@@ -39733,6 +39733,8 @@ pub mod builder {
         pub sealed: Option<String>,
 
         pub shrink: bool,
+
+        pub seal_resources: bool,
     }
 
     pub struct Icons {
@@ -39746,6 +39748,54 @@ pub mod builder {
         }
         crate::image::nine_patch(&bytes)
             .map_err(|error| error.with_context(format!("File: {name}")))
+    }
+
+    struct Naming {
+        sealing: bool,
+        given: std::collections::BTreeMap<String, String>,
+        next: usize,
+    }
+
+    impl Naming {
+        fn new(sealing: bool) -> Naming {
+            Naming {
+                sealing,
+                given: std::collections::BTreeMap::new(),
+                next: 0,
+            }
+        }
+
+        fn of(&mut self, plain: String) -> String {
+            if !self.sealing {
+                return plain;
+            }
+            if let Some(held) = self.given.get(&plain) {
+                return held.clone();
+            }
+            let extension = plain
+                .rsplit_once('.')
+                .filter(|(_, after)| !after.contains('/'))
+                .map(|(_, after)| format!(".{after}"))
+                .unwrap_or_default();
+            let sealed = format!("r/{}{extension}", Naming::letters(self.next));
+            self.next += 1;
+            self.given.insert(plain, sealed.clone());
+            sealed
+        }
+
+        fn letters(mut at: usize) -> String {
+            let mut out = Vec::new();
+            loop {
+                out.push(b'a' + (at % 26) as u8);
+                at /= 26;
+                if at == 0 {
+                    break;
+                }
+                at -= 1;
+            }
+            out.reverse();
+            String::from_utf8(out).unwrap_or_else(|_| "a".to_string())
+        }
     }
 
     fn entry_for(folder: &str, name: &str) -> String {
@@ -39820,9 +39870,10 @@ pub mod builder {
             crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
         let mut files = Vec::with_capacity(set.len() + project.resources.len());
 
+        let mut naming = Naming::new(project.seal_resources);
         let mut compiling: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
         for made in &set {
-            let entry = entry_for(&made.folder, &made.name);
+            let entry = naming.of(entry_for(&made.folder, &made.name));
             let drawn = made.name.ends_with(".xml");
             let named = if drawn {
                 made.name.clone()
@@ -39844,7 +39895,7 @@ pub mod builder {
         }
 
         for held in &project.resources {
-            let already = format!("res/{}/{}", held.folder, held.name);
+            let already = naming.of(format!("res/{}/{}", held.folder, held.name));
             if files.iter().any(|(entry, _)| *entry == already)
                 || compiling.iter().any(|(entry, _)| *entry == already)
             {
@@ -39856,7 +39907,7 @@ pub mod builder {
                         .with_context(format!("Folder: {}", held.folder))
                         .with_context(format!("Reported: {why}"))
                 })?;
-            let entry = format!("res/{}/{}", held.folder, held.name);
+            let entry = naming.of(format!("res/{}/{}", held.folder, held.name));
             if !table.read_file(&held.folder, &held.name, &entry, sink) {
                 return Err(
                     fail("EB047", "A resource could not be given an identifier.")
@@ -39915,7 +39966,7 @@ pub mod builder {
                 crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
             let mut carried: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
             for held in &project.library_resources {
-                let entry = format!("res/{}/{}", held.folder, held.name);
+                let entry = naming.of(format!("res/{}/{}", held.folder, held.name));
                 if files.iter().any(|(one, _)| *one == entry)
                     || compiling.iter().any(|(one, _)| *one == entry)
                 {
@@ -40181,6 +40232,7 @@ pub mod builder {
             library_packages: Vec::new(),
             sealed: None,
             shrink: true,
+            seal_resources: false,
         }
     }
 
@@ -40305,6 +40357,7 @@ pub mod builder {
             library_packages: Vec::new(),
             sealed: None,
             shrink: true,
+            seal_resources: false,
         })
     }
 
@@ -40331,6 +40384,7 @@ pub mod builder {
         let manifest = merged_manifest(&manifest, &brought.manifests)?;
         let mut project = from_manifest(&manifest)?;
         project.shrink = held.as_ref().map(|one| one.shrink).unwrap_or(true);
+        project.seal_resources = held.as_ref().map(|one| one.seal_resources).unwrap_or(false);
         project.icon = crate::scaffold::icon_bytes(root);
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
@@ -50559,6 +50613,158 @@ final class NeverCalled {
     }
 
     #[test]
+    fn sealed_resources_keep_a_package_that_still_resolves() {
+        let directory = temp_directory("omni-sealed-res");
+        let root = directory.join("Sealed");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt.sealed".to_string(),
+                label: "Sealed".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let drawable = root.join("Res").join("drawable");
+        std::fs::create_dir_all(&drawable).unwrap();
+        std::fs::write(
+            drawable.join("a_marker.xml"),
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <shape xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             android:shape=\"rectangle\" />\n",
+        )
+        .unwrap();
+
+        let mut settings = super::settings::held(&folder)
+            .expect("they read")
+            .expect("they are there");
+        settings.seal_resources = true;
+        super::settings::write(&folder, &settings).expect("they write");
+
+        let project = super::builder::from_project(&folder).expect("it compiles");
+        assert!(project.seal_resources, "the setting is carried");
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::certificate::self_signed(
+            &key,
+            "Sealed",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+        let mut sink = Sink::new();
+        let outcome =
+            super::builder::assemble(&project, &key, &certificate, &mut sink).expect("it packages");
+        assert!(outcome.verified.everything_checkable_passed());
+
+        let path = directory.join("sealed.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+
+        let mut reading = Sink::new();
+        let archive = super::archive::read(&outcome.package, &mut reading).expect("it opens");
+        let named: Vec<&str> = archive
+            .entries()
+            .iter()
+            .map(|one| one.name.as_str())
+            .collect();
+        assert!(
+            named.iter().any(|one| one.starts_with("r/")),
+            "the resources are under a name that says nothing: {named:?}"
+        );
+        assert!(
+            !named.iter().any(|one| one.starts_with("res/")),
+            "and none is left where it was: {named:?}"
+        );
+        assert!(
+            named.contains(&"resources.arsc"),
+            "the table the platform reads is untouched: {named:?}"
+        );
+        assert!(
+            named.contains(&"AndroidManifest.xml"),
+            "and so is the manifest: {named:?}"
+        );
+
+        let found = super::inspect::package(path.to_str().unwrap()).expect("it must open");
+        assert_eq!(found.package, "com.tr.yt.sealed");
+        assert!(
+            found.sound,
+            "the signatures still hold over the sealed names"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_project_left_alone_keeps_the_names_the_developer_wrote() {
+        let directory = temp_directory("omni-plain-res");
+        let root = directory.join("Plain");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt.plain".to_string(),
+                label: "Plain".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let drawable = root.join("Res").join("drawable");
+        std::fs::create_dir_all(&drawable).unwrap();
+        std::fs::write(
+            drawable.join("a_marker.xml"),
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <shape xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             android:shape=\"rectangle\" />\n",
+        )
+        .unwrap();
+
+        let project = super::builder::from_project(&folder).expect("it compiles");
+        assert!(
+            !project.seal_resources,
+            "sealing is not on unless it is asked for"
+        );
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::certificate::self_signed(
+            &key,
+            "Plain",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+        let mut sink = Sink::new();
+        let outcome =
+            super::builder::assemble(&project, &key, &certificate, &mut sink).expect("it packages");
+
+        let mut reading = Sink::new();
+        let archive = super::archive::read(&outcome.package, &mut reading).expect("it opens");
+        let named: Vec<&str> = archive
+            .entries()
+            .iter()
+            .map(|one| one.name.as_str())
+            .collect();
+        assert!(
+            named.iter().any(|one| one.starts_with("res/")),
+            "the resources are where the developer put them: {named:?}"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_project_of_several_files_becomes_a_package_that_verifies() {
         const MAIN: &str = r#"
 package com.tr.yt.several;
@@ -55406,6 +55612,7 @@ public final class MainActivity extends Activity {
             library_packages: Vec::new(),
             sealed: None,
             shrink: true,
+            seal_resources: false,
         }
     }
 
@@ -56072,6 +56279,7 @@ public final class MainActivity extends Activity {
                 library_packages: Vec::new(),
                 sealed: None,
                 shrink: true,
+                seal_resources: false,
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
