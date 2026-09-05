@@ -1479,7 +1479,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Bir sayı, bir karakter ya da bunlardan birinin önünde `-`."),
         ("A package is a zip. This one does not open as one.", "Paket bir zip'tir. Bu, zip olarak açılmıyor."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Bu denetimi geçemeyen paket, bu yapının üretildiği paket değildir. Aslını kurun ya da kaynaktan yeniden derleyin."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Üst öğe ad olarak, paket:ad olarak ya da @paket:style/ad olarak yazılır."),
+                ("A package with nothing in it cannot be hashed.", "İçinde hiçbir şey olmayan bir paketin özeti çıkarılamaz."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Üst öğe ad olarak, paket:ad olarak ya da @paket:style/ad olarak yazılır."),
                 ("A pattern does not match the thing it is taking apart.", "Bir desen, parçalarına ayırdığı şeye uymuyor."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "İzinler android.permission.INTERNET gibi adlandırılır: harf, rakam, nokta ve alt çizgi."),
         ("A pixel names a palette entry the image does not hold.", "Bir piksel, görüntüde bulunmayan bir palet girdisini gösteriyor."),
@@ -2531,7 +2532,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Eine Zahl, ein Zeichen oder ein `-` davor."),
         ("A package is a zip. This one does not open as one.", "Ein Paket ist ein Zip. Dieses lässt sich nicht als solches öffnen."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Ein Paket, das diese Prüfung nicht besteht, ist nicht das, als das dieser Build entstanden ist. Installieren Sie das Original oder bauen Sie es erneut aus den Quellen."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Ein Elternstil wird als Name, als paket:name oder als @paket:style/name geschrieben."),
+                ("A package with nothing in it cannot be hashed.", "Ein Paket, in dem nichts ist, kann nicht gehasht werden."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Ein Elternstil wird als Name, als paket:name oder als @paket:style/name geschrieben."),
                 ("A pattern does not match the thing it is taking apart.", "Ein Muster passt nicht zu dem, was es zerlegt."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "Eine Berechtigung heißt wie android.permission.INTERNET: Buchstaben, Ziffern, Punkte und Unterstriche."),
         ("A pixel names a palette entry the image does not hold.", "Ein Pixel benennt einen Paletteneintrag, den das Bild nicht enthält."),
@@ -3583,7 +3585,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Un número, un carácter, o un `-` delante de uno."),
         ("A package is a zip. This one does not open as one.", "Un paquete es un zip. Este no se abre como tal."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Un paquete que no supera esta comprobación no es aquel como el que se creó esta compilación. Instale el original, o vuelva a compilarlo desde el código fuente."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Un padre se escribe como un nombre, como paquete:nombre, o como @paquete:style/nombre."),
+                ("A package with nothing in it cannot be hashed.", "No se puede calcular el resumen de un paquete que no contiene nada."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Un padre se escribe como un nombre, como paquete:nombre, o como @paquete:style/nombre."),
                 ("A pattern does not match the thing it is taking apart.", "Un patrón no coincide con lo que descompone."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "Un permiso se nombra como android.permission.INTERNET: letras, dígitos, puntos y guiones bajos."),
         ("A pixel names a palette entry the image does not hold.", "Un píxel nombra una entrada de la paleta que la imagen no contiene."),
@@ -4635,7 +4638,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Un nombre, un caractère, ou un `-` devant l'un d'eux."),
         ("A package is a zip. This one does not open as one.", "Un paquet est un zip. Celui-ci ne s'ouvre pas comme tel."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Un paquet qui échoue à cette vérification n'est pas celui sous lequel cette compilation a été faite. Installez l'original, ou recompilez-le depuis les sources."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Un parent s'écrit comme un nom, comme paquet:nom, ou comme @paquet:style/nom."),
+                ("A package with nothing in it cannot be hashed.", "Un paquet qui ne contient rien ne peut pas être haché."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Un parent s'écrit comme un nom, comme paquet:nom, ou comme @paquet:style/nom."),
                 ("A pattern does not match the thing it is taking apart.", "Un motif ne correspond pas à ce qu'il décompose."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "Une permission se nomme comme android.permission.INTERNET : lettres, chiffres, points et traits de soulignement."),
         ("A pixel names a palette entry the image does not hold.", "Un pixel nomme une entrée de palette que l'image ne contient pas."),
@@ -5690,7 +5694,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Un numero, un carattere, oppure un `-` davanti a uno di essi."),
         ("A package is a zip. This one does not open as one.", "Un pacchetto è uno zip. Questo non si apre come tale."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Un pacchetto che non supera questo controllo non è quello con cui questa compilazione è stata fatta. Installate l'originale, oppure ricompilatelo dai sorgenti."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Un genitore si scrive come un nome, come pacchetto:nome, oppure come @pacchetto:style/nome."),
+                ("A package with nothing in it cannot be hashed.", "Un pacchetto che non contiene nulla non può essere sottoposto a hash."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Un genitore si scrive come un nome, come pacchetto:nome, oppure come @pacchetto:style/nome."),
                 ("A pattern does not match the thing it is taking apart.", "Un pattern non corrisponde a ciò che scompone."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "Un permesso si chiama come android.permission.INTERNET: lettere, cifre, punti e trattini bassi."),
         ("A pixel names a palette entry the image does not hold.", "Un pixel nomina una voce di tavolozza che l'immagine non contiene."),
@@ -6745,7 +6750,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Um número, um caractere, ou um `-` na frente de um deles."),
         ("A package is a zip. This one does not open as one.", "Um pacote é um zip. Este não abre como tal."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Um pacote que não passa nesta verificação não é aquele com que esta compilação foi feita. Instale o original, ou compile-o de novo a partir do código."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Um pai se escreve como um nome, como pacote:nome, ou como @pacote:style/nome."),
+                ("A package with nothing in it cannot be hashed.", "Não se pode calcular o resumo de um pacote que não contém nada."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Um pai se escreve como um nome, como pacote:nome, ou como @pacote:style/nome."),
                 ("A pattern does not match the thing it is taking apart.", "Um padrão não corresponde àquilo que decompõe."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "Uma permissão se chama como android.permission.INTERNET: letras, dígitos, pontos e sublinhados."),
         ("A pixel names a palette entry the image does not hold.", "Um pixel nomeia uma entrada de paleta que a imagem não contém."),
@@ -7797,7 +7803,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "Число, символ или `-` перед одним из них."),
         ("A package is a zip. This one does not open as one.", "Пакет — это zip. Этот как zip не открывается."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Пакет, не прошедший эту проверку, — не тот, каким была сделана эта сборка. Установите оригинал или соберите его заново из исходников."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "Родитель пишется как имя, как пакет:имя или как @пакет:style/имя."),
+                ("A package with nothing in it cannot be hashed.", "Для пакета, в котором ничего нет, нельзя вычислить хеш."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "Родитель пишется как имя, как пакет:имя или как @пакет:style/имя."),
                 ("A pattern does not match the thing it is taking apart.", "Образец не соответствует тому, что он разбирает."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "Разрешение называется как android.permission.INTERNET: буквы, цифры, точки и подчёркивания."),
         ("A pixel names a palette entry the image does not hold.", "Пиксель называет запись палитры, которой в изображении нет."),
@@ -8849,7 +8856,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "عدد، أو محرف، أو `-` أمام أحدهما."),
         ("A package is a zip. This one does not open as one.", "الحزمة ملف zip. وهذه لا تُفتح كذلك."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "الحزمة التي ترسب في هذا الفحص ليست الحزمة التي صُنع بها هذا البناء. ثبّت الأصل، أو أعد بناءه من المصدر."),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "يُكتب الأصل اسمًا، أو حزمة:اسم، أو @حزمة:style/اسم."),
+                ("A package with nothing in it cannot be hashed.", "حزمة لا شيء فيها لا يمكن حساب بصمتها."),
+("A parent is written as a name, as package:name, or as @package:style/name.", "يُكتب الأصل اسمًا، أو حزمة:اسم، أو @حزمة:style/اسم."),
                 ("A pattern does not match the thing it is taking apart.", "النمط لا يطابق ما يفككه."),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "يُسمّى الإذن مثل android.permission.INTERNET: حروف وأرقام ونقاط وشرطات سفلية."),
         ("A pixel names a palette entry the image does not hold.", "بكسل يسمّي مدخلًا في لوحة الألوان لا تحمله الصورة."),
@@ -9901,7 +9909,8 @@ pub mod speech {
 ("A number, a character, or a `-` in front of one.", "一个数、一个字符，或它们前面的一个 `-`。"),
         ("A package is a zip. This one does not open as one.", "包就是 zip。这个打不开。"),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "未通过此项检查的包，并非此构建当初所生成的那个。请安装原件，或从源码重新构建。"),
-        ("A parent is written as a name, as package:name, or as @package:style/name.", "父样式写作名称、包名:名称，或 @包名:style/名称。"),
+                ("A package with nothing in it cannot be hashed.", "里面什么都没有的包无法计算散列。"),
+("A parent is written as a name, as package:name, or as @package:style/name.", "父样式写作名称、包名:名称，或 @包名:style/名称。"),
                 ("A pattern does not match the thing it is taking apart.", "模式与它所拆解的东西不匹配。"),
 ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "权限的命名形如 android.permission.INTERNET：字母、数字、点和下划线。"),
         ("A pixel names a palette entry the image does not hold.", "某个像素指向图像中没有的调色板条目。"),
@@ -23529,6 +23538,13 @@ pub mod signing {
         block.extend_from_slice(signer);
     }
 
+    pub fn apk_digest_of(
+        package: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+    ) -> Result<(u32, Vec<u8>), Diagnostic> {
+        content_of(package, algorithm)
+    }
+
     fn content_of(
         package: &[u8],
         algorithm: crate::rsa::DigestAlgorithm,
@@ -32780,6 +32796,174 @@ public final class {class_name} extends ContentProvider {{
     }
 }
 
+pub mod verity {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::Sha256;
+    use crate::FailureClass;
+
+    pub const BLOCK: usize = 4096;
+    pub const LOG2_BLOCK: u8 = 12;
+    pub const SHA256_ALGORITHM: u32 = 1;
+    pub const VERSION: u32 = 2;
+
+    const DIGEST_BYTES: usize = 32;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.verity",
+            message,
+        )
+    }
+
+    fn digest_of(block: &[u8]) -> [u8; DIGEST_BYTES] {
+        let mut hasher = Sha256::new();
+        hasher.update(block);
+        if block.len() < BLOCK {
+            hasher.update(&vec![0u8; BLOCK - block.len()]);
+        }
+        *hasher.finish().as_bytes()
+    }
+
+    fn level_above(below: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < below.len() {
+            let stop = (at + BLOCK).min(below.len());
+            out.extend_from_slice(&digest_of(&below[at..stop]));
+            at = stop;
+        }
+        out
+    }
+
+    pub struct Tree {
+        pub levels: Vec<Vec<u8>>,
+        pub root: [u8; DIGEST_BYTES],
+    }
+
+    pub fn tree_of(content: &[u8]) -> Tree {
+        if content.len() <= BLOCK {
+            return Tree {
+                levels: Vec::new(),
+                root: digest_of(content),
+            };
+        }
+        let mut levels: Vec<Vec<u8>> = Vec::new();
+        let mut here = level_above(content);
+        while here.len() > DIGEST_BYTES {
+            levels.push(here.clone());
+            if here.len() <= BLOCK {
+                break;
+            }
+            here = level_above(&here);
+        }
+        let top = levels.last().cloned().unwrap_or(here);
+        let root = digest_of(&top);
+        levels.reverse();
+        Tree { levels, root }
+    }
+
+    pub fn flattened(tree: &Tree) -> Vec<u8> {
+        let mut out = Vec::new();
+        for level in &tree.levels {
+            out.extend_from_slice(level);
+            let over = level.len() % BLOCK;
+            if over != 0 {
+                out.extend(std::iter::repeat_n(0u8, BLOCK - over));
+            }
+        }
+        out
+    }
+
+    fn sized(out: &mut Vec<u8>, held: &[u8]) {
+        out.extend_from_slice(&(held.len() as u32).to_le_bytes());
+        out.extend_from_slice(held);
+    }
+
+    pub fn hashing_info(root: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&SHA256_ALGORITHM.to_le_bytes());
+        out.push(LOG2_BLOCK);
+        sized(&mut out, &[]);
+        sized(&mut out, root);
+        out
+    }
+
+    pub fn signed_data(
+        file_size: u64,
+        root: &[u8],
+        apk_digest: &[u8],
+        certificate: &[u8],
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&file_size.to_le_bytes());
+        body.extend_from_slice(&SHA256_ALGORITHM.to_le_bytes());
+        body.push(LOG2_BLOCK);
+        sized(&mut body, &[]);
+        sized(&mut body, root);
+        sized(&mut body, apk_digest);
+        sized(&mut body, certificate);
+        sized(&mut body, &[]);
+
+        let mut out = Vec::with_capacity(body.len() + 4);
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    pub fn signing_info(
+        apk_digest: &[u8],
+        certificate: &[u8],
+        public_key: &[u8],
+        algorithm_id: u32,
+        signature: &[u8],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        sized(&mut out, apk_digest);
+        sized(&mut out, certificate);
+        sized(&mut out, &[]);
+        sized(&mut out, public_key);
+        out.extend_from_slice(&algorithm_id.to_le_bytes());
+        sized(&mut out, signature);
+        out
+    }
+
+    pub fn side_file(
+        package: &[u8],
+        key: &crate::rsa::PrivateKey,
+        certificate: &[u8],
+        apk_digest: &[u8],
+        algorithm_id: u32,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if package.is_empty() {
+            return Err(fail(
+                "EV001",
+                "A package with nothing in it cannot be hashed.",
+            ));
+        }
+        let tree = tree_of(package);
+        let public_key = crate::x509::Certificate::public_key_info(certificate)?;
+        let held = signed_data(package.len() as u64, &tree.root, apk_digest, certificate);
+        let signature = crate::rsa::sign(key, crate::rsa::DigestAlgorithm::Sha256, &held)?;
+        let signing = signing_info(
+            apk_digest,
+            certificate,
+            &public_key,
+            algorithm_id,
+            &signature,
+        );
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&VERSION.to_le_bytes());
+        sized(&mut out, &hashing_info(&tree.root));
+        sized(&mut out, &signing);
+        sized(&mut out, &flattened(&tree));
+        Ok(out)
+    }
+}
+
 pub mod shrink {
     use crate::dexwrite::{Class, Operand};
     use std::collections::BTreeSet;
@@ -40010,6 +40194,8 @@ pub mod builder {
         pub certificate_fingerprint: String,
 
         pub verified: crate::signing::Report,
+
+        pub side_signature: Vec<u8>,
     }
 
     impl Outcome {
@@ -40017,6 +40203,7 @@ pub mod builder {
             w.begin_object(Some(key));
             w.field_u64("bytes", self.package.len() as u64);
             w.field_u64("entries", self.entries as u64);
+            w.field_u64("sideSignatureBytes", self.side_signature.len() as u64);
             w.field_bool("signed", self.signed);
             w.field_bool("carriesCode", self.carries_code);
             w.field_str("certificate", &self.certificate_fingerprint);
@@ -41292,6 +41479,12 @@ public final class R {{
             return Err(refusal);
         }
 
+        crate::progress::enter_checked("side")?;
+        let (apk_algorithm, apk_digest) =
+            crate::signing::apk_digest_of(&package, rsa::DigestAlgorithm::Sha256)?;
+        let side_signature =
+            crate::verity::side_file(&package, key, certificate_der, &apk_digest, apk_algorithm)?;
+
         Ok(Outcome {
             package,
             guard: report,
@@ -41300,6 +41493,7 @@ public final class R {{
             carries_code: !project.code.is_empty(),
             certificate_fingerprint: parsed.fingerprint_display(),
             verified,
+            side_signature,
         })
     }
 }
@@ -50289,6 +50483,79 @@ final class NeverCalled {
             "with no roots nothing is reachable, so nothing goes"
         );
         assert_eq!(trimmed.dropped, 0);
+    }
+
+    #[test]
+    fn the_side_signature_is_one_google_s_own_tool_accepts() {
+        let directory = temp_directory("omni-v4");
+        let root = directory.join("Side");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt.side".to_string(),
+                label: "Side".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let project = super::builder::from_project(&folder).expect("it compiles");
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::certificate::self_signed(
+            &key,
+            "Side",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+        let mut sink = Sink::new();
+        let outcome =
+            super::builder::assemble(&project, &key, &certificate, &mut sink).expect("it packages");
+
+        assert!(
+            !outcome.side_signature.is_empty(),
+            "a side signature is produced"
+        );
+        assert_eq!(
+            u32::from_le_bytes(outcome.side_signature[..4].try_into().unwrap()),
+            super::verity::VERSION,
+            "it opens with the version the format says"
+        );
+
+        let apk = directory.join("side.apk");
+        let idsig = directory.join("side.apk.idsig");
+        std::fs::write(&apk, &outcome.package).unwrap();
+        std::fs::write(&idsig, &outcome.side_signature).unwrap();
+
+        let Some(tool) = find_apksigner() else {
+            eprintln!("apksigner is not here, so the side signature was not put to it");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        };
+        let done = std::process::Command::new(&tool)
+            .arg("verify")
+            .arg("--min-sdk-version")
+            .arg("30")
+            .arg("--v4-signature-file")
+            .arg(&idsig)
+            .arg(&apk)
+            .output()
+            .expect("apksigner runs");
+        assert!(
+            done.status.success(),
+            "apksigner refused the side signature:\n{}\n{}",
+            String::from_utf8_lossy(&done.stdout),
+            String::from_utf8_lossy(&done.stderr),
+        );
+        eprintln!("apksigner accepted the v4 side signature");
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
