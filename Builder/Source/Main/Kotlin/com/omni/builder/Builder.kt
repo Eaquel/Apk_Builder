@@ -84,6 +84,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -3048,6 +3049,8 @@ private sealed interface Screen {
 
     data object NewKey : Screen
 
+    data object Logcat : Screen
+
     data object Theme : Screen
 
     data object Languages : Screen
@@ -3081,6 +3084,10 @@ class BuilderActivity : Activity() {
         const val DRAWER_DP = 300
 
         const val SHOT_REQUEST = 3
+
+        const val LOG_HELD = 600
+
+        const val LOG_TICK_MILLIS = 400L
 
         val NATIVE_TILES = listOf("Kotlin", "Rust", "C++", "Java")
 
@@ -3297,6 +3304,13 @@ class BuilderActivity : Activity() {
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
+
+    private var logReading = false
+    private var logProcess: java.lang.Process? = null
+    private val logHeld = ArrayDeque<String>()
+    private var logRefused = ""
+    private var logView: TextView? = null
+    private var logCount: TextView? = null
 
     private var webAddress = ""
     private val webParts = WEB_PARTS_ON.toMutableList()
@@ -3632,6 +3646,7 @@ class BuilderActivity : Activity() {
     override fun onPause() {
         hideOffers()
         keepTheDraft()
+        stopTheLog()
         aurora.pauseDrawing()
         super.onPause()
         OmniLog.flushSession()
@@ -3640,6 +3655,7 @@ class BuilderActivity : Activity() {
     override fun onDestroy() {
         keepTheDraft()
         stopTheBuild()
+        stopTheLog()
         runCatching { unregisterReceiver(installAnswer) }
         OmniLog.flushSession()
         super.onDestroy()
@@ -3742,6 +3758,11 @@ class BuilderActivity : Activity() {
         hideOffers()
         editor = null
         editorAt = null
+        logView = null
+        logCount = null
+        if (screen !is Screen.Logcat) {
+            stopTheLog()
+        }
         content.removeAllViews()
         results.removeAllViews()
 
@@ -3784,6 +3805,7 @@ class BuilderActivity : Activity() {
             is Screen.Settings -> renderSettings()
             is Screen.Keys -> renderKeys()
             is Screen.NewKey -> renderNewKey()
+            is Screen.Logcat -> renderLogcat()
             is Screen.Theme -> renderTheme()
             is Screen.Languages -> renderLanguages()
             is Screen.Feedback -> renderFeedback()
@@ -3911,6 +3933,7 @@ class BuilderActivity : Activity() {
             is Screen.Settings -> getString(R.string.omni_tab_settings)
             is Screen.Keys -> getString(R.string.omni_keys_title)
             is Screen.NewKey -> getString(R.string.omni_keys_new)
+            is Screen.Logcat -> getString(R.string.omni_menu_logcat)
             is Screen.Theme -> getString(R.string.omni_settings_theme)
             is Screen.Languages -> getString(R.string.omni_settings_language)
             is Screen.Feedback -> getString(R.string.omni_feedback_title)
@@ -4063,6 +4086,12 @@ class BuilderActivity : Activity() {
         list.addView(
             drawerRow(Mark.Shape.HOME, R.string.omni_menu_home, here is Screen.Projects) {
                 leaveFor(Screen.Projects)
+            }
+        )
+        list.addView(drawerSection(getString(R.string.omni_menu_making)))
+        list.addView(
+            drawerRow(Mark.Shape.LOG, R.string.omni_menu_logcat, here is Screen.Logcat) {
+                leaveFor(Screen.Logcat)
             }
         )
         list.addView(drawerSection(getString(R.string.omni_menu_other)))
@@ -6239,6 +6268,199 @@ class BuilderActivity : Activity() {
         OmniLog.event(LogLevel.INFO, "project", "Deleted ${project.root}")
         render(false)
         results.addView(notice(getString(R.string.omni_trash_sent, project.name), palette.ok))
+    }
+
+    private fun heldLog(): String = synchronized(logHeld) { logHeld.joinToString("\n") }
+
+    private fun paintTheLog() {
+        val written = heldLog()
+        logView?.text = written.ifEmpty { getString(R.string.omni_log_empty) }
+        logCount?.text = getString(R.string.omni_log_lines, synchronized(logHeld) { logHeld.size })
+    }
+
+    private val logTick = object : Runnable {
+        override fun run() {
+            if (!logReading || screen !is Screen.Logcat || isFinishing || isDestroyed) {
+                return
+            }
+            paintTheLog()
+            content.postDelayed(this, LOG_TICK_MILLIS)
+        }
+    }
+
+    private fun startTheLog() {
+        if (logReading) {
+            return
+        }
+        logRefused = ""
+        logReading = true
+        Thread {
+            val reading = runCatching {
+                ProcessBuilder(
+                    listOf("logcat", "-v", "time", "--pid=" + android.os.Process.myPid())
+                ).redirectErrorStream(true).start()
+            }.getOrElse { why ->
+                runOnUiThread {
+                    logReading = false
+                    logRefused = why.message ?: why.javaClass.simpleName
+                    OmniLog.event(LogLevel.WARN, "logcat", "The device log would not open.")
+                    if (!isFinishing && !isDestroyed && screen is Screen.Logcat) {
+                        render(false)
+                    }
+                }
+                return@Thread
+            }
+            logProcess = reading
+            runCatching {
+                reading.inputStream.bufferedReader().use { reader ->
+                    while (logReading) {
+                        val line = reader.readLine() ?: break
+                        synchronized(logHeld) {
+                            logHeld.addLast(line)
+                            while (logHeld.size > LOG_HELD) {
+                                logHeld.removeFirst()
+                            }
+                        }
+                    }
+                }
+            }
+            runCatching { reading.destroy() }
+            logProcess = null
+        }.start()
+        content.postDelayed(logTick, LOG_TICK_MILLIS)
+    }
+
+    private fun stopTheLog() {
+        if (!logReading) {
+            return
+        }
+        logReading = false
+        runCatching { logProcess?.destroy() }
+        logProcess = null
+    }
+
+    private fun renderLogcat() {
+        content.addView(
+            mascot(
+                Chibi.Face.CALM,
+                getString(R.string.omni_menu_logcat),
+                getString(R.string.omni_log_note),
+            )
+        )
+        val scope = card()
+        scope.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    badge(Mark.Shape.LOG, if (logReading) palette.ok else palette.muted),
+                    LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(
+                                    if (logReading) {
+                                        R.string.omni_log_running
+                                    } else {
+                                        R.string.omni_log_stopped
+                                    }
+                                )
+                                setTextColor(if (logReading) palette.ok else palette.muted)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_log_scope)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        content.addView(scope)
+
+        if (logRefused.isNotEmpty()) {
+            content.addView(notice(logRefused, palette.error))
+        }
+
+        val doing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+            }
+        }
+        doing.addView(
+            subtle(
+                getString(if (logReading) R.string.omni_log_stop else R.string.omni_log_start),
+                if (logReading) palette.warning else palette.ok,
+            ) {
+                if (logReading) stopTheLog() else startTheLog()
+                render(false)
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+        )
+        doing.addView(
+            subtle(getString(R.string.omni_action_clear), palette.muted) {
+                synchronized(logHeld) { logHeld.clear() }
+                paintTheLog()
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        doing.addView(
+            subtle(getString(R.string.omni_action_copy), palette.accent) {
+                copyOut(heldLog(), getString(R.string.omni_menu_logcat))
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        content.addView(doing)
+
+        val counter = TextView(this).apply {
+            setTextColor(palette.muted)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setPadding(0, gap(2), 0, gap(1))
+        }
+        logCount = counter
+        content.addView(counter)
+
+        val written = EditText(this).apply {
+            setTextColor(palette.foreground)
+            setBackgroundColor(Color.TRANSPARENT)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            gravity = Gravity.TOP or Gravity.START
+            setHorizontallyScrolling(true)
+            isFocusable = true
+            setTextIsSelectable(true)
+            keyListener = null
+            minLines = 12
+            maxLines = 40
+            setPadding(gap(2))
+        }
+        logView = written
+        val holder = card()
+        holder.addView(
+            HorizontalScrollView(this).apply {
+                isFillViewport = true
+                addView(written, MATCH_PARENT, WRAP_CONTENT)
+            }
+        )
+        content.addView(holder)
+        paintTheLog()
+        if (logReading) {
+            content.removeCallbacks(logTick)
+            content.postDelayed(logTick, LOG_TICK_MILLIS)
+        }
+        content.addView(quiet(getString(R.string.omni_log_note_scope)))
     }
 
     private fun kindCard(

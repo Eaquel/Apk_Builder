@@ -329,4 +329,15 @@
     <string name="omni_web_create">COSTRUISCI L’APK</string>
     <string name="omni_web_needs">Serve un indirizzo, e non può contenere un punto e virgola.</string>
     <string name="omni_web_note_privacy">Il pacchetto chiede la rete e nient’altro. Quello che fa la pagina riguarda il sito, non questa app.</string>
+    <string name="omni_menu_making">Costruire</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">Il registro del dispositivo, per quanto questa app riesca a vederlo.</string>
+    <string name="omni_log_scope">Legge il registro di questa app, dal vivo, su questo dispositivo.</string>
+    <string name="omni_log_running">In lettura</string>
+    <string name="omni_log_stopped">Fermo</string>
+    <string name="omni_log_start">AVVIA</string>
+    <string name="omni_log_stop">FERMA</string>
+    <string name="omni_log_empty">Non è stato ancora registrato niente.</string>
+    <string name="omni_log_lines">%1$d righe</string>
+    <string name="omni_log_note_scope">Android mostra a un’app soltanto il proprio registro. Quello di un’altra app, o del sistema, vuole un permesso che si dà solo a un’app di sistema, perciò qui non viene offerto invece di essere offerto e vuoto.</string>
 </resources>

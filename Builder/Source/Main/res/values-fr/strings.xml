@@ -329,4 +329,15 @@
     <string name="omni_web_create">CONSTRUIRE L’APK</string>
     <string name="omni_web_needs">Une adresse est nécessaire, et elle ne peut pas contenir de point-virgule.</string>
     <string name="omni_web_note_privacy">Le paquet demande le réseau, et rien d’autre. Ce que fait la page regarde le site, pas cette application.</string>
+    <string name="omni_menu_making">Fabriquer</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">Le journal de l’appareil, tel que cette application peut le voir.</string>
+    <string name="omni_log_scope">Lit le propre journal de cette application, en direct, sur cet appareil.</string>
+    <string name="omni_log_running">Lecture</string>
+    <string name="omni_log_stopped">Arrêté</string>
+    <string name="omni_log_start">DÉMARRER</string>
+    <string name="omni_log_stop">ARRÊTER</string>
+    <string name="omni_log_empty">Rien n’a encore été journalisé.</string>
+    <string name="omni_log_lines">%1$d lignes</string>
+    <string name="omni_log_note_scope">Android ne montre à une application que son propre journal. Celui d’une autre application, ou du système, demande une permission accordée aux seules applications système : il n’est donc pas proposé ici plutôt que proposé et vide.</string>
 </resources>

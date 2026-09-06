@@ -329,4 +329,15 @@
     <string name="omni_web_create">APK BAUEN</string>
     <string name="omni_web_needs">Eine Adresse wird gebraucht, und sie darf kein Semikolon enthalten.</string>
     <string name="omni_web_note_privacy">Das Paket verlangt das Netz und sonst nichts. Was die Seite tut, ist Sache der Website, nicht dieser App.</string>
+    <string name="omni_menu_making">Bauen</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">Das Geräteprotokoll, so weit diese App es sehen kann.</string>
+    <string name="omni_log_scope">Liest das eigene Protokoll dieser App, laufend, auf diesem Gerät.</string>
+    <string name="omni_log_running">Liest</string>
+    <string name="omni_log_stopped">Angehalten</string>
+    <string name="omni_log_start">STARTEN</string>
+    <string name="omni_log_stop">STOPPEN</string>
+    <string name="omni_log_empty">Es wurde noch nichts protokolliert.</string>
+    <string name="omni_log_lines">%1$d Zeilen</string>
+    <string name="omni_log_note_scope">Android zeigt einer App nur ihr eigenes Protokoll. Das Protokoll einer anderen App oder des Systems braucht eine Berechtigung, die nur eine Systemanwendung bekommt, also wird es hier gar nicht erst angeboten statt angeboten und leer.</string>
 </resources>

@@ -329,4 +329,15 @@
     <string name="omni_web_create">CREAR EL APK</string>
     <string name="omni_web_needs">Hace falta una dirección, y no puede llevar punto y coma.</string>
     <string name="omni_web_note_privacy">El paquete pide la red y nada más. Lo que haga la página es cosa del sitio, no de esta aplicación.</string>
+    <string name="omni_menu_making">Construir</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">El registro del dispositivo, hasta donde esta aplicación puede verlo.</string>
+    <string name="omni_log_scope">Lee el propio registro de esta aplicación, en vivo, en este dispositivo.</string>
+    <string name="omni_log_running">Leyendo</string>
+    <string name="omni_log_stopped">Detenido</string>
+    <string name="omni_log_start">INICIAR</string>
+    <string name="omni_log_stop">DETENER</string>
+    <string name="omni_log_empty">Todavía no se ha registrado nada.</string>
+    <string name="omni_log_lines">%1$d líneas</string>
+    <string name="omni_log_note_scope">Android muestra a una aplicación solo su propio registro. El de otra aplicación, o el del sistema, necesita un permiso que solo se concede a una aplicación del sistema, así que aquí no se ofrece en vez de ofrecerse vacío.</string>
 </resources>

@@ -329,4 +329,15 @@
     <string name="omni_web_create">构建 APK</string>
     <string name="omni_web_needs">需要一个网址，而且里面不能有分号。</string>
     <string name="omni_web_note_privacy">这个包只请求网络，别的都不要。网页做什么是网站的事，不是这个应用的事。</string>
+    <string name="omni_menu_making">构建</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">本机日志，这个应用能看到的那一部分。</string>
+    <string name="omni_log_scope">在本机实时读取这个应用自己的日志。</string>
+    <string name="omni_log_running">读取中</string>
+    <string name="omni_log_stopped">已停止</string>
+    <string name="omni_log_start">开始</string>
+    <string name="omni_log_stop">停止</string>
+    <string name="omni_log_empty">还没有任何日志。</string>
+    <string name="omni_log_lines">%1$d 行</string>
+    <string name="omni_log_note_scope">Android 只让一个应用看到它自己的日志。别的应用或系统的日志需要只有系统应用才被授予的权限，所以这里不提供，而不是提供了却是空的。</string>
 </resources>

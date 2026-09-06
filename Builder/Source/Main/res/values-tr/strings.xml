@@ -329,4 +329,15 @@
     <string name="omni_web_create">APK OLUŞTUR</string>
     <string name="omni_web_needs">Bir adres gerekir ve içinde noktalı virgül bulunamaz.</string>
     <string name="omni_web_note_privacy">Paket ağ dışında hiçbir şey istemez. Sayfanın ne yaptığı sitenin işidir, bu uygulamanın değil.</string>
+    <string name="omni_menu_making">Geliştirme</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">Cihaz günlüğü, bu uygulamanın görebildiği kadarıyla.</string>
+    <string name="omni_log_scope">Bu uygulamanın kendi günlüğünü, bu cihazda, anlık okur.</string>
+    <string name="omni_log_running">Okunuyor</string>
+    <string name="omni_log_stopped">Durdu</string>
+    <string name="omni_log_start">BAŞLAT</string>
+    <string name="omni_log_stop">DURDUR</string>
+    <string name="omni_log_empty">Henüz hiçbir şey kaydedilmedi.</string>
+    <string name="omni_log_lines">%1$d satır</string>
+    <string name="omni_log_note_scope">Android bir uygulamaya yalnızca kendi günlüğünü gösterir. Başka bir uygulamanın ya da sistemin günlüğü, yalnızca sistem uygulamalarına verilen bir izin ister; bu yüzden burada sunulup boş bırakılmak yerine hiç sunulmaz.</string>
 </resources>

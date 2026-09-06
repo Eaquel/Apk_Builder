@@ -329,4 +329,15 @@
     <string name="omni_web_create">ابنِ الحزمة</string>
     <string name="omni_web_needs">يلزم عنوان، ولا يجوز أن يحمل فاصلة منقوطة.</string>
     <string name="omni_web_note_privacy">تطلب الحزمة الشبكة ولا شيء سواها. وما تفعله الصفحة شأن الموقع لا شأن هذا التطبيق.</string>
+    <string name="omni_menu_making">البناء</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">سجل الجهاز، بالقدر الذي يستطيع هذا التطبيق رؤيته.</string>
+    <string name="omni_log_scope">يقرأ سجل هذا التطبيق نفسه، حيًّا، على هذا الجهاز.</string>
+    <string name="omni_log_running">يقرأ</string>
+    <string name="omni_log_stopped">متوقف</string>
+    <string name="omni_log_start">ابدأ</string>
+    <string name="omni_log_stop">أوقف</string>
+    <string name="omni_log_empty">لم يُسجَّل شيء بعد.</string>
+    <string name="omni_log_lines">%1$d سطرًا</string>
+    <string name="omni_log_note_scope">لا يُري أندرويد التطبيقَ إلا سجله هو. أما سجل تطبيق آخر أو سجل النظام فيحتاج إذنًا لا يُمنح إلا لتطبيقات النظام، ولذلك لا يُعرض هنا أصلًا بدل أن يُعرض فارغًا.</string>
 </resources>

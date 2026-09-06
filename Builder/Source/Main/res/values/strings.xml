@@ -329,4 +329,15 @@
     <string name="omni_web_create">BUILD THE APK</string>
     <string name="omni_web_needs">An address is needed, and it may not carry a semicolon.</string>
     <string name="omni_web_note_privacy">The package asks for the network, and nothing else. What the page does is the site’s business, not this app’s.</string>
+    <string name="omni_menu_making">Making</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">The device log, as this app can see it.</string>
+    <string name="omni_log_scope">Reads this app’s own log, live, on this device.</string>
+    <string name="omni_log_running">Reading</string>
+    <string name="omni_log_stopped">Stopped</string>
+    <string name="omni_log_start">START</string>
+    <string name="omni_log_stop">STOP</string>
+    <string name="omni_log_empty">Nothing has been logged yet.</string>
+    <string name="omni_log_lines">%1$d lines</string>
+    <string name="omni_log_note_scope">Android shows an app only its own log. The log of another app, or of the system, needs a permission only a system app is granted, so it is not offered here rather than offered and empty.</string>
 </resources>

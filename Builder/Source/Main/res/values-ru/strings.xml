@@ -329,4 +329,15 @@
     <string name="omni_web_create">СОБРАТЬ APK</string>
     <string name="omni_web_needs">Нужен адрес, и в нём не может быть точки с запятой.</string>
     <string name="omni_web_note_privacy">Пакет просит сеть и ничего больше. Что делает страница — дело сайта, а не этого приложения.</string>
+    <string name="omni_menu_making">Сборка</string>
+    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_log_note">Журнал устройства — насколько это приложение может его видеть.</string>
+    <string name="omni_log_scope">Читает собственный журнал этого приложения, вживую, на этом устройстве.</string>
+    <string name="omni_log_running">Читает</string>
+    <string name="omni_log_stopped">Остановлено</string>
+    <string name="omni_log_start">ЗАПУСТИТЬ</string>
+    <string name="omni_log_stop">ОСТАНОВИТЬ</string>
+    <string name="omni_log_empty">Пока ничего не записано.</string>
+    <string name="omni_log_lines">строк: %1$d</string>
+    <string name="omni_log_note_scope">Android показывает приложению только его собственный журнал. Журнал другого приложения или системы требует разрешения, которое даётся лишь системному приложению, поэтому здесь он не предлагается вовсе, а не предлагается пустым.</string>
 </resources>
