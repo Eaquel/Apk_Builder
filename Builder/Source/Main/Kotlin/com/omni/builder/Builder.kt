@@ -632,6 +632,8 @@ data class ProjectSpec(
     val targetSdk: Int,
     val languages: List<String>,
     val locales: List<String>,
+    val page: String = "",
+    val pageParts: List<String> = emptyList(),
 ) {
     fun encode(): String = buildString {
         append("package=").append(packageName).append(';')
@@ -643,6 +645,10 @@ data class ProjectSpec(
         append("targetSdk=").append(targetSdk).append(';')
         append("languages=").append(languages.joinToString(",")).append(';')
         append("locales=").append(locales.joinToString(","))
+        if (page.isNotEmpty()) {
+            append(';').append("webParts=").append(pageParts.joinToString(","))
+            append(';').append("web=").append(page)
+        }
     }
 }
 
@@ -3018,7 +3024,11 @@ private sealed interface Screen {
 
     data object Projects : Screen
 
+    data object Kinds : Screen
+
     data object NewProject : Screen
+
+    data object WebToApk : Screen
 
     data class Files(val root: String, val folder: String) : Screen
 
@@ -3071,6 +3081,30 @@ class BuilderActivity : Activity() {
         const val DRAWER_DP = 300
 
         const val SHOT_REQUEST = 3
+
+        val NATIVE_TILES = listOf("Kotlin", "Rust", "C++", "Java")
+
+        val WEB_TILES = listOf("HTML", "CSS", "JS")
+
+        val WEB_PARTS = listOf("script", "storage", "pictures", "whole", "cached")
+
+        val WEB_PARTS_ON = listOf(true, true, true, true, false)
+
+        val WEB_PART_NAMES = listOf(
+            R.string.omni_web_script,
+            R.string.omni_web_storage,
+            R.string.omni_web_pictures,
+            R.string.omni_web_whole,
+            R.string.omni_web_cached,
+        )
+
+        val WEB_PART_NOTES = listOf(
+            R.string.omni_web_script_note,
+            R.string.omni_web_storage_note,
+            R.string.omni_web_pictures_note,
+            R.string.omni_web_whole_note,
+            R.string.omni_web_cached_note,
+        )
 
         const val SUBJECT_LIMIT = 100
 
@@ -3263,6 +3297,9 @@ class BuilderActivity : Activity() {
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
+
+    private var webAddress = ""
+    private val webParts = WEB_PARTS_ON.toMutableList()
 
     private var feedbackKind = 0
     private var feedbackSubject = ""
@@ -3615,8 +3652,11 @@ class BuilderActivity : Activity() {
         if (next == screen && !navigating) {
             return
         }
-        if (next is Screen.NewProject && screen !is Screen.NewProject) {
+        if (next is Screen.Kinds && screen !is Screen.Kinds) {
             formStep = 0
+            formLabel = DEFAULT_LABEL
+            formVersionName = "1.0.0"
+            formVersionCode = "1"
             formPackage = Preferences.newPackage(this, DEFAULT_PACKAGE)
             formMinSdk = Preferences.newMinSdk(this, OLDEST_PLATFORM)
             formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
@@ -3732,7 +3772,9 @@ class BuilderActivity : Activity() {
 
         when (val here = screen) {
             is Screen.Projects -> renderProjects()
+            is Screen.Kinds -> renderKinds()
             is Screen.NewProject -> renderNewProject()
+            is Screen.WebToApk -> renderWebToApk()
             is Screen.Files -> renderFiles(here.root, here.folder)
             is Screen.Health -> renderHealth(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
@@ -3809,7 +3851,9 @@ class BuilderActivity : Activity() {
         }
         when (val here = screen) {
             is Screen.Projects -> finish()
-            is Screen.NewProject -> go(Screen.Projects)
+            is Screen.Kinds -> go(Screen.Projects)
+            is Screen.NewProject -> go(Screen.Kinds)
+            is Screen.WebToApk -> go(Screen.Kinds)
             is Screen.Help -> go(Screen.About)
             is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Picture -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
@@ -3855,7 +3899,9 @@ class BuilderActivity : Activity() {
         }
         crownTitle.text = when (here) {
             is Screen.Projects -> getString(R.string.omni_projects_title)
+            is Screen.Kinds -> getString(R.string.omni_kinds_title)
             is Screen.NewProject -> getString(R.string.omni_projects_new)
+            is Screen.WebToApk -> getString(R.string.omni_web_title)
             is Screen.Files -> File(here.root).name
             is Screen.Health -> getString(R.string.omni_health_title)
             is Screen.Editor -> here.path.substringAfterLast('/')
@@ -4115,7 +4161,7 @@ class BuilderActivity : Activity() {
             )
         }
         content.addView(card)
-        content.addView(primary(getString(R.string.omni_projects_new)) { go(Screen.NewProject) })
+        content.addView(primary(getString(R.string.omni_projects_new)) { go(Screen.Kinds) })
         content.addView(quiet(getString(R.string.omni_projects_note)))
     }
 
@@ -4158,7 +4204,7 @@ class BuilderActivity : Activity() {
         content.addView(onwards)
         content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
             formStep = 0
-            go(Screen.Projects)
+            go(Screen.Kinds)
         })
     }
 
@@ -6193,6 +6239,201 @@ class BuilderActivity : Activity() {
         OmniLog.event(LogLevel.INFO, "project", "Deleted ${project.root}")
         render(false)
         results.addView(notice(getString(R.string.omni_trash_sent, project.name), palette.ok))
+    }
+
+    private fun kindCard(
+        mark: Mark.Shape,
+        title: String,
+        detail: String,
+        edge: Int,
+        tiles: List<String>,
+        onPress: () -> Unit,
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(gap(4), gap(4), gap(4), gap(4))
+        isClickable = true
+        isFocusable = true
+        contentDescription = said(title, detail)
+        readAs(Button::class.java.name)
+        background = touchable(
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(4).toFloat()
+                setColor(palette.surface)
+                setStroke(gap(1) / 2, edge)
+            },
+            edge,
+        )
+        setOnClickListener { onPress() }
+        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = gap(3)
+        }
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    badge(mark, edge),
+                    LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    TextView(context).apply {
+                        text = title
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        addView(
+            TextView(context).apply {
+                text = detail
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setLineSpacing(gap(1).toFloat(), 1f)
+                setPadding(0, gap(2), 0, 0)
+            }
+        )
+        addView(
+            FlowLayout(context, gap(2), gap(2)).apply {
+                setPadding(0, gap(3), 0, 0)
+                tiles.forEach { addView(tile(it, edge)) }
+            }
+        )
+    }
+
+    private fun renderKinds() {
+        content.addView(
+            mascot(
+                Chibi.Face.SPARK,
+                getString(R.string.omni_kinds_title),
+                getString(R.string.omni_kinds_note),
+            )
+        )
+        content.addView(
+            kindCard(
+                Mark.Shape.CODE,
+                getString(R.string.omni_kinds_native),
+                getString(R.string.omni_kinds_native_note),
+                palette.accent,
+                NATIVE_TILES,
+            ) { go(Screen.NewProject) }
+        )
+        content.addView(
+            kindCard(
+                Mark.Shape.WEB,
+                getString(R.string.omni_kinds_web),
+                getString(R.string.omni_kinds_web_note),
+                palette.ok,
+                WEB_TILES,
+            ) { go(Screen.WebToApk) }
+        )
+        content.addView(
+            subtle(getString(R.string.omni_action_cancel), palette.muted) { go(Screen.Projects) }
+        )
+    }
+
+    private fun createPage() {
+        results.removeAllViews()
+        if (webAddress.isBlank() || webAddress.contains(';')) {
+            results.addView(notice(getString(R.string.omni_web_needs), palette.warning))
+            return
+        }
+        val root = freeFolder(formLabel)
+        working({ Builder.nativeCreateProject(root.absolutePath, pageSpec().encode()) })
+        finished@{ answer ->
+            val outcome = runCatching { CreateOutcome.parse(answer) }.getOrElse {
+                results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
+                return@finished
+            }
+            if (!outcome.created) {
+                showRefusal(Refusal.parse(JSONObject(answer)), results)
+                return@finished
+            }
+            OmniLog.event(LogLevel.INFO, "project", "Created ${outcome.root}")
+            results.addView(notice(getString(R.string.omni_created), palette.ok))
+            openHere(root.absolutePath)
+        }
+    }
+
+    private fun pageSpec() = ProjectSpec(
+        packageName = formPackage.trim(),
+        label = formLabel.trim(),
+        versionName = formVersionName.trim(),
+        versionCode = formVersionCode.trim().toIntOrNull() ?: 0,
+        abis = ONLY_ABI,
+        minSdk = formMinSdk,
+        targetSdk = formTargetSdk,
+        languages = listOf("java"),
+        locales = (formLocales + BASE_LOCALE).toList(),
+        page = webAddress.trim(),
+        pageParts = WEB_PARTS.filterIndexed { index, _ -> webParts[index] },
+    )
+
+    private fun renderWebToApk() {
+        content.addView(
+            mascot(
+                Chibi.Face.WINK,
+                getString(R.string.omni_web_title),
+                getString(R.string.omni_web_note),
+            )
+        )
+        val where = card()
+        where.addView(
+            field(getString(R.string.omni_web_address), webAddress) { webAddress = it }
+        )
+        content.addView(where)
+
+        val switches = card()
+        WEB_PARTS.forEachIndexed { index, _ ->
+            if (index > 0) {
+                switches.addView(rule(), MATCH_PARENT, 1)
+            }
+            switches.addView(
+                switchRow(
+                    getString(WEB_PART_NAMES[index]),
+                    getString(WEB_PART_NOTES[index]),
+                    webParts[index],
+                ) { webParts[index] = it }
+            )
+        }
+        content.addView(switches)
+
+        val more = card()
+        more.addView(
+            row(
+                getString(R.string.omni_web_look),
+                palette.label,
+                "",
+                palette.accent,
+            ) { go(Screen.Theme) }
+        )
+        content.addView(more)
+
+        content.addView(label(getString(R.string.omni_web_facts)))
+        val facts = card()
+        facts.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
+        facts.addView(
+            field(getString(R.string.omni_form_package), formPackage) { formPackage = it }
+        )
+        facts.addView(
+            field(getString(R.string.omni_form_version_name), formVersionName) {
+                formVersionName = it
+            }
+        )
+        facts.addView(
+            field(getString(R.string.omni_form_version_code), formVersionCode) {
+                formVersionCode = it
+            }
+        )
+        content.addView(facts)
+        content.addView(primary(getString(R.string.omni_web_create)) { createPage() })
+        content.addView(
+            subtle(getString(R.string.omni_action_cancel), palette.muted) { go(Screen.Kinds) }
+        )
+        content.addView(quiet(getString(R.string.omni_web_note_privacy)))
     }
 
     private fun tile(text: String, tint: Int) = TextView(this).apply {
