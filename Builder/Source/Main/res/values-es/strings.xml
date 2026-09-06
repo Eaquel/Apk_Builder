@@ -52,8 +52,6 @@
     <string name="omni_action_purge">BORRAR PARA SIEMPRE</string>
     <string name="omni_action_empty">VACIAR LA PAPELERA</string>
     <string name="omni_action_back">ATRÁS</string>
-    <string name="omni_action_next">SIGUIENTE</string>
-    <string name="omni_form_step">PASO %1$d DE %2$d</string>
     <string name="omni_action_cancel">CANCELAR</string>
     <string name="omni_action_new_file">NUEVO ARCHIVO</string>
     <string name="omni_action_new_folder">NUEVA CARPETA</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Todavía no se ha registrado nada.</string>
     <string name="omni_log_lines">%1$d líneas</string>
     <string name="omni_log_note_scope">Android muestra a una aplicación solo su propio registro. El de otra aplicación, o el del sistema, necesita un permiso que solo se concede a una aplicación del sistema, así que aquí no se ofrece en vez de ofrecerse vacío.</string>
+    <string name="omni_form_note">Un nombre, un paquete, una versión y un icono. Todo lo demás puede cambiar después.</string>
+    <string name="omni_form_platforms">Versiones de Android</string>
+    <string name="omni_form_platforms_span">Android %1$s a %2$s</string>
+    <string name="omni_form_platforms_note">El Android más antiguo en que esto corre, y el más nuevo contra el que se construye.</string>
+    <string name="omni_editor_run">Construir este proyecto</string>
+    <string name="omni_editor_symbols">Símbolos</string>
 </resources>

@@ -52,8 +52,6 @@
     <string name="omni_action_purge">APAGAR PARA SEMPRE</string>
     <string name="omni_action_empty">ESVAZIAR A LIXEIRA</string>
     <string name="omni_action_back">VOLTAR</string>
-    <string name="omni_action_next">SEGUINTE</string>
-    <string name="omni_form_step">PASSO %1$d DE %2$d</string>
     <string name="omni_action_cancel">CANCELAR</string>
     <string name="omni_action_new_file">NOVO ARQUIVO</string>
     <string name="omni_action_new_folder">NOVA PASTA</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Ainda não foi registado nada.</string>
     <string name="omni_log_lines">%1$d linhas</string>
     <string name="omni_log_note_scope">O Android mostra a uma aplicação apenas o seu próprio registo. O de outra aplicação, ou o do sistema, precisa de uma permissão dada só a aplicações do sistema, por isso aqui não é oferecido em vez de ser oferecido e vazio.</string>
+    <string name="omni_form_note">Um nome, um pacote, uma versão e um ícone. Tudo o resto pode mudar depois.</string>
+    <string name="omni_form_platforms">Versões do Android</string>
+    <string name="omni_form_platforms_span">Android %1$s a %2$s</string>
+    <string name="omni_form_platforms_note">O Android mais antigo em que isto corre, e o mais recente contra o qual é construído.</string>
+    <string name="omni_editor_run">Construir este projeto</string>
+    <string name="omni_editor_symbols">Símbolos</string>
 </resources>

@@ -52,8 +52,6 @@
     <string name="omni_action_purge">احذف نهائيًا</string>
     <string name="omni_action_empty">أفرغ المهملات</string>
     <string name="omni_action_back">رجوع</string>
-    <string name="omni_action_next">التالي</string>
-    <string name="omni_form_step">الخطوة %1$d من %2$d</string>
     <string name="omni_action_cancel">إلغاء</string>
     <string name="omni_action_new_file">ملف جديد</string>
     <string name="omni_action_new_folder">مجلد جديد</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">لم يُسجَّل شيء بعد.</string>
     <string name="omni_log_lines">%1$d سطرًا</string>
     <string name="omni_log_note_scope">لا يُري أندرويد التطبيقَ إلا سجله هو. أما سجل تطبيق آخر أو سجل النظام فيحتاج إذنًا لا يُمنح إلا لتطبيقات النظام، ولذلك لا يُعرض هنا أصلًا بدل أن يُعرض فارغًا.</string>
+    <string name="omni_form_note">اسم وحزمة وإصدار وأيقونة. وكل ما عداها يمكن تغييره لاحقًا.</string>
+    <string name="omni_form_platforms">إصدارات أندرويد</string>
+    <string name="omni_form_platforms_span">أندرويد من %1$s إلى %2$s</string>
+    <string name="omni_form_platforms_note">أقدم أندرويد يعمل عليه هذا، وأحدث أندرويد بُني في مواجهته.</string>
+    <string name="omni_editor_run">ابنِ هذا المشروع</string>
+    <string name="omni_editor_symbols">الرموز</string>
 </resources>

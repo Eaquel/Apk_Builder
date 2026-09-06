@@ -52,8 +52,6 @@
     <string name="omni_action_purge">KALICI SİL</string>
     <string name="omni_action_empty">ÇÖPÜ BOŞALT</string>
     <string name="omni_action_back">GERİ</string>
-    <string name="omni_action_next">İLERİ</string>
-    <string name="omni_form_step">ADIM %1$d / %2$d</string>
     <string name="omni_action_cancel">VAZGEÇ</string>
     <string name="omni_action_new_file">YENİ DOSYA</string>
     <string name="omni_action_new_folder">YENİ KLASÖR</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Henüz hiçbir şey kaydedilmedi.</string>
     <string name="omni_log_lines">%1$d satır</string>
     <string name="omni_log_note_scope">Android bir uygulamaya yalnızca kendi günlüğünü gösterir. Başka bir uygulamanın ya da sistemin günlüğü, yalnızca sistem uygulamalarına verilen bir izin ister; bu yüzden burada sunulup boş bırakılmak yerine hiç sunulmaz.</string>
+    <string name="omni_form_note">Bir ad, bir paket, bir sürüm ve bir simge. Gerisi sonradan değişebilir.</string>
+    <string name="omni_form_platforms">Android sürümleri</string>
+    <string name="omni_form_platforms_span">Android %1$s – %2$s</string>
+    <string name="omni_form_platforms_note">Üzerinde çalışacağı en eski Android ve karşısında derlendiği en yeni Android.</string>
+    <string name="omni_editor_run">Bu projeyi derle</string>
+    <string name="omni_editor_symbols">Simgeler</string>
 </resources>

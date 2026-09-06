@@ -52,8 +52,6 @@
     <string name="omni_action_purge">DELETE FOR GOOD</string>
     <string name="omni_action_empty">EMPTY THE TRASH</string>
     <string name="omni_action_back">BACK</string>
-    <string name="omni_action_next">NEXT</string>
-    <string name="omni_form_step">STEP %1$d OF %2$d</string>
     <string name="omni_action_cancel">CANCEL</string>
     <string name="omni_action_new_file">NEW FILE</string>
     <string name="omni_action_new_folder">NEW FOLDER</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Nothing has been logged yet.</string>
     <string name="omni_log_lines">%1$d lines</string>
     <string name="omni_log_note_scope">Android shows an app only its own log. The log of another app, or of the system, needs a permission only a system app is granted, so it is not offered here rather than offered and empty.</string>
+    <string name="omni_form_note">A name, a package, a version and an icon. Everything else can change later.</string>
+    <string name="omni_form_platforms">Android versions</string>
+    <string name="omni_form_platforms_span">Android %1$s to %2$s</string>
+    <string name="omni_form_platforms_note">The oldest Android this runs on, and the newest it is built against.</string>
+    <string name="omni_editor_run">Build this project</string>
+    <string name="omni_editor_symbols">Symbols</string>
 </resources>

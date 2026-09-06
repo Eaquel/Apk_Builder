@@ -3087,6 +3087,10 @@ class BuilderActivity : Activity() {
 
         const val LOG_HELD = 600
 
+        val EDITOR_SYMBOLS = listOf(
+            "\t", ";", "\"", "{", "}", "(", ")", "[", "]", ",", ".", "=",
+        )
+
         const val LOG_TICK_MILLIS = 400L
 
         val NATIVE_TILES = listOf("Kotlin", "Rust", "C++", "Java")
@@ -3165,8 +3169,6 @@ class BuilderActivity : Activity() {
         )
 
         val HELP_BANDS = listOf(1, 2, 2, 2, 2, 3)
-
-        const val WIZARD_STEPS = 3
 
         const val WATCH_CODE_MILLIS = 1_200L
 
@@ -3283,7 +3285,6 @@ class BuilderActivity : Activity() {
     private var formLabel = DEFAULT_LABEL
     private var formVersionName = "1.0.0"
     private var formVersionCode = "1"
-    private var formStep = 0
     private var formMinSdk = OLDEST_PLATFORM
     private var formTargetSdk = NEWEST_PLATFORM
     private val formLanguages = linkedSetOf("java")
@@ -3669,7 +3670,6 @@ class BuilderActivity : Activity() {
             return
         }
         if (next is Screen.Kinds && screen !is Screen.Kinds) {
-            formStep = 0
             formLabel = DEFAULT_LABEL
             formVersionName = "1.0.0"
             formVersionCode = "1"
@@ -4195,103 +4195,35 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderNewProject() {
-        formStep = formStep.coerceIn(0, WIZARD_STEPS - 1)
-        content.addView(stepMarker(formStep, WIZARD_STEPS))
-
-        when (formStep) {
-            0 -> newProjectIdentity()
-            1 -> newProjectPicture()
-            else -> newProjectAndroid()
-        }
-
-        val onwards = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(3)
-            }
-        }
-        if (formStep > 0) {
-            onwards.addView(
-                subtle(getString(R.string.omni_action_back), palette.muted) {
-                    formStep -= 1
-                    render(true)
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+        content.addView(
+            mascot(
+                Chibi.Face.SPARK,
+                getString(R.string.omni_projects_new),
+                getString(R.string.omni_form_note),
             )
-        }
-        onwards.addView(
-            if (formStep == WIZARD_STEPS - 1) {
-                primary(getString(R.string.omni_action_create)) { createProject() }
-            } else {
-                primary(getString(R.string.omni_action_next)) {
-                    formStep += 1
-                    render(true)
-                }
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
         )
-        content.addView(onwards)
-        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
-            formStep = 0
-            go(Screen.Kinds)
-        })
-    }
 
-    private fun stepMarker(at: Int, count: Int): View {
-        val holder = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, gap(1), 0, gap(3))
-        }
-        holder.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_form_step, at + 1, count)
-                typeface = Type.label
-                setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                letterSpacing = Type.TRACKING
-            }
-        )
-        val track = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(2)
-            }
-        }
-        for (index in 0 until count) {
-            track.addView(
-                View(this).apply {
-                    background = pill(
-                        when {
-                            index < at -> Ink.fade(palette.accent, 0.55f)
-                            index == at -> palette.accent
-                            else -> palette.raised
-                        },
-                        gap(1).toFloat(),
-                    )
-                },
-                LinearLayout.LayoutParams(0, gap(1), 1f).apply {
-                    marginEnd = if (index == count - 1) 0 else gap(1)
-                },
-            )
-        }
-        holder.addView(track)
-        return holder
-    }
-
-    private fun newProjectIdentity() {
         val identity = card()
         identity.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
-        identity.addView(field(getString(R.string.omni_form_package), formPackage) { formPackage = it })
         identity.addView(
-            field(getString(R.string.omni_form_version_name), formVersionName) { formVersionName = it }
+            field(getString(R.string.omni_form_package), formPackage) { formPackage = it }
         )
-        identity.addView(
-            field(getString(R.string.omni_form_version_code), formVersionCode) { formVersionCode = it }
+        val versions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        versions.addView(
+            field(getString(R.string.omni_form_version_name), formVersionName) {
+                formVersionName = it
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(2) },
         )
+        versions.addView(
+            field(getString(R.string.omni_form_version_code), formVersionCode) {
+                formVersionCode = it
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(2) },
+        )
+        identity.addView(versions)
         content.addView(identity)
-    }
 
-    private fun newProjectPicture() {
         content.addView(label(getString(R.string.omni_form_image)))
         val picture = card()
         picture.addView(
@@ -4323,25 +4255,81 @@ class BuilderActivity : Activity() {
         picture.addView(choosing)
         content.addView(picture)
         content.addView(quiet(getString(R.string.omni_form_image_note)))
-    }
 
-    private fun newProjectAndroid() {
-        content.addView(label(getString(R.string.omni_form_min_sdk)))
-        content.addView(
-            chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == formMinSdk }) {
+        content.addView(label(getString(R.string.omni_form_platforms)))
+        val platforms = card()
+        platforms.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    badge(Mark.Shape.PACKAGE, palette.accent),
+                    LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(
+                                    R.string.omni_form_platforms_span,
+                                    releaseNamed(formMinSdk),
+                                    releaseNamed(formTargetSdk),
+                                )
+                                setTextColor(palette.foreground)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_form_platforms_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        platforms.addView(label(getString(R.string.omni_form_min_sdk)))
+        platforms.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { ANDROID_RELEASES[it].first == formMinSdk },
+            ) {
                 formMinSdk = ANDROID_RELEASES[it].first
-                if (formTargetSdk < formMinSdk) formTargetSdk = formMinSdk
+                if (formTargetSdk < formMinSdk) {
+                    formTargetSdk = formMinSdk
+                }
+                render(false)
             }
         )
-
-        content.addView(label(getString(R.string.omni_form_target_sdk)))
-        content.addView(
-            chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == formTargetSdk }) {
+        platforms.addView(label(getString(R.string.omni_form_target_sdk)))
+        platforms.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { ANDROID_RELEASES[it].first == formTargetSdk },
+            ) {
                 formTargetSdk = ANDROID_RELEASES[it].first
-                if (formMinSdk > formTargetSdk) formMinSdk = formTargetSdk
+                if (formMinSdk > formTargetSdk) {
+                    formMinSdk = formTargetSdk
+                }
+                render(false)
             }
+        )
+        content.addView(platforms)
+
+        content.addView(primary(getString(R.string.omni_action_create)) { createProject() })
+        content.addView(
+            subtle(getString(R.string.omni_action_cancel), palette.muted) { go(Screen.Kinds) }
         )
     }
+
+    private fun releaseNamed(api: Int): String =
+        ANDROID_RELEASES.firstOrNull { it.first == api }?.second ?: api.toString()
 
     private fun renderFiles(root: String, folder: String) {
         content.addView(breadcrumb(root, folder))
@@ -5428,6 +5416,8 @@ class BuilderActivity : Activity() {
         }
         editor.onChanged = ::mark
 
+        content.addView(editorTrail(root, path))
+
         val tools = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -5435,11 +5425,18 @@ class BuilderActivity : Activity() {
         }
         val each = LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS))
         tools.addView(
+            markControl(Mark.Shape.PLAY, R.string.omni_editor_run) {
+                save()
+                go(Screen.Build(root))
+            },
+            each,
+        )
+        tools.addView(
             markControl(Mark.Shape.UNDO, R.string.omni_editor_undo) {
                 editor.undo()
                 mark()
             },
-            each,
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
         )
         tools.addView(
             markControl(Mark.Shape.REDO, R.string.omni_editor_redo) {
@@ -5517,7 +5514,117 @@ class BuilderActivity : Activity() {
             ),
         )
         content.addView(sheet)
+        content.addView(symbolBar(editor, ::mark))
         editor.postDelayed(watch, WATCH_CODE_MILLIS)
+    }
+
+    private fun editorTrail(root: String, path: String): View {
+        val trail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(2))
+        }
+        val walk = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val parts = listOf(File(root).name) + path.split('/').filter { it.isNotEmpty() }
+        parts.forEachIndexed { index, part ->
+            if (index > 0) {
+                walk.addView(
+                    TextView(this).apply {
+                        text = "/"
+                        setTextColor(palette.divider)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setPadding(gap(1), 0, gap(1), 0)
+                    }
+                )
+            }
+            val last = index == parts.size - 1
+            walk.addView(
+                TextView(this).apply {
+                    text = part
+                    setTextColor(if (last) palette.foreground else palette.muted)
+                    typeface = if (last) Type.strong else Type.body
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    maxLines = 1
+                }
+            )
+        }
+        trail.addView(
+            HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(walk, MATCH_PARENT, WRAP_CONTENT)
+            }
+        )
+        val (shape, tint) = markFor(FileEntry(path, false, 0L, 0L))
+        trail.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(3), gap(2), gap(3), gap(2))
+                background = GradientDrawable().apply {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadii = floatArrayOf(
+                        gap(2).toFloat(), gap(2).toFloat(), gap(2).toFloat(), gap(2).toFloat(),
+                        0f, 0f, 0f, 0f,
+                    )
+                    setColor(palette.surface)
+                }
+                addView(
+                    View(context).apply { foreground = Mark(shape, tint) },
+                    LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    TextView(context).apply {
+                        text = path.substringAfterLast('/')
+                        setTextColor(palette.foreground)
+                        typeface = Type.strong
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        maxLines = 1
+                    }
+                )
+            },
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = gap(2) },
+        )
+        return trail
+    }
+
+    private fun symbolBar(editor: CodeEditor, mark: () -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        for (symbol in EDITOR_SYMBOLS) {
+            row.addView(
+                control().apply {
+                    text = if (symbol == "\t") "TAB" else symbol
+                    setTextColor(palette.foreground)
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    minWidth = gap(TOUCH_UNITS)
+                    setPadding(gap(2), gap(2), gap(2), gap(2))
+                    background = reacting(palette.raised, gap(2).toFloat(), palette.accent)
+                    setOnClickListener {
+                        val from = editor.selectionStart.coerceAtLeast(0)
+                        val to = editor.selectionEnd.coerceAtLeast(from)
+                        editor.text?.replace(from, to, symbol)
+                        mark()
+                        press()
+                    }
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginEnd = gap(1)
+                },
+            )
+        }
+        return HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            contentDescription = getString(R.string.omni_editor_symbols)
+            addView(row, MATCH_PARENT, WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+            }
+        }
     }
 
     private fun editorMenu(

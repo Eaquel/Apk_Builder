@@ -52,8 +52,6 @@
     <string name="omni_action_purge">УДАЛИТЬ НАВСЕГДА</string>
     <string name="omni_action_empty">ОЧИСТИТЬ КОРЗИНУ</string>
     <string name="omni_action_back">НАЗАД</string>
-    <string name="omni_action_next">ДАЛЕЕ</string>
-    <string name="omni_form_step">ШАГ %1$d ИЗ %2$d</string>
     <string name="omni_action_cancel">ОТМЕНА</string>
     <string name="omni_action_new_file">НОВЫЙ ФАЙЛ</string>
     <string name="omni_action_new_folder">НОВАЯ ПАПКА</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Пока ничего не записано.</string>
     <string name="omni_log_lines">строк: %1$d</string>
     <string name="omni_log_note_scope">Android показывает приложению только его собственный журнал. Журнал другого приложения или системы требует разрешения, которое даётся лишь системному приложению, поэтому здесь он не предлагается вовсе, а не предлагается пустым.</string>
+    <string name="omni_form_note">Имя, пакет, версия и значок. Всё остальное можно изменить позже.</string>
+    <string name="omni_form_platforms">Версии Android</string>
+    <string name="omni_form_platforms_span">Android с %1$s по %2$s</string>
+    <string name="omni_form_platforms_note">Самый старый Android, на котором это работает, и самый новый, под который это собрано.</string>
+    <string name="omni_editor_run">Собрать этот проект</string>
+    <string name="omni_editor_symbols">Знаки</string>
 </resources>

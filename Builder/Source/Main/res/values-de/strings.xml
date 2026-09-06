@@ -52,8 +52,6 @@
     <string name="omni_action_purge">ENDGÜLTIG LÖSCHEN</string>
     <string name="omni_action_empty">PAPIERKORB LEEREN</string>
     <string name="omni_action_back">ZURÜCK</string>
-    <string name="omni_action_next">WEITER</string>
-    <string name="omni_form_step">SCHRITT %1$d VON %2$d</string>
     <string name="omni_action_cancel">ABBRECHEN</string>
     <string name="omni_action_new_file">NEUE DATEI</string>
     <string name="omni_action_new_folder">NEUER ORDNER</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Es wurde noch nichts protokolliert.</string>
     <string name="omni_log_lines">%1$d Zeilen</string>
     <string name="omni_log_note_scope">Android zeigt einer App nur ihr eigenes Protokoll. Das Protokoll einer anderen App oder des Systems braucht eine Berechtigung, die nur eine Systemanwendung bekommt, also wird es hier gar nicht erst angeboten statt angeboten und leer.</string>
+    <string name="omni_form_note">Ein Name, ein Paket, eine Version und ein Symbol. Alles andere lässt sich später ändern.</string>
+    <string name="omni_form_platforms">Android-Versionen</string>
+    <string name="omni_form_platforms_span">Android %1$s bis %2$s</string>
+    <string name="omni_form_platforms_note">Das älteste Android, auf dem das läuft, und das neueste, gegen das es gebaut wird.</string>
+    <string name="omni_editor_run">Dieses Projekt bauen</string>
+    <string name="omni_editor_symbols">Zeichen</string>
 </resources>

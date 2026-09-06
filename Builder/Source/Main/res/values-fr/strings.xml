@@ -52,8 +52,6 @@
     <string name="omni_action_purge">SUPPRIMER DÉFINITIVEMENT</string>
     <string name="omni_action_empty">VIDER LA CORBEILLE</string>
     <string name="omni_action_back">RETOUR</string>
-    <string name="omni_action_next">SUIVANT</string>
-    <string name="omni_form_step">ÉTAPE %1$d SUR %2$d</string>
     <string name="omni_action_cancel">ANNULER</string>
     <string name="omni_action_new_file">NOUVEAU FICHIER</string>
     <string name="omni_action_new_folder">NOUVEAU DOSSIER</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">Rien n’a encore été journalisé.</string>
     <string name="omni_log_lines">%1$d lignes</string>
     <string name="omni_log_note_scope">Android ne montre à une application que son propre journal. Celui d’une autre application, ou du système, demande une permission accordée aux seules applications système : il n’est donc pas proposé ici plutôt que proposé et vide.</string>
+    <string name="omni_form_note">Un nom, un paquet, une version et une icône. Tout le reste peut changer plus tard.</string>
+    <string name="omni_form_platforms">Versions d’Android</string>
+    <string name="omni_form_platforms_span">Android %1$s à %2$s</string>
+    <string name="omni_form_platforms_note">Le plus ancien Android sur lequel cela tourne, et le plus récent contre lequel c’est construit.</string>
+    <string name="omni_editor_run">Construire ce projet</string>
+    <string name="omni_editor_symbols">Symboles</string>
 </resources>

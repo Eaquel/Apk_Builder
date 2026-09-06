@@ -52,8 +52,6 @@
     <string name="omni_action_purge">永久删除</string>
     <string name="omni_action_empty">清空回收站</string>
     <string name="omni_action_back">返回</string>
-    <string name="omni_action_next">下一步</string>
-    <string name="omni_form_step">第 %1$d 步，共 %2$d 步</string>
     <string name="omni_action_cancel">取消</string>
     <string name="omni_action_new_file">新建文件</string>
     <string name="omni_action_new_folder">新建文件夹</string>
@@ -340,4 +338,10 @@
     <string name="omni_log_empty">还没有任何日志。</string>
     <string name="omni_log_lines">%1$d 行</string>
     <string name="omni_log_note_scope">Android 只让一个应用看到它自己的日志。别的应用或系统的日志需要只有系统应用才被授予的权限，所以这里不提供，而不是提供了却是空的。</string>
+    <string name="omni_form_note">一个名称、一个包名、一个版本和一个图标。其余的以后都能改。</string>
+    <string name="omni_form_platforms">Android 版本</string>
+    <string name="omni_form_platforms_span">Android %1$s 到 %2$s</string>
+    <string name="omni_form_platforms_note">这个应用能运行的最老 Android，以及它编译时面向的最新 Android。</string>
+    <string name="omni_editor_run">构建这个项目</string>
+    <string name="omni_editor_symbols">符号</string>
 </resources>
