@@ -2200,6 +2200,26 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
         TABLE,
         SORT,
         TICK,
+        MENU,
+        HOME,
+        ROBOT,
+        LOG,
+        BRUSH,
+        GLOBE,
+        SPEECH,
+        STAR,
+        INFO,
+        HELP,
+        WEB,
+        BRANCH,
+        PLAY,
+        STOP,
+        SEND,
+        LINK,
+        ADD,
+        SHIELD,
+        MAIL,
+        BOLT,
     }
 
     private companion object {
@@ -2541,6 +2561,380 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 path.lineTo(20f, 16f)
                 canvas.drawPath(path, paint)
             }
+            Shape.MENU -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(4.5f, 7f)
+                path.lineTo(19.5f, 7f)
+                path.moveTo(4.5f, 12f)
+                path.lineTo(19.5f, 12f)
+                path.moveTo(4.5f, 17f)
+                path.lineTo(19.5f, 17f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.HOME -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(3.8f, 11.6f)
+                path.lineTo(12f, 4.4f)
+                path.lineTo(20.2f, 11.6f)
+                path.moveTo(6.4f, 10.2f)
+                path.lineTo(6.4f, 19.6f)
+                path.lineTo(17.6f, 19.6f)
+                path.lineTo(17.6f, 10.2f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.ROBOT -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(5f, 8f, 19f, 19.4f, 3.2f, 3.2f, Path.Direction.CW)
+                path.moveTo(12f, 8f)
+                path.lineTo(12f, 5.4f)
+                path.moveTo(3.4f, 12.4f)
+                path.lineTo(3.4f, 15f)
+                path.moveTo(20.6f, 12.4f)
+                path.lineTo(20.6f, 15f)
+                canvas.drawPath(path, paint)
+                canvas.drawCircle(12f, 4.2f, 1.2f, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(9.2f, 13f, 1.4f, paint)
+                canvas.drawCircle(14.8f, 13f, 1.4f, paint)
+            }
+            Shape.LOG -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(3.5f, 5.5f, 20.5f, 18.5f, 1.6f, 1.6f, Path.Direction.CW)
+                path.moveTo(7f, 10f)
+                path.lineTo(9.6f, 12.4f)
+                path.lineTo(7f, 14.8f)
+                path.moveTo(12.4f, 14.8f)
+                path.lineTo(17.4f, 14.8f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.BRUSH -> {
+                paint.style = Paint.Style.STROKE
+                canvas.drawCircle(12f, 12f, 8f, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(9.2f, 9.2f, 1.3f, paint)
+                canvas.drawCircle(14.8f, 9.6f, 1.3f, paint)
+                canvas.drawCircle(8.6f, 14.6f, 1.3f, paint)
+                canvas.drawCircle(13.4f, 15.4f, 1.3f, paint)
+            }
+            Shape.GLOBE -> {
+                paint.style = Paint.Style.STROKE
+                canvas.drawCircle(12f, 12f, 8f, paint)
+                path.moveTo(4f, 12f)
+                path.lineTo(20f, 12f)
+                path.addOval(7.6f, 4f, 16.4f, 20f, Path.Direction.CW)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SPEECH -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(3.8f, 5.4f, 20.2f, 16.4f, 2.6f, 2.6f, Path.Direction.CW)
+                path.moveTo(8.6f, 16.4f)
+                path.lineTo(8.6f, 20.6f)
+                path.lineTo(13.2f, 16.4f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.STAR -> {
+                paint.style = Paint.Style.FILL
+                var point = 0
+                while (point < 10) {
+                    val reach = if (point % 2 == 0) 8.4f else 3.7f
+                    val turn = -PI.toFloat() / 2f + point * PI.toFloat() / 5f
+                    val across = 12f + cos(turn) * reach
+                    val down = 12f + sin(turn) * reach
+                    if (point == 0) path.moveTo(across, down) else path.lineTo(across, down)
+                    point += 1
+                }
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.INFO -> {
+                paint.style = Paint.Style.STROKE
+                canvas.drawCircle(12f, 12f, 8f, paint)
+                path.moveTo(12f, 11.2f)
+                path.lineTo(12f, 16.6f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(12f, 7.8f, 1.1f, paint)
+            }
+            Shape.HELP -> {
+                paint.style = Paint.Style.STROKE
+                canvas.drawCircle(12f, 12f, 8f, paint)
+                path.moveTo(9.4f, 9.6f)
+                path.cubicTo(9.4f, 6.8f, 14.8f, 6.8f, 14.8f, 9.9f)
+                path.cubicTo(14.8f, 12.3f, 12f, 12.4f, 12f, 14.8f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(12f, 17.6f, 1.1f, paint)
+            }
+            Shape.WEB -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(3.5f, 5.5f, 20.5f, 18.5f, 1.6f, 1.6f, Path.Direction.CW)
+                path.moveTo(3.5f, 9.6f)
+                path.lineTo(20.5f, 9.6f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(6.4f, 7.6f, 0.8f, paint)
+                canvas.drawCircle(9f, 7.6f, 0.8f, paint)
+                canvas.drawCircle(11.6f, 7.6f, 0.8f, paint)
+            }
+            Shape.BRANCH -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(7.4f, 8f)
+                path.lineTo(7.4f, 16f)
+                path.moveTo(7.4f, 13.4f)
+                path.cubicTo(7.4f, 10.4f, 16.6f, 12.4f, 16.6f, 9.6f)
+                canvas.drawPath(path, paint)
+                canvas.drawCircle(7.4f, 5.9f, 2.1f, paint)
+                canvas.drawCircle(7.4f, 18.1f, 2.1f, paint)
+                canvas.drawCircle(16.6f, 7.5f, 2.1f, paint)
+            }
+            Shape.PLAY -> {
+                paint.style = Paint.Style.FILL
+                path.moveTo(8.4f, 5.6f)
+                path.lineTo(18.4f, 12f)
+                path.lineTo(8.4f, 18.4f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.STOP -> {
+                paint.style = Paint.Style.FILL
+                path.addRoundRect(7.4f, 7.4f, 16.6f, 16.6f, 1.3f, 1.3f, Path.Direction.CW)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SEND -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(20.4f, 4.2f)
+                path.lineTo(3.6f, 11.4f)
+                path.lineTo(10.8f, 13.6f)
+                path.lineTo(13f, 20.4f)
+                path.close()
+                path.moveTo(10.8f, 13.6f)
+                path.lineTo(20.4f, 4.2f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.LINK -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(9.8f, 14.2f)
+                path.lineTo(14.2f, 9.8f)
+                path.moveTo(9.4f, 10.6f)
+                path.lineTo(7.4f, 12.6f)
+                path.cubicTo(5.8f, 14.2f, 5.8f, 16.8f, 7.4f, 18.4f)
+                path.cubicTo(9f, 20f, 11.6f, 20f, 13.2f, 18.4f)
+                path.lineTo(15.2f, 16.4f)
+                path.moveTo(14.6f, 13.4f)
+                path.lineTo(16.6f, 11.4f)
+                path.cubicTo(18.2f, 9.8f, 18.2f, 7.2f, 16.6f, 5.6f)
+                path.cubicTo(15f, 4f, 12.4f, 4f, 10.8f, 5.6f)
+                path.lineTo(8.8f, 7.6f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.ADD -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 5.4f)
+                path.lineTo(12f, 18.6f)
+                path.moveTo(5.4f, 12f)
+                path.lineTo(18.6f, 12f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SHIELD -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 3.6f)
+                path.lineTo(19.4f, 6.8f)
+                path.lineTo(19.4f, 12.2f)
+                path.cubicTo(19.4f, 16.6f, 16f, 19.2f, 12f, 20.6f)
+                path.cubicTo(8f, 19.2f, 4.6f, 16.6f, 4.6f, 12.2f)
+                path.lineTo(4.6f, 6.8f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.MAIL -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(3.5f, 5.8f, 20.5f, 18.2f, 1.6f, 1.6f, Path.Direction.CW)
+                path.moveTo(3.5f, 7.4f)
+                path.lineTo(12f, 13.6f)
+                path.lineTo(20.5f, 7.4f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.BOLT -> {
+                paint.style = Paint.Style.FILL
+                path.moveTo(13.6f, 3.4f)
+                path.lineTo(6f, 13.6f)
+                path.lineTo(11f, 13.6f)
+                path.lineTo(10f, 20.6f)
+                path.lineTo(18f, 10.2f)
+                path.lineTo(13f, 10.2f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+        }
+        canvas.restore()
+    }
+
+    override fun setAlpha(alpha: Int) {
+        paint.alpha = alpha
+    }
+
+    override fun setColorFilter(filter: ColorFilter?) {
+        paint.colorFilter = filter
+    }
+
+    @Deprecated("The platform asks for this and nothing reads it.")
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+}
+
+internal class Flag(private val tag: String) : Drawable() {
+
+    private companion object {
+        const val WIDE = 24f
+        const val TALL = 16f
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val path = Path()
+
+    private fun band(canvas: Canvas, top: Float, bottom: Float, colour: Int) {
+        paint.color = colour
+        canvas.drawRect(0f, top, WIDE, bottom, paint)
+    }
+
+    private fun column(canvas: Canvas, left: Float, right: Float, colour: Int) {
+        paint.color = colour
+        canvas.drawRect(left, 0f, right, TALL, paint)
+    }
+
+    private fun star(canvas: Canvas, across: Float, down: Float, reach: Float, turned: Float) {
+        path.rewind()
+        var point = 0
+        while (point < 10) {
+            val out = if (point % 2 == 0) reach else reach * 0.42f
+            val turn = turned - PI.toFloat() / 2f + point * PI.toFloat() / 5f
+            val x = across + cos(turn) * out
+            val y = down + sin(turn) * out
+            if (point == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            point += 1
+        }
+        path.close()
+        canvas.drawPath(path, paint)
+    }
+
+    private fun crescent(canvas: Canvas, across: Float, down: Float, reach: Float, over: Int) {
+        canvas.drawCircle(across, down, reach, paint)
+        val was = paint.color
+        paint.color = over
+        canvas.drawCircle(across + reach * 0.32f, down, reach * 0.80f, paint)
+        paint.color = was
+    }
+
+    private fun union(canvas: Canvas) {
+        paint.color = 0xFF012169.toInt()
+        canvas.drawRect(0f, 0f, WIDE, TALL, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 4.4f
+        paint.color = 0xFFFFFFFF.toInt()
+        path.rewind()
+        path.moveTo(0f, 0f)
+        path.lineTo(WIDE, TALL)
+        path.moveTo(WIDE, 0f)
+        path.lineTo(0f, TALL)
+        canvas.drawPath(path, paint)
+        paint.strokeWidth = 1.9f
+        paint.color = 0xFFC8102E.toInt()
+        canvas.drawPath(path, paint)
+        paint.style = Paint.Style.FILL
+        paint.color = 0xFFFFFFFF.toInt()
+        canvas.drawRect(0f, TALL / 2f - 2.7f, WIDE, TALL / 2f + 2.7f, paint)
+        canvas.drawRect(WIDE / 2f - 2.7f, 0f, WIDE / 2f + 2.7f, TALL, paint)
+        paint.color = 0xFFC8102E.toInt()
+        canvas.drawRect(0f, TALL / 2f - 1.6f, WIDE, TALL / 2f + 1.6f, paint)
+        canvas.drawRect(WIDE / 2f - 1.6f, 0f, WIDE / 2f + 1.6f, TALL, paint)
+    }
+
+    override fun draw(canvas: Canvas) {
+        val across = bounds.width().toFloat()
+        val down = bounds.height().toFloat()
+        if (across <= 0f || down <= 0f) return
+        val unit = min(across / WIDE, down / TALL)
+        canvas.save()
+        canvas.translate(
+            bounds.left + (across - WIDE * unit) / 2f,
+            bounds.top + (down - TALL * unit) / 2f,
+        )
+        canvas.scale(unit, unit)
+        path.rewind()
+        path.addRoundRect(0f, 0f, WIDE, TALL, 2f, 2f, Path.Direction.CW)
+        canvas.clipPath(path)
+        paint.style = Paint.Style.FILL
+        when (tag) {
+            "tr" -> {
+                band(canvas, 0f, TALL, 0xFFE30A17.toInt())
+                paint.color = 0xFFFFFFFF.toInt()
+                crescent(canvas, 9.2f, 8f, 4.3f, 0xFFE30A17.toInt())
+                star(canvas, 15.1f, 8f, 2.3f, 0f)
+            }
+            "de" -> {
+                band(canvas, 0f, TALL / 3f, 0xFF000000.toInt())
+                band(canvas, TALL / 3f, TALL * 2f / 3f, 0xFFDD0000.toInt())
+                band(canvas, TALL * 2f / 3f, TALL, 0xFFFFCE00.toInt())
+            }
+            "es" -> {
+                band(canvas, 0f, TALL, 0xFFAA151B.toInt())
+                band(canvas, TALL / 4f, TALL * 3f / 4f, 0xFFF1BF00.toInt())
+            }
+            "fr" -> {
+                column(canvas, 0f, WIDE / 3f, 0xFF002395.toInt())
+                column(canvas, WIDE / 3f, WIDE * 2f / 3f, 0xFFFFFFFF.toInt())
+                column(canvas, WIDE * 2f / 3f, WIDE, 0xFFED2939.toInt())
+            }
+            "it" -> {
+                column(canvas, 0f, WIDE / 3f, 0xFF008C45.toInt())
+                column(canvas, WIDE / 3f, WIDE * 2f / 3f, 0xFFF4F5F0.toInt())
+                column(canvas, WIDE * 2f / 3f, WIDE, 0xFFCD212A.toInt())
+            }
+            "pt" -> {
+                column(canvas, 0f, WIDE * 2f / 5f, 0xFF006600.toInt())
+                column(canvas, WIDE * 2f / 5f, WIDE, 0xFFFF0000.toInt())
+                paint.color = 0xFFFFE900.toInt()
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 1.1f
+                canvas.drawCircle(WIDE * 2f / 5f, 8f, 3.2f, paint)
+                paint.style = Paint.Style.FILL
+                paint.color = 0xFFFFFFFF.toInt()
+                canvas.drawCircle(WIDE * 2f / 5f, 8f, 1.7f, paint)
+                paint.color = 0xFF003399.toInt()
+                canvas.drawCircle(WIDE * 2f / 5f, 8f, 1.1f, paint)
+            }
+            "ru" -> {
+                band(canvas, 0f, TALL / 3f, 0xFFFFFFFF.toInt())
+                band(canvas, TALL / 3f, TALL * 2f / 3f, 0xFF0039A6.toInt())
+                band(canvas, TALL * 2f / 3f, TALL, 0xFFD52B1E.toInt())
+            }
+            "ar" -> {
+                band(canvas, 0f, TALL, 0xFF006C35.toInt())
+                paint.color = 0xFFFFFFFF.toInt()
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 0.9f
+                path.rewind()
+                path.moveTo(4.4f, 6.4f)
+                path.cubicTo(8f, 3.8f, 16f, 8.4f, 19.6f, 5.8f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawRect(4.4f, 10.2f, 19.6f, 11.2f, paint)
+                path.rewind()
+                path.moveTo(4.4f, 12.4f)
+                path.lineTo(7f, 10.7f)
+                path.lineTo(4.4f, 9f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            "zh" -> {
+                band(canvas, 0f, TALL, 0xFFDE2910.toInt())
+                paint.color = 0xFFFFDE00.toInt()
+                star(canvas, 5.4f, 4.6f, 2.6f, 0f)
+                star(canvas, 9.6f, 2.2f, 1.1f, 0.35f)
+                star(canvas, 11.4f, 4.4f, 1.1f, 0.7f)
+                star(canvas, 11.4f, 7.1f, 1.1f, 1.05f)
+                star(canvas, 9.6f, 9.1f, 1.1f, 1.4f)
+            }
+            else -> union(canvas)
         }
         canvas.restore()
     }
@@ -2613,8 +3007,6 @@ class FlowLayout(
     }
 }
 
-private enum class Tab { PROJECTS, FILES, BUILD, TRASH, SETTINGS }
-
 private enum class Order(val label: Int) {
     NAME(R.string.omni_files_by_name),
     SIZE(R.string.omni_files_by_size),
@@ -2623,52 +3015,42 @@ private enum class Order(val label: Int) {
 }
 
 private sealed interface Screen {
-    val tab: Tab
 
-    data object Projects : Screen {
-        override val tab = Tab.PROJECTS
-    }
+    data object Projects : Screen
 
-    data object NewProject : Screen {
-        override val tab = Tab.PROJECTS
-    }
+    data object NewProject : Screen
 
-    data class Files(val root: String, val folder: String) : Screen {
-        override val tab = Tab.FILES
-    }
+    data class Files(val root: String, val folder: String) : Screen
 
-    data class Editor(val root: String, val path: String) : Screen {
-        override val tab = Tab.FILES
-    }
+    data class Editor(val root: String, val path: String) : Screen
 
-    data class Health(val root: String) : Screen {
-        override val tab = Tab.FILES
-    }
+    data class Health(val root: String) : Screen
 
-    data class Picture(val root: String, val path: String) : Screen {
-        override val tab = Tab.FILES
-    }
+    data class Picture(val root: String, val path: String) : Screen
 
-    data class Build(val root: String) : Screen {
-        override val tab = Tab.BUILD
-    }
+    data class Build(val root: String) : Screen
 
-    data object Trash : Screen {
-        override val tab = Tab.TRASH
-    }
+    data object Trash : Screen
 
-    data object Settings : Screen {
-        override val tab = Tab.SETTINGS
-    }
+    data object Settings : Screen
 
-    data object Keys : Screen {
-        override val tab = Tab.SETTINGS
-    }
+    data object Keys : Screen
 
-    data object NewKey : Screen {
-        override val tab = Tab.SETTINGS
-    }
+    data object NewKey : Screen
+
+    data object Theme : Screen
+
+    data object Languages : Screen
+
+    data object Feedback : Screen
+
+    data object Rate : Screen
+
+    data object About : Screen
+
+    data object Help : Screen
 }
+
 class BuilderActivity : Activity() {
 
     private companion object {
@@ -2684,9 +3066,64 @@ class BuilderActivity : Activity() {
 
         const val WIDE_DP = 600
 
-        val ON_THE_BAR = listOf(Tab.PROJECTS, Tab.FILES, Tab.BUILD)
-
         const val COLUMN_DP = 640
+
+        const val DRAWER_DP = 300
+
+        const val SHOT_REQUEST = 3
+
+        const val SUBJECT_LIMIT = 100
+
+        const val DETAIL_LIMIT = 1_000
+
+        val FEEDBACK_KINDS = listOf(
+            R.string.omni_feedback_kind_fault,
+            R.string.omni_feedback_kind_idea,
+            R.string.omni_feedback_kind_question,
+            R.string.omni_feedback_kind_other,
+        )
+
+        val HELP_BAND_NAMES = listOf(
+            R.string.omni_help_band_all,
+            R.string.omni_help_band_start,
+            R.string.omni_help_band_making,
+            R.string.omni_help_band_trouble,
+        )
+
+        val HELP_TOPICS = listOf(
+            Triple(
+                R.string.omni_help_first,
+                R.string.omni_help_first_note,
+                R.string.omni_help_first_body,
+            ),
+            Triple(
+                R.string.omni_help_project,
+                R.string.omni_help_project_note,
+                R.string.omni_help_project_body,
+            ),
+            Triple(
+                R.string.omni_help_write,
+                R.string.omni_help_write_note,
+                R.string.omni_help_write_body,
+            ),
+            Triple(
+                R.string.omni_help_package,
+                R.string.omni_help_package_note,
+                R.string.omni_help_package_body,
+            ),
+            Triple(
+                R.string.omni_help_sign,
+                R.string.omni_help_sign_note,
+                R.string.omni_help_sign_body,
+            ),
+            Triple(
+                R.string.omni_help_trouble,
+                R.string.omni_help_trouble_note,
+                R.string.omni_help_trouble_body,
+            ),
+        )
+
+        val HELP_BANDS = listOf(1, 2, 2, 2, 2, 3)
 
         const val WIZARD_STEPS = 3
 
@@ -2782,10 +3219,11 @@ class BuilderActivity : Activity() {
     private lateinit var aurora: AuroraView
     private lateinit var veil: BinaryVeil
     private lateinit var ceremony: FrameLayout
-    private lateinit var bar: LinearLayout
-    private lateinit var rail: LinearLayout
+    private lateinit var drawer: LinearLayout
+    private lateinit var shade: View
     private lateinit var crown: LinearLayout
     private lateinit var crownBack: View
+    private lateinit var crownMenu: View
     private lateinit var crownSplit: View
     private lateinit var crownTitle: TextView
     private lateinit var scroller: ScrollView
@@ -2825,6 +3263,14 @@ class BuilderActivity : Activity() {
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
+
+    private var feedbackKind = 0
+    private var feedbackSubject = ""
+    private var feedbackDetail = ""
+    private var feedbackMail = ""
+    private var feedbackShot: String? = null
+    private var helpFor = ""
+    private var helpBand = 0
 
     private var searchFor = ""
     private var searchCase = false
@@ -2881,23 +3327,17 @@ class BuilderActivity : Activity() {
             addView(content, MATCH_PARENT, WRAP_CONTENT)
         }
 
-        bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            background = sheet(palette.surface, palette.divider)
-            layoutTransition = LayoutTransition()
-        }
-        rail = LinearLayout(this).apply {
+        drawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = sheet(palette.surface, palette.divider)
+            setBackgroundColor(palette.surface)
+        }
+        shade = View(this).apply {
+            setBackgroundColor(Ink.fade(Color.BLACK, 0.55f))
             visibility = View.GONE
+            isClickable = true
+            setOnClickListener { closeTheDrawer() }
         }
 
-        val body = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(rail, LinearLayout.LayoutParams(WRAP_CONTENT, MATCH_PARENT))
-            addView(scroller, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
-        }
         scroller.addOnLayoutChangeListener { _, left, _, right, _, was, _, until, _ ->
             if (right - left != until - was) {
                 fitTheColumn()
@@ -2905,6 +3345,7 @@ class BuilderActivity : Activity() {
         }
 
         crownBack = markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() }
+        crownMenu = markControl(Mark.Shape.MENU, R.string.omni_menu_title) { openTheDrawer() }
         crownSplit = markControl(Mark.Shape.SPLIT, R.string.omni_files_split) {
             val here = screen
             secondFolder = if (secondFolder == null && here is Screen.Files) here.folder else null
@@ -2922,6 +3363,7 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(gap(2), gap(1), gap(2), gap(1))
+            addView(crownMenu, LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)))
             addView(crownBack, LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)))
             addView(
                 crownTitle,
@@ -2935,6 +3377,10 @@ class BuilderActivity : Activity() {
                 LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
             )
             addView(
+                markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
+                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+            )
+            addView(
                 markControl(Mark.Shape.GEAR, R.string.omni_tab_settings) { go(Screen.Settings) },
                 LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
             )
@@ -2945,8 +3391,7 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(roof, LinearLayout.LayoutParams(MATCH_PARENT, 0))
             addView(crown, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            addView(body, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-            addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
 
         ceremony = FrameLayout(this).apply {
@@ -2960,6 +3405,11 @@ class BuilderActivity : Activity() {
             setBackgroundColor(palette.background)
             addView(aurora, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             addView(shell, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(shade, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(
+                drawer,
+                FrameLayout.LayoutParams(gap(DRAWER_DP / 4), MATCH_PARENT, Gravity.START),
+            )
             addView(ceremony, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             addView(veil, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
@@ -2967,6 +3417,7 @@ class BuilderActivity : Activity() {
         fitAroundTheSystemBars(stack, roof)
         hideTheNavigationBar()
 
+        drawer.translationX = -gap(DRAWER_DP / 4).toFloat()
         standing = examine()
         provisionSharedKey()
         answerBackTheWayThisScreenWants()
@@ -3029,11 +3480,8 @@ class BuilderActivity : Activity() {
                 above.height = top
                 roof.layoutParams = above
             }
-            val railed = wideEnoughForARail()
-            bar.visibility = if (keyboard > 0 || railed) View.GONE else View.VISIBLE
-            bar.setPadding(gap(2), gap(2), gap(2), gap(2) + bottom)
-            rail.setPadding(gap(2), gap(2), gap(2), gap(2) + bottom)
-            scroller.setPadding(0, 0, 0, keyboard)
+            drawer.setPadding(0, top, 0, bottom)
+            scroller.setPadding(0, 0, 0, keyboard + bottom)
             insets
         }
     }
@@ -3174,6 +3622,7 @@ class BuilderActivity : Activity() {
             formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
         }
         screen = next
+        closeTheDrawer()
         answerBackTheWayThisScreenWants()
         if (navigating) {
             return
@@ -3267,8 +3716,7 @@ class BuilderActivity : Activity() {
         }
 
         if (standing == "TAMPERED") {
-            bar.removeAllViews()
-            bar.visibility = View.GONE
+            drawer.removeAllViews()
             crown.visibility = View.GONE
             content.addView(notice(getString(R.string.omni_integrity_refused_title), palette.error))
             content.addView(body(getString(R.string.omni_integrity_refused_body)))
@@ -3280,8 +3728,7 @@ class BuilderActivity : Activity() {
 
         crown.visibility = View.VISIBLE
         drawCrown()
-        bar.visibility = View.VISIBLE
-        drawBar()
+        drawTheDrawer()
 
         when (val here = screen) {
             is Screen.Projects -> renderProjects()
@@ -3295,6 +3742,12 @@ class BuilderActivity : Activity() {
             is Screen.Settings -> renderSettings()
             is Screen.Keys -> renderKeys()
             is Screen.NewKey -> renderNewKey()
+            is Screen.Theme -> renderTheme()
+            is Screen.Languages -> renderLanguages()
+            is Screen.Feedback -> renderFeedback()
+            is Screen.Rate -> renderRate()
+            is Screen.About -> renderAbout()
+            is Screen.Help -> renderHelp()
         }
         content.addView(results)
 
@@ -3329,7 +3782,7 @@ class BuilderActivity : Activity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return
         }
-        val wanted = screen !is Screen.Projects
+        val wanted = screen !is Screen.Projects || drawerIsOpen()
         if (wanted == backRegistered) {
             return
         }
@@ -3350,9 +3803,14 @@ class BuilderActivity : Activity() {
         if (ceremonyIsUp()) {
             return
         }
+        if (drawerIsOpen()) {
+            closeTheDrawer()
+            return
+        }
         when (val here = screen) {
             is Screen.Projects -> finish()
             is Screen.NewProject -> go(Screen.Projects)
+            is Screen.Help -> go(Screen.About)
             is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Picture -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Files ->
@@ -3369,17 +3827,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun destination(tab: Tab): Screen {
-        val root = openProject
-        return when (tab) {
-            Tab.PROJECTS -> Screen.Projects
-            Tab.FILES -> root?.let { Screen.Files(it, "") } ?: Screen.Projects
-            Tab.BUILD -> root?.let { Screen.Build(it) } ?: Screen.Projects
-            Tab.TRASH -> Screen.Trash
-            Tab.SETTINGS -> Screen.Settings
-        }
-    }
-
     private fun markControl(shape: Mark.Shape, named: Int, onPress: () -> Unit) =
         View(this).apply {
             contentDescription = getString(named)
@@ -3390,6 +3837,10 @@ class BuilderActivity : Activity() {
             foreground = Mark(shape, palette.foreground)
             setOnClickListener { onPress() }
         }
+
+    private fun versionShown(): String = runCatching {
+        packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+    }.getOrDefault("").ifEmpty { "1.0" }
 
     private fun drawCrown() {
         val here = screen
@@ -3414,10 +3865,16 @@ class BuilderActivity : Activity() {
             is Screen.Settings -> getString(R.string.omni_tab_settings)
             is Screen.Keys -> getString(R.string.omni_keys_title)
             is Screen.NewKey -> getString(R.string.omni_keys_new)
+            is Screen.Theme -> getString(R.string.omni_settings_theme)
+            is Screen.Languages -> getString(R.string.omni_settings_language)
+            is Screen.Feedback -> getString(R.string.omni_feedback_title)
+            is Screen.Rate -> getString(R.string.omni_rate_title)
+            is Screen.About -> getString(R.string.omni_settings_about)
+            is Screen.Help -> getString(R.string.omni_help_title)
         }
     }
 
-    private fun wideEnoughForARail(): Boolean =
+    private fun wideEnough(): Boolean =
         resources.configuration.screenWidthDp >= WIDE_DP
 
     private fun fitTheColumn() {
@@ -3429,70 +3886,173 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun drawBar() {
-        val wide = wideEnoughForARail()
-        val into = if (wide) rail else bar
-        rail.visibility = if (wide) View.VISIBLE else View.GONE
-        bar.visibility = if (wide) View.GONE else View.VISIBLE
-        bar.removeAllViews()
-        rail.removeAllViews()
-        val labels = mapOf(
-            Tab.PROJECTS to R.string.omni_tab_projects,
-            Tab.FILES to R.string.omni_tab_files,
-            Tab.BUILD to R.string.omni_tab_build,
+    private fun drawerIsOpen(): Boolean = shade.visibility == View.VISIBLE
+
+    private fun openTheDrawer() {
+        if (drawerIsOpen()) {
+            return
+        }
+        shade.alpha = 0f
+        shade.visibility = View.VISIBLE
+        shade.animate().alpha(1f).setDuration(Motion.of(Motion.ENTER)).start()
+        drawer.animate()
+            .translationX(0f)
+            .setDuration(Motion.of(Motion.ENTER))
+            .setInterpolator(DecelerateInterpolator())
+            .start()
+        answerBackTheWayThisScreenWants()
+    }
+
+    private fun closeTheDrawer() {
+        if (!drawerIsOpen()) {
+            return
+        }
+        shade.animate()
+            .alpha(0f)
+            .setDuration(Motion.of(Motion.LEAVE))
+            .withEndAction { shade.visibility = View.GONE }
+            .start()
+        drawer.animate()
+            .translationX(-drawer.width.toFloat())
+            .setDuration(Motion.of(Motion.LEAVE))
+            .setInterpolator(AccelerateInterpolator())
+            .start()
+        answerBackTheWayThisScreenWants()
+    }
+
+    private fun leaveFor(next: Screen) {
+        closeTheDrawer()
+        drawer.postDelayed({ go(next) }, Motion.of(Motion.LEAVE))
+    }
+
+    private fun drawerHeader(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(gap(4), gap(5), gap(4), gap(4))
+        addView(
+            ImageView(context).apply {
+                setImageDrawable(Chibi(Chibi.Face.SPARK, palette))
+            },
+            LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(3) },
         )
-        for (tab in ON_THE_BAR) {
-            val active = screen.tab == tab
-            val reachable = tab != Tab.FILES && tab != Tab.BUILD || openProject != null
-            into.addView(
-                control().apply {
-                    text = getString(labels.getValue(tab))
-                    setTextColor(
-                        stated(
-                            when {
-                                active -> palette.background
-                                reachable -> palette.foreground
-                                else -> palette.muted
-                            }
-                        )
-                    )
-                    typeface = Type.label
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    letterSpacing = Type.TRACKING
-                    maxLines = 1
-                    setPadding(gap(1), gap(3), gap(1), gap(3))
-                    background = reacting(
-                        if (active) palette.accent else Color.TRANSPARENT,
-                        gap(3).toFloat(),
-                        palette.accent,
-                    )
-                    isSelected = active
-                    isEnabled = true
-                    readAs(android.widget.ToggleButton::class.java.name)
-                    setOnClickListener {
-                        if (reachable) {
-                            go(destination(tab))
-                        } else {
-                            go(Screen.Projects)
-                            results.addView(
-                                notice(getString(R.string.omni_no_project_open), palette.warning)
-                            )
-                        }
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_app_name)
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        letterSpacing = 0.05f
                     }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_about_version, versionShown())
+                        setTextColor(palette.accent)
+                        typeface = Type.label
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        letterSpacing = Type.TRACKING
+                    }
+                )
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+    }
+
+    private fun drawerSection(value: String) = TextView(this).apply {
+        text = value.uppercase(Locale.getDefault())
+        setTextColor(palette.muted)
+        typeface = Type.label
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        letterSpacing = Type.TRACKING
+        setPadding(gap(4), gap(4), gap(4), gap(1))
+    }
+
+    private fun drawerRow(shape: Mark.Shape, named: Int, active: Boolean, onPress: () -> Unit) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(gap(4), gap(2), gap(4), gap(2))
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(named)
+            readAs(Button::class.java.name)
+            background = touchable(
+                pill(if (active) Ink.fade(palette.accent, 0.16f) else Color.TRANSPARENT, 0f),
+                palette.accent,
+            )
+            setOnClickListener { onPress() }
+            addView(
+                View(context).apply {
+                    foreground = Mark(shape, if (active) palette.accent else palette.muted)
                 },
-                if (wide) {
-                    LinearLayout.LayoutParams(gap(22), WRAP_CONTENT).apply {
-                        topMargin = gap(1) / 2
-                        bottomMargin = gap(1) / 2
-                    }
-                } else {
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                        marginStart = gap(1) / 2
-                        marginEnd = gap(1) / 2
-                    }
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(4) },
+            )
+            addView(
+                TextView(context).apply {
+                    text = getString(named)
+                    setTextColor(if (active) palette.accent else palette.foreground)
+                    typeface = if (active) Type.label else Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
         }
+
+    private fun drawTheDrawer() {
+        drawer.removeAllViews()
+        val here = screen
+        drawer.addView(drawerHeader())
+        drawer.addView(
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply {
+                marginStart = gap(4)
+                marginEnd = gap(4)
+            },
+        )
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        list.addView(
+            drawerRow(Mark.Shape.HOME, R.string.omni_menu_home, here is Screen.Projects) {
+                leaveFor(Screen.Projects)
+            }
+        )
+        list.addView(drawerSection(getString(R.string.omni_menu_other)))
+        list.addView(
+            drawerRow(Mark.Shape.BRUSH, R.string.omni_settings_theme, here is Screen.Theme) {
+                leaveFor(Screen.Theme)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.GLOBE, R.string.omni_settings_language, here is Screen.Languages) {
+                leaveFor(Screen.Languages)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.SPEECH, R.string.omni_feedback_title, here is Screen.Feedback) {
+                leaveFor(Screen.Feedback)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.STAR, R.string.omni_rate_title, here is Screen.Rate) {
+                leaveFor(Screen.Rate)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.INFO, R.string.omni_settings_about, here is Screen.About) {
+                leaveFor(Screen.About)
+            }
+        )
+        drawer.addView(
+            ScrollView(this).apply {
+                isFillViewport = false
+                overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                addView(list, MATCH_PARENT, WRAP_CONTENT)
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f),
+        )
     }
 
     private fun projectsFolder() = File(getExternalFilesDir(null) ?: filesDir, "Projects")
@@ -3722,7 +4282,7 @@ class BuilderActivity : Activity() {
             content.addView(filePane(root, folder, entries, null))
         } else {
             val panes = LinearLayout(this).apply {
-                orientation = if (wideEnoughForARail()) {
+                orientation = if (wideEnough()) {
                     LinearLayout.HORIZONTAL
                 } else {
                     LinearLayout.VERTICAL
@@ -3786,6 +4346,9 @@ class BuilderActivity : Activity() {
                     },
                     if (troubled) palette.warning else palette.accent,
                 ) { go(Screen.Health(root)) }
+            )
+            tools.addView(
+                tool(getString(R.string.omni_tab_build), palette.ok) { go(Screen.Build(root)) }
             )
             content.addView(tools)
             lookForTrouble(root)
@@ -5632,29 +6195,935 @@ class BuilderActivity : Activity() {
         results.addView(notice(getString(R.string.omni_trash_sent, project.name), palette.ok))
     }
 
-    private fun renderSettings() {
-        content.addView(heading(getString(R.string.omni_settings_language)))
-        val current = Preferences.language(this).ifEmpty { deviceLanguage() }
-        content.addView(
-            chips(
-                Preferences.LANGUAGES.map { it.second },
-                { Preferences.LANGUAGES[it].first == current },
-            ) { index ->
-                Preferences.setLanguage(this, Preferences.LANGUAGES[index].first)
-                recreate()
-            }
-        )
+    private fun tile(text: String, tint: Int) = TextView(this).apply {
+        this.text = text
+        setTextColor(tint)
+        typeface = Type.label
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        letterSpacing = Type.TRACKING
+        setPadding(gap(3), gap(1), gap(3), gap(1))
+        background = pill(Ink.fade(tint, 0.16f), gap(2).toFloat())
+    }
 
-        content.addView(heading(getString(R.string.omni_settings_theme)))
+    private fun mascot(face: Chibi.Face, title: String, detail: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(4), 0, gap(2))
+            addView(
+                ImageView(context).apply { setImageDrawable(Chibi(face, palette)) },
+                LinearLayout.LayoutParams(gap(17), gap(17)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                            letterSpacing = 0.05f
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = detail
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            setLineSpacing(gap(1).toFloat(), 1f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
+    private fun grid(across: Int, cells: List<View>): View {
+        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var at = 0
+        while (at < cells.size) {
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            var column = 0
+            while (column < across) {
+                line.addView(
+                    cells.getOrNull(at + column) ?: View(this),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                        marginStart = if (column == 0) 0 else gap(1)
+                        marginEnd = if (column == across - 1) 0 else gap(1)
+                        topMargin = gap(1)
+                        bottomMargin = gap(1)
+                    },
+                )
+                column += 1
+            }
+            holder.addView(line, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            at += across
+        }
+        return holder
+    }
+
+    private fun switchRow(
+        title: String,
+        detail: String,
+        on: Boolean,
+        onChange: (Boolean) -> Unit,
+    ): View {
+        var held = on
+        val knob = View(this)
+        val track = FrameLayout(this).apply {
+            addView(
+                knob,
+                FrameLayout.LayoutParams(
+                    gap(4),
+                    gap(4),
+                    Gravity.CENTER_VERTICAL or Gravity.START,
+                ).apply { marginStart = gap(1) },
+            )
+        }
+
+        fun repaint(moving: Boolean) {
+            track.background = pill(
+                if (held) palette.accent else palette.raised,
+                gap(3).toFloat(),
+            )
+            knob.background = pill(
+                if (held) palette.background else palette.muted,
+                gap(2).toFloat(),
+            )
+            val slid = if (held) gap(5).toFloat() else 0f
+            if (moving && !Motion.still()) {
+                knob.animate().translationX(slid).setDuration(Motion.of(Motion.TAP)).start()
+            } else {
+                knob.translationX = slid
+            }
+        }
+
+        val holder = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(0, gap(2), 0, gap(2))
+            isClickable = true
+            isFocusable = true
+            contentDescription = said(title, detail)
+            readAs(android.widget.Switch::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    if (detail.isNotEmpty()) {
+                        addView(
+                            TextView(context).apply {
+                                text = detail
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            }
+                        )
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(track, LinearLayout.LayoutParams(gap(11), gap(6)))
+        }
+        holder.setOnClickListener {
+            held = !held
+            repaint(true)
+            onChange(held)
+        }
+        repaint(false)
+        return holder
+    }
+
+    private fun counted(
+        named: String,
+        initial: String,
+        limit: Int,
+        lines: Int,
+        onChange: (String) -> Unit,
+    ): View {
+        val counter = TextView(this).apply {
+            text = getString(R.string.omni_counted, initial.length, limit)
+            setTextColor(palette.muted)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        }
+        val writing = EditText(this).apply {
+            setText(initial)
+            setTextColor(palette.foreground)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(0, gap(1), 0, gap(1))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(limit))
+            if (lines > 1) {
+                isSingleLine = false
+                minLines = lines
+                gravity = Gravity.TOP or Gravity.START
+                inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            } else {
+                isSingleLine = true
+            }
+        }
+        writing.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                val written = s?.toString().orEmpty()
+                counter.text = getString(R.string.omni_counted, written.length, limit)
+                onChange(written)
+            }
+        })
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(2), 0, gap(1))
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(
+                        TextView(context).apply {
+                            text = named.uppercase(Locale.getDefault())
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            letterSpacing = 0.12f
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(counter)
+                }
+            )
+            addView(writing)
+            addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+        }
+    }
+
+    private fun choice(title: String, on: Boolean, onPress: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = gap(TOUCH_UNITS)
+        setPadding(gap(3), gap(2), gap(3), gap(2))
+        isClickable = true
+        isFocusable = true
+        isSelected = on
+        contentDescription = title
+        readAs(android.widget.RadioButton::class.java.name)
+        background = touchable(
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(3).toFloat()
+                setColor(if (on) Ink.fade(palette.accent, 0.14f) else palette.raised)
+                setStroke(gap(1) / 2, if (on) palette.accent else palette.divider)
+            },
+            palette.accent,
+        )
+        setOnClickListener { onPress() }
+        addView(
+            View(context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(if (on) palette.accent else Color.TRANSPARENT)
+                    setStroke(gap(1) / 2, if (on) palette.accent else palette.muted)
+                }
+            },
+            LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
+        )
+        addView(
+            TextView(context).apply {
+                text = title
+                setTextColor(if (on) palette.accent else palette.foreground)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                maxLines = 2
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+    }
+
+    private fun badge(mark: Mark.Shape, tint: Int) = FrameLayout(this).apply {
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Ink.fade(tint, 0.16f))
+        }
+        addView(
+            View(context).apply { foreground = Mark(mark, tint) },
+            FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT).apply {
+                val inset = gap(2)
+                setMargins(inset, inset, inset, inset)
+            },
+        )
+    }
+
+    private fun helpMark(topic: Int): Pair<Mark.Shape, Int> = when (topic) {
+        0 -> Mark.Shape.HOME to palette.accent
+        1 -> Mark.Shape.ADD to palette.ok
+        2 -> Mark.Shape.CODE to palette.warning
+        3 -> Mark.Shape.PACKAGE to palette.error
+        4 -> Mark.Shape.SHIELD to palette.ok
+        else -> Mark.Shape.HELP to palette.accent
+    }
+
+    private fun showNote(title: String, said: String) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(said)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun themeCard(shown: Palette, active: Boolean, onPress: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            clipToOutline = true
+            background = touchable(
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(4).toFloat()
+                    setColor(palette.surface)
+                    setStroke(gap(1) / 2, if (active) palette.accent else palette.divider)
+                },
+                palette.accent,
+            )
+            isClickable = true
+            isFocusable = true
+            isSelected = active
+            contentDescription = shown.label
+            readAs(android.widget.ToggleButton::class.java.name)
+            setOnClickListener { onPress() }
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+                bottomMargin = gap(1)
+            }
+            addView(
+                ThemeArt(context, shown),
+                LinearLayout.LayoutParams(MATCH_PARENT, gap(28)),
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(gap(4), gap(3), gap(4), gap(3))
+                    addView(
+                        TextView(context).apply {
+                            text = shown.label
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    if (active) {
+                        addView(tile(getString(R.string.omni_theme_active), palette.accent))
+                    }
+                }
+            )
+        }
+
+    private fun renderTheme() {
         content.addView(
-            chips(
-                Palette.ALL.map { it.label },
-                { Palette.ALL[it].key == palette.key },
-            ) { index ->
-                Preferences.setPalette(this, Palette.ALL[index].key)
-                recreate()
+            mascot(
+                Chibi.Face.WINK,
+                getString(R.string.omni_settings_theme),
+                getString(R.string.omni_theme_note),
+            )
+        )
+        for (shown in listOf(Palette.HACKER, Palette.ANIME, Palette.DARK)) {
+            content.addView(
+                themeCard(shown, shown.key == palette.key) {
+                    if (shown.key != palette.key) {
+                        Preferences.setPalette(this, shown.key)
+                        recreate()
+                    }
+                }
+            )
+        }
+    }
+
+    private fun languageRow(tag: String, named: String, current: Boolean) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(0, gap(2), 0, gap(2))
+            isClickable = true
+            isFocusable = true
+            isSelected = current
+            contentDescription = named
+            readAs(android.widget.RadioButton::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener {
+                if (!current) {
+                    Preferences.setLanguage(this@BuilderActivity, tag)
+                    recreate()
+                }
+            }
+            addView(
+                View(context).apply { background = Flag(tag) },
+                LinearLayout.LayoutParams(gap(9), gap(6)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = named
+                            setTextColor(if (current) palette.accent else palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = tag.uppercase(Locale.US)
+                            setTextColor(palette.muted)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            if (current) {
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.TICK, palette.accent) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)),
+                )
+            }
+        }
+
+    private fun renderLanguages() {
+        content.addView(
+            mascot(
+                Chibi.Face.CALM,
+                getString(R.string.omni_settings_language),
+                getString(R.string.omni_language_note),
+            )
+        )
+        val current = Preferences.language(this).ifEmpty { deviceLanguage() }
+        val list = card()
+        Preferences.LANGUAGES.forEachIndexed { index, spoken ->
+            if (index > 0) {
+                list.addView(rule(), MATCH_PARENT, 1)
+            }
+            list.addView(languageRow(spoken.first, spoken.second, spoken.first == current))
+        }
+        content.addView(list)
+    }
+
+    private fun starRow(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        setPadding(0, gap(2), 0, gap(2))
+        var at = 0
+        while (at < 5) {
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.STAR, palette.warning) },
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply {
+                    marginStart = gap(1)
+                    marginEnd = gap(1)
+                },
+            )
+            at += 1
+        }
+    }
+
+    private fun storeIntent(): Intent =
+        Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName"))
+
+    private fun renderRate() {
+        val stage = FrameLayout(this).apply {
+            background = sheet(palette.surface, palette.divider)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(4)
+            }
+            addView(
+                ThemeArt(context, palette),
+                FrameLayout.LayoutParams(MATCH_PARENT, gap(34)),
+            )
+            addView(
+                ImageView(context).apply { setImageDrawable(Chibi(Chibi.Face.SPARK, palette)) },
+                FrameLayout.LayoutParams(gap(24), gap(24), Gravity.CENTER),
+            )
+        }
+        content.addView(stage)
+        content.addView(starRow())
+        content.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_rate_title)
+                setTextColor(palette.foreground)
+                typeface = Type.heading
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+                gravity = Gravity.CENTER
+                setPadding(0, gap(2), 0, gap(1))
             }
         )
+        content.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_rate_note)
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                gravity = Gravity.CENTER
+                setLineSpacing(gap(1).toFloat(), 1f)
+                setPadding(gap(4), 0, gap(4), gap(2))
+            }
+        )
+        content.addView(primary(getString(R.string.omni_rate_store)) { hand(storeIntent()) })
+        content.addView(
+            subtle(getString(R.string.omni_feedback_title), palette.accent) { go(Screen.Feedback) }
+        )
+        content.addView(quiet(getString(R.string.omni_rate_store_note)))
+    }
+
+    private fun featureCell(mark: Mark.Shape, named: Int, tint: Int): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(gap(1), gap(2), gap(1), gap(2))
+            addView(badge(mark, tint), LinearLayout.LayoutParams(gap(10), gap(10)))
+            addView(
+                TextView(context).apply {
+                    text = getString(named)
+                    setTextColor(palette.muted)
+                    typeface = Type.label
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    letterSpacing = Type.TRACKING
+                    gravity = Gravity.CENTER
+                    setPadding(0, gap(1), 0, 0)
+                }
+            )
+        }
+
+    private fun mailIntent(subject: String, body: String): Intent =
+        Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")).apply {
+            putExtra(Intent.EXTRA_SUBJECT, subject)
+            putExtra(Intent.EXTRA_TEXT, body)
+        }
+
+    private fun renderAbout() {
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    ImageView(context).apply {
+                        setImageDrawable(Chibi(Chibi.Face.SPARK, palette))
+                    },
+                    LinearLayout.LayoutParams(gap(22), gap(22)),
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_app_name)
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                        letterSpacing = 0.05f
+                        setPadding(0, gap(2), 0, gap(1))
+                    }
+                )
+                addView(tile(getString(R.string.omni_about_version, versionShown()), palette.accent))
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_about_note)
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        gravity = Gravity.CENTER
+                        setLineSpacing(gap(1).toFloat(), 1f)
+                        setPadding(gap(4), gap(2), gap(4), 0)
+                    }
+                )
+            }
+        )
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, gap(2), 0, gap(2))
+                val cells = listOf(
+                    featureCell(Mark.Shape.BOLT, R.string.omni_about_feature_fast, palette.warning),
+                    featureCell(Mark.Shape.SHIELD, R.string.omni_about_feature_safe, palette.ok),
+                    featureCell(
+                        Mark.Shape.PACKAGE,
+                        R.string.omni_about_feature_alone,
+                        palette.accent,
+                    ),
+                    featureCell(
+                        Mark.Shape.GLOBE,
+                        R.string.omni_about_feature_spoken,
+                        palette.error,
+                    ),
+                )
+                cells.forEach { addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
+            }
+        )
+        val rows = card()
+        rows.addView(
+            row(
+                getString(R.string.omni_about_policy),
+                getString(R.string.omni_about_policy_note),
+                "",
+                palette.muted,
+            ) {
+                showNote(
+                    getString(R.string.omni_about_policy),
+                    getString(R.string.omni_about_policy_body),
+                )
+            }
+        )
+        rows.addView(rule(), MATCH_PARENT, 1)
+        rows.addView(
+            row(
+                getString(R.string.omni_about_terms),
+                getString(R.string.omni_about_terms_note),
+                "",
+                palette.muted,
+            ) {
+                showNote(
+                    getString(R.string.omni_about_terms),
+                    getString(R.string.omni_about_terms_body),
+                )
+            }
+        )
+        rows.addView(rule(), MATCH_PARENT, 1)
+        rows.addView(
+            row(
+                getString(R.string.omni_about_contact),
+                getString(R.string.omni_feedback_note),
+                "",
+                palette.accent,
+            ) { go(Screen.Feedback) }
+        )
+        rows.addView(rule(), MATCH_PARENT, 1)
+        rows.addView(
+            row(
+                getString(R.string.omni_about_developer),
+                getString(R.string.omni_about_developer_name),
+                "",
+                palette.muted,
+            ) { go(Screen.Help) }
+        )
+        content.addView(rows)
+        content.addView(
+            keyValue(
+                getString(R.string.omni_settings_integrity),
+                Sentry.lastChecked(this).takeIf { it > 0L }?.let {
+                    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(it))
+                } ?: "",
+                standing,
+                when (standing) {
+                    "TRUSTED" -> palette.ok
+                    "TAMPERED" -> palette.error
+                    else -> palette.warning
+                },
+            )
+        )
+        content.addView(
+            TextView(this).apply {
+                text = getString(
+                    R.string.omni_about_rights,
+                    Calendar.getInstance().get(Calendar.YEAR).toString(),
+                )
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                gravity = Gravity.CENTER
+                setPadding(0, gap(4), 0, gap(2))
+            }
+        )
+    }
+
+    private fun feedbackBody(): String = buildString {
+        append(getString(FEEDBACK_KINDS[feedbackKind])).append('\n')
+        append(feedbackSubject).append("\n\n")
+        append(feedbackDetail).append("\n\n")
+        append(getString(R.string.omni_about_version, versionShown())).append('\n')
+        append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+        append(" · API ").append(Build.VERSION.SDK_INT)
+    }
+
+    private fun sendFeedback() {
+        results.removeAllViews()
+        if (feedbackSubject.isBlank() || feedbackDetail.isBlank()) {
+            results.addView(notice(getString(R.string.omni_feedback_needs), palette.warning))
+            return
+        }
+        val intent = mailIntent(
+            getString(R.string.omni_feedback_subject_line, feedbackSubject),
+            feedbackBody(),
+        )
+        val shot = feedbackShot
+        if (shot != null) {
+            intent.putExtra(Intent.EXTRA_STREAM, Uri.parse(shot))
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        hand(intent)
+    }
+
+    private fun renderFeedback() {
+        content.addView(
+            mascot(
+                Chibi.Face.CALM,
+                getString(R.string.omni_feedback_title),
+                getString(R.string.omni_feedback_note),
+            )
+        )
+        content.addView(label(getString(R.string.omni_feedback_kind)))
+        content.addView(
+            grid(
+                2,
+                FEEDBACK_KINDS.mapIndexed { index, named ->
+                    choice(getString(named), index == feedbackKind) {
+                        feedbackKind = index
+                        render(false)
+                    }
+                },
+            )
+        )
+        val form = card()
+        form.addView(
+            counted(
+                getString(R.string.omni_feedback_subject),
+                feedbackSubject,
+                SUBJECT_LIMIT,
+                1,
+            ) { feedbackSubject = it }
+        )
+        form.addView(
+            counted(
+                getString(R.string.omni_feedback_detail),
+                feedbackDetail,
+                DETAIL_LIMIT,
+                5,
+            ) { feedbackDetail = it }
+        )
+        content.addView(form)
+
+        content.addView(label(getString(R.string.omni_feedback_shot)))
+        val shot = feedbackShot
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                minimumHeight = gap(26)
+                setPadding(gap(4), gap(5), gap(4), gap(5))
+                isClickable = true
+                isFocusable = true
+                contentDescription = getString(R.string.omni_feedback_shot_pick)
+                readAs(Button::class.java.name)
+                background = touchable(
+                    GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = gap(4).toFloat()
+                        setColor(Color.TRANSPARENT)
+                        setStroke(gap(1) / 2, palette.divider)
+                    },
+                    palette.accent,
+                )
+                setOnClickListener { chooseShot() }
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.IMAGE, palette.muted)
+                    },
+                    LinearLayout.LayoutParams(gap(10), gap(10)),
+                )
+                addView(
+                    TextView(context).apply {
+                        text = if (shot == null) {
+                            getString(R.string.omni_feedback_shot_pick)
+                        } else {
+                            getString(R.string.omni_feedback_shot_chosen)
+                        }
+                        setTextColor(if (shot == null) palette.muted else palette.ok)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        gravity = Gravity.CENTER
+                        setPadding(0, gap(2), 0, 0)
+                    }
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(1) },
+        )
+        if (shot != null) {
+            content.addView(
+                subtle(getString(R.string.omni_action_clear), palette.muted) {
+                    feedbackShot = null
+                    render(false)
+                }
+            )
+        }
+        val reply = card()
+        reply.addView(
+            field(getString(R.string.omni_feedback_mail), feedbackMail) { feedbackMail = it }
+        )
+        content.addView(reply)
+        content.addView(primary(getString(R.string.omni_feedback_send)) { sendFeedback() })
+        content.addView(quiet(getString(R.string.omni_feedback_send_note)))
+    }
+
+    private fun chooseShot() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+        }
+        runCatching { startActivityForResult(intent, SHOT_REQUEST) }
+            .onFailure {
+                results.removeAllViews()
+                results.addView(
+                    notice(it.message ?: getString(R.string.omni_form_image_none), palette.error)
+                )
+            }
+    }
+
+    private fun helpCard(topic: Int): View {
+        val (mark, tint) = helpMark(topic)
+        val title = getString(HELP_TOPICS[topic].first)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(3), gap(4), gap(3), gap(4))
+            isClickable = true
+            isFocusable = true
+            contentDescription = title
+            readAs(Button::class.java.name)
+            background = touchable(
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(4).toFloat()
+                    setColor(palette.surface)
+                    setStroke(gap(1) / 2, Ink.fade(tint, 0.5f))
+                },
+                tint,
+            )
+            setOnClickListener {
+                showNote(title, getString(HELP_TOPICS[topic].third))
+            }
+            addView(badge(mark, tint), LinearLayout.LayoutParams(gap(11), gap(11)))
+            addView(
+                TextView(context).apply {
+                    text = title
+                    setTextColor(palette.foreground)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    setPadding(0, gap(2), 0, 0)
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = getString(HELP_TOPICS[topic].second)
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setLineSpacing(gap(1).toFloat(), 1f)
+                }
+            )
+        }
+    }
+
+    private fun helpMatches(topic: Int): Boolean {
+        val needle = helpFor.trim().lowercase(Locale.getDefault())
+        val band = HELP_BANDS[topic]
+        if (helpBand != 0 && band != helpBand) {
+            return false
+        }
+        if (needle.isEmpty()) {
+            return true
+        }
+        val whole = HELP_TOPICS[topic].toList()
+            .joinToString(" ") { getString(it) }
+            .lowercase(Locale.getDefault())
+        return whole.contains(needle)
+    }
+
+    private fun renderHelp() {
+        content.addView(
+            mascot(
+                Chibi.Face.SPARK,
+                getString(R.string.omni_help_title),
+                getString(R.string.omni_help_note),
+            )
+        )
+        val search = card()
+        search.addView(
+            field(getString(R.string.omni_help_search), helpFor) {
+                helpFor = it
+                results.removeAllViews()
+            }
+        )
+        search.addView(
+            subtle(getString(R.string.omni_help_search_go), palette.accent) { render(false) }
+        )
+        content.addView(search)
+        content.addView(
+            chips(HELP_BAND_NAMES.map { getString(it) }, { it == helpBand }) {
+                helpBand = it
+                render(false)
+            }
+        )
+        val shown = HELP_TOPICS.indices.filter { helpMatches(it) }
+        if (shown.isEmpty()) {
+            content.addView(quiet(getString(R.string.omni_help_none)))
+        } else {
+            content.addView(grid(2, shown.map { helpCard(it) }))
+        }
+        content.addView(
+            row(
+                getString(R.string.omni_help_docs),
+                getString(R.string.omni_help_docs_note),
+                "",
+                palette.accent,
+            ) {
+                showNote(
+                    getString(R.string.omni_help_docs),
+                    getString(R.string.omni_help_docs_body),
+                )
+            }
+        )
+        val reach = card()
+        reach.addView(heading(getString(R.string.omni_about_contact)))
+        reach.addView(body(getString(R.string.omni_help_contact_note)))
+        reach.addView(
+            subtle(getString(R.string.omni_feedback_title), palette.accent) {
+                go(Screen.Feedback)
+            }
+        )
+        reach.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_help_signed)
+                setTextColor(palette.muted)
+                typeface = Type.label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                letterSpacing = Type.TRACKING
+                gravity = Gravity.END
+                setPadding(0, gap(2), 0, gap(1))
+            }
+        )
+        content.addView(reach)
+    }
+
+    private fun renderSettings() {
+        val look = card()
+        look.addView(
+            row(
+                getString(R.string.omni_settings_theme),
+                palette.label,
+                "",
+                palette.accent,
+            ) { go(Screen.Theme) }
+        )
+        look.addView(rule(), MATCH_PARENT, 1)
+        val spoken = Preferences.language(this).ifEmpty { deviceLanguage() }
+        look.addView(
+            row(
+                getString(R.string.omni_settings_language),
+                Preferences.LANGUAGES.firstOrNull { it.first == spoken }?.second.orEmpty(),
+                "",
+                palette.accent,
+            ) { go(Screen.Languages) }
+        )
+        content.addView(look)
 
         content.addView(heading(getString(R.string.omni_keys_title)))
         val chosen = Preferences.signingKey(this)
@@ -5777,34 +7246,14 @@ class BuilderActivity : Activity() {
         content.addView(logActions)
         content.addView(quiet(getString(R.string.omni_settings_logs_note)))
 
-        content.addView(heading(getString(R.string.omni_settings_about)))
-        val about = card()
-        about.addView(
+        content.addView(
             row(
-                getString(R.string.omni_app_name),
-                getString(R.string.omni_about_reach),
-                getString(R.string.omni_about_soon_short),
-                palette.accent,
-            ) {
-                results.removeAllViews()
-                results.addView(notice(getString(R.string.omni_about_soon), palette.muted))
-            }
+                getString(R.string.omni_settings_about),
+                getString(R.string.omni_about_note),
+                "",
+                palette.muted,
+            ) { go(Screen.About) }
         )
-        about.addView(
-            keyValue(
-                getString(R.string.omni_settings_integrity),
-                Sentry.lastChecked(this).takeIf { it > 0L }?.let {
-                    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(it))
-                } ?: "",
-                standing,
-                when (standing) {
-                    "TRUSTED" -> palette.ok
-                    "TAMPERED" -> palette.error
-                    else -> palette.warning
-                },
-            )
-        )
-        content.addView(about)
     }
 
     private fun speakTheDeviceLanguage() {
@@ -6557,7 +8006,15 @@ class BuilderActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != IMAGE_REQUEST || resultCode != RESULT_OK) {
+        if (resultCode != RESULT_OK) {
+            return
+        }
+        if (requestCode == SHOT_REQUEST) {
+            feedbackShot = data?.data?.toString()
+            render(false)
+            return
+        }
+        if (requestCode != IMAGE_REQUEST) {
             return
         }
         val uri = data?.data ?: return
@@ -7237,6 +8694,145 @@ internal object Tape {
         dropouts(canvas, paint, w, h, life, strength)
         bloom(canvas, paint, w, h, life, strength)
         headSwitch(canvas, paint, w, h, life, strength)
+    }
+}
+
+class ThemeArt(context: Context, private val shown: Palette) : View(context) {
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val path = Path()
+
+    private fun rain(canvas: Canvas, wide: Float, tall: Float) {
+        paint.style = Paint.Style.FILL
+        paint.typeface = Type.data
+        paint.textAlign = Paint.Align.CENTER
+        paint.textSize = tall / 9f
+        val columns = 12
+        var column = 0
+        while (column < columns) {
+            val across = wide * (column + 0.5f) / columns
+            val head = Ink.scatter(column, 11) * tall
+            var letter = 0
+            while (letter < 8) {
+                val down = (head + letter * tall / 7f) % (tall * 1.12f)
+                paint.color = Ink.fade(shown.accent, 0.14f + 0.7f * (letter / 7f))
+                canvas.drawText(
+                    if (Ink.scatter(column, letter) > 0.5f) "1" else "0",
+                    across,
+                    down,
+                    paint,
+                )
+                letter += 1
+            }
+            column += 1
+        }
+        paint.textAlign = Paint.Align.LEFT
+    }
+
+    private fun bloom(canvas: Canvas, wide: Float, tall: Float) {
+        paint.style = Paint.Style.FILL
+        paint.shader = RadialGradient(
+            wide * 0.26f,
+            tall * 0.3f,
+            tall * 0.9f,
+            Ink.fade(shown.glowFirst, 0.85f),
+            Color.TRANSPARENT,
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, wide, tall, paint)
+        paint.shader = RadialGradient(
+            wide * 0.8f,
+            tall * 0.74f,
+            tall * 0.8f,
+            Ink.fade(shown.glowThird, 0.8f),
+            Color.TRANSPARENT,
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, wide, tall, paint)
+        paint.shader = null
+        var petal = 0
+        while (petal < 9) {
+            paint.color = Ink.fade(shown.accent, 0.10f + 0.14f * Ink.scatter(petal, 5))
+            canvas.drawCircle(
+                wide * Ink.scatter(petal, 2),
+                tall * Ink.scatter(petal, 7),
+                tall * (0.02f + 0.05f * Ink.scatter(petal, 9)),
+                paint,
+            )
+            petal += 1
+        }
+        val figure = Chibi(Chibi.Face.RIBBON, shown)
+        val edge = (tall * 0.82f).toInt()
+        val left = ((wide - edge) / 2f).toInt()
+        val top = ((tall - edge) / 2f).toInt()
+        figure.setBounds(left, top, left + edge, top + edge)
+        figure.draw(canvas)
+    }
+
+    private fun pane(canvas: Canvas, wide: Float, tall: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = shown.raised
+        path.rewind()
+        path.addRoundRect(
+            wide * 0.11f,
+            tall * 0.16f,
+            wide * 0.89f,
+            tall * 0.9f,
+            tall * 0.07f,
+            tall * 0.07f,
+            Path.Direction.CW,
+        )
+        canvas.drawPath(path, paint)
+        paint.color = shown.divider
+        canvas.save()
+        canvas.clipPath(path)
+        canvas.drawRect(wide * 0.11f, tall * 0.16f, wide * 0.89f, tall * 0.32f, paint)
+        canvas.restore()
+        val dots = listOf(shown.error, shown.warning, shown.ok)
+        dots.forEachIndexed { index, colour ->
+            paint.color = colour
+            canvas.drawCircle(
+                wide * 0.16f + index * tall * 0.1f,
+                tall * 0.24f,
+                tall * 0.028f,
+                paint,
+            )
+        }
+        val widths = listOf(0.44f, 0.62f, 0.3f, 0.54f, 0.38f)
+        widths.forEachIndexed { index, reach ->
+            paint.color = if (index % 2 == 0) {
+                Ink.fade(shown.accent, 0.8f)
+            } else {
+                Ink.fade(shown.foreground, 0.42f)
+            }
+            val top = tall * (0.4f + index * 0.1f)
+            canvas.drawRoundRect(
+                wide * 0.16f,
+                top,
+                wide * (0.16f + reach),
+                top + tall * 0.05f,
+                tall * 0.025f,
+                tall * 0.025f,
+                paint,
+            )
+        }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val wide = width.toFloat()
+        val tall = height.toFloat()
+        if (wide <= 0f || tall <= 0f) {
+            return
+        }
+        paint.style = Paint.Style.FILL
+        paint.color = shown.background
+        canvas.drawRect(0f, 0f, wide, tall, paint)
+        when (shown.key) {
+            Palette.HACKER.key -> rain(canvas, wide, tall)
+            Palette.ANIME.key -> bloom(canvas, wide, tall)
+            else -> pane(canvas, wide, tall)
+        }
+        Ink.vignette(canvas, paint, wide, tall, 0.5f)
     }
 }
 
