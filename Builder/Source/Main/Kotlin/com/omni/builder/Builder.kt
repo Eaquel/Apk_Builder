@@ -3357,6 +3357,8 @@ class BuilderActivity : Activity() {
 
         const val LOG_HELD = 600
 
+        const val TREE_DEEPEST = 8
+
         val EDITOR_SYMBOLS = listOf(
             "{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "->", "\u03bb",
             "<", ">", "@", "\"",
@@ -3617,6 +3619,7 @@ class BuilderActivity : Activity() {
     private var cloneAddress = ""
 
     private var raised = false
+    private val opened = mutableSetOf<String>()
     private val wentBefore = mutableListOf<String>()
     private val wentAfter = mutableListOf<String>()
 
@@ -4834,7 +4837,12 @@ class BuilderActivity : Activity() {
 
     private fun openHere(root: String) {
         if (openProject != root) {
-
+            opened.clear()
+            runCatching {
+                FileEntry.list(Builder.nativeProjectTree(root))
+                    .filter { it.folder && !it.path.contains('/') }
+                    .forEach { opened.add(it.path) }
+            }
         }
         openProject = root
         go(Screen.Files(root, ""))
@@ -5023,37 +5031,169 @@ class BuilderActivity : Activity() {
     private fun releaseNamed(api: Int): String =
         ANDROID_RELEASES.firstOrNull { it.first == api }?.second ?: api.toString()
 
-    private fun renderFiles(root: String, folder: String) {
-        content.addView(breadcrumb(root, folder))
-        content.addView(sortRow())
+    private fun paneHead(root: String, folder: String, tall: Boolean): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(gap(2), gap(2), gap(2), gap(2))
+            setBackgroundColor(palette.surface)
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.FOLDER, palette.accent) },
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    if (tall) {
+                        addView(
+                            TextView(context).apply {
+                                text = File(root).name
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                                maxLines = 1
+                            }
+                        )
+                    }
+                    addView(
+                        TextView(context).apply {
+                            text = if (folder.isEmpty()) root else "$root/$folder"
+                            setTextColor(palette.accent)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.START
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                markControl(Mark.Shape.MORE, R.string.omni_action_more) { projectMenu(root) },
+                LinearLayout.LayoutParams(gap(8), gap(8)),
+            )
+        }
 
+    private fun treeRow(root: String, entry: FileEntry, depth: Int, entries: List<FileEntry>): View {
+        val open = entry.path in opened
+        val (shape, tint) = markFor(entry)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(gap(2) + depth * gap(4), gap(1), gap(2), gap(1))
+            isClickable = true
+            isFocusable = true
+            contentDescription = entry.path.substringAfterLast('/')
+            readAs(Button::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener {
+                if (entry.folder) {
+                    if (open) opened.remove(entry.path) else opened.add(entry.path)
+                    render(false)
+                } else {
+                    openEntry(root, entry)
+                }
+            }
+            setOnLongClickListener {
+                showActions(root, entry.path.substringBeforeLast('/', ""), entry, null)
+                true
+            }
+            addView(
+                View(context).apply {
+                    foreground = if (entry.folder) {
+                        Mark(if (open) Mark.Shape.DOWN else Mark.Shape.FORWARD, palette.muted)
+                    } else {
+                        null
+                    }
+                },
+                LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(1) },
+            )
+            addView(
+                View(context).apply { foreground = Mark(shape, tint) },
+                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                TextView(context).apply {
+                    text = entry.path.substringAfterLast('/')
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    maxLines = 1
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+    }
+
+    private fun growTree(
+        into: LinearLayout,
+        root: String,
+        folder: String,
+        depth: Int,
+        entries: List<FileEntry>,
+    ) {
+        if (depth > TREE_DEEPEST) {
+            return
+        }
+        arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder }).forEach { one ->
+            into.addView(treeRow(root, one, depth, entries))
+            if (one.folder && one.path in opened) {
+                growTree(into, root, one.path, depth + 1, entries)
+            }
+        }
+    }
+
+    private fun treePane(root: String, entries: List<FileEntry>): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheet(palette.background, palette.divider)
+            addView(paneHead(root, "", true))
+            addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+            val rows = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+            }
+            growTree(rows, root, "", 0, entries)
+            if (rows.childCount == 0) {
+                rows.addView(quiet(getString(R.string.omni_files_empty)).apply {
+                    setPadding(gap(4), gap(4), gap(4), gap(4))
+                })
+            }
+            addView(rows)
+        }
+
+    private fun renderFiles(root: String, folder: String) {
         val entries = runCatching {
             FileEntry.list(Builder.nativeProjectTree(root))
         }.getOrDefault(emptyList())
-        val here = arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder })
 
         val beside = secondFolder
-        if (beside == null) {
-            content.addView(filePane(root, folder, entries, null))
-        } else {
-            val panes = LinearLayout(this).apply {
-                orientation = if (wideEnough()) {
-                    LinearLayout.HORIZONTAL
-                } else {
-                    LinearLayout.VERTICAL
-                }
+        val panes = LinearLayout(this).apply {
+            orientation = if (wideEnough()) {
+                LinearLayout.HORIZONTAL
+            } else {
+                LinearLayout.VERTICAL
             }
+        }
+        val across = panes.orientation == LinearLayout.HORIZONTAL
+        panes.addView(
+            treePane(root, entries),
+            if (across) {
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) }
+            } else {
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            },
+        )
+        if (beside != null || across) {
+            val other = beside ?: folder
             panes.addView(
-                filePane(root, folder, entries, beside),
-                if (panes.orientation == LinearLayout.HORIZONTAL) {
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) }
-                } else {
-                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = sheet(palette.background, palette.divider)
+                    addView(paneHead(root, other, false))
+                    addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+                    addView(filePane(root, other, entries, folder))
                 },
-            )
-            panes.addView(
-                filePane(root, beside, entries, folder),
-                if (panes.orientation == LinearLayout.HORIZONTAL) {
+                if (across) {
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) }
                 } else {
                     LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
@@ -5061,8 +5201,10 @@ class BuilderActivity : Activity() {
                     }
                 },
             )
-            content.addView(panes)
         }
+        content.addView(panes)
+        content.addView(breadcrumb(root, folder))
+        content.addView(sortRow())
 
         val making = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
