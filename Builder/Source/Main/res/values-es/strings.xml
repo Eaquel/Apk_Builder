@@ -344,4 +344,7 @@
     <string name="omni_form_platforms_note">El Android más antiguo en que esto corre, y el más nuevo contra el que se construye.</string>
     <string name="omni_editor_run">Construir este proyecto</string>
     <string name="omni_editor_symbols">Símbolos</string>
+    <string name="omni_tab_shell">Terminal</string>
+    <string name="omni_shell_refused">No se pudo iniciar un intérprete aquí.</string>
+    <string name="omni_shell_note">Trabajando en %1$s. El teclado se abre al tocar.</string>
 </resources>

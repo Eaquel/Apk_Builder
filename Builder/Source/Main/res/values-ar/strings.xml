@@ -344,4 +344,7 @@
     <string name="omni_form_platforms_note">أقدم أندرويد يعمل عليه هذا، وأحدث أندرويد بُني في مواجهته.</string>
     <string name="omni_editor_run">ابنِ هذا المشروع</string>
     <string name="omni_editor_symbols">الرموز</string>
+    <string name="omni_tab_shell">الطرفية</string>
+    <string name="omni_shell_refused">تعذّر بدء صدفة هنا.</string>
+    <string name="omni_shell_note">يعمل في %1$s. وتُفتح لوحة المفاتيح بلمسة.</string>
 </resources>

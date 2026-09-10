@@ -344,4 +344,7 @@
     <string name="omni_form_platforms_note">这个应用能运行的最老 Android，以及它编译时面向的最新 Android。</string>
     <string name="omni_editor_run">构建这个项目</string>
     <string name="omni_editor_symbols">符号</string>
+    <string name="omni_tab_shell">终端</string>
+    <string name="omni_shell_refused">这里无法启动 shell。</string>
+    <string name="omni_shell_note">正在 %1$s 中工作。轻触即可打开键盘。</string>
 </resources>

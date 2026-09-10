@@ -510,6 +510,18 @@ object Builder {
 
     external fun nativeSpeak(tag: String): String
 
+    external fun nativeShellOpen(folder: String, home: String, rows: Int, columns: Int): Int
+
+    external fun nativeShellRead(handle: Int, into: ByteArray, wait: Int): Int
+
+    external fun nativeShellWrite(handle: Int, from: ByteArray): Int
+
+    external fun nativeShellResize(handle: Int, rows: Int, columns: Int)
+
+    external fun nativeShellClose(handle: Int)
+
+    external fun nativeShellInterrupt(handle: Int)
+
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
@@ -1026,19 +1038,19 @@ data class Palette(
         val DARK = Palette(
             key = "dark",
             label = "Dark",
-            background = 0xFF1E1F22.toInt(),
-            surface = 0xFF2B2D30.toInt(),
-            raised = 0xFF35373B.toInt(),
-            foreground = 0xFFDFE1E5.toInt(),
-            muted = 0xFF9DA0A8.toInt(),
-            accent = 0xFF4A88C7.toInt(),
-            ok = 0xFF4C9F5B.toInt(),
-            warning = 0xFFD9A343.toInt(),
-            error = 0xFFCF5B56.toInt(),
-            divider = 0xFF393B40.toInt(),
-            glowFirst = 0xFF2F3238.toInt(),
-            glowSecond = 0xFF2A2D33.toInt(),
-            glowThird = 0xFF26292E.toInt(),
+            background = 0xFF05111A.toInt(),
+            surface = 0xFF0A1822.toInt(),
+            raised = 0xFF10222E.toInt(),
+            foreground = 0xFFE8F3FB.toInt(),
+            muted = 0xFF8FA8BC.toInt(),
+            accent = 0xFF0A8CFD.toInt(),
+            ok = 0xFF1AB74D.toInt(),
+            warning = 0xFFF2A63D.toInt(),
+            error = 0xFFF84048.toInt(),
+            divider = 0xFF123243.toInt(),
+            glowFirst = 0xFF0A2A44.toInt(),
+            glowSecond = 0xFF06203A.toInt(),
+            glowThird = 0xFF04182C.toInt(),
         )
 
         val HACKER = Palette(
@@ -2178,6 +2190,290 @@ internal class Chibi(private val who: Face, private val palette: Palette) : Draw
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }
 
+internal class TerminalView(
+    context: Context,
+    private var palette: Palette,
+    private val onKey: (ByteArray) -> Unit,
+) : View(context) {
+
+    val screen = Screenful(24, 80)
+    private val reader = Sequences(screen) { said -> onKey(said.toByteArray(Charsets.UTF_8)) }
+    private var lookingBack = 0
+    private var dragFrom = 0f
+    private var dragged = 0f
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Type.data }
+    private var cellWidth = 0f
+    private var cellHeight = 0f
+    private var baseline = 0f
+    private var lettering = 0f
+    private var onResize: ((Int, Int) -> Unit)? = null
+
+    init {
+        isFocusableInTouchMode = true
+        lettering = inPixels(13f)
+        measureCell()
+    }
+
+    fun repaint(next: Palette) {
+        palette = next
+        invalidate()
+    }
+
+    fun sizeText(sp: Float) {
+        lettering = inPixels(sp.coerceIn(8f, 24f))
+        measureCell()
+        fit(width, height)
+        invalidate()
+    }
+
+    fun textSizeSp(): Float = lettering / inPixels(1f)
+
+    private fun inPixels(sp: Float): Float = TypedValue.applyDimension(
+        TypedValue.COMPLEX_UNIT_SP,
+        sp,
+        resources.displayMetrics,
+    )
+
+    fun whenResized(what: (Int, Int) -> Unit) {
+        onResize = what
+    }
+
+    fun accept(bytes: ByteArray, length: Int) {
+        reader.feed(bytes, length)
+        lookingBack = 0
+        postInvalidate()
+    }
+
+    private fun rowAt(r: Int): Array<Screenful.Cell>? {
+        val back = lookingBack
+        if (back == 0) {
+            return screen.lines.getOrNull(r)
+        }
+        val from = screen.history.size - back
+        val at = from + r
+        return if (at < screen.history.size) {
+            screen.history.getOrNull(at)
+        } else {
+            screen.lines.getOrNull(at - screen.history.size)
+        }
+    }
+
+    @Suppress("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dragFrom = event.y
+                dragged = 0f
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (screen.onAlternate || cellHeight <= 0f) {
+                    return true
+                }
+                val moved = event.y - dragFrom
+                dragged += kotlin.math.abs(moved)
+                val steps = (moved / cellHeight).toInt()
+                if (steps != 0) {
+                    dragFrom = event.y
+                    lookingBack = (lookingBack + steps).coerceIn(0, screen.history.size)
+                    invalidate()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (dragged < cellHeight) {
+                    performClick()
+                }
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
+    private fun measureCell() {
+        paint.textSize = lettering
+        cellWidth = paint.measureText("M")
+        val metrics = paint.fontMetrics
+        cellHeight = metrics.descent - metrics.ascent + 1f
+        baseline = -metrics.ascent
+    }
+
+    private fun fit(w: Int, h: Int) {
+        if (w <= 0 || h <= 0 || cellWidth <= 0f || cellHeight <= 0f) {
+            return
+        }
+        val columns = (w / cellWidth).toInt().coerceIn(20, 400)
+        val rows = (h / cellHeight).toInt().coerceIn(4, 200)
+        if (columns != screen.columns || rows != screen.rows) {
+            screen.resize(rows, columns)
+            onResize?.invoke(rows, columns)
+        }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, was: Int, then: Int) {
+        super.onSizeChanged(w, h, was, then)
+        fit(w, h)
+    }
+
+    private fun colourOf(code: Int, ground: Boolean): Int {
+        val found = when {
+            code == Screenful.DEFAULT_INK -> palette.foreground
+            code == Screenful.DEFAULT_GROUND -> Color.TRANSPARENT
+            code >= 256 -> {
+                val rgb = code - 256
+                Color.rgb((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF)
+            }
+            code < 16 -> ANSI[code]
+            code < 232 -> {
+                val at = code - 16
+                Color.rgb(STEPS[at / 36], STEPS[(at / 6) % 6], STEPS[at % 6])
+            }
+            else -> {
+                val grey = (8 + (code - 232) * 10).coerceIn(0, 255)
+                Color.rgb(grey, grey, grey)
+            }
+        }
+        return if (ground && found == Color.TRANSPARENT) palette.background else found
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        canvas.drawColor(palette.background)
+        paint.textSize = lettering
+        val word = StringBuilder()
+        for (r in 0 until screen.rows) {
+            val line = rowAt(r) ?: continue
+            var c = 0
+            while (c < screen.columns) {
+                val cell = line.getOrNull(c) ?: break
+                var run = c
+                while (run < screen.columns) {
+                    val next = line.getOrNull(run) ?: break
+                    if (next.ground != cell.ground || next.style != cell.style ||
+                        next.ink != cell.ink
+                    ) {
+                        break
+                    }
+                    run += 1
+                }
+                val reversed = (cell.style and Screenful.REVERSE) != 0
+                val ink = colourOf(if (reversed) cell.ground else cell.ink, reversed)
+                val ground = colourOf(if (reversed) cell.ink else cell.ground, true)
+                val left = c * cellWidth
+                val top = r * cellHeight
+                if (ground != palette.background) {
+                    paint.style = Paint.Style.FILL
+                    paint.color = ground
+                    canvas.drawRect(left, top, run * cellWidth, top + cellHeight, paint)
+                }
+                word.setLength(0)
+                for (at in c until run) {
+                    word.append(line.getOrNull(at)?.letter ?: ' ')
+                }
+                paint.color = if ((cell.style and Screenful.FAINT) != 0) {
+                    Ink.fade(ink, 0.6f)
+                } else {
+                    ink
+                }
+                paint.isFakeBoldText = (cell.style and Screenful.BOLD) != 0
+                paint.style = Paint.Style.FILL
+                canvas.drawText(word.toString(), left, top + baseline, paint)
+                if ((cell.style and Screenful.UNDERLINE) != 0) {
+                    paint.strokeWidth = 1f
+                    canvas.drawLine(
+                        left,
+                        top + cellHeight - 2f,
+                        run * cellWidth,
+                        top + cellHeight - 2f,
+                        paint,
+                    )
+                }
+                c = run
+            }
+        }
+        if (screen.showCursor && lookingBack == 0) {
+            paint.style = Paint.Style.FILL
+            paint.color = Ink.fade(palette.accent, 0.55f)
+            canvas.drawRect(
+                screen.column * cellWidth,
+                screen.row * cellHeight,
+                (screen.column + 1) * cellWidth,
+                (screen.row + 1) * cellHeight,
+                paint,
+            )
+        }
+    }
+
+    override fun onCheckIsTextEditor(): Boolean = true
+
+    override fun onCreateInputConnection(out: EditorInfo): InputConnection {
+        out.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        out.imeOptions = EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            EditorInfo.IME_FLAG_NO_FULLSCREEN
+        return object : BaseInputConnection(this, false) {
+            override fun commitText(written: CharSequence?, position: Int): Boolean {
+                written?.let { onKey(it.toString().toByteArray(Charsets.UTF_8)) }
+                return true
+            }
+
+            override fun sendKeyEvent(event: KeyEvent?): Boolean {
+                if (event != null && event.action == KeyEvent.ACTION_DOWN) {
+                    return this@TerminalView.onKeyDown(event.keyCode, event)
+                }
+                return true
+            }
+
+            override fun deleteSurroundingText(before: Int, after: Int): Boolean {
+                repeat(before) { onKey(byteArrayOf(0x7F)) }
+                return true
+            }
+        }
+    }
+
+    override fun onKeyDown(code: Int, event: KeyEvent): Boolean {
+        val said = when (code) {
+            KeyEvent.KEYCODE_DEL -> byteArrayOf(0x7F)
+            KeyEvent.KEYCODE_ENTER -> byteArrayOf(0x0D)
+            KeyEvent.KEYCODE_TAB -> byteArrayOf(0x09)
+            KeyEvent.KEYCODE_ESCAPE -> byteArrayOf(0x1B)
+            KeyEvent.KEYCODE_DPAD_UP -> arrow('A')
+            KeyEvent.KEYCODE_DPAD_DOWN -> arrow('B')
+            KeyEvent.KEYCODE_DPAD_RIGHT -> arrow('C')
+            KeyEvent.KEYCODE_DPAD_LEFT -> arrow('D')
+            KeyEvent.KEYCODE_MOVE_HOME -> "\u001B[H".toByteArray()
+            KeyEvent.KEYCODE_MOVE_END -> "\u001B[F".toByteArray()
+            else -> {
+                val letter = event.unicodeChar
+                when {
+                    event.isCtrlPressed && letter != 0 ->
+                        byteArrayOf((letter.toChar().uppercaseChar().code and 0x1F).toByte())
+                    letter != 0 -> letter.toChar().toString().toByteArray(Charsets.UTF_8)
+                    else -> return super.onKeyDown(code, event)
+                }
+            }
+        }
+        onKey(said)
+        return true
+    }
+
+    fun arrow(which: Char): ByteArray =
+        if (screen.applicationKeys) {
+            "\u001BO$which".toByteArray()
+        } else {
+            "\u001B[$which".toByteArray()
+        }
+
+    private companion object {
+        val STEPS = intArrayOf(0, 95, 135, 175, 215, 255)
+
+        val ANSI = intArrayOf(
+            0xFF1E1E1E.toInt(), 0xFFCD3131.toInt(), 0xFF0DBC79.toInt(), 0xFFE5E510.toInt(),
+            0xFF2472C8.toInt(), 0xFFBC3FBC.toInt(), 0xFF11A8CD.toInt(), 0xFFE5E5E5.toInt(),
+            0xFF666666.toInt(), 0xFFF14C4C.toInt(), 0xFF23D18B.toInt(), 0xFFF5F543.toInt(),
+            0xFF3B8EEA.toInt(), 0xFFD670D6.toInt(), 0xFF29B8DB.toInt(), 0xFFFFFFFF.toInt(),
+        )
+    }
+}
+
 internal class Mark(private val shape: Shape, private val colour: Int) : Drawable() {
 
     enum class Shape {
@@ -3051,6 +3347,8 @@ private sealed interface Screen {
 
     data object Logcat : Screen
 
+    data object Terminal : Screen
+
     data object Theme : Screen
 
     data object Languages : Screen
@@ -3305,6 +3603,12 @@ class BuilderActivity : Activity() {
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
+
+    private var shellView: TerminalView? = null
+    private var shellHandle = -1
+    private var shellReader: Thread? = null
+    private var shellFolder: String? = null
+    private var shellControl = false
 
     private var logReading = false
     private var logProcess: java.lang.Process? = null
@@ -3657,6 +3961,7 @@ class BuilderActivity : Activity() {
         keepTheDraft()
         stopTheBuild()
         stopTheLog()
+        closeTheShell()
         runCatching { unregisterReceiver(installAnswer) }
         OmniLog.flushSession()
         super.onDestroy()
@@ -3763,6 +4068,10 @@ class BuilderActivity : Activity() {
         if (screen !is Screen.Logcat) {
             stopTheLog()
         }
+        if (screen !is Screen.Terminal) {
+            closeTheShell()
+            shellView = null
+        }
         content.removeAllViews()
         results.removeAllViews()
 
@@ -3806,6 +4115,7 @@ class BuilderActivity : Activity() {
             is Screen.Keys -> renderKeys()
             is Screen.NewKey -> renderNewKey()
             is Screen.Logcat -> renderLogcat()
+            is Screen.Terminal -> renderTerminal()
             is Screen.Theme -> renderTheme()
             is Screen.Languages -> renderLanguages()
             is Screen.Feedback -> renderFeedback()
@@ -3934,6 +4244,7 @@ class BuilderActivity : Activity() {
             is Screen.Keys -> getString(R.string.omni_keys_title)
             is Screen.NewKey -> getString(R.string.omni_keys_new)
             is Screen.Logcat -> getString(R.string.omni_menu_logcat)
+            is Screen.Terminal -> getString(R.string.omni_tab_shell)
             is Screen.Theme -> getString(R.string.omni_settings_theme)
             is Screen.Languages -> getString(R.string.omni_settings_language)
             is Screen.Feedback -> getString(R.string.omni_feedback_title)
@@ -4000,7 +4311,8 @@ class BuilderActivity : Activity() {
         setPadding(gap(4), gap(5), gap(4), gap(4))
         addView(
             ImageView(context).apply {
-                setImageDrawable(Chibi(Chibi.Face.SPARK, palette))
+                setImageResource(R.drawable.omni_mascot)
+                scaleType = ImageView.ScaleType.FIT_CENTER
             },
             LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(3) },
         )
@@ -4090,7 +4402,12 @@ class BuilderActivity : Activity() {
         )
         list.addView(drawerSection(getString(R.string.omni_menu_making)))
         list.addView(
-            drawerRow(Mark.Shape.LOG, R.string.omni_menu_logcat, here is Screen.Logcat) {
+            drawerRow(Mark.Shape.LOG, R.string.omni_tab_shell, here is Screen.Terminal) {
+                leaveFor(Screen.Terminal)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.CODE, R.string.omni_menu_logcat, here is Screen.Logcat) {
                 leaveFor(Screen.Logcat)
             }
         )
@@ -4197,7 +4514,7 @@ class BuilderActivity : Activity() {
     private fun renderNewProject() {
         content.addView(
             mascot(
-                Chibi.Face.SPARK,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_projects_new),
                 getString(R.string.omni_form_note),
             )
@@ -6446,10 +6763,147 @@ class BuilderActivity : Activity() {
         logProcess = null
     }
 
+    private fun renderTerminal() {
+        val home = filesDir.absolutePath
+        val folder = openProject ?: home
+        val view = shellView?.also { it.repaint(palette) }
+            ?: TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
+        (view.parent as? ViewGroup)?.removeView(view)
+        shellView = view
+        shellFolder = folder
+
+        val frame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheet(palette.background, palette.divider)
+            setPadding(gap(1), gap(1), gap(1), gap(1))
+        }
+        frame.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, gap(74)))
+        content.addView(frame)
+        content.addView(shellKeys(view))
+
+        view.whenResized { rows, columns ->
+            if (shellHandle >= 0) {
+                runCatching { Builder.nativeShellResize(shellHandle, rows, columns) }
+            }
+        }
+        view.setOnClickListener {
+            view.requestFocus()
+            val keyboard = getSystemService(InputMethodManager::class.java)
+            keyboard?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        }
+
+        if (shellHandle < 0) {
+            openTheShell(folder, home, view)
+        } else {
+            view.accept(byteArrayOf(), 0)
+        }
+    }
+
+    private fun openTheShell(folder: String, home: String, view: TerminalView) {
+        File(home, "tmp").mkdirs()
+        val handle = runCatching {
+            Builder.nativeShellOpen(folder, home, view.screen.rows, view.screen.columns)
+        }.getOrDefault(-1)
+        if (handle < 0) {
+            results.addView(notice(getString(R.string.omni_shell_refused), palette.error))
+            return
+        }
+        shellHandle = handle
+        OmniLog.event(LogLevel.INFO, "shell", "A shell was opened.")
+        val reader = Thread {
+            val room = ByteArray(8192)
+            while (!Thread.currentThread().isInterrupted) {
+                val got = runCatching { Builder.nativeShellRead(handle, room, 60) }
+                    .getOrDefault(-1)
+                if (got < 0) {
+                    break
+                }
+                if (got > 0) {
+                    val copy = room.copyOf(got)
+                    runOnUiThread { shellView?.accept(copy, copy.size) }
+                }
+            }
+            runOnUiThread { closeTheShell() }
+        }
+        reader.isDaemon = true
+        shellReader = reader
+        reader.start()
+    }
+
+    private fun sendToTheShell(bytes: ByteArray) {
+        if (shellHandle < 0 || bytes.isEmpty()) {
+            return
+        }
+        val said = if (shellControl) {
+            shellControl = false
+            byteArrayOf((bytes[0].toInt().toChar().uppercaseChar().code and 0x1F).toByte())
+        } else {
+            bytes
+        }
+        runCatching { Builder.nativeShellWrite(shellHandle, said) }
+    }
+
+    private fun closeTheShell() {
+        val handle = shellHandle
+        shellHandle = -1
+        shellReader?.interrupt()
+        shellReader = null
+        if (handle >= 0) {
+            runCatching { Builder.nativeShellClose(handle) }
+            OmniLog.event(LogLevel.INFO, "shell", "The shell was closed.")
+        }
+    }
+
+    private fun shellKeys(view: TerminalView): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, gap(2), 0, gap(1))
+        }
+        val keys = listOf<Pair<String, () -> Unit>>(
+            "ESC" to { sendToTheShell(byteArrayOf(0x1B)) },
+            "TAB" to { sendToTheShell(byteArrayOf(0x09)) },
+            "CTRL" to { shellControl = !shellControl },
+            "^C" to { runCatching { Builder.nativeShellInterrupt(shellHandle) }.let { } },
+            "/" to { sendToTheShell("/".toByteArray()) },
+            "-" to { sendToTheShell("-".toByteArray()) },
+            "|" to { sendToTheShell("|".toByteArray()) },
+            "↑" to { sendToTheShell("\u001B[A".toByteArray()) },
+            "↓" to { sendToTheShell("\u001B[B".toByteArray()) },
+        )
+        for ((label, press) in keys) {
+            row.addView(
+                TextView(this).apply {
+                    text = label
+                    typeface = Type.data
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    gravity = Gravity.CENTER
+                    setPadding(gap(1), gap(2), gap(1), gap(2))
+                    isClickable = true
+                    readAs(Button::class.java.name)
+                    background = touchable(pill(palette.raised, gap(2).toFloat()), palette.accent)
+                    setOnClickListener {
+                        press()
+                        view.requestFocus()
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    marginEnd = gap(1) / 2
+                },
+            )
+        }
+        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        holder.addView(row)
+        holder.addView(
+            quiet(getString(R.string.omni_shell_note, shellFolder ?: filesDir.absolutePath))
+        )
+        return holder
+    }
+
     private fun renderLogcat() {
         content.addView(
             mascot(
-                Chibi.Face.CALM,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_menu_logcat),
                 getString(R.string.omni_log_note),
             )
@@ -6636,7 +7090,7 @@ class BuilderActivity : Activity() {
     private fun renderKinds() {
         content.addView(
             mascot(
-                Chibi.Face.SPARK,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_kinds_title),
                 getString(R.string.omni_kinds_note),
             )
@@ -6704,7 +7158,7 @@ class BuilderActivity : Activity() {
     private fun renderWebToApk() {
         content.addView(
             mascot(
-                Chibi.Face.WINK,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_web_title),
                 getString(R.string.omni_web_note),
             )
@@ -6775,13 +7229,16 @@ class BuilderActivity : Activity() {
         background = pill(Ink.fade(tint, 0.16f), gap(2).toFloat())
     }
 
-    private fun mascot(face: Chibi.Face, title: String, detail: String): View =
+    private fun mascot(art: Int, title: String, detail: String): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, gap(4), 0, gap(2))
             addView(
-                ImageView(context).apply { setImageDrawable(Chibi(face, palette)) },
+                ImageView(context).apply {
+                    setImageResource(art)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                },
                 LinearLayout.LayoutParams(gap(17), gap(17)).apply { marginEnd = gap(3) },
             )
             addView(
@@ -7100,7 +7557,7 @@ class BuilderActivity : Activity() {
     private fun renderTheme() {
         content.addView(
             mascot(
-                Chibi.Face.WINK,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_settings_theme),
                 getString(R.string.omni_theme_note),
             )
@@ -7172,7 +7629,7 @@ class BuilderActivity : Activity() {
     private fun renderLanguages() {
         content.addView(
             mascot(
-                Chibi.Face.CALM,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_settings_language),
                 getString(R.string.omni_language_note),
             )
@@ -7219,7 +7676,10 @@ class BuilderActivity : Activity() {
                 FrameLayout.LayoutParams(MATCH_PARENT, gap(34)),
             )
             addView(
-                ImageView(context).apply { setImageDrawable(Chibi(Chibi.Face.SPARK, palette)) },
+                ImageView(context).apply {
+                    setImageResource(R.drawable.omni_mascot)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                },
                 FrameLayout.LayoutParams(gap(24), gap(24), Gravity.CENTER),
             )
         }
@@ -7285,7 +7745,8 @@ class BuilderActivity : Activity() {
                 setPadding(0, gap(4), 0, gap(2))
                 addView(
                     ImageView(context).apply {
-                        setImageDrawable(Chibi(Chibi.Face.SPARK, palette))
+                        setImageResource(R.drawable.omni_mascot)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
                     },
                     LinearLayout.LayoutParams(gap(22), gap(22)),
                 )
@@ -7438,7 +7899,7 @@ class BuilderActivity : Activity() {
     private fun renderFeedback() {
         content.addView(
             mascot(
-                Chibi.Face.CALM,
+                R.drawable.omni_mascot,
                 getString(R.string.omni_feedback_title),
                 getString(R.string.omni_feedback_note),
             )
@@ -7610,7 +8071,7 @@ class BuilderActivity : Activity() {
     private fun renderHelp() {
         content.addView(
             mascot(
-                Chibi.Face.SPARK,
+                R.drawable.omni_mascot_reading,
                 getString(R.string.omni_help_title),
                 getString(R.string.omni_help_note),
             )

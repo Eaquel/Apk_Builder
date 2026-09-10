@@ -344,4 +344,7 @@
     <string name="omni_form_platforms_note">Самый старый Android, на котором это работает, и самый новый, под который это собрано.</string>
     <string name="omni_editor_run">Собрать этот проект</string>
     <string name="omni_editor_symbols">Знаки</string>
+    <string name="omni_tab_shell">Терминал</string>
+    <string name="omni_shell_refused">Здесь не удалось запустить оболочку.</string>
+    <string name="omni_shell_note">Работает в %1$s. Клавиатура открывается по касанию.</string>
 </resources>

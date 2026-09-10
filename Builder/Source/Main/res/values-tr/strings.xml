@@ -344,4 +344,7 @@
     <string name="omni_form_platforms_note">Üzerinde çalışacağı en eski Android ve karşısında derlendiği en yeni Android.</string>
     <string name="omni_editor_run">Bu projeyi derle</string>
     <string name="omni_editor_symbols">Simgeler</string>
+    <string name="omni_tab_shell">Terminal</string>
+    <string name="omni_shell_refused">Burada bir kabuk başlatılamadı.</string>
+    <string name="omni_shell_note">%1$s içinde çalışıyor. Dokununca klavye açılır.</string>
 </resources>
