@@ -3332,6 +3332,14 @@ private sealed interface Screen {
     data object About : Screen
 
     data object Help : Screen
+
+    data object HelpAdb : Screen
+
+    data object HelpTalk : Screen
+
+    data object HelpDocs : Screen
+
+    data object HelpFaq : Screen
 }
 
 class BuilderActivity : Activity() {
@@ -3416,7 +3424,48 @@ class BuilderActivity : Activity() {
             R.string.omni_help_band_all,
             R.string.omni_help_band_start,
             R.string.omni_help_band_making,
+            R.string.omni_help_band_files,
+            R.string.omni_help_band_web,
             R.string.omni_help_band_trouble,
+        )
+
+        val HELP_BANDS = listOf(1, 2, 2, 2, 2, 5, 2, 2, 4, 3)
+
+        val TALK_STEPS = listOf(
+            R.string.omni_talk_step_ask to R.string.omni_talk_step_ask_note,
+            R.string.omni_talk_folder to R.string.omni_talk_folder_note,
+            R.string.omni_talk_step_add to R.string.omni_talk_step_add_note,
+            R.string.omni_talk_switch to R.string.omni_talk_step_switch_note,
+            R.string.omni_talk_step_keep to R.string.omni_talk_step_keep_note,
+            R.string.omni_talk_step_word to R.string.omni_talk_step_word_note,
+            R.string.omni_talk_step_write to R.string.omni_talk_step_write_note,
+            R.string.omni_talk_step_fix to R.string.omni_talk_step_fix_note,
+            R.string.omni_talk_step_private to R.string.omni_talk_step_private_note,
+            R.string.omni_talk_step_tips to R.string.omni_talk_step_tips_note,
+        )
+
+        val ADB_ALONE = listOf(
+            R.string.omni_adb_a_one to R.string.omni_adb_a_one_note,
+            R.string.omni_adb_a_two to R.string.omni_adb_a_two_note,
+            R.string.omni_adb_a_three to R.string.omni_adb_a_three_note,
+        )
+
+        val ADB_DESK = listOf(
+            R.string.omni_adb_d_one to R.string.omni_adb_d_one_note,
+            R.string.omni_adb_d_two to R.string.omni_adb_d_two_note,
+            R.string.omni_adb_d_three to R.string.omni_adb_d_three_note,
+        )
+
+        val ADB_ALONE_ART = listOf(
+            R.drawable.omni_adb_wifi_one,
+            R.drawable.omni_adb_wifi_two,
+            R.drawable.omni_adb_wifi_three,
+        )
+
+        val ADB_DESK_ART = listOf(
+            R.drawable.omni_adb_usb_one,
+            R.drawable.omni_adb_usb_two,
+            R.drawable.omni_adb_usb_three,
         )
 
         val HELP_TOPICS = listOf(
@@ -3450,9 +3499,49 @@ class BuilderActivity : Activity() {
                 R.string.omni_help_trouble_note,
                 R.string.omni_help_trouble_body,
             ),
+            Triple(
+                R.string.omni_ask_gradle,
+                R.string.omni_ask_gradle_note,
+                R.string.omni_ask_gradle_note,
+            ),
+            Triple(
+                R.string.omni_ask_small,
+                R.string.omni_ask_small_note,
+                R.string.omni_ask_small_note,
+            ),
+            Triple(
+                R.string.omni_ask_web,
+                R.string.omni_ask_web_note,
+                R.string.omni_ask_web_note,
+            ),
+            Triple(
+                R.string.omni_ask_move,
+                R.string.omni_ask_move_note,
+                R.string.omni_ask_move_note,
+            ),
         )
 
-        val HELP_BANDS = listOf(1, 2, 2, 2, 2, 3)
+        val HELP_POPULAR = listOf(
+            R.string.omni_help_adb,
+            R.string.omni_menu_assistant,
+            R.string.omni_help_docs,
+            R.string.omni_help_trouble,
+        )
+
+        val DOC_ROWS = listOf(
+            R.string.omni_doc_home to R.string.omni_doc_home_note,
+            R.string.omni_doc_new to R.string.omni_doc_new_note,
+            R.string.omni_doc_kinds to R.string.omni_doc_kinds_note,
+            R.string.omni_doc_files to R.string.omni_doc_files_note,
+            R.string.omni_doc_build to R.string.omni_doc_build_note,
+            R.string.omni_doc_logcat to R.string.omni_doc_logcat_note,
+            R.string.omni_doc_theme to R.string.omni_doc_theme_note,
+            R.string.omni_doc_web to R.string.omni_doc_web_note,
+            R.string.omni_doc_settings to R.string.omni_doc_settings_note,
+            R.string.omni_doc_feedback to R.string.omni_doc_feedback_note,
+            R.string.omni_doc_talk to R.string.omni_doc_talk_note,
+            R.string.omni_doc_rate to R.string.omni_doc_rate_note,
+        )
 
         const val WATCH_CODE_MILLIS = 1_200L
 
@@ -3613,6 +3702,8 @@ class BuilderActivity : Activity() {
     private var feedbackShot: String? = null
     private var helpFor = ""
     private var helpBand = 0
+    private var helpOpen = -1
+    private var adbTab = 0
 
     private val talkHeld = mutableListOf<Pair<Boolean, String>>()
     private var talkDraft = ""
@@ -4111,6 +4202,10 @@ class BuilderActivity : Activity() {
             is Screen.Rate -> renderRate()
             is Screen.About -> renderAbout()
             is Screen.Help -> renderHelp()
+            is Screen.HelpAdb -> renderHelpAdb()
+            is Screen.HelpTalk -> renderHelpTalk()
+            is Screen.HelpDocs -> renderHelpDocs()
+            is Screen.HelpFaq -> renderHelpFaq()
         }
         content.addView(results)
 
@@ -4176,6 +4271,10 @@ class BuilderActivity : Activity() {
             is Screen.NewProject -> go(Screen.Kinds)
             is Screen.WebToApk -> go(Screen.Kinds)
             is Screen.Help -> go(Screen.About)
+            is Screen.HelpAdb -> go(Screen.Help)
+            is Screen.HelpTalk -> go(Screen.Help)
+            is Screen.HelpDocs -> go(Screen.Help)
+            is Screen.HelpFaq -> go(Screen.Help)
             is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Picture -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Files ->
@@ -9549,77 +9648,377 @@ class BuilderActivity : Activity() {
             }
     }
 
-    private fun helpCard(topic: Int): View {
-        val (mark, tint) = helpMark(topic)
-        val title = getString(HELP_TOPICS[topic].first)
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(gap(3), gap(4), gap(3), gap(4))
-            isClickable = true
-            isFocusable = true
-            contentDescription = title
-            readAs(Button::class.java.name)
-            background = touchable(
-                GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = gap(4).toFloat()
-                    setColor(palette.surface)
-                    setStroke(gap(1) / 2, Ink.fade(tint, 0.5f))
-                },
-                tint,
-            )
-            setOnClickListener {
-                showNote(title, getString(HELP_TOPICS[topic].third))
+    private fun helpEntry(
+        mark: Mark.Shape,
+        tint: Int,
+        title: String,
+        detail: String,
+        onPress: () -> Unit,
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(gap(4), gap(4), gap(4), gap(4))
+        isClickable = true
+        isFocusable = true
+        contentDescription = said(title, detail)
+        readAs(Button::class.java.name)
+        background = touchable(
+            GradientDrawable().apply {
+                this.shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(4).toFloat()
+                setColor(palette.surface)
+                setStroke(gap(1) / 2, Ink.fade(tint, 0.45f))
+            },
+            tint,
+        )
+        setOnClickListener { onPress() }
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    badge(mark, tint),
+                    LinearLayout.LayoutParams(gap(12), gap(12)),
+                )
+                addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)),
+                )
             }
-            addView(badge(mark, tint), LinearLayout.LayoutParams(gap(11), gap(11)))
-            addView(
-                TextView(context).apply {
-                    text = title
-                    setTextColor(palette.foreground)
-                    typeface = Type.strong
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                    setPadding(0, gap(2), 0, 0)
-                }
-            )
-            addView(
-                TextView(context).apply {
-                    text = getString(HELP_TOPICS[topic].second)
-                    setTextColor(palette.muted)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    setLineSpacing(gap(1).toFloat(), 1f)
-                }
-            )
-        }
+        )
+        addView(
+            TextView(context).apply {
+                text = title
+                setTextColor(palette.foreground)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                setPadding(0, gap(3), 0, gap(1))
+            }
+        )
+        addView(
+            TextView(context).apply {
+                text = detail
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setLineSpacing(gap(1).toFloat(), 1f)
+            }
+        )
     }
 
-    private fun helpMatches(topic: Int): Boolean {
-        val needle = helpFor.trim().lowercase(Locale.getDefault())
-        val band = HELP_BANDS[topic]
-        if (helpBand != 0 && band != helpBand) {
-            return false
-        }
-        if (needle.isEmpty()) {
-            return true
-        }
-        val whole = HELP_TOPICS[topic].toList()
-            .joinToString(" ") { getString(it) }
-            .lowercase(Locale.getDefault())
-        return whole.contains(needle)
+    private fun helpFooter() {
+        content.addView(
+            noteCard(
+                getString(R.string.omni_help_more),
+                getString(R.string.omni_help_contact_note),
+                subtle(getString(R.string.omni_feedback_title), palette.accent) {
+                    go(Screen.Feedback)
+                },
+            )
+        )
+        content.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_help_signed)
+                setTextColor(palette.muted)
+                typeface = Type.label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                letterSpacing = Type.TRACKING
+                gravity = Gravity.END
+                setPadding(0, gap(1), 0, gap(3))
+            }
+        )
     }
 
     private fun renderHelp() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot_reading,
-                getString(R.string.omni_help_title),
-                getString(R.string.omni_help_note),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_help_hello)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_help_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(R.drawable.omni_mascot_reading)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    },
+                    LinearLayout.LayoutParams(gap(24), gap(20)).apply { marginStart = gap(2) },
+                )
+            }
+        )
+
+        val search = card()
+        search.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.FIND, palette.muted) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    EditText(context).apply {
+                        setText(helpFor)
+                        hint = getString(R.string.omni_help_search)
+                        setHintTextColor(palette.muted)
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        setBackgroundColor(Color.TRANSPARENT)
+                        isSingleLine = true
+                        addTextChangedListener(object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun afterTextChanged(s: Editable?) {
+                                helpFor = s?.toString().orEmpty()
+                            }
+                        })
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    subtle(getString(R.string.omni_help_search_go), palette.accent) {
+                        go(Screen.HelpFaq)
+                    }
+                )
+            }
+        )
+        content.addView(search)
+
+        content.addView(label(getString(R.string.omni_help_popular)))
+        content.addView(
+            chips(HELP_POPULAR.map { getString(it) }, { false }) { which ->
+                go(
+                    when (which) {
+                        0 -> Screen.HelpAdb
+                        1 -> Screen.HelpTalk
+                        2 -> Screen.HelpDocs
+                        else -> Screen.HelpFaq
+                    }
+                )
+            }
+        )
+
+        content.addView(
+            grid(
+                2,
+                listOf(
+                    helpEntry(
+                        Mark.Shape.LOG,
+                        palette.accent,
+                        getString(R.string.omni_help_adb),
+                        getString(R.string.omni_help_adb_note),
+                    ) { go(Screen.HelpAdb) },
+                    helpEntry(
+                        Mark.Shape.ROBOT,
+                        0xFFB06BFF.toInt(),
+                        getString(R.string.omni_menu_assistant),
+                        getString(R.string.omni_help_talk_note),
+                    ) { go(Screen.HelpTalk) },
+                    helpEntry(
+                        Mark.Shape.PHONE,
+                        palette.ok,
+                        getString(R.string.omni_help_docs),
+                        getString(R.string.omni_help_docs_note),
+                    ) { go(Screen.HelpDocs) },
+                    helpEntry(
+                        Mark.Shape.BOOK,
+                        0xFFFF5C8A.toInt(),
+                        getString(R.string.omni_help_faq),
+                        getString(R.string.omni_help_faq_note),
+                    ) { go(Screen.HelpFaq) },
+                ),
+            )
+        )
+        helpFooter()
+    }
+
+    private fun numberedRow(at: Int, mark: Mark.Shape, tint: Int, title: String, detail: String) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(gap(1), gap(3), gap(1), gap(3))
+            isClickable = true
+            isFocusable = true
+            contentDescription = said(title, detail)
+            readAs(Button::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { showNote(title, detail) }
+            addView(
+                badge(mark, tint),
+                LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = getString(R.string.omni_help_numbered, at, title)
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = detail
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setLineSpacing(gap(1).toFloat(), 1f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
+                LinearLayout.LayoutParams(gap(6), gap(6)),
+            )
+        }
+
+    private fun renderHelpDocs() {
+        content.addView(
+            screenHead(
+                Mark.Shape.BOOK,
+                getString(R.string.omni_help_docs),
+                getString(R.string.omni_help_docs_note),
+            )
+        )
+        content.addView(
+            noteCard(
+                getString(R.string.omni_help_docs),
+                getString(R.string.omni_help_docs_body),
+            )
+        )
+        val list = card()
+        DOC_ROWS.forEachIndexed { index, row ->
+            if (index > 0) {
+                list.addView(rule(), MATCH_PARENT, 1)
+            }
+            val (mark, tint) = docMark(index)
+            list.addView(
+                numberedRow(index + 1, mark, tint, getString(row.first), getString(row.second))
+            )
+        }
+        content.addView(list)
+        helpFooter()
+    }
+
+    private fun docMark(at: Int): Pair<Mark.Shape, Int> = when (at) {
+        0 -> Mark.Shape.HOME to palette.accent
+        1 -> Mark.Shape.ADD to palette.ok
+        2 -> Mark.Shape.CODE to 0xFFB06BFF.toInt()
+        3 -> Mark.Shape.FOLDER to palette.warning
+        4 -> Mark.Shape.PLAY to 0xFFFF5C8A.toInt()
+        5 -> Mark.Shape.PHONE to palette.ok
+        6 -> Mark.Shape.BRUSH to 0xFFFF5C8A.toInt()
+        7 -> Mark.Shape.WEB to palette.accent
+        8 -> Mark.Shape.GEAR to palette.warning
+        9 -> Mark.Shape.SPEECH to palette.ok
+        10 -> Mark.Shape.ROBOT to 0xFFB06BFF.toInt()
+        else -> Mark.Shape.STAR to palette.accent
+    }
+
+    private fun foldRow(at: Int, question: String, answer: String): View {
+        val open = at == helpOpen
+        val (mark, tint) = helpMark(at)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(3), gap(3), gap(3), gap(3))
+            background = touchable(
+                GradientDrawable().apply {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(if (open) palette.surface else Color.TRANSPARENT)
+                    setStroke(gap(1) / 2, if (open) Ink.fade(tint, 0.5f) else palette.divider)
+                },
+                tint,
+            )
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(1)
+                bottomMargin = gap(1)
+            }
+            isClickable = true
+            isFocusable = true
+            contentDescription = question
+            readAs(Button::class.java.name)
+            setOnClickListener {
+                helpOpen = if (open) -1 else at
+                render(false)
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        View(context).apply { foreground = Mark(mark, tint) },
+                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(R.string.omni_help_numbered, at + 1, question)
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(
+                                if (open) Mark.Shape.AWAY else Mark.Shape.DOWN,
+                                palette.muted,
+                            )
+                        },
+                        LinearLayout.LayoutParams(gap(6), gap(6)),
+                    )
+                }
+            )
+            if (open) {
+                addView(
+                    TextView(context).apply {
+                        text = answer
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setLineSpacing(gap(1).toFloat(), 1f)
+                        setPadding(gap(10), gap(2), 0, gap(1))
+                    }
+                )
+            }
+        }
+    }
+
+    private fun renderHelpFaq() {
+        content.addView(
+            screenHead(
+                Mark.Shape.HELP,
+                getString(R.string.omni_help_faq),
+                getString(R.string.omni_help_faq_note),
             )
         )
         val search = card()
         search.addView(
             field(getString(R.string.omni_help_search), helpFor) {
                 helpFor = it
-                results.removeAllViews()
             }
         )
         search.addView(
@@ -9629,48 +10028,232 @@ class BuilderActivity : Activity() {
         content.addView(
             chips(HELP_BAND_NAMES.map { getString(it) }, { it == helpBand }) {
                 helpBand = it
+                helpOpen = -1
                 render(false)
             }
         )
-        val shown = HELP_TOPICS.indices.filter { helpMatches(it) }
-        if (shown.isEmpty()) {
-            content.addView(quiet(getString(R.string.omni_help_none)))
-        } else {
-            content.addView(grid(2, shown.map { helpCard(it) }))
-        }
-        content.addView(
-            row(
-                getString(R.string.omni_help_docs),
-                getString(R.string.omni_help_docs_note),
-                "",
-                palette.accent,
+        val needle = helpFor.trim().lowercase(Locale.getDefault())
+        var shown = 0
+        HELP_TOPICS.forEachIndexed { index, topic ->
+            val band = HELP_BANDS[index]
+            val whole = (getString(topic.first) + " " + getString(topic.second))
+                .lowercase(Locale.getDefault())
+            if ((helpBand == 0 || band == helpBand) &&
+                (needle.isEmpty() || whole.contains(needle))
             ) {
-                showNote(
-                    getString(R.string.omni_help_docs),
-                    getString(R.string.omni_help_docs_body),
+                shown += 1
+                content.addView(foldRow(index, getString(topic.first), getString(topic.second)))
+            }
+        }
+        if (shown == 0) {
+            content.addView(quiet(getString(R.string.omni_help_none)))
+        }
+        helpFooter()
+    }
+
+    private fun renderHelpTalk() {
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_help_talk_title)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_help_talk_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(R.drawable.omni_mascot_reading)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    },
+                    LinearLayout.LayoutParams(gap(22), gap(18)).apply { marginStart = gap(2) },
                 )
             }
         )
-        val reach = card()
-        reach.addView(heading(getString(R.string.omni_about_contact)))
-        reach.addView(body(getString(R.string.omni_help_contact_note)))
-        reach.addView(
-            subtle(getString(R.string.omni_feedback_title), palette.accent) {
-                go(Screen.Feedback)
+        content.addView(
+            grid(
+                if (wideEnough()) 2 else 1,
+                TALK_STEPS.mapIndexed { index, step ->
+                    LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(gap(4), gap(4), gap(4), gap(4))
+                        background = GradientDrawable().apply {
+                            this.shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(4).toFloat()
+                            setColor(palette.surface)
+                            setStroke(gap(1) / 2, palette.divider)
+                        }
+                        addView(
+                            LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                addView(
+                                    TextView(context).apply {
+                                        text = (index + 1).toString()
+                                        setTextColor(palette.background)
+                                        typeface = Type.label
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                        gravity = Gravity.CENTER
+                                        background = GradientDrawable().apply {
+                                            shape = GradientDrawable.OVAL
+                                            setColor(palette.accent)
+                                        }
+                                    },
+                                    LinearLayout.LayoutParams(gap(8), gap(8)).apply {
+                                        marginEnd = gap(3)
+                                    },
+                                )
+                                addView(
+                                    TextView(context).apply {
+                                        text = getString(step.first)
+                                        setTextColor(palette.foreground)
+                                        typeface = Type.strong
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                                    },
+                                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                                )
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(step.second)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setPadding(0, gap(2), 0, 0)
+                            }
+                        )
+                    }
+                },
+            )
+        )
+        content.addView(primary(getString(R.string.omni_menu_assistant)) { go(Screen.Assistant) })
+        helpFooter()
+    }
+
+    private fun guideStep(at: Int, title: String, detail: String, art: Int): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(4), gap(4), gap(4), gap(4))
+            background = GradientDrawable().apply {
+                this.shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(4).toFloat()
+                setColor(palette.surface)
+                setStroke(gap(1) / 2, palette.divider)
+            }
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+                bottomMargin = gap(1)
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = at.toString()
+                            setTextColor(palette.background)
+                            typeface = Type.label
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            gravity = Gravity.CENTER
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(palette.accent)
+                            }
+                        },
+                        LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = detail
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setLineSpacing(gap(1).toFloat(), 1f)
+                    setPadding(0, gap(2), 0, gap(2))
+                }
+            )
+            if (art != 0) {
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(art)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        adjustViewBounds = true
+                    },
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+            }
+        }
+
+    private fun renderHelpAdb() {
+        content.addView(
+            screenHead(
+                Mark.Shape.LOG,
+                getString(R.string.omni_help_adb),
+                getString(R.string.omni_help_adb_note),
+            )
+        )
+        content.addView(
+            chips(
+                listOf(
+                    getString(R.string.omni_adb_alone),
+                    getString(R.string.omni_adb_desk),
+                ),
+                { it == adbTab },
+            ) {
+                adbTab = it
+                render(false)
             }
         )
-        reach.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_help_signed)
-                setTextColor(palette.muted)
-                typeface = Type.label
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                letterSpacing = Type.TRACKING
-                gravity = Gravity.END
-                setPadding(0, gap(2), 0, gap(1))
-            }
+        val steps = if (adbTab == 0) ADB_ALONE else ADB_DESK
+        val art = if (adbTab == 0) ADB_ALONE_ART else ADB_DESK_ART
+        content.addView(
+            noteCard(
+                getString(R.string.omni_adb_first),
+                getString(
+                    if (adbTab == 0) R.string.omni_adb_alone_first else R.string.omni_adb_desk_first
+                ),
+            )
         )
-        content.addView(reach)
+        steps.forEachIndexed { index, step ->
+            content.addView(
+                guideStep(
+                    index + 1,
+                    getString(step.first),
+                    getString(step.second),
+                    art.getOrElse(index) { 0 },
+                )
+            )
+        }
+        helpFooter()
     }
 
     private fun renderSettings() {
