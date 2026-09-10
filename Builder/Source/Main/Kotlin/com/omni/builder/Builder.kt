@@ -10756,7 +10756,6 @@ class BuilderActivity : Activity() {
                         view.observe(
                             percent = report.optInt("percent"),
                             stage = report.optInt("step", 1) - 1,
-                            count = report.optInt("steps", 1),
                             finished = state == "built",
                             refused = state == "refused" || state == "stopped",
                         )
@@ -12513,8 +12512,6 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
 class BuildStageView(context: Context, private var palette: Palette) : View(context) {
 
     private companion object {
-        const val RAIN = 90
-
         const val CATCH_UP = 3.4f
     }
 
@@ -12524,7 +12521,6 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
     }
     private val glass = Paint()
     private val ring = RectF()
-    private val glyph = CharArray(1)
 
     private var running = false
     private var lastFrame = 0L
@@ -12533,9 +12529,10 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
     private var reported = 0f
     private var drawn = 0f
     private var stageAt = 0
-    private var stageCount = 1
     private var refusedAt = -1
     private var done = false
+    private var stamps = arrayOfNulls<String>(0)
+    private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     var title: String = ""
     var stages: List<String> = emptyList()
@@ -12559,14 +12556,27 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
         refusedAt = -1
         done = false
         running = true
+        stamps = arrayOfNulls(stages.size)
+        stamp(0)
         postOnAnimation(step)
     }
 
-    fun observe(percent: Int, stage: Int, count: Int, finished: Boolean, refused: Boolean) {
+    private fun stamp(at: Int) {
+        if (at in stamps.indices && stamps[at] == null) {
+            stamps[at] = clock.format(Date())
+        }
+    }
+
+    fun observe(percent: Int, stage: Int, finished: Boolean, refused: Boolean) {
         reported = percent.coerceIn(0, 100).toFloat()
         stageAt = stage.coerceAtLeast(0)
-        stageCount = count.coerceAtLeast(1)
         done = finished
+        for (at in 0..stageAt) {
+            stamp(at)
+        }
+        if (finished) {
+            stages.indices.forEach { stamp(it) }
+        }
         if (refused) refusedAt = stageAt
     }
 
@@ -12595,121 +12605,116 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
         lastFrame = now
         drawn += (reported - drawn) * (since * CATCH_UP).coerceIn(0f, 1f)
         if (done && reported >= 100f && drawn > 99.4f) drawn = 100f
-        val life = (now - began) / 1000f
 
         canvas.drawColor(palette.background)
-        drawRain(canvas, w, h, life)
-        val centre = h * 0.30f
-        drawRing(canvas, w, centre, min(w, h) * 0.19f, life)
-        drawStages(canvas, w, h)
 
-        text.textAlign = Paint.Align.CENTER
-        text.textSize = min(w, h) * 0.034f
+        val pad = min(w, h) * 0.05f
+        val card = RectF(pad, pad, w - pad, h - pad)
+        paint.style = Paint.Style.FILL
+        paint.color = palette.surface
+        canvas.drawRoundRect(card, pad * 0.6f, pad * 0.6f, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        paint.color = palette.divider
+        canvas.drawRoundRect(card, pad * 0.6f, pad * 0.6f, paint)
+        paint.style = Paint.Style.FILL
+
+        val left = card.left + pad
+        val right = card.right - pad
+        val mark = min(w, h) * 0.075f
+        val hammer = Mark(Mark.Shape.PACKAGE, palette.accent)
+        hammer.setBounds(
+            left.toInt(),
+            (card.top + pad * 0.7f).toInt(),
+            (left + mark).toInt(),
+            (card.top + pad * 0.7f + mark).toInt(),
+        )
+        hammer.draw(canvas)
+
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = min(w, h) * 0.036f
         text.color = palette.foreground
-        canvas.drawText(title, w * 0.5f, h * 0.075f, text)
+        canvas.drawText(title, left + mark + pad * 0.6f, card.top + pad * 1.5f, text)
         text.textSize = min(w, h) * 0.026f
         text.color = palette.muted
-        canvas.drawText(remaining, w * 0.5f, h * 0.925f, text)
-        canvas.drawText(note, w * 0.5f, h * 0.962f, text)
+        canvas.drawText(note, left + mark + pad * 0.6f, card.top + pad * 2.3f, text)
 
-        Tape.over(canvas, glass, w, h, life, 0.75f)
-        Ink.vignette(canvas, glass, w, h, 0.8f)
-    }
-
-    private fun drawRain(canvas: Canvas, w: Float, h: Float, life: Float) {
-        text.textAlign = Paint.Align.CENTER
-        text.textSize = min(w, h) * 0.022f
-        for (index in 0 until RAIN) {
-            val column = Ink.scatter(index, 21) * w
-            val speed = 26f + Ink.scatter(index, 22) * 70f
-            val y = ((Ink.scatter(index, 23) * h + life * speed) % (h + 40f)) - 20f
-            glyph[0] = if (((life * 2.4f).toInt() + index) % 2 == 0) '1' else '0'
-            text.color = Ink.fade(palette.accent, 0.05f + 0.10f * Ink.scatter(index, 24))
-            canvas.drawText(glyph, 0, 1, column, y, text)
-        }
-    }
-
-    private fun drawRing(canvas: Canvas, w: Float, cy: Float, radius: Float, life: Float) {
-        val cx = w * 0.5f
-        ring.set(cx - radius, cy - radius, cx + radius, cy + radius)
-        val width = radius * 0.13f
-
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = width
-        paint.strokeCap = Paint.Cap.ROUND
-        paint.color = Ink.fade(palette.foreground, 0.10f)
-        canvas.drawCircle(cx, cy, radius, paint)
-
-        val colour = when {
-            refusedAt >= 0 -> palette.error
-            done -> palette.ok
-            else -> palette.accent
-        }
-        val sweep = 360f * (drawn / 100f)
-        paint.strokeWidth = width * 2.1f
-        paint.color = Ink.fade(colour, 0.16f)
-        canvas.drawArc(ring, -90f, sweep, false, paint)
-        paint.strokeWidth = width
-        paint.color = Ink.hot(colour, 0.2f)
-        canvas.drawArc(ring, -90f, sweep, false, paint)
-
-        if (!done && refusedAt < 0) {
-            paint.strokeWidth = width * 0.55f
-            paint.color = Ink.fade(Ink.hot(colour, 0.7f), 0.85f)
-            canvas.drawArc(ring, -90f + (life * 220f) % 360f, 26f, false, paint)
-        }
-        paint.style = Paint.Style.FILL
-        paint.strokeCap = Paint.Cap.BUTT
-
-        text.textAlign = Paint.Align.CENTER
-        text.textSize = radius * 0.62f
+        val barTop = card.top + pad * 3.2f
+        val barTall = min(w, h) * 0.018f
+        val shown = "%" + drawn.toInt().coerceIn(0, 100)
+        text.textSize = min(w, h) * 0.028f
+        val room = text.measureText(shown) + pad * 0.5f
+        ring.set(left, barTop, right - room, barTop + barTall)
+        paint.color = palette.raised
+        canvas.drawRoundRect(ring, barTall / 2f, barTall / 2f, paint)
+        ring.right = left + (right - room - left) * (drawn / 100f).coerceIn(0f, 1f)
+        paint.color = if (refusedAt >= 0) palette.error else palette.accent
+        canvas.drawRoundRect(ring, barTall / 2f, barTall / 2f, paint)
         text.color = palette.foreground
-        canvas.drawText("${drawn.toInt()}", cx, cy + radius * 0.18f, text)
-        text.textSize = radius * 0.22f
-        text.color = palette.muted
-        canvas.drawText("%", cx, cy + radius * 0.52f, text)
-    }
-
-    private fun drawStages(canvas: Canvas, w: Float, h: Float) {
-        if (stages.isEmpty()) return
-        val top = h * 0.545f
-        val room = h * 0.33f
-        val line = room / stages.size
+        text.textAlign = Paint.Align.RIGHT
+        canvas.drawText(shown, right, barTop + barTall, text)
         text.textAlign = Paint.Align.LEFT
-        text.textSize = min(line * 0.52f, min(w, h) * 0.030f)
-        val left = w * 0.16f
 
-        for ((index, name) in stages.withIndex()) {
-            val y = top + line * (index + 0.5f)
-            val state = when {
-                index == refusedAt -> 2
-                done || index < stageAt -> 0
-                index == stageAt -> 1
-                else -> 3
-            }
-            val colour = when (state) {
-                0 -> palette.ok
-                1 -> palette.accent
-                2 -> palette.error
-                else -> palette.muted
-            }
-            paint.color = Ink.fade(colour, if (state == 3) 0.35f else 1f)
-            val dot = line * 0.16f
-            when (state) {
-                1 -> {
+        val listTop = barTop + barTall + pad * 1.2f
+        val room2 = (card.bottom - pad * 0.6f - listTop).coerceAtLeast(1f)
+        val rows = stages.size.coerceAtLeast(1)
+        val step = (room2 / rows).coerceAtMost(min(w, h) * 0.062f)
+        text.textSize = (step * 0.44f).coerceAtMost(min(w, h) * 0.026f)
+        stages.forEachIndexed { index, named ->
+            val y = listTop + step * (index + 0.7f)
+            val past = index < stageAt || (done && reported >= 100f)
+            val here = index == stageAt && !done
+            val stamp = stamps.getOrNull(index).orEmpty()
+            text.color = palette.muted
+            canvas.drawText(stamp, left, y, text)
+            val dot = left + step * 1.7f
+            when {
+                refusedAt == index -> {
+                    paint.color = palette.error
+                    canvas.drawCircle(dot, y - step * 0.16f, step * 0.16f, paint)
+                }
+                past -> {
                     paint.style = Paint.Style.STROKE
-                    paint.strokeWidth = max(1.5f, dot * 0.45f)
-                    canvas.drawCircle(left - dot * 2.4f, y - line * 0.16f, dot, paint)
+                    paint.strokeWidth = step * 0.08f
+                    paint.color = palette.ok
+                    canvas.drawLine(
+                        dot - step * 0.16f,
+                        y - step * 0.16f,
+                        dot - step * 0.03f,
+                        y - step * 0.03f,
+                        paint,
+                    )
+                    canvas.drawLine(
+                        dot - step * 0.03f,
+                        y - step * 0.03f,
+                        dot + step * 0.18f,
+                        y - step * 0.32f,
+                        paint,
+                    )
                     paint.style = Paint.Style.FILL
                 }
-                else -> canvas.drawCircle(left - dot * 2.4f, y - line * 0.16f, dot, paint)
+                else -> {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = step * 0.06f
+                    paint.color = if (here) palette.accent else palette.divider
+                    canvas.drawCircle(dot, y - step * 0.16f, step * 0.16f, paint)
+                    paint.style = Paint.Style.FILL
+                }
             }
-            text.color = Ink.fade(
-                if (state == 3) palette.muted else palette.foreground,
-                if (state == 3) 0.55f else 1f,
-            )
-            canvas.drawText(name, left, y, text)
+            text.color = when {
+                refusedAt == index -> palette.error
+                here -> palette.accent
+                past -> palette.foreground
+                else -> palette.muted
+            }
+            canvas.drawText(named, dot + step * 0.42f, y, text)
         }
+
+        text.textAlign = Paint.Align.RIGHT
+        text.color = palette.muted
+        text.textSize = min(w, h) * 0.026f
+        canvas.drawText(remaining, right, card.bottom - pad * 0.4f, text)
+        text.textAlign = Paint.Align.LEFT
     }
 }
 
