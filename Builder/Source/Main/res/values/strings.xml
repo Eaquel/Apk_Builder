@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Add a picture</string>
     <string name="omni_talk_add_link">Add a link</string>
     <string name="omni_talk_unwired">No assistant is connected yet. The screen is here; what answers on it is not, and nothing will be made up in its place.</string>
+    <string name="omni_log_device">Device connection</string>
+    <string name="omni_log_unbound">Not connected</string>
+    <string name="omni_log_bind">Connect a device</string>
+    <string name="omni_log_bind_note">To read another device’s log you have to reach it over ADB first.</string>
+    <string name="omni_log_sieve">Search the log…</string>
+    <string name="omni_log_written">Log output</string>
+    <string name="omni_log_empty_note">Press Start to begin reading.</string>
+    <string name="omni_log_about">About the log</string>
+    <string name="omni_log_guide">Open the guide</string>
+    <string name="omni_clone_title">Clone a repository</string>
+    <string name="omni_clone_kind">Version control</string>
+    <string name="omni_clone_address">Repository address</string>
+    <string name="omni_clone_auth">Authentication</string>
+    <string name="omni_clone_auth_none">None</string>
+    <string name="omni_clone_auth_token">Token</string>
+    <string name="omni_clone_into">Target folder</string>
+    <string name="omni_clone_go">Clone</string>
+    <string name="omni_clone_unwired">No version-control client is wired in yet. The form is here; what would fetch the repository is not, and nothing will be faked in its place.</string>
 </resources>

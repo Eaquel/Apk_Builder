@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">أضف صورة</string>
     <string name="omni_talk_add_link">أضف رابطًا</string>
     <string name="omni_talk_unwired">لا مساعد موصول بعد. الشاشة هنا؛ أما ما يجيب عليها فليس كذلك، ولن يُختلق شيء مكانه.</string>
+    <string name="omni_log_device">اتصال الجهاز</string>
+    <string name="omni_log_unbound">غير متصل</string>
+    <string name="omni_log_bind">اتصل بجهاز</string>
+    <string name="omni_log_bind_note">لقراءة سجل جهاز آخر عليك الوصول إليه عبر ADB أولًا.</string>
+    <string name="omni_log_sieve">ابحث في السجل…</string>
+    <string name="omni_log_written">مخرجات السجل</string>
+    <string name="omni_log_empty_note">اضغط ابدأ لتبدأ القراءة.</string>
+    <string name="omni_log_about">عن السجل</string>
+    <string name="omni_log_guide">افتح الدليل</string>
+    <string name="omni_clone_title">استنساخ مستودع</string>
+    <string name="omni_clone_kind">إدارة الإصدارات</string>
+    <string name="omni_clone_address">عنوان المستودع</string>
+    <string name="omni_clone_auth">الاستيثاق</string>
+    <string name="omni_clone_auth_none">بلا</string>
+    <string name="omni_clone_auth_token">رمز</string>
+    <string name="omni_clone_into">مجلد الوجهة</string>
+    <string name="omni_clone_go">استنسخ</string>
+    <string name="omni_clone_unwired">لا عميل لإدارة الإصدارات موصول بعد. النموذج هنا؛ أما ما يجلب المستودع فليس كذلك، ولن يُصطنع شيء مكانه.</string>
 </resources>

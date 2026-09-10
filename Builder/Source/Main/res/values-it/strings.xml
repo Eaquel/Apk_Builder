@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Aggiungi un’immagine</string>
     <string name="omni_talk_add_link">Aggiungi un collegamento</string>
     <string name="omni_talk_unwired">Nessun assistente è ancora collegato. La schermata c’è; ciò che risponde su di essa no, e al suo posto non verrà inventato niente.</string>
+    <string name="omni_log_device">Connessione del dispositivo</string>
+    <string name="omni_log_unbound">Non connesso</string>
+    <string name="omni_log_bind">Connetti un dispositivo</string>
+    <string name="omni_log_bind_note">Per leggere il registro di un altro dispositivo devi prima raggiungerlo via ADB.</string>
+    <string name="omni_log_sieve">Cerca nel registro…</string>
+    <string name="omni_log_written">Uscita del registro</string>
+    <string name="omni_log_empty_note">Premi Avvia per cominciare a leggere.</string>
+    <string name="omni_log_about">Sul registro</string>
+    <string name="omni_log_guide">Apri la guida</string>
+    <string name="omni_clone_title">Clona un repository</string>
+    <string name="omni_clone_kind">Controllo di versione</string>
+    <string name="omni_clone_address">Indirizzo del repository</string>
+    <string name="omni_clone_auth">Autenticazione</string>
+    <string name="omni_clone_auth_none">Nessuna</string>
+    <string name="omni_clone_auth_token">Token</string>
+    <string name="omni_clone_into">Cartella di destinazione</string>
+    <string name="omni_clone_go">Clona</string>
+    <string name="omni_clone_unwired">Nessun client di controllo di versione è ancora collegato. Il modulo c’è; ciò che andrebbe a prendere il repository no, e al suo posto non verrà finto niente.</string>
 </resources>

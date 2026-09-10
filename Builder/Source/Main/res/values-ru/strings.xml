@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Добавить картинку</string>
     <string name="omni_talk_add_link">Добавить ссылку</string>
     <string name="omni_talk_unwired">Помощник пока не подключён. Экран есть; того, что на нём отвечает, нет, и вместо него ничего выдумано не будет.</string>
+    <string name="omni_log_device">Подключение устройства</string>
+    <string name="omni_log_unbound">Не подключено</string>
+    <string name="omni_log_bind">Подключить устройство</string>
+    <string name="omni_log_bind_note">Чтобы читать журнал другого устройства, сперва нужно достучаться до него по ADB.</string>
+    <string name="omni_log_sieve">Искать в журнале…</string>
+    <string name="omni_log_written">Вывод журнала</string>
+    <string name="omni_log_empty_note">Нажмите «Запустить», чтобы начать чтение.</string>
+    <string name="omni_log_about">О журнале</string>
+    <string name="omni_log_guide">Открыть руководство</string>
+    <string name="omni_clone_title">Клонировать репозиторий</string>
+    <string name="omni_clone_kind">Контроль версий</string>
+    <string name="omni_clone_address">Адрес репозитория</string>
+    <string name="omni_clone_auth">Аутентификация</string>
+    <string name="omni_clone_auth_none">Нет</string>
+    <string name="omni_clone_auth_token">Токен</string>
+    <string name="omni_clone_into">Целевая папка</string>
+    <string name="omni_clone_go">Клонировать</string>
+    <string name="omni_clone_unwired">Клиент контроля версий пока не подключён. Форма есть; того, что забрало бы репозиторий, нет, и вместо него ничего изображать не станут.</string>
 </resources>

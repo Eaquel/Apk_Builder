@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">添加图片</string>
     <string name="omni_talk_add_link">添加链接</string>
     <string name="omni_talk_unwired">还没有接上任何助手。界面在这里，但在上面作答的东西还没有，也不会拿别的东西顶替。</string>
+    <string name="omni_log_device">设备连接</string>
+    <string name="omni_log_unbound">未连接</string>
+    <string name="omni_log_bind">连接设备</string>
+    <string name="omni_log_bind_note">要读取另一台设备的日志，得先通过 ADB 连上它。</string>
+    <string name="omni_log_sieve">在日志中搜索…</string>
+    <string name="omni_log_written">日志输出</string>
+    <string name="omni_log_empty_note">点“开始”即可开始读取。</string>
+    <string name="omni_log_about">关于日志</string>
+    <string name="omni_log_guide">打开指南</string>
+    <string name="omni_clone_title">克隆仓库</string>
+    <string name="omni_clone_kind">版本控制</string>
+    <string name="omni_clone_address">仓库地址</string>
+    <string name="omni_clone_auth">身份验证</string>
+    <string name="omni_clone_auth_none">无</string>
+    <string name="omni_clone_auth_token">令牌</string>
+    <string name="omni_clone_into">目标文件夹</string>
+    <string name="omni_clone_go">克隆</string>
+    <string name="omni_clone_unwired">还没有接上版本控制客户端。表单在这里，但真正去取仓库的东西还没有，也不会拿假的顶上。</string>
 </resources>

@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Juntar uma imagem</string>
     <string name="omni_talk_add_link">Juntar uma ligação</string>
     <string name="omni_talk_unwired">Ainda não há nenhum assistente ligado. O ecrã está aqui; o que responde nele não está, e nada será inventado no seu lugar.</string>
+    <string name="omni_log_device">Ligação do aparelho</string>
+    <string name="omni_log_unbound">Sem ligação</string>
+    <string name="omni_log_bind">Ligar um aparelho</string>
+    <string name="omni_log_bind_note">Para ler o registo de outro aparelho tens primeiro de lhe chegar por ADB.</string>
+    <string name="omni_log_sieve">Procurar no registo…</string>
+    <string name="omni_log_written">Saída do registo</string>
+    <string name="omni_log_empty_note">Carrega em Iniciar para começar a ler.</string>
+    <string name="omni_log_about">Sobre o registo</string>
+    <string name="omni_log_guide">Abrir o guia</string>
+    <string name="omni_clone_title">Clonar um repositório</string>
+    <string name="omni_clone_kind">Controlo de versões</string>
+    <string name="omni_clone_address">Endereço do repositório</string>
+    <string name="omni_clone_auth">Autenticação</string>
+    <string name="omni_clone_auth_none">Nenhuma</string>
+    <string name="omni_clone_auth_token">Token</string>
+    <string name="omni_clone_into">Pasta de destino</string>
+    <string name="omni_clone_go">Clonar</string>
+    <string name="omni_clone_unwired">Ainda não há nenhum cliente de controlo de versões ligado. O formulário está aqui; o que iria buscar o repositório não está, e nada será fingido no seu lugar.</string>
 </resources>

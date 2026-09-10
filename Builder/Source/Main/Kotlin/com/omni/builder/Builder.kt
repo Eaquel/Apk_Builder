@@ -2538,6 +2538,9 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
         TRASH,
         CLIP,
         DOWN,
+        PHONE,
+        BOOK,
+        WIDEN,
     }
 
     private companion object {
@@ -3072,6 +3075,43 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 path.lineTo(20.5f, 7.4f)
                 canvas.drawPath(path, paint)
             }
+            Shape.PHONE -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(6.5f, 3.4f, 17.5f, 20.6f, 2.2f, 2.2f, Path.Direction.CW)
+                path.moveTo(10.4f, 6.2f)
+                path.lineTo(13.6f, 6.2f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.BOOK -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 7f)
+                path.cubicTo(9.6f, 4.8f, 6.4f, 5.2f, 4.4f, 5.8f)
+                path.lineTo(4.4f, 18.2f)
+                path.cubicTo(6.4f, 17.6f, 9.6f, 17.2f, 12f, 19.4f)
+                path.cubicTo(14.4f, 17.2f, 17.6f, 17.6f, 19.6f, 18.2f)
+                path.lineTo(19.6f, 5.8f)
+                path.cubicTo(17.6f, 5.2f, 14.4f, 4.8f, 12f, 7f)
+                path.close()
+                path.moveTo(12f, 7f)
+                path.lineTo(12f, 19.4f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.WIDEN -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(4.5f, 9f)
+                path.lineTo(4.5f, 4.5f)
+                path.lineTo(9f, 4.5f)
+                path.moveTo(15f, 4.5f)
+                path.lineTo(19.5f, 4.5f)
+                path.lineTo(19.5f, 9f)
+                path.moveTo(19.5f, 15f)
+                path.lineTo(19.5f, 19.5f)
+                path.lineTo(15f, 19.5f)
+                path.moveTo(9f, 19.5f)
+                path.lineTo(4.5f, 19.5f)
+                path.lineTo(4.5f, 15f)
+                canvas.drawPath(path, paint)
+            }
             Shape.CLOCK -> {
                 paint.style = Paint.Style.STROKE
                 canvas.drawCircle(12f, 12f, 8f, paint)
@@ -3341,6 +3381,8 @@ class BuilderActivity : Activity() {
 
         val WEB_PARTS_ON = listOf(true, true, true, true, false)
 
+        val CLONE_KINDS = listOf("Git")
+
         val WEB_PART_NAMES = listOf(
             R.string.omni_web_script,
             R.string.omni_web_storage,
@@ -3556,6 +3598,8 @@ class BuilderActivity : Activity() {
     private var logRefused = ""
     private var logView: TextView? = null
     private var logCount: TextView? = null
+    private var logHollow: View? = null
+    private var logSieve = ""
 
     private var webAddress = ""
     private val webParts = WEB_PARTS_ON.toMutableList()
@@ -3570,6 +3614,7 @@ class BuilderActivity : Activity() {
 
     private val talkHeld = mutableListOf<Pair<Boolean, String>>()
     private var talkDraft = ""
+    private var cloneAddress = ""
 
     private var raised = false
     private val wentBefore = mutableListOf<String>()
@@ -4000,6 +4045,7 @@ class BuilderActivity : Activity() {
         editorAt = null
         logView = null
         logCount = null
+        logHollow = null
         if (screen !is Screen.Logcat) {
             stopTheLog()
         }
@@ -4462,6 +4508,13 @@ class BuilderActivity : Activity() {
                 raiseAction(R.string.omni_raise_open, Mark.Shape.FOLDER) {
                     raised = false
                     go(Screen.Projects)
+                }
+            )
+            raise.addView(
+                raiseAction(R.string.omni_clone_title, Mark.Shape.BRANCH) {
+                    raised = false
+                    drawRaise()
+                    askToClone()
                 }
             )
         }
@@ -7034,12 +7087,21 @@ class BuilderActivity : Activity() {
         results.addView(notice(getString(R.string.omni_trash_sent, project.name), palette.ok))
     }
 
-    private fun heldLog(): String = synchronized(logHeld) { logHeld.joinToString("\n") }
+    private fun heldLog(): String = synchronized(logHeld) {
+        val needle = logSieve.trim().lowercase(Locale.getDefault())
+        logHeld.filter { needle.isEmpty() || it.lowercase(Locale.getDefault()).contains(needle) }
+            .joinToString("\n")
+    }
 
     private fun paintTheLog() {
         val written = heldLog()
-        logView?.text = written.ifEmpty { getString(R.string.omni_log_empty) }
-        logCount?.text = getString(R.string.omni_log_lines, synchronized(logHeld) { logHeld.size })
+        logView?.text = written
+        logView?.visibility = if (written.isEmpty()) View.GONE else View.VISIBLE
+        logHollow?.visibility = if (written.isEmpty()) View.VISIBLE else View.GONE
+        logCount?.text = said(
+            getString(if (logReading) R.string.omni_log_running else R.string.omni_log_stopped),
+            getString(R.string.omni_log_lines, synchronized(logHeld) { logHeld.size }),
+        )
     }
 
     private val logTick = object : Runnable {
@@ -7512,6 +7574,152 @@ class BuilderActivity : Activity() {
         render(false)
     }
 
+    private fun logButton(mark: Mark.Shape, named: Int, filled: Boolean, onPress: () -> Unit) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(gap(2), gap(3), gap(2), gap(3))
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(named)
+            readAs(Button::class.java.name)
+            background = touchable(
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(if (filled) palette.accent else palette.raised)
+                },
+                if (filled) palette.background else palette.accent,
+            )
+            setOnClickListener { onPress() }
+            addView(
+                View(context).apply {
+                    foreground = Mark(mark, if (filled) palette.background else palette.foreground)
+                },
+                LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                TextView(context).apply {
+                    text = getString(named)
+                    setTextColor(if (filled) palette.background else palette.foreground)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    maxLines = 1
+                }
+            )
+        }
+
+    private fun dropRow(named: String, shown: String, choices: List<String>, onPick: (Int) -> Unit): View {
+        val value = TextView(this).apply {
+            text = shown
+            setTextColor(palette.foreground)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(2), 0, gap(1))
+            addView(
+                TextView(context).apply {
+                    text = named
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, 0, 0, gap(1))
+                }
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(gap(3), gap(3), gap(3), gap(3))
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = named
+                    readAs(android.widget.Spinner::class.java.name)
+                    background = touchable(
+                        GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(2).toFloat()
+                            setColor(palette.raised)
+                        },
+                        palette.accent,
+                    )
+                    setOnClickListener {
+                        AlertDialog.Builder(this@BuilderActivity)
+                            .setTitle(named)
+                            .setItems(choices.toTypedArray()) { _, which ->
+                                value.text = choices[which]
+                                onPick(which)
+                            }
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .show()
+                    }
+                    addView(value, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(Mark.Shape.DOWN, palette.muted)
+                        },
+                        LinearLayout.LayoutParams(gap(6), gap(6)),
+                    )
+                }
+            )
+        }
+    }
+
+    private fun askToClone() {
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(5), gap(4), gap(5), gap(2))
+        }
+        sheet.addView(
+            dropRow(
+                getString(R.string.omni_clone_kind),
+                CLONE_KINDS.first(),
+                CLONE_KINDS,
+            ) {}
+        )
+        val (whereHolder, whereField) = input(
+            getString(R.string.omni_clone_address),
+            cloneAddress,
+        )
+        whereField.hint = "https://github.com/user/repo.git"
+        sheet.addView(whereHolder)
+        sheet.addView(
+            dropRow(
+                getString(R.string.omni_clone_auth),
+                getString(R.string.omni_clone_auth_none),
+                listOf(
+                    getString(R.string.omni_clone_auth_none),
+                    getString(R.string.omni_clone_auth_token),
+                ),
+            ) {}
+        )
+        val (intoHolder, intoField) = input(
+            getString(R.string.omni_clone_into),
+            projectsFolder().absolutePath,
+        )
+        sheet.addView(intoHolder)
+
+        val shown = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.omni_clone_title))
+            .setView(ScrollView(this).apply { addView(sheet, MATCH_PARENT, WRAP_CONTENT) })
+            .setPositiveButton(getString(R.string.omni_clone_go), null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        shown.show()
+        shown.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
+            cloneAddress = whereField.text?.toString().orEmpty().trim()
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_clone_unwired), palette.warning))
+            shown.dismiss()
+            if (intoField.text.isNullOrEmpty()) {
+                return@setOnClickListener
+            }
+        }
+        shown.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(palette.error)
+        shown.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(palette.accent)
+    }
+
     private fun renderLogcat() {
         content.addView(
             screenHead(
@@ -7520,35 +7728,55 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_log_note),
             )
         )
-        val scope = card()
-        scope.addView(
+
+        val bound = card()
+        bound.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    badge(Mark.Shape.LOG, if (logReading) palette.ok else palette.muted),
-                    LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
+                    View(context).apply { foreground = Mark(Mark.Shape.PHONE, palette.accent) },
+                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
                 )
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         addView(
                             TextView(context).apply {
-                                text = getString(
-                                    if (logReading) {
-                                        R.string.omni_log_running
-                                    } else {
-                                        R.string.omni_log_stopped
-                                    }
-                                )
-                                setTextColor(if (logReading) palette.ok else palette.muted)
+                                text = getString(R.string.omni_log_device)
+                                setTextColor(palette.foreground)
                                 typeface = Type.strong
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                             }
                         )
                         addView(
+                            LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                addView(
+                                    View(context).apply {
+                                        background = GradientDrawable().apply {
+                                            shape = GradientDrawable.OVAL
+                                            setColor(palette.error)
+                                        }
+                                    },
+                                    LinearLayout.LayoutParams(gap(2), gap(2)).apply {
+                                        marginEnd = gap(2)
+                                    },
+                                )
+                                addView(
+                                    TextView(context).apply {
+                                        text = getString(R.string.omni_log_unbound)
+                                        setTextColor(palette.error)
+                                        typeface = Type.strong
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                    }
+                                )
+                            }
+                        )
+                        addView(
                             TextView(context).apply {
-                                text = getString(R.string.omni_log_scope)
+                                text = getString(R.string.omni_log_bind_note)
                                 setTextColor(palette.muted)
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                                 setLineSpacing(gap(1).toFloat(), 1f)
@@ -7557,13 +7785,76 @@ class BuilderActivity : Activity() {
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
+                addView(
+                    logButton(Mark.Shape.LINK, R.string.omni_log_bind, true) { go(Screen.Help) },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                        marginStart = gap(2)
+                    },
+                )
             }
         )
-        content.addView(scope)
+        content.addView(bound)
 
-        if (logRefused.isNotEmpty()) {
-            content.addView(notice(logRefused, palette.error))
-        }
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(1))
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.LOG, palette.accent) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_menu_logcat)
+                        setTextColor(palette.accent)
+                        typeface = Type.strong
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    }
+                )
+            }
+        )
+        content.addView(
+            View(this).apply { setBackgroundColor(palette.accent) },
+            LinearLayout.LayoutParams(gap(22), gap(1) / 2),
+        )
+        content.addView(
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(2) },
+        )
+
+        val sieve = card()
+        sieve.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.FIND, palette.muted) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    EditText(context).apply {
+                        setText(logSieve)
+                        hint = getString(R.string.omni_log_sieve)
+                        setHintTextColor(palette.muted)
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        setBackgroundColor(Color.TRANSPARENT)
+                        isSingleLine = true
+                        addTextChangedListener(object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun afterTextChanged(s: Editable?) {
+                                logSieve = s?.toString().orEmpty()
+                                paintTheLog()
+                            }
+                        })
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        content.addView(sieve)
 
         val doing = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -7572,39 +7863,80 @@ class BuilderActivity : Activity() {
             }
         }
         doing.addView(
-            subtle(
-                getString(if (logReading) R.string.omni_log_stop else R.string.omni_log_start),
-                if (logReading) palette.warning else palette.ok,
-            ) {
-                if (logReading) stopTheLog() else startTheLog()
+            logButton(Mark.Shape.PLAY, R.string.omni_log_start, !logReading) {
+                startTheLog()
                 render(false)
             },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
         )
         doing.addView(
-            subtle(getString(R.string.omni_action_clear), palette.muted) {
+            logButton(Mark.Shape.STOP, R.string.omni_log_stop, false) {
+                stopTheLog()
+                render(false)
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                marginStart = gap(1)
+                marginEnd = gap(1)
+            },
+        )
+        doing.addView(
+            logButton(Mark.Shape.TRASH, R.string.omni_action_clear, false) {
                 synchronized(logHeld) { logHeld.clear() }
                 paintTheLog()
             },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
         )
-        doing.addView(
-            subtle(getString(R.string.omni_action_copy), palette.accent) {
-                copyOut(heldLog(), getString(R.string.omni_menu_logcat))
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
-        )
         content.addView(doing)
 
+        val shown = card()
+        shown.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_log_written)
+                                setTextColor(palette.foreground)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_log_scope)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    markControl(Mark.Shape.NOTE, R.string.omni_action_copy) {
+                        copyOut(heldLog(), getString(R.string.omni_menu_logcat))
+                    },
+                    LinearLayout.LayoutParams(gap(8), gap(8)),
+                )
+                addView(
+                    markControl(Mark.Shape.WIDEN, R.string.omni_log_written) {
+                        showNote(getString(R.string.omni_log_written), heldLog().ifEmpty {
+                            getString(R.string.omni_log_empty)
+                        })
+                    },
+                    LinearLayout.LayoutParams(gap(8), gap(8)),
+                )
+            }
+        )
         val counter = TextView(this).apply {
             setTextColor(palette.muted)
             typeface = Type.data
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(0, gap(2), 0, gap(1))
+            setPadding(0, gap(1), 0, gap(1))
         }
         logCount = counter
-        content.addView(counter)
-
         val written = EditText(this).apply {
             setTextColor(palette.foreground)
             setBackgroundColor(Color.TRANSPARENT)
@@ -7615,25 +7947,61 @@ class BuilderActivity : Activity() {
             isFocusable = true
             setTextIsSelectable(true)
             keyListener = null
-            minLines = 12
-            maxLines = 40
-            setPadding(gap(2))
+            minLines = 10
+            maxLines = 30
+            setPadding(gap(1))
         }
         logView = written
-        val holder = card()
-        holder.addView(
+        val hollow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(gap(4), gap(10), gap(4), gap(10))
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.LOG, palette.divider) },
+                LinearLayout.LayoutParams(gap(14), gap(14)),
+            )
+            addView(
+                TextView(context).apply {
+                    text = getString(R.string.omni_log_empty)
+                    setTextColor(palette.foreground)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    gravity = Gravity.CENTER
+                    setPadding(0, gap(3), 0, gap(1))
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = getString(R.string.omni_log_empty_note)
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    gravity = Gravity.CENTER
+                    setLineSpacing(gap(1).toFloat(), 1f)
+                }
+            )
+        }
+        logHollow = hollow
+        shown.addView(counter)
+        shown.addView(hollow)
+        shown.addView(
             HorizontalScrollView(this).apply {
                 isFillViewport = true
                 addView(written, MATCH_PARENT, WRAP_CONTENT)
             }
         )
-        content.addView(holder)
+        content.addView(shown)
         paintTheLog()
         if (logReading) {
             content.removeCallbacks(logTick)
             content.postDelayed(logTick, LOG_TICK_MILLIS)
         }
-        content.addView(quiet(getString(R.string.omni_log_note_scope)))
+        content.addView(
+            noteCard(
+                getString(R.string.omni_log_about),
+                getString(R.string.omni_log_note_scope),
+                logButton(Mark.Shape.BOOK, R.string.omni_log_guide, false) { go(Screen.Help) },
+            )
+        )
     }
 
     private fun kindCard(

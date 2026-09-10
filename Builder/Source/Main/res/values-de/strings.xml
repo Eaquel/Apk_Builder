@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Bild hinzufügen</string>
     <string name="omni_talk_add_link">Link hinzufügen</string>
     <string name="omni_talk_unwired">Noch ist kein Assistent angeschlossen. Der Bildschirm ist da; was darauf antwortet, nicht, und an seiner Stelle wird nichts erfunden.</string>
+    <string name="omni_log_device">Geräteverbindung</string>
+    <string name="omni_log_unbound">Nicht verbunden</string>
+    <string name="omni_log_bind">Gerät verbinden</string>
+    <string name="omni_log_bind_note">Um das Protokoll eines anderen Geräts zu lesen, musst du es zuerst über ADB erreichen.</string>
+    <string name="omni_log_sieve">Im Protokoll suchen…</string>
+    <string name="omni_log_written">Protokollausgabe</string>
+    <string name="omni_log_empty_note">Drücke Starten, um zu lesen.</string>
+    <string name="omni_log_about">Über das Protokoll</string>
+    <string name="omni_log_guide">Anleitung öffnen</string>
+    <string name="omni_clone_title">Repository klonen</string>
+    <string name="omni_clone_kind">Versionsverwaltung</string>
+    <string name="omni_clone_address">Repository-Adresse</string>
+    <string name="omni_clone_auth">Anmeldung</string>
+    <string name="omni_clone_auth_none">Keine</string>
+    <string name="omni_clone_auth_token">Token</string>
+    <string name="omni_clone_into">Zielordner</string>
+    <string name="omni_clone_go">Klonen</string>
+    <string name="omni_clone_unwired">Es ist noch kein Versionsverwaltungs-Client angeschlossen. Das Formular ist da; was das Repository holen würde, nicht, und nichts wird an seiner Stelle vorgetäuscht.</string>
 </resources>

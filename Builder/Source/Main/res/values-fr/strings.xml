@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Ajouter une image</string>
     <string name="omni_talk_add_link">Ajouter un lien</string>
     <string name="omni_talk_unwired">Aucun assistant n’est encore branché. L’écran est là ; ce qui répond dessus ne l’est pas, et rien ne sera inventé à sa place.</string>
+    <string name="omni_log_device">Connexion de l’appareil</string>
+    <string name="omni_log_unbound">Non connecté</string>
+    <string name="omni_log_bind">Connecter un appareil</string>
+    <string name="omni_log_bind_note">Pour lire le journal d’un autre appareil, il faut d’abord l’atteindre par ADB.</string>
+    <string name="omni_log_sieve">Chercher dans le journal…</string>
+    <string name="omni_log_written">Sortie du journal</string>
+    <string name="omni_log_empty_note">Appuie sur Démarrer pour commencer la lecture.</string>
+    <string name="omni_log_about">À propos du journal</string>
+    <string name="omni_log_guide">Ouvrir le guide</string>
+    <string name="omni_clone_title">Cloner un dépôt</string>
+    <string name="omni_clone_kind">Gestion de versions</string>
+    <string name="omni_clone_address">Adresse du dépôt</string>
+    <string name="omni_clone_auth">Authentification</string>
+    <string name="omni_clone_auth_none">Aucune</string>
+    <string name="omni_clone_auth_token">Jeton</string>
+    <string name="omni_clone_into">Dossier cible</string>
+    <string name="omni_clone_go">Cloner</string>
+    <string name="omni_clone_unwired">Aucun client de gestion de versions n’est encore branché. Le formulaire est là ; ce qui irait chercher le dépôt ne l’est pas, et rien ne sera simulé à sa place.</string>
 </resources>

@@ -375,4 +375,22 @@
     <string name="omni_talk_add_picture">Görsel Ekle</string>
     <string name="omni_talk_add_link">Bağlantı Ekle</string>
     <string name="omni_talk_unwired">Henüz bağlı bir yapay zeka yok. Ekran burada; üzerinde cevap veren şey değil ve yerine bir şey uydurulmayacak.</string>
+    <string name="omni_log_device">Cihaz Bağlantısı</string>
+    <string name="omni_log_unbound">Bağlı Değil</string>
+    <string name="omni_log_bind">Cihaza Bağlan</string>
+    <string name="omni_log_bind_note">Başka bir cihazın günlüğünü okumak için önce ona ADB ile bağlanmalısınız.</string>
+    <string name="omni_log_sieve">Loglarda ara…</string>
+    <string name="omni_log_written">Logcat Çıktısı</string>
+    <string name="omni_log_empty_note">Okumaya başlamak için Başlat düğmesine dokunun.</string>
+    <string name="omni_log_about">Logcat Hakkında</string>
+    <string name="omni_log_guide">Rehberi Aç</string>
+    <string name="omni_clone_title">Depo Klonla</string>
+    <string name="omni_clone_kind">Sürüm kontrolü</string>
+    <string name="omni_clone_address">Depo adresi</string>
+    <string name="omni_clone_auth">Kimlik doğrulama</string>
+    <string name="omni_clone_auth_none">Yok</string>
+    <string name="omni_clone_auth_token">Belirteç</string>
+    <string name="omni_clone_into">Hedef klasör</string>
+    <string name="omni_clone_go">Klonla</string>
+    <string name="omni_clone_unwired">Henüz bağlı bir sürüm kontrol istemcisi yok. Form burada; depoyu getirecek olan şey değil ve yerine sahtesi konmayacak.</string>
 </resources>
