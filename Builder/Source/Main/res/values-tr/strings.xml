@@ -355,7 +355,7 @@
     <string name="omni_about_head">Omni Builder hakkında detaylı bilgiler.</string>
     <string name="omni_language_shown">%1$s (%2$s)</string>
     <string name="omni_language_told">Bilgi</string>
-    <string name="omni_language_wait">Bir dil seçildiğinde arayüz hemen güncellenir. Bunlardan beşi — Japonca, Korece, Hintçe, Endonezce ve Brezilya Portekizcesi — henüz çevrilmedi; çevrilene kadar İngilizceye düşer.</string>
+    <string name="omni_language_all">Bir dil seçildiğinde arayüz hemen güncellenir. Buradakilerin hepsi eksiksiz çevrildi; hiçbiri başka bir dile düşmez.</string>
     <string name="omni_menu_assistant">Yapay Zeka</string>
     <string name="omni_talk_hello">Merhaba!\nBen Yapay Zeka Asistanınızım.\n\nAndroid geliştirme sürecinde size yardımcı olmak için buradayım. Kod yazabilir, hata çözebilir, proje yapınıza göre önerilerde bulunabilirim. Nasıl yardımcı olabilirim?</string>
     <string name="omni_talk_hint">Mesajınızı yazın…</string>

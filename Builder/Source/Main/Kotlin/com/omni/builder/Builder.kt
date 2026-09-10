@@ -1134,8 +1134,6 @@ object Preferences {
         Triple("pt-BR", "Português (Brasil)", "BR"),
     )
 
-    val TRANSLATED = setOf("en", "tr", "de", "es", "fr", "it", "pt", "ru", "ar", "zh")
-
     private fun store(context: Context) =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
@@ -9501,7 +9499,7 @@ class BuilderActivity : Activity() {
         }
         content.addView(list)
         content.addView(
-            noteCard(getString(R.string.omni_language_told), getString(R.string.omni_language_wait))
+            noteCard(getString(R.string.omni_language_told), getString(R.string.omni_language_all))
         )
     }
 

@@ -355,7 +355,7 @@
     <string name="omni_about_head">关于 Omni Builder 的一切。</string>
     <string name="omni_language_shown">%1$s (%2$s)</string>
     <string name="omni_language_told">说明</string>
-    <string name="omni_language_wait">选定语言后界面立刻改变。其中五种——日语、韩语、印地语、印尼语和巴西葡萄牙语——尚未翻译，在翻译完成前会回落到英语。</string>
+    <string name="omni_language_all">选定语言后界面立刻改变。每一种都已完整翻译，不会回落到别的语言。</string>
     <string name="omni_menu_assistant">助手</string>
     <string name="omni_talk_hello">你好！\n我是你的助手。\n\n我在这里帮你做 Android 开发。我能写代码、理清报错，也能按你的项目结构给出建议。要我帮什么？</string>
     <string name="omni_talk_hint">写下你的消息…</string>

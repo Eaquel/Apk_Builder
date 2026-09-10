@@ -355,7 +355,7 @@
     <string name="omni_about_head">Tudo sobre o Omni Builder.</string>
     <string name="omni_language_shown">%1$s (%2$s)</string>
     <string name="omni_language_told">Nota</string>
-    <string name="omni_language_wait">A interface muda assim que se escolhe uma língua. Cinco delas — japonês, coreano, hindi, indonésio e português do Brasil — ainda não estão traduzidas e recorrem ao inglês até estarem.</string>
+    <string name="omni_language_all">A interface muda assim que se escolhe uma língua. Todas estão traduzidas por inteiro, portanto nada recorre a outra língua.</string>
     <string name="omni_menu_assistant">Assistente</string>
     <string name="omni_talk_hello">Olá!\nSou o teu assistente.\n\nEstou aqui para ajudar enquanto constróis para Android. Posso escrever código, resolver um erro e sugerir o que assenta no teu projeto. Em que posso ajudar?</string>
     <string name="omni_talk_hint">Escreve a tua mensagem…</string>
