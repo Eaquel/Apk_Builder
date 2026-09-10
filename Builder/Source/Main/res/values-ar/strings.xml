@@ -358,4 +358,21 @@
     <string name="omni_action_forward">إلى الأمام</string>
     <string name="omni_rate_support">دعمك يهمّنا كثيرًا.</string>
     <string name="omni_about_head">كل شيء عن Omni Builder.</string>
+    <string name="omni_language_shown">%1$s (%2$s)</string>
+    <string name="omni_language_told">ملاحظة</string>
+    <string name="omni_language_wait">تتغيّر الواجهة فور اختيار لغة. وخمس منها — اليابانية والكورية والهندية والإندونيسية والبرتغالية البرازيلية — لم تُترجم بعد، فترتدّ إلى الإنجليزية حتى تُترجم.</string>
+    <string name="omni_menu_assistant">المساعد</string>
+    <string name="omni_talk_hello">مرحبًا!\nأنا مساعدك.\n\nأنا هنا لأعينك وأنت تبني لأندرويد. أستطيع كتابة شفرة، وحلّ خطأ، واقتراح ما يناسب شكل مشروعك. كيف أساعدك؟</string>
+    <string name="omni_talk_hint">اكتب رسالتك…</string>
+    <string name="omni_talk_send">أرسل</string>
+    <string name="omni_talk_warning">ما يكتبه المساعد ليس صحيحًا دائمًا. اختبر الشفرة المهمة قبل استعمالها.</string>
+    <string name="omni_talk_clear">امسح المحادثة</string>
+    <string name="omni_talk_export">صدّر المحادثة</string>
+    <string name="omni_talk_folder">مجلد العمل</string>
+    <string name="omni_talk_folder_note">اختر المجلد الذي يعمل عليه المساعد.</string>
+    <string name="omni_talk_switch">غيّر المساعد</string>
+    <string name="omni_talk_add_file">أضف ملفًا</string>
+    <string name="omni_talk_add_picture">أضف صورة</string>
+    <string name="omni_talk_add_link">أضف رابطًا</string>
+    <string name="omni_talk_unwired">لا مساعد موصول بعد. الشاشة هنا؛ أما ما يجيب عليها فليس كذلك، ولن يُختلق شيء مكانه.</string>
 </resources>

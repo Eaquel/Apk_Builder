@@ -358,4 +358,21 @@
     <string name="omni_action_forward">Forward</string>
     <string name="omni_rate_support">Your support matters to us.</string>
     <string name="omni_about_head">Everything about Omni Builder.</string>
+    <string name="omni_language_shown">%1$s (%2$s)</string>
+    <string name="omni_language_told">Note</string>
+    <string name="omni_language_wait">The interface changes as soon as a language is chosen. Five of these — Japanese, Korean, Hindi, Indonesian and Brazilian Portuguese — are not translated yet, so they fall back to English until they are.</string>
+    <string name="omni_menu_assistant">Assistant</string>
+    <string name="omni_talk_hello">Hello!\nI am your assistant.\n\nI am here to help while you build for Android. I can write code, work out an error, and suggest things that suit the shape of your project. How can I help?</string>
+    <string name="omni_talk_hint">Write your message…</string>
+    <string name="omni_talk_send">Send</string>
+    <string name="omni_talk_warning">What an assistant writes is not always right. Test important code before you use it.</string>
+    <string name="omni_talk_clear">Clear the conversation</string>
+    <string name="omni_talk_export">Export the conversation</string>
+    <string name="omni_talk_folder">Working folder</string>
+    <string name="omni_talk_folder_note">Choose the folder the assistant works on.</string>
+    <string name="omni_talk_switch">Change the assistant</string>
+    <string name="omni_talk_add_file">Add a file</string>
+    <string name="omni_talk_add_picture">Add a picture</string>
+    <string name="omni_talk_add_link">Add a link</string>
+    <string name="omni_talk_unwired">No assistant is connected yet. The screen is here; what answers on it is not, and nothing will be made up in its place.</string>
 </resources>

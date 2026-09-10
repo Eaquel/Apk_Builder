@@ -358,4 +358,21 @@
     <string name="omni_action_forward">İleri</string>
     <string name="omni_rate_support">Desteğin bizim için çok önemli!</string>
     <string name="omni_about_head">Omni Builder hakkında detaylı bilgiler.</string>
+    <string name="omni_language_shown">%1$s (%2$s)</string>
+    <string name="omni_language_told">Bilgi</string>
+    <string name="omni_language_wait">Bir dil seçildiğinde arayüz hemen güncellenir. Bunlardan beşi — Japonca, Korece, Hintçe, Endonezce ve Brezilya Portekizcesi — henüz çevrilmedi; çevrilene kadar İngilizceye düşer.</string>
+    <string name="omni_menu_assistant">Yapay Zeka</string>
+    <string name="omni_talk_hello">Merhaba!\nBen Yapay Zeka Asistanınızım.\n\nAndroid geliştirme sürecinde size yardımcı olmak için buradayım. Kod yazabilir, hata çözebilir, proje yapınıza göre önerilerde bulunabilirim. Nasıl yardımcı olabilirim?</string>
+    <string name="omni_talk_hint">Mesajınızı yazın…</string>
+    <string name="omni_talk_send">Gönder</string>
+    <string name="omni_talk_warning">Yapay zeka tarafından üretilen bilgiler her zaman doğru olmayabilir. Önemli kodları kullanmadan önce test edin.</string>
+    <string name="omni_talk_clear">Sohbeti Temizle</string>
+    <string name="omni_talk_export">Sohbeti Dışa Aktar</string>
+    <string name="omni_talk_folder">Sohbet Çalışma Dizini</string>
+    <string name="omni_talk_folder_note">Yapay zekanın hangi klasör üzerinde çalışacağını seçin.</string>
+    <string name="omni_talk_switch">Yapay Zeka Değiştir</string>
+    <string name="omni_talk_add_file">Dosya Ekle</string>
+    <string name="omni_talk_add_picture">Görsel Ekle</string>
+    <string name="omni_talk_add_link">Bağlantı Ekle</string>
+    <string name="omni_talk_unwired">Henüz bağlı bir yapay zeka yok. Ekran burada; üzerinde cevap veren şey değil ve yerine bir şey uydurulmayacak.</string>
 </resources>

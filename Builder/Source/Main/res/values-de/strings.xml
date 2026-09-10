@@ -358,4 +358,21 @@
     <string name="omni_action_forward">Vorwärts</string>
     <string name="omni_rate_support">Deine Unterstützung zählt für uns.</string>
     <string name="omni_about_head">Alles über Omni Builder.</string>
+    <string name="omni_language_shown">%1$s (%2$s)</string>
+    <string name="omni_language_told">Hinweis</string>
+    <string name="omni_language_wait">Die Oberfläche wechselt, sobald eine Sprache gewählt ist. Fünf davon — Japanisch, Koreanisch, Hindi, Indonesisch und brasilianisches Portugiesisch — sind noch nicht übersetzt und fallen bis dahin auf Englisch zurück.</string>
+    <string name="omni_menu_assistant">Assistent</string>
+    <string name="omni_talk_hello">Hallo!\nIch bin dein Assistent.\n\nIch bin hier, um beim Bauen für Android zu helfen. Ich kann Code schreiben, einen Fehler auflösen und Vorschläge machen, die zu deinem Projekt passen. Wie kann ich helfen?</string>
+    <string name="omni_talk_hint">Schreib deine Nachricht…</string>
+    <string name="omni_talk_send">Senden</string>
+    <string name="omni_talk_warning">Was ein Assistent schreibt, stimmt nicht immer. Prüfe wichtigen Code, bevor du ihn benutzt.</string>
+    <string name="omni_talk_clear">Unterhaltung löschen</string>
+    <string name="omni_talk_export">Unterhaltung ausgeben</string>
+    <string name="omni_talk_folder">Arbeitsordner</string>
+    <string name="omni_talk_folder_note">Wähle den Ordner, an dem der Assistent arbeitet.</string>
+    <string name="omni_talk_switch">Assistenten wechseln</string>
+    <string name="omni_talk_add_file">Datei hinzufügen</string>
+    <string name="omni_talk_add_picture">Bild hinzufügen</string>
+    <string name="omni_talk_add_link">Link hinzufügen</string>
+    <string name="omni_talk_unwired">Noch ist kein Assistent angeschlossen. Der Bildschirm ist da; was darauf antwortet, nicht, und an seiner Stelle wird nichts erfunden.</string>
 </resources>

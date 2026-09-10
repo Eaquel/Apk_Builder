@@ -358,4 +358,21 @@
     <string name="omni_action_forward">Вперёд</string>
     <string name="omni_rate_support">Ваша поддержка много для нас значит.</string>
     <string name="omni_about_head">Всё об Omni Builder.</string>
+    <string name="omni_language_shown">%1$s (%2$s)</string>
+    <string name="omni_language_told">Примечание</string>
+    <string name="omni_language_wait">Интерфейс меняется, как только выбран язык. Пять из них — японский, корейский, хинди, индонезийский и бразильский португальский — ещё не переведены и до тех пор откатываются к английскому.</string>
+    <string name="omni_menu_assistant">Помощник</string>
+    <string name="omni_talk_hello">Здравствуйте!\nЯ ваш помощник.\n\nЯ здесь, чтобы помочь, пока вы собираете под Android. Могу написать код, разобрать ошибку и предложить то, что подходит вашему проекту. Чем помочь?</string>
+    <string name="omni_talk_hint">Напишите сообщение…</string>
+    <string name="omni_talk_send">Отправить</string>
+    <string name="omni_talk_warning">Написанное помощником не всегда верно. Проверьте важный код, прежде чем им пользоваться.</string>
+    <string name="omni_talk_clear">Очистить переписку</string>
+    <string name="omni_talk_export">Выгрузить переписку</string>
+    <string name="omni_talk_folder">Рабочая папка</string>
+    <string name="omni_talk_folder_note">Выберите папку, над которой работает помощник.</string>
+    <string name="omni_talk_switch">Сменить помощника</string>
+    <string name="omni_talk_add_file">Добавить файл</string>
+    <string name="omni_talk_add_picture">Добавить картинку</string>
+    <string name="omni_talk_add_link">Добавить ссылку</string>
+    <string name="omni_talk_unwired">Помощник пока не подключён. Экран есть; того, что на нём отвечает, нет, и вместо него ничего выдумано не будет.</string>
 </resources>

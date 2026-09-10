@@ -358,4 +358,21 @@
     <string name="omni_action_forward">Avançar</string>
     <string name="omni_rate_support">O teu apoio é muito importante para nós.</string>
     <string name="omni_about_head">Tudo sobre o Omni Builder.</string>
+    <string name="omni_language_shown">%1$s (%2$s)</string>
+    <string name="omni_language_told">Nota</string>
+    <string name="omni_language_wait">A interface muda assim que se escolhe uma língua. Cinco delas — japonês, coreano, hindi, indonésio e português do Brasil — ainda não estão traduzidas e recorrem ao inglês até estarem.</string>
+    <string name="omni_menu_assistant">Assistente</string>
+    <string name="omni_talk_hello">Olá!\nSou o teu assistente.\n\nEstou aqui para ajudar enquanto constróis para Android. Posso escrever código, resolver um erro e sugerir o que assenta no teu projeto. Em que posso ajudar?</string>
+    <string name="omni_talk_hint">Escreve a tua mensagem…</string>
+    <string name="omni_talk_send">Enviar</string>
+    <string name="omni_talk_warning">O que um assistente escreve nem sempre está certo. Testa o código importante antes de o usares.</string>
+    <string name="omni_talk_clear">Limpar a conversa</string>
+    <string name="omni_talk_export">Exportar a conversa</string>
+    <string name="omni_talk_folder">Pasta de trabalho</string>
+    <string name="omni_talk_folder_note">Escolhe a pasta em que o assistente trabalha.</string>
+    <string name="omni_talk_switch">Trocar de assistente</string>
+    <string name="omni_talk_add_file">Juntar um ficheiro</string>
+    <string name="omni_talk_add_picture">Juntar uma imagem</string>
+    <string name="omni_talk_add_link">Juntar uma ligação</string>
+    <string name="omni_talk_unwired">Ainda não há nenhum assistente ligado. O ecrã está aqui; o que responde nele não está, e nada será inventado no seu lugar.</string>
 </resources>
