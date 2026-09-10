@@ -307,7 +307,6 @@
     <string name="omni_kinds_web_note">Une page que tu fais déjà tourner, enveloppée dans son propre paquet.</string>
     <string name="omni_web_title">Web To Apk</string>
     <string name="omni_web_note">Donne l’adresse, choisis ce que la page a le droit de faire, et l’application s’écrit autour.</string>
-    <string name="omni_web_address">Adresse</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">Les scripts de la page s’exécutent.</string>
     <string name="omni_web_storage">Stockage HTML5</string>
@@ -501,4 +500,13 @@
     <string name="omni_feedback_shot_note">Cela nous aide à comprendre le souci plus vite.</string>
     <string name="omni_feedback_reach">Contact (facultatif)</string>
     <string name="omni_feedback_reach_note">Nous pouvons te joindre s’il le faut.</string>
+    <string name="omni_web_tech">Technologies prises en charge</string>
+    <string name="omni_web_tech_note">HTML, CSS, JavaScript et le web moderne sont pris en charge. Cela marche avec n’importe quel site.</string>
+    <string name="omni_web_where">Adresse du site</string>
+    <string name="omni_web_where_note">Donne l’adresse du site que tu veux transformer en application.</string>
+    <string name="omni_web_deeper">Réglages avancés</string>
+    <string name="omni_web_deeper_note">Adapte l’application à ton besoin.</string>
+    <string name="omni_web_look_note">Règle les couleurs et l’allure de l’application.</string>
+    <string name="omni_web_facts_note">Règle le nom, le paquet, l’icône et le reste.</string>
+    <string name="omni_web_safe">Conversion sûre, rapide et facile</string>
 </resources>

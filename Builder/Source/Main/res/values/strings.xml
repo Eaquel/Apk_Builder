@@ -307,7 +307,6 @@
     <string name="omni_kinds_web_note">A page you already run, wrapped in a package of its own.</string>
     <string name="omni_web_title">Web To Apk</string>
     <string name="omni_web_note">Give the address, choose what the page is allowed, and this writes the app around it.</string>
-    <string name="omni_web_address">Address</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">Scripts on the page run.</string>
     <string name="omni_web_storage">HTML5 storage</string>
@@ -501,4 +500,13 @@
     <string name="omni_feedback_shot_note">It helps us understand the trouble sooner.</string>
     <string name="omni_feedback_reach">Contact (optional)</string>
     <string name="omni_feedback_reach_note">We can reach you if we need to.</string>
+    <string name="omni_web_tech">Technologies it supports</string>
+    <string name="omni_web_tech_note">HTML, CSS, JavaScript and the modern web are all supported. It works with any site.</string>
+    <string name="omni_web_where">Website address</string>
+    <string name="omni_web_where_note">Give the address of the site you want turned into an app.</string>
+    <string name="omni_web_deeper">Deeper settings</string>
+    <string name="omni_web_deeper_note">Shape the app to what you need.</string>
+    <string name="omni_web_look_note">Set the colours and the look of the app.</string>
+    <string name="omni_web_facts_note">Set the app name, package name, icon and the rest.</string>
+    <string name="omni_web_safe">Safe, quick and easy to turn over</string>
 </resources>

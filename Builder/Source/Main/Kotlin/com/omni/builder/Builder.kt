@@ -3401,6 +3401,14 @@ class BuilderActivity : Activity() {
             R.string.omni_web_cached,
         )
 
+        val WEB_PART_MARKS = listOf(
+            Mark.Shape.CODE,
+            Mark.Shape.TABLE,
+            Mark.Shape.IMAGE,
+            Mark.Shape.WIDEN,
+            Mark.Shape.GLOBE,
+        )
+
         val WEB_PART_NOTES = listOf(
             R.string.omni_web_script_note,
             R.string.omni_web_storage_note,
@@ -5009,11 +5017,37 @@ class BuilderActivity : Activity() {
 
     private fun renderNewProject() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
-                getString(R.string.omni_projects_new),
-                getString(R.string.omni_form_note),
-            )
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(3))
+                addView(
+                    thumbnail(formImage.orEmpty(), gap(18)),
+                    LinearLayout.LayoutParams(gap(18), gap(18)).apply { marginEnd = gap(4) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_projects_new)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_form_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
         )
 
         val identity = card()
@@ -5038,74 +5072,74 @@ class BuilderActivity : Activity() {
         content.addView(identity)
 
         content.addView(label(getString(R.string.omni_form_image)))
-        val picture = card()
-        picture.addView(
-            LauncherPreview(this, palette).apply {
-                show(formImage)
-                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, gap(30)).apply {
-                    topMargin = gap(1)
-                    bottomMargin = gap(2)
-                }
-            }
-        )
-        picture.addView(
-            quiet(formImage?.let { File(it).name } ?: getString(R.string.omni_form_image_none))
-        )
-        val choosing = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        choosing.addView(
-            subtle(getString(R.string.omni_form_image_choose), palette.accent) { chooseImage(null) },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
-        if (formImage != null) {
-            choosing.addView(
-                subtle(getString(R.string.omni_action_clear), palette.muted) {
-                    formImage = null
-                    render(false)
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
-            )
-        }
-        picture.addView(choosing)
-        content.addView(picture)
-        content.addView(quiet(getString(R.string.omni_form_image_note)))
-
-        content.addView(label(getString(R.string.omni_form_platforms)))
-        val platforms = card()
-        platforms.addView(
+        content.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(4), gap(4), gap(4), gap(4))
+                background = GradientDrawable().apply {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(4).toFloat()
+                    setColor(Color.TRANSPARENT)
+                    setStroke(gap(1) / 2, palette.divider, gap(2).toFloat(), gap(2).toFloat())
+                }
                 addView(
-                    badge(Mark.Shape.PACKAGE, palette.accent),
-                    LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
+                    LauncherPreview(context, palette).apply { show(formImage) },
+                    LinearLayout.LayoutParams(gap(26), gap(26)).apply { marginEnd = gap(4) },
                 )
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         addView(
-                            TextView(context).apply {
-                                text = getString(
-                                    R.string.omni_form_platforms_span,
-                                    releaseNamed(formMinSdk),
-                                    releaseNamed(formTargetSdk),
+                            subtle(
+                                getString(R.string.omni_form_image_choose),
+                                palette.accent,
+                            ) { chooseImage(null) }.apply {
+                                background = reacting(
+                                    Color.TRANSPARENT,
+                                    gap(3).toFloat(),
+                                    palette.accent,
                                 )
-                                setTextColor(palette.foreground)
-                                typeface = Type.strong
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                             }
                         )
                         addView(
-                            TextView(context).apply {
-                                text = getString(R.string.omni_form_platforms_note)
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                                setLineSpacing(gap(1).toFloat(), 1f)
+                            subtle(getString(R.string.omni_action_clear), palette.foreground) {
+                                formImage = null
+                                render(false)
+                            }.apply {
+                                background = reacting(
+                                    palette.raised,
+                                    gap(3).toFloat(),
+                                    palette.accent,
+                                )
                             }
                         )
+                        addView(quiet(getString(R.string.omni_form_image_note)))
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
-            }
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(1) },
+        )
+
+        content.addView(
+            noteCard(
+                getString(R.string.omni_form_platforms),
+                getString(R.string.omni_form_platforms_note),
+            )
+        )
+        val platforms = card()
+        platforms.addView(
+            keyValue(
+                getString(R.string.omni_form_platforms),
+                "",
+                getString(
+                    R.string.omni_form_platforms_span,
+                    releaseNamed(formMinSdk),
+                    releaseNamed(formTargetSdk),
+                ),
+                palette.accent,
+            )
         )
         platforms.addView(label(getString(R.string.omni_form_min_sdk)))
         platforms.addView(
@@ -8656,6 +8690,87 @@ class BuilderActivity : Activity() {
         pageParts = WEB_PARTS.filterIndexed { index, _ -> webParts[index] },
     )
 
+    private fun titledCard(mark: Mark.Shape, tint: Int, title: String, note: String): LinearLayout {
+        val holder = card()
+        holder.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(1), 0, gap(1))
+                addView(
+                    badge(mark, tint),
+                    LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = title
+                                setTextColor(palette.foreground)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = note
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        return holder
+    }
+
+    private fun markedRow(mark: Mark.Shape, tint: Int, title: String, note: String, onPress: () -> Unit) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(0, gap(2), 0, gap(2))
+            isClickable = true
+            isFocusable = true
+            contentDescription = said(title, note)
+            readAs(Button::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { onPress() }
+            addView(
+                badge(mark, tint),
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = note
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
+                LinearLayout.LayoutParams(gap(6), gap(6)),
+            )
+        }
+
     private fun renderWebToApk() {
         content.addView(
             LinearLayout(this).apply {
@@ -8670,7 +8785,7 @@ class BuilderActivity : Activity() {
                                 text = getString(R.string.omni_web_title)
                                 setTextColor(palette.foreground)
                                 typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
                             }
                         )
                         addView(
@@ -8693,60 +8808,157 @@ class BuilderActivity : Activity() {
                 )
             }
         )
-        val where = card()
+        content.addView(
+            titledCard(
+                Mark.Shape.BOLT,
+                palette.accent,
+                getString(R.string.omni_web_tech),
+                getString(R.string.omni_web_tech_note),
+            )
+        )
+
+        val where = titledCard(
+            Mark.Shape.LINK,
+            palette.accent,
+            getString(R.string.omni_web_where),
+            getString(R.string.omni_web_where_note),
+        )
         where.addView(
-            field(getString(R.string.omni_web_address), webAddress) { webAddress = it }
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(3), gap(2), gap(3), gap(2))
+                background = GradientDrawable().apply {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(palette.raised)
+                    setStroke(gap(1) / 2, palette.divider)
+                }
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.LINK, palette.muted) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    EditText(context).apply {
+                        setText(webAddress)
+                        hint = "https://ornek.com"
+                        setHintTextColor(palette.muted)
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        setBackgroundColor(Color.TRANSPARENT)
+                        isSingleLine = true
+                        inputType = InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_VARIATION_URI
+                        addTextChangedListener(object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun afterTextChanged(s: Editable?) {
+                                webAddress = s?.toString().orEmpty()
+                            }
+                        })
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(2) },
         )
         content.addView(where)
 
-        val switches = card()
+        val more = titledCard(
+            Mark.Shape.GEAR,
+            palette.muted,
+            getString(R.string.omni_web_deeper),
+            getString(R.string.omni_web_deeper_note),
+        )
         WEB_PARTS.forEachIndexed { index, _ ->
-            if (index > 0) {
-                switches.addView(rule(), MATCH_PARENT, 1)
-            }
-            switches.addView(
-                switchRow(
-                    getString(WEB_PART_NAMES[index]),
-                    getString(WEB_PART_NOTES[index]),
-                    webParts[index],
-                ) { webParts[index] = it }
+            more.addView(rule(), MATCH_PARENT, 1)
+            more.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(WEB_PART_MARKS[index], palette.accent)
+                        },
+                        LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                    )
+                    addView(
+                        switchRow(
+                            getString(WEB_PART_NAMES[index]),
+                            getString(WEB_PART_NOTES[index]),
+                            webParts[index],
+                        ) { webParts[index] = it },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                }
             )
         }
-        content.addView(switches)
-
-        val more = card()
+        more.addView(rule(), MATCH_PARENT, 1)
         more.addView(
-            row(
+            markedRow(
+                Mark.Shape.BRUSH,
+                0xFFFF5C8A.toInt(),
                 getString(R.string.omni_web_look),
-                palette.label,
-                "",
-                palette.accent,
+                getString(R.string.omni_web_look_note),
             ) { go(Screen.Theme) }
+        )
+        more.addView(rule(), MATCH_PARENT, 1)
+        more.addView(
+            markedRow(
+                Mark.Shape.INFO,
+                palette.accent,
+                getString(R.string.omni_web_facts),
+                getString(R.string.omni_web_facts_note),
+            ) { showWebFacts() }
         )
         content.addView(more)
 
-        content.addView(label(getString(R.string.omni_web_facts)))
-        val facts = card()
-        facts.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
-        facts.addView(
+        content.addView(primary(getString(R.string.omni_web_create)) { createPage() })
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(0, gap(2), 0, gap(3))
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.SHIELD, palette.ok) },
+                    LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_web_safe)
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    }
+                )
+            }
+        )
+        content.addView(quiet(getString(R.string.omni_web_note_privacy)))
+    }
+
+    private fun showWebFacts() {
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(5), gap(3), gap(5), gap(2))
+        }
+        sheet.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
+        sheet.addView(
             field(getString(R.string.omni_form_package), formPackage) { formPackage = it }
         )
-        facts.addView(
+        sheet.addView(
             field(getString(R.string.omni_form_version_name), formVersionName) {
                 formVersionName = it
             }
         )
-        facts.addView(
+        sheet.addView(
             field(getString(R.string.omni_form_version_code), formVersionCode) {
                 formVersionCode = it
             }
         )
-        content.addView(facts)
-        content.addView(primary(getString(R.string.omni_web_create)) { createPage() })
-        content.addView(
-            subtle(getString(R.string.omni_action_cancel), palette.muted) { go(Screen.Kinds) }
-        )
-        content.addView(quiet(getString(R.string.omni_web_note_privacy)))
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.omni_web_facts))
+            .setView(ScrollView(this).apply { addView(sheet, MATCH_PARENT, WRAP_CONTENT) })
+            .setPositiveButton(android.R.string.ok) { _, _ -> render(false) }
+            .show()
     }
 
     private fun tile(text: String, tint: Int) = TextView(this).apply {

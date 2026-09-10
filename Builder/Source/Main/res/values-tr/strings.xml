@@ -307,7 +307,6 @@
     <string name="omni_kinds_web_note">Halihazırda çalıştırdığın bir sayfa, kendi paketine sarılmış hâlde.</string>
     <string name="omni_web_title">Web To Apk</string>
     <string name="omni_web_note">Adresi ver, sayfaya neyin izinli olduğunu seç; uygulama etrafına yazılsın.</string>
-    <string name="omni_web_address">Adres</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">Sayfadaki betikler çalışır.</string>
     <string name="omni_web_storage">HTML5 depolama</string>
@@ -501,4 +500,13 @@
     <string name="omni_feedback_shot_note">Sorunu daha hızlı anlamamıza yardımcı olur.</string>
     <string name="omni_feedback_reach">İletişim (İsteğe Bağlı)</string>
     <string name="omni_feedback_reach_note">Gerekirse sizinle iletişime geçebiliriz.</string>
+    <string name="omni_web_tech">Desteklenen Teknolojiler</string>
+    <string name="omni_web_tech_note">HTML, CSS, JavaScript ve modern web teknolojileri desteklenir. Tüm web siteleri ile uyumludur.</string>
+    <string name="omni_web_where">Web Site Adresi</string>
+    <string name="omni_web_where_note">Dönüştürmek istediğin web sitesinin URL’sini gir.</string>
+    <string name="omni_web_deeper">Gelişmiş Ayarlar</string>
+    <string name="omni_web_deeper_note">Uygulamanı ihtiyacına göre özelleştir.</string>
+    <string name="omni_web_look_note">Uygulamanın renklerini ve görünümünü ayarla.</string>
+    <string name="omni_web_facts_note">Uygulama adı, paket adı, ikon vb. ayarları yapılandır.</string>
+    <string name="omni_web_safe">Güvenli, hızlı ve kolay dönüşüm</string>
 </resources>

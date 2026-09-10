@@ -307,7 +307,6 @@
     <string name="omni_kinds_web_note">Страница, которую вы уже держите, обёрнутая в собственный пакет.</string>
     <string name="omni_web_title">Web To Apk</string>
     <string name="omni_web_note">Дайте адрес, выберите, что странице позволено, и приложение будет написано вокруг неё.</string>
-    <string name="omni_web_address">Адрес</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">Скрипты на странице работают.</string>
     <string name="omni_web_storage">Хранилище HTML5</string>
@@ -501,4 +500,13 @@
     <string name="omni_feedback_shot_note">Так мы поймём затруднение быстрее.</string>
     <string name="omni_feedback_reach">Связь (по желанию)</string>
     <string name="omni_feedback_reach_note">Мы сможем написать вам, если понадобится.</string>
+    <string name="omni_web_tech">Поддерживаемые технологии</string>
+    <string name="omni_web_tech_note">HTML, CSS, JavaScript и современный веб поддержаны. Работает с любым сайтом.</string>
+    <string name="omni_web_where">Адрес сайта</string>
+    <string name="omni_web_where_note">Укажите адрес сайта, который нужно превратить в приложение.</string>
+    <string name="omni_web_deeper">Расширенные настройки</string>
+    <string name="omni_web_deeper_note">Подгоните приложение под свои нужды.</string>
+    <string name="omni_web_look_note">Задайте цвета и вид приложения.</string>
+    <string name="omni_web_facts_note">Задайте имя, пакет, значок и остальное.</string>
+    <string name="omni_web_safe">Безопасное, быстрое и простое превращение</string>
 </resources>

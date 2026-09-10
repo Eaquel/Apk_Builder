@@ -307,7 +307,6 @@
     <string name="omni_kinds_web_note">把你已经在跑的网页，包进它自己的安装包里。</string>
     <string name="omni_web_title">Web To Apk</string>
     <string name="omni_web_note">给出网址，选好允许网页做什么，应用就围着它写出来。</string>
-    <string name="omni_web_address">网址</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">网页上的脚本会运行。</string>
     <string name="omni_web_storage">HTML5 存储</string>
@@ -501,4 +500,13 @@
     <string name="omni_feedback_shot_note">这能帮我们更快弄清问题。</string>
     <string name="omni_feedback_reach">联系方式（可选）</string>
     <string name="omni_feedback_reach_note">需要时我们可以联系你。</string>
+    <string name="omni_web_tech">支持的技术</string>
+    <string name="omni_web_tech_note">HTML、CSS、JavaScript 和现代网页技术都支持，任何网站都可以。</string>
+    <string name="omni_web_where">网站地址</string>
+    <string name="omni_web_where_note">给出你想变成应用的网站网址。</string>
+    <string name="omni_web_deeper">高级设置</string>
+    <string name="omni_web_deeper_note">按你的需要调整应用。</string>
+    <string name="omni_web_look_note">设置应用的颜色和外观。</string>
+    <string name="omni_web_facts_note">设置应用名、包名、图标等等。</string>
+    <string name="omni_web_safe">安全、快速、简单的转换</string>
 </resources>

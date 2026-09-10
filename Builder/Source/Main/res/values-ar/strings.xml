@@ -307,7 +307,6 @@
     <string name="omni_kinds_web_note">صفحة تديرها بالفعل، ملفوفة في حزمة خاصة بها.</string>
     <string name="omni_web_title">Web To Apk</string>
     <string name="omni_web_note">أعطِ العنوان، واختر ما يُسمح به للصفحة، فيُكتب التطبيق حولها.</string>
-    <string name="omni_web_address">العنوان</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">تعمل النصوص البرمجية في الصفحة.</string>
     <string name="omni_web_storage">تخزين HTML5</string>
@@ -501,4 +500,13 @@
     <string name="omni_feedback_shot_note">يعيننا ذلك على فهم المشكلة أسرع.</string>
     <string name="omni_feedback_reach">التواصل (اختياري)</string>
     <string name="omni_feedback_reach_note">نستطيع مراسلتك إن لزم.</string>
+    <string name="omni_web_tech">التقنيات المدعومة</string>
+    <string name="omni_web_tech_note">HTML وCSS وJavaScript والوِب الحديث كلها مدعومة. ويعمل مع أي موقع.</string>
+    <string name="omni_web_where">عنوان الموقع</string>
+    <string name="omni_web_where_note">أعطِ عنوان الموقع الذي تريد تحويله إلى تطبيق.</string>
+    <string name="omni_web_deeper">إعدادات متقدمة</string>
+    <string name="omni_web_deeper_note">صُغ التطبيق على قدر حاجتك.</string>
+    <string name="omni_web_look_note">اضبط ألوان التطبيق ومظهره.</string>
+    <string name="omni_web_facts_note">اضبط الاسم واسم الحزمة والأيقونة وسائرها.</string>
+    <string name="omni_web_safe">تحويل آمن وسريع وسهل</string>
 </resources>
