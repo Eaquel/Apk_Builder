@@ -3260,7 +3260,8 @@ class BuilderActivity : Activity() {
         const val LOG_HELD = 600
 
         val EDITOR_SYMBOLS = listOf(
-            "\t", ";", "\"", "{", "}", "(", ")", "[", "]", ",", ".", "=",
+            "{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "->", "\u03bb",
+            "<", ">", "@", "\"",
         )
 
         const val LOG_TICK_MILLIS = 400L
@@ -6132,7 +6133,7 @@ class BuilderActivity : Activity() {
         for (symbol in EDITOR_SYMBOLS) {
             row.addView(
                 control().apply {
-                    text = if (symbol == "\t") "TAB" else symbol
+                    text = symbol
                     setTextColor(palette.foreground)
                     typeface = Type.data
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
