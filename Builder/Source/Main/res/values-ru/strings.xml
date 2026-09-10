@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Целевая папка</string>
     <string name="omni_clone_go">Клонировать</string>
     <string name="omni_clone_unwired">Клиент контроля версий пока не подключён. Форма есть; того, что забрало бы репозиторий, нет, и вместо него ничего изображать не станут.</string>
+    <string name="omni_facts_title">Сведения о проекте</string>
+    <string name="omni_facts_name">Имя проекта</string>
+    <string name="omni_facts_where">Папка проекта</string>
+    <string name="omni_facts_changed">Последнее изменение</string>
+    <string name="omni_facts_holds">Содержит</string>
+    <string name="omni_facts_counted">файлов: %1$d, папок: %2$d</string>
+    <string name="omni_facts_kind">Вид проекта</string>
+    <string name="omni_facts_java">Приложение Android (Java)</string>
+    <string name="omni_facts_made_by">Собрано в</string>
+    <string name="omni_project_rename">Переименовать проект</string>
+    <string name="omni_project_picture">Сменить картинку приложения</string>
+    <string name="omni_project_package">Изменить имя пакета</string>
+    <string name="omni_project_clear">Очистить собранное проектом</string>
+    <string name="omni_project_export">Выгрузить проект как ZIP</string>
+    <string name="omni_project_cleared">Удалено собранных файлов: %1$d.</string>
+    <string name="omni_project_exported">Проект записан как ZIP.</string>
 </resources>

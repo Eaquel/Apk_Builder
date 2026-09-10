@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Hedef klasör</string>
     <string name="omni_clone_go">Klonla</string>
     <string name="omni_clone_unwired">Henüz bağlı bir sürüm kontrol istemcisi yok. Form burada; depoyu getirecek olan şey değil ve yerine sahtesi konmayacak.</string>
+    <string name="omni_facts_title">Proje Bilgileri</string>
+    <string name="omni_facts_name">Proje Adı</string>
+    <string name="omni_facts_where">Proje Dizini</string>
+    <string name="omni_facts_changed">Son Düzenleme</string>
+    <string name="omni_facts_holds">Toplam Dosya</string>
+    <string name="omni_facts_counted">%1$d dosya, %2$d klasör</string>
+    <string name="omni_facts_kind">Proje Türü</string>
+    <string name="omni_facts_java">Android Uygulaması (Java)</string>
+    <string name="omni_facts_made_by">Derleme Ortamı</string>
+    <string name="omni_project_rename">Projeyi Yeniden Adlandır</string>
+    <string name="omni_project_picture">Uygulama Görselini Değiştir</string>
+    <string name="omni_project_package">Paket Adını Düzenle</string>
+    <string name="omni_project_clear">Proje Önbelleğini Temizle</string>
+    <string name="omni_project_export">Projeyi ZIP Olarak Dışa Aktar</string>
+    <string name="omni_project_cleared">%1$d derlenmiş dosya silindi.</string>
+    <string name="omni_project_exported">Proje ZIP olarak yazıldı.</string>
 </resources>

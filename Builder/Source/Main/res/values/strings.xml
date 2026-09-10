@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Target folder</string>
     <string name="omni_clone_go">Clone</string>
     <string name="omni_clone_unwired">No version-control client is wired in yet. The form is here; what would fetch the repository is not, and nothing will be faked in its place.</string>
+    <string name="omni_facts_title">Project details</string>
+    <string name="omni_facts_name">Project name</string>
+    <string name="omni_facts_where">Project folder</string>
+    <string name="omni_facts_changed">Last changed</string>
+    <string name="omni_facts_holds">Holds</string>
+    <string name="omni_facts_counted">%1$d files, %2$d folders</string>
+    <string name="omni_facts_kind">Project kind</string>
+    <string name="omni_facts_java">Android application (Java)</string>
+    <string name="omni_facts_made_by">Built with</string>
+    <string name="omni_project_rename">Rename the project</string>
+    <string name="omni_project_picture">Change the app picture</string>
+    <string name="omni_project_package">Edit the package name</string>
+    <string name="omni_project_clear">Clear what the project built</string>
+    <string name="omni_project_export">Export the project as a ZIP</string>
+    <string name="omni_project_cleared">%1$d built files removed.</string>
+    <string name="omni_project_exported">The project was written out as a ZIP.</string>
 </resources>

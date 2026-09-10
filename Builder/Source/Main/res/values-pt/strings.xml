@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Pasta de destino</string>
     <string name="omni_clone_go">Clonar</string>
     <string name="omni_clone_unwired">Ainda não há nenhum cliente de controlo de versões ligado. O formulário está aqui; o que iria buscar o repositório não está, e nada será fingido no seu lugar.</string>
+    <string name="omni_facts_title">Dados do projeto</string>
+    <string name="omni_facts_name">Nome do projeto</string>
+    <string name="omni_facts_where">Pasta do projeto</string>
+    <string name="omni_facts_changed">Última alteração</string>
+    <string name="omni_facts_holds">Contém</string>
+    <string name="omni_facts_counted">%1$d ficheiros, %2$d pastas</string>
+    <string name="omni_facts_kind">Tipo de projeto</string>
+    <string name="omni_facts_java">Aplicação Android (Java)</string>
+    <string name="omni_facts_made_by">Construído com</string>
+    <string name="omni_project_rename">Mudar o nome do projeto</string>
+    <string name="omni_project_picture">Mudar a imagem da aplicação</string>
+    <string name="omni_project_package">Editar o nome do pacote</string>
+    <string name="omni_project_clear">Apagar o que o projeto construiu</string>
+    <string name="omni_project_export">Exportar o projeto como ZIP</string>
+    <string name="omni_project_cleared">%1$d ficheiros construídos removidos.</string>
+    <string name="omni_project_exported">O projeto foi escrito como ZIP.</string>
 </resources>

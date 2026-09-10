@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Dossier cible</string>
     <string name="omni_clone_go">Cloner</string>
     <string name="omni_clone_unwired">Aucun client de gestion de versions n’est encore branché. Le formulaire est là ; ce qui irait chercher le dépôt ne l’est pas, et rien ne sera simulé à sa place.</string>
+    <string name="omni_facts_title">Détails du projet</string>
+    <string name="omni_facts_name">Nom du projet</string>
+    <string name="omni_facts_where">Dossier du projet</string>
+    <string name="omni_facts_changed">Dernière modification</string>
+    <string name="omni_facts_holds">Contient</string>
+    <string name="omni_facts_counted">%1$d fichiers, %2$d dossiers</string>
+    <string name="omni_facts_kind">Type de projet</string>
+    <string name="omni_facts_java">Application Android (Java)</string>
+    <string name="omni_facts_made_by">Construit avec</string>
+    <string name="omni_project_rename">Renommer le projet</string>
+    <string name="omni_project_picture">Changer l’image de l’application</string>
+    <string name="omni_project_package">Modifier le nom du paquet</string>
+    <string name="omni_project_clear">Effacer ce que le projet a construit</string>
+    <string name="omni_project_export">Exporter le projet en ZIP</string>
+    <string name="omni_project_cleared">%1$d fichiers construits supprimés.</string>
+    <string name="omni_project_exported">Le projet a été écrit en ZIP.</string>
 </resources>

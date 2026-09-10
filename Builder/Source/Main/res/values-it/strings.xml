@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Cartella di destinazione</string>
     <string name="omni_clone_go">Clona</string>
     <string name="omni_clone_unwired">Nessun client di controllo di versione è ancora collegato. Il modulo c’è; ciò che andrebbe a prendere il repository no, e al suo posto non verrà finto niente.</string>
+    <string name="omni_facts_title">Dati del progetto</string>
+    <string name="omni_facts_name">Nome del progetto</string>
+    <string name="omni_facts_where">Cartella del progetto</string>
+    <string name="omni_facts_changed">Ultima modifica</string>
+    <string name="omni_facts_holds">Contiene</string>
+    <string name="omni_facts_counted">%1$d file, %2$d cartelle</string>
+    <string name="omni_facts_kind">Tipo di progetto</string>
+    <string name="omni_facts_java">Applicazione Android (Java)</string>
+    <string name="omni_facts_made_by">Costruito con</string>
+    <string name="omni_project_rename">Rinomina il progetto</string>
+    <string name="omni_project_picture">Cambia l’immagine dell’app</string>
+    <string name="omni_project_package">Modifica il nome del pacchetto</string>
+    <string name="omni_project_clear">Cancella ciò che il progetto ha costruito</string>
+    <string name="omni_project_export">Esporta il progetto come ZIP</string>
+    <string name="omni_project_cleared">%1$d file costruiti rimossi.</string>
+    <string name="omni_project_exported">Il progetto è stato scritto come ZIP.</string>
 </resources>

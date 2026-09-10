@@ -393,4 +393,20 @@
     <string name="omni_clone_into">Zielordner</string>
     <string name="omni_clone_go">Klonen</string>
     <string name="omni_clone_unwired">Es ist noch kein Versionsverwaltungs-Client angeschlossen. Das Formular ist da; was das Repository holen würde, nicht, und nichts wird an seiner Stelle vorgetäuscht.</string>
+    <string name="omni_facts_title">Projektangaben</string>
+    <string name="omni_facts_name">Projektname</string>
+    <string name="omni_facts_where">Projektordner</string>
+    <string name="omni_facts_changed">Zuletzt geändert</string>
+    <string name="omni_facts_holds">Enthält</string>
+    <string name="omni_facts_counted">%1$d Dateien, %2$d Ordner</string>
+    <string name="omni_facts_kind">Projektart</string>
+    <string name="omni_facts_java">Android-Anwendung (Java)</string>
+    <string name="omni_facts_made_by">Gebaut mit</string>
+    <string name="omni_project_rename">Projekt umbenennen</string>
+    <string name="omni_project_picture">App-Bild wechseln</string>
+    <string name="omni_project_package">Paketnamen bearbeiten</string>
+    <string name="omni_project_clear">Gebautes des Projekts löschen</string>
+    <string name="omni_project_export">Projekt als ZIP ausgeben</string>
+    <string name="omni_project_cleared">%1$d gebaute Dateien entfernt.</string>
+    <string name="omni_project_exported">Das Projekt wurde als ZIP geschrieben.</string>
 </resources>

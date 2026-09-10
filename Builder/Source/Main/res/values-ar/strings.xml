@@ -393,4 +393,20 @@
     <string name="omni_clone_into">مجلد الوجهة</string>
     <string name="omni_clone_go">استنسخ</string>
     <string name="omni_clone_unwired">لا عميل لإدارة الإصدارات موصول بعد. النموذج هنا؛ أما ما يجلب المستودع فليس كذلك، ولن يُصطنع شيء مكانه.</string>
+    <string name="omni_facts_title">بيانات المشروع</string>
+    <string name="omni_facts_name">اسم المشروع</string>
+    <string name="omni_facts_where">مجلد المشروع</string>
+    <string name="omni_facts_changed">آخر تعديل</string>
+    <string name="omni_facts_holds">يحوي</string>
+    <string name="omni_facts_counted">%1$d ملفًا و%2$d مجلدًا</string>
+    <string name="omni_facts_kind">نوع المشروع</string>
+    <string name="omni_facts_java">تطبيق أندرويد (جافا)</string>
+    <string name="omni_facts_made_by">بُني بـ</string>
+    <string name="omni_project_rename">غيّر اسم المشروع</string>
+    <string name="omni_project_picture">غيّر صورة التطبيق</string>
+    <string name="omni_project_package">حرّر اسم الحزمة</string>
+    <string name="omni_project_clear">امسح ما بناه المشروع</string>
+    <string name="omni_project_export">صدّر المشروع كملف ZIP</string>
+    <string name="omni_project_cleared">حُذف %1$d ملفًا مبنيًّا.</string>
+    <string name="omni_project_exported">كُتب المشروع ملف ZIP.</string>
 </resources>

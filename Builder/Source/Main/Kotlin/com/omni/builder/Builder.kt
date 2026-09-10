@@ -4875,18 +4875,7 @@ class BuilderActivity : Activity() {
                     palette.ok,
                 ) { openHere(project.root) }.apply {
                     setOnLongClickListener {
-                        AlertDialog.Builder(this@BuilderActivity)
-                            .setTitle(project.label.ifEmpty { project.name })
-                            .setItems(
-                                arrayOf(
-                                    getString(R.string.omni_action_open),
-                                    getString(R.string.omni_action_delete),
-                                )
-                            ) { _, which ->
-                                if (which == 0) openHere(project.root) else deleteProject(project)
-                            }
-                            .setNegativeButton(android.R.string.cancel, null)
-                            .show()
+                        projectMenu(project.root)
                         true
                     }
                 }
@@ -5115,6 +5104,9 @@ class BuilderActivity : Activity() {
             )
             tools.addView(
                 tool(getString(R.string.omni_tab_build), palette.ok) { go(Screen.Build(root)) }
+            )
+            tools.addView(
+                tool(getString(R.string.omni_action_more), palette.muted) { projectMenu(root) }
             )
             content.addView(tools)
             lookForTrouble(root)
@@ -7718,6 +7710,210 @@ class BuilderActivity : Activity() {
         }
         shown.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(palette.error)
         shown.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(palette.accent)
+    }
+
+    private fun factRow(named: String, said: String, onPress: (() -> Unit)? = null): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(2), 0, gap(2))
+            addView(
+                TextView(context).apply {
+                    text = named
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                },
+                LinearLayout.LayoutParams(gap(34), WRAP_CONTENT),
+            )
+            addView(
+                TextView(context).apply {
+                    text = said
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            if (onPress != null) {
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.NOTE, palette.muted)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(R.string.omni_action_copy)
+                        readAs(Button::class.java.name)
+                        setOnClickListener { onPress() }
+                    },
+                    LinearLayout.LayoutParams(gap(6), gap(6)),
+                )
+            }
+        }
+
+    private fun countedIn(root: String): Pair<Int, Int> {
+        var files = 0
+        var folders = 0
+        File(root).walkTopDown().forEach { if (it.isDirectory) folders += 1 else files += 1 }
+        return files to (folders - 1).coerceAtLeast(0)
+    }
+
+    private fun showProjectFacts(root: String) {
+        val summary = summaryOf(root)
+        val here = File(root)
+        val (files, folders) = countedIn(root)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(5), gap(3), gap(5), gap(2))
+        }
+        sheet.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 0, 0, gap(3))
+                addView(
+                    thumbnail(File(root, "$PROJECT_RES/$PROJECT_ICON").absolutePath, gap(20)),
+                    LinearLayout.LayoutParams(gap(20), gap(20)).apply { marginEnd = gap(4) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(quiet(getString(R.string.omni_facts_name)))
+                        addView(
+                            TextView(context).apply {
+                                text = here.name
+                                setTextColor(palette.foreground)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                            }
+                        )
+                        addView(quiet(getString(R.string.omni_form_package)))
+                        addView(
+                            TextView(context).apply {
+                                text = summary?.packageName.orEmpty()
+                                setTextColor(palette.foreground)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        sheet.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+        sheet.addView(factRow(getString(R.string.omni_facts_where), root) {
+            copyOut(root, getString(R.string.omni_facts_where))
+        })
+        sheet.addView(
+            factRow(getString(R.string.omni_facts_changed), moment(here.lastModified() / 1000))
+        )
+        sheet.addView(
+            factRow(
+                getString(R.string.omni_facts_holds),
+                getString(R.string.omni_facts_counted, files, folders),
+            )
+        )
+        sheet.addView(factRow(getString(R.string.omni_facts_kind), getString(R.string.omni_facts_java)))
+        sheet.addView(
+            factRow(
+                getString(R.string.omni_facts_made_by),
+                getString(R.string.omni_app_shown, versionShown()),
+            )
+        )
+        sheet.addView(
+            factRow(
+                getString(R.string.omni_form_platforms),
+                getString(
+                    R.string.omni_form_platforms_span,
+                    releaseNamed(summary?.minSdk ?: OLDEST_PLATFORM),
+                    releaseNamed(summary?.targetSdk ?: NEWEST_PLATFORM),
+                ),
+            )
+        )
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.omni_facts_title))
+            .setView(ScrollView(this).apply { addView(sheet, MATCH_PARENT, WRAP_CONTENT) })
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun clearProjectCache(root: String) {
+        val named = File(root).name
+        var gone = 0
+        runCatching {
+            builtFolder().listFiles()?.forEach { one ->
+                if (one.name.startsWith(named) && one.delete()) {
+                    gone += 1
+                }
+            }
+        }
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_project_cleared, gone), palette.ok))
+    }
+
+    private fun exportProject(root: String) {
+        val here = File(root)
+        working({
+            val into = File(builtFolder(), "${here.name}.zip")
+            java.util.zip.ZipOutputStream(FileOutputStream(into)).use { out ->
+                here.walkTopDown().filter { it.isFile }.forEach { one ->
+                    val at = one.absolutePath.removePrefix(here.absolutePath).trimStart('/')
+                    out.putNextEntry(java.util.zip.ZipEntry(at))
+                    one.inputStream().use { it.copyTo(out) }
+                    out.closeEntry()
+                }
+            }
+            into.absolutePath
+        }) { where ->
+            results.addView(notice(getString(R.string.omni_project_exported), palette.ok))
+            shareOutside(File(where))
+        }
+    }
+
+    private fun projectMenu(root: String) {
+        val summary = summaryOf(root)
+        val named = arrayOf(
+            getString(R.string.omni_project_rename),
+            getString(R.string.omni_project_picture),
+            getString(R.string.omni_project_package),
+            getString(R.string.omni_facts_title),
+            getString(R.string.omni_project_clear),
+            getString(R.string.omni_project_export),
+            getString(R.string.omni_action_delete),
+        )
+        AlertDialog.Builder(this)
+            .setTitle(File(root).name)
+            .setItems(named) { _, which ->
+                when (which) {
+                    0 -> askForName(
+                        getString(R.string.omni_project_rename),
+                        File(root).name,
+                    ) { asked ->
+                        val into = File(File(root).parentFile, asked.trim())
+                        results.removeAllViews()
+                        if (asked.isBlank() || into.exists() || !File(root).renameTo(into)) {
+                            results.addView(
+                                notice(getString(R.string.omni_files_needs_name), palette.error)
+                            )
+                        } else {
+                            if (openProject == root) {
+                                openProject = into.absolutePath
+                            }
+                            go(Screen.Files(into.absolutePath, ""))
+                        }
+                    }
+                    1 -> chooseImage(root)
+                    2 -> askForName(
+                        getString(R.string.omni_form_package),
+                        summary?.packageName.orEmpty(),
+                    ) { asked ->
+                        act(Builder.nativeManifestSet(root, "package", asked.trim()), "set")
+                    }
+                    3 -> showProjectFacts(root)
+                    4 -> clearProjectCache(root)
+                    5 -> exportProject(root)
+                    else -> summary?.let { deleteProject(it) }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun renderLogcat() {
