@@ -235,10 +235,6 @@
     <string name="omni_theme_active">EM USO</string>
     <string name="omni_about_version">Versão %1$s</string>
     <string name="omni_about_note">Tudo aqui é construído neste aparelho. Nada do que escreves é enviado para lado nenhum.</string>
-    <string name="omni_about_feature_fast">RÁPIDO</string>
-    <string name="omni_about_feature_safe">ASSINADO</string>
-    <string name="omni_about_feature_alone">SEM LIGAÇÃO</string>
-    <string name="omni_about_feature_spoken">10 LÍNGUAS</string>
     <string name="omni_about_policy">Política de privacidade</string>
     <string name="omni_about_policy_note">O que esta aplicação guarda e o que nunca envia</string>
     <string name="omni_about_policy_body">Os teus projetos, as tuas chaves e os teus pacotes ficam no armazenamento próprio desta aplicação, neste aparelho. Nada do que escreves é carregado, e a aplicação não abre por si nenhuma ligação. Uma ligação em que tocas é entregue à aplicação com que escolhes abri-la.</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">No telefone, Definições › Acerca do telefone › Informações de software, toca sete vezes no número de compilação e liga a depuração USB nas opções de programador.</string>
     <string name="omni_adb_d_three">Testar a ligação</string>
     <string name="omni_adb_d_three_note">Liga o telefone com um cabo que leve dados, abre um terminal na pasta platform-tools e corre adb devices.</string>
+    <string name="omni_about_make">Construir</string>
+    <string name="omni_about_make_note">Cria as tuas aplicações com facilidade</string>
+    <string name="omni_about_try">Testar</string>
+    <string name="omni_about_try_note">Encontra falhas depressa</string>
+    <string name="omni_about_own">Personalizar</string>
+    <string name="omni_about_own_note">Com temas à tua medida</string>
+    <string name="omni_about_join">Participar</string>
+    <string name="omni_about_join_note">Juntos, por uma melhor</string>
+    <string name="omni_about_reserved">Todos os direitos reservados.</string>
+    <string name="omni_about_thanks">Obrigado por usares o Omni Builder!</string>
+    <string name="omni_about_thanks_note">Estamos aqui por uma melhor experiência de desenvolvimento.</string>
+    <string name="omni_feedback_kind_fault_note">Algo está mal</string>
+    <string name="omni_feedback_kind_idea_note">Uma ideia nova</string>
+    <string name="omni_feedback_kind_question_note">Agradecer</string>
+    <string name="omni_feedback_kind_other_note">Outra coisa</string>
+    <string name="omni_feedback_shot_note">Ajuda-nos a perceber o problema mais depressa.</string>
+    <string name="omni_feedback_reach">Contacto (opcional)</string>
+    <string name="omni_feedback_reach_note">Podemos falar contigo se for preciso.</string>
 </resources>

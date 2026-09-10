@@ -3521,6 +3521,20 @@ class BuilderActivity : Activity() {
             ),
         )
 
+        val FEEDBACK_MARKS = listOf(
+            Mark.Shape.BINARY,
+            Mark.Shape.BOLT,
+            Mark.Shape.STAR,
+            Mark.Shape.NOTE,
+        )
+
+        val FEEDBACK_NOTES = listOf(
+            R.string.omni_feedback_kind_fault_note,
+            R.string.omni_feedback_kind_idea_note,
+            R.string.omni_feedback_kind_question_note,
+            R.string.omni_feedback_kind_other_note,
+        )
+
         val HELP_POPULAR = listOf(
             R.string.omni_help_adb,
             R.string.omni_menu_assistant,
@@ -9343,29 +9357,76 @@ class BuilderActivity : Activity() {
         content.addView(quiet(getString(R.string.omni_rate_store_note)))
     }
 
-    private fun featureCell(mark: Mark.Shape, named: Int, tint: Int): View =
+    private fun featureCell(mark: Mark.Shape, named: Int, note: Int, tint: Int): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(gap(1), gap(2), gap(1), gap(2))
-            addView(badge(mark, tint), LinearLayout.LayoutParams(gap(10), gap(10)))
+            addView(
+                View(context).apply { foreground = Mark(mark, tint) },
+                LinearLayout.LayoutParams(gap(9), gap(9)),
+            )
             addView(
                 TextView(context).apply {
                     text = getString(named)
-                    setTextColor(palette.muted)
-                    typeface = Type.label
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                    letterSpacing = Type.TRACKING
+                    setTextColor(palette.foreground)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     gravity = Gravity.CENTER
-                    setPadding(0, gap(1), 0, 0)
+                    setPadding(0, gap(2), 0, 0)
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = getString(note)
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    gravity = Gravity.CENTER
+                    setLineSpacing(gap(1) / 2f, 1f)
                 }
             )
         }
 
-    private fun mailIntent(subject: String, body: String): Intent =
-        Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")).apply {
-            putExtra(Intent.EXTRA_SUBJECT, subject)
-            putExtra(Intent.EXTRA_TEXT, body)
+    private fun aboutRow(mark: Mark.Shape, tint: Int, title: String, note: String, onPress: () -> Unit) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(0, gap(2), 0, gap(2))
+            isClickable = true
+            isFocusable = true
+            contentDescription = said(title, note)
+            readAs(Button::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { onPress() }
+            addView(
+                View(context).apply { foreground = Mark(mark, tint) },
+                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = note
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.accent) },
+                LinearLayout.LayoutParams(gap(6), gap(6)),
+            )
         }
 
     private fun renderAbout() {
@@ -9376,17 +9437,18 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_about_head),
             )
         )
-        content.addView(
+        val face = card()
+        face.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(0, gap(4), 0, gap(2))
+                setPadding(0, gap(3), 0, gap(2))
                 addView(
                     ImageView(context).apply {
                         setImageResource(R.drawable.omni_brand_large)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                     },
-                    LinearLayout.LayoutParams(gap(22), gap(22)),
+                    LinearLayout.LayoutParams(gap(20), gap(20)),
                 )
                 addView(
                     TextView(context).apply {
@@ -9394,11 +9456,23 @@ class BuilderActivity : Activity() {
                         setTextColor(palette.foreground)
                         typeface = Type.heading
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
-                        letterSpacing = 0.05f
-                        setPadding(0, gap(2), 0, gap(1))
+                        setPadding(0, gap(2), 0, 0)
                     }
                 )
-                addView(tile(getString(R.string.omni_about_version, versionShown()), palette.accent))
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_brand_note)
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setPadding(0, 0, 0, gap(2))
+                    }
+                )
+                addView(
+                    tile(
+                        getString(R.string.omni_about_version, versionShown()),
+                        palette.foreground,
+                    )
+                )
                 addView(
                     TextView(context).apply {
                         text = getString(R.string.omni_about_note)
@@ -9406,39 +9480,53 @@ class BuilderActivity : Activity() {
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         gravity = Gravity.CENTER
                         setLineSpacing(gap(1).toFloat(), 1f)
-                        setPadding(gap(4), gap(2), gap(4), 0)
+                        setPadding(gap(2), gap(3), gap(2), gap(2))
                     }
                 )
             }
         )
-        content.addView(
+        face.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, gap(2), 0, gap(2))
                 val cells = listOf(
-                    featureCell(Mark.Shape.BOLT, R.string.omni_about_feature_fast, palette.warning),
-                    featureCell(Mark.Shape.SHIELD, R.string.omni_about_feature_safe, palette.ok),
                     featureCell(
-                        Mark.Shape.PACKAGE,
-                        R.string.omni_about_feature_alone,
+                        Mark.Shape.CODE,
+                        R.string.omni_about_make,
+                        R.string.omni_about_make_note,
                         palette.accent,
                     ),
                     featureCell(
-                        Mark.Shape.GLOBE,
-                        R.string.omni_about_feature_spoken,
-                        palette.error,
+                        Mark.Shape.BOLT,
+                        R.string.omni_about_try,
+                        R.string.omni_about_try_note,
+                        0xFFB06BFF.toInt(),
+                    ),
+                    featureCell(
+                        Mark.Shape.BRUSH,
+                        R.string.omni_about_own,
+                        R.string.omni_about_own_note,
+                        0xFFFF5C8A.toInt(),
+                    ),
+                    featureCell(
+                        Mark.Shape.SPEECH,
+                        R.string.omni_about_join,
+                        R.string.omni_about_join_note,
+                        palette.ok,
                     ),
                 )
                 cells.forEach { addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
             }
         )
+        content.addView(face)
+
         val rows = card()
         rows.addView(
-            row(
+            aboutRow(
+                Mark.Shape.SHIELD,
+                palette.accent,
                 getString(R.string.omni_about_policy),
                 getString(R.string.omni_about_policy_note),
-                "",
-                palette.muted,
             ) {
                 showNote(
                     getString(R.string.omni_about_policy),
@@ -9448,11 +9536,11 @@ class BuilderActivity : Activity() {
         )
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
-            row(
+            aboutRow(
+                Mark.Shape.NOTE,
+                0xFFB06BFF.toInt(),
                 getString(R.string.omni_about_terms),
                 getString(R.string.omni_about_terms_note),
-                "",
-                palette.muted,
             ) {
                 showNote(
                     getString(R.string.omni_about_terms),
@@ -9462,23 +9550,76 @@ class BuilderActivity : Activity() {
         )
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
-            row(
+            aboutRow(
+                Mark.Shape.MAIL,
+                palette.ok,
                 getString(R.string.omni_about_contact),
                 getString(R.string.omni_feedback_note),
-                "",
-                palette.accent,
             ) { go(Screen.Feedback) }
         )
-        rows.addView(rule(), MATCH_PARENT, 1)
-        rows.addView(
-            row(
+        content.addView(rows)
+
+        val who = card()
+        who.addView(
+            aboutRow(
+                Mark.Shape.SPEECH,
+                palette.warning,
                 getString(R.string.omni_about_developer),
                 getString(R.string.omni_about_developer_name),
-                "",
-                palette.muted,
             ) { go(Screen.Help) }
         )
-        content.addView(rows)
+        who.addView(rule(), MATCH_PARENT, 1)
+        who.addView(
+            aboutRow(
+                Mark.Shape.INFO,
+                palette.accent,
+                getString(R.string.omni_about_reserved),
+                getString(
+                    R.string.omni_about_rights,
+                    Calendar.getInstance().get(Calendar.YEAR).toString(),
+                ),
+            ) {
+                showNote(
+                    getString(R.string.omni_about_terms),
+                    getString(R.string.omni_about_terms_body),
+                )
+            }
+        )
+        content.addView(who)
+
+        val thanks = card()
+        thanks.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.HEART, palette.accent) },
+                    LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_about_thanks)
+                                setTextColor(palette.accent)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_about_thanks_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        content.addView(thanks)
         content.addView(
             keyValue(
                 getString(R.string.omni_settings_integrity),
@@ -9493,19 +9634,13 @@ class BuilderActivity : Activity() {
                 },
             )
         )
-        content.addView(
-            TextView(this).apply {
-                text = getString(
-                    R.string.omni_about_rights,
-                    Calendar.getInstance().get(Calendar.YEAR).toString(),
-                )
-                setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                gravity = Gravity.CENTER
-                setPadding(0, gap(4), 0, gap(2))
-            }
-        )
     }
+
+    private fun mailIntent(subject: String, body: String): Intent =
+        Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")).apply {
+            putExtra(Intent.EXTRA_SUBJECT, subject)
+            putExtra(Intent.EXTRA_TEXT, body)
+        }
 
     private fun feedbackBody(): String = buildString {
         append(getString(FEEDBACK_KINDS[feedbackKind])).append('\n')
@@ -9534,6 +9669,74 @@ class BuilderActivity : Activity() {
         hand(intent)
     }
 
+    private fun kindCell(at: Int, mark: Mark.Shape, title: String, detail: String): View {
+        val on = at == feedbackKind
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(gap(2), gap(3), gap(2), gap(3))
+            isClickable = true
+            isFocusable = true
+            isSelected = on
+            contentDescription = said(title, detail)
+            readAs(android.widget.RadioButton::class.java.name)
+            background = touchable(
+                GradientDrawable().apply {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(if (on) Ink.fade(palette.accent, 0.14f) else palette.raised)
+                    setStroke(gap(1) / 2, if (on) palette.accent else palette.divider)
+                },
+                palette.accent,
+            )
+            setOnClickListener {
+                feedbackKind = at
+                render(false)
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                    addView(
+                        View(context).apply {
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(if (on) palette.accent else Color.TRANSPARENT)
+                                setStroke(gap(1) / 2, if (on) palette.accent else palette.muted)
+                            }
+                        },
+                        LinearLayout.LayoutParams(gap(4), gap(4)),
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+            addView(
+                View(context).apply {
+                    foreground = Mark(mark, if (on) palette.accent else palette.foreground)
+                },
+                LinearLayout.LayoutParams(gap(9), gap(9)),
+            )
+            addView(
+                TextView(context).apply {
+                    text = title
+                    setTextColor(palette.foreground)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    gravity = Gravity.CENTER
+                    setPadding(0, gap(2), 0, 0)
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = detail
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    gravity = Gravity.CENTER
+                }
+            )
+        }
+    }
+
     private fun renderFeedback() {
         content.addView(
             screenHead(
@@ -9542,18 +9745,29 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_feedback_note),
             )
         )
-        content.addView(label(getString(R.string.omni_feedback_kind)))
-        content.addView(
-            grid(
-                2,
-                FEEDBACK_KINDS.mapIndexed { index, named ->
-                    choice(getString(named), index == feedbackKind) {
-                        feedbackKind = index
-                        render(false)
-                    }
-                },
-            )
+        val kinds = card()
+        kinds.addView(label(getString(R.string.omni_feedback_kind)))
+        kinds.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                FEEDBACK_KINDS.forEachIndexed { index, named ->
+                    addView(
+                        kindCell(
+                            index,
+                            FEEDBACK_MARKS[index],
+                            getString(named),
+                            getString(FEEDBACK_NOTES[index]),
+                        ),
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                            marginStart = if (index == 0) 0 else gap(1)
+                            marginEnd = if (index == FEEDBACK_KINDS.size - 1) 0 else gap(1)
+                        },
+                    )
+                }
+            }
         )
+        content.addView(kinds)
+
         val form = card()
         form.addView(
             counted(
@@ -9587,10 +9801,10 @@ class BuilderActivity : Activity() {
                 readAs(Button::class.java.name)
                 background = touchable(
                     GradientDrawable().apply {
-                        shape = GradientDrawable.RECTANGLE
+                        this.shape = GradientDrawable.RECTANGLE
                         cornerRadius = gap(4).toFloat()
                         setColor(Color.TRANSPARENT)
-                        setStroke(gap(1) / 2, palette.divider)
+                        setStroke(gap(1) / 2, palette.divider, gap(2).toFloat(), gap(2).toFloat())
                     },
                     palette.accent,
                 )
@@ -9608,10 +9822,18 @@ class BuilderActivity : Activity() {
                         } else {
                             getString(R.string.omni_feedback_shot_chosen)
                         }
-                        setTextColor(if (shot == null) palette.muted else palette.ok)
+                        setTextColor(if (shot == null) palette.accent else palette.ok)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         gravity = Gravity.CENTER
                         setPadding(0, gap(2), 0, 0)
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_feedback_shot_note)
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        gravity = Gravity.CENTER
                     }
                 )
             },
@@ -9625,13 +9847,35 @@ class BuilderActivity : Activity() {
                 }
             )
         }
+
+        content.addView(label(getString(R.string.omni_feedback_reach)))
         val reply = card()
         reply.addView(
-            field(getString(R.string.omni_feedback_mail), feedbackMail) { feedbackMail = it }
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.MAIL, palette.muted) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    field(getString(R.string.omni_feedback_mail), feedbackMail) {
+                        feedbackMail = it
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
         )
+        reply.addView(quiet(getString(R.string.omni_feedback_reach_note)))
         content.addView(reply)
+
         content.addView(primary(getString(R.string.omni_feedback_send)) { sendFeedback() })
-        content.addView(quiet(getString(R.string.omni_feedback_send_note)))
+        content.addView(
+            noteCard(
+                getString(R.string.omni_language_told),
+                getString(R.string.omni_feedback_send_note),
+            )
+        )
     }
 
     private fun chooseShot() {

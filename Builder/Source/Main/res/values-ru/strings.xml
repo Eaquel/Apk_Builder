@@ -235,10 +235,6 @@
     <string name="omni_theme_active">В ХОДУ</string>
     <string name="omni_about_version">Версия %1$s</string>
     <string name="omni_about_note">Всё здесь собирается на этом устройстве. Ничто написанное вами никуда не отправляется.</string>
-    <string name="omni_about_feature_fast">БЫСТРО</string>
-    <string name="omni_about_feature_safe">ПОДПИСАНО</string>
-    <string name="omni_about_feature_alone">БЕЗ СЕТИ</string>
-    <string name="omni_about_feature_spoken">10 ЯЗЫКОВ</string>
     <string name="omni_about_policy">Политика конфиденциальности</string>
     <string name="omni_about_policy_note">Что это приложение хранит и чего никогда не отправляет</string>
     <string name="omni_about_policy_body">Ваши проекты, ваши ключи и ваши пакеты остаются в собственном хранилище этого приложения на этом устройстве. Ничто написанное вами не загружается, и приложение само не открывает никакого соединения. Ссылка, по которой вы нажали, передаётся тому приложению, которым вы решили её открыть.</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">На телефоне: Настройки › О телефоне › Сведения о ПО, нажмите на номер сборки семь раз, затем включите отладку по USB в параметрах разработчика.</string>
     <string name="omni_adb_d_three">Проверьте соединение</string>
     <string name="omni_adb_d_three_note">Подключите телефон кабелем, передающим данные, откройте терминал в папке platform-tools и выполните adb devices.</string>
+    <string name="omni_about_make">Создавать</string>
+    <string name="omni_about_make_note">Собирайте приложения без труда</string>
+    <string name="omni_about_try">Проверять</string>
+    <string name="omni_about_try_note">Быстро находите ошибки</string>
+    <string name="omni_about_own">Настраивать</string>
+    <string name="omni_about_own_note">С оформлением, что вам по душе</string>
+    <string name="omni_about_join">Участвовать</string>
+    <string name="omni_about_join_note">Вместе — к лучшему</string>
+    <string name="omni_about_reserved">Все права защищены.</string>
+    <string name="omni_about_thanks">Спасибо, что пользуетесь Omni Builder!</string>
+    <string name="omni_about_thanks_note">Мы здесь ради лучшей разработки.</string>
+    <string name="omni_feedback_kind_fault_note">Что-то не так</string>
+    <string name="omni_feedback_kind_idea_note">Новая мысль</string>
+    <string name="omni_feedback_kind_question_note">Сказать спасибо</string>
+    <string name="omni_feedback_kind_other_note">Что-то другое</string>
+    <string name="omni_feedback_shot_note">Так мы поймём затруднение быстрее.</string>
+    <string name="omni_feedback_reach">Связь (по желанию)</string>
+    <string name="omni_feedback_reach_note">Мы сможем написать вам, если понадобится.</string>
 </resources>

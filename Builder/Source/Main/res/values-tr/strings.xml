@@ -235,10 +235,6 @@
     <string name="omni_theme_active">KULLANIMDA</string>
     <string name="omni_about_version">Sürüm %1$s</string>
     <string name="omni_about_note">Buradaki her şey bu cihazda derlenir. Yazdığın hiçbir şey dışarı gönderilmez.</string>
-    <string name="omni_about_feature_fast">HIZLI</string>
-    <string name="omni_about_feature_safe">İMZALI</string>
-    <string name="omni_about_feature_alone">ÇEVRİMDIŞI</string>
-    <string name="omni_about_feature_spoken">10 DİL</string>
     <string name="omni_about_policy">Gizlilik politikası</string>
     <string name="omni_about_policy_note">Bu uygulama neyi tutar, neyi asla göndermez</string>
     <string name="omni_about_policy_body">Projelerin, anahtarların ve paketlerin bu cihazda, uygulamanın kendi deposunda kalır. Yazdığın hiçbir şey yüklenmez ve uygulama kendiliğinden hiçbir bağlantı açmaz. Dokunduğun bir bağlantı, onu açmak için seçtiğin uygulamaya devredilir.</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">Telefonda Ayarlar › Telefon hakkında › Yazılım bilgileri’ne gidip yapım numarasına 7 kez dokunun, sonra geliştirici seçeneklerinde USB hata ayıklamayı açın.</string>
     <string name="omni_adb_d_three">Bağlantıyı Test Edin</string>
     <string name="omni_adb_d_three_note">Telefonu veri aktarımını destekleyen bir kabloyla bağlayın, platform-tools klasöründe terminal açın ve adb devices komutunu girin.</string>
+    <string name="omni_about_make">Geliştir</string>
+    <string name="omni_about_make_note">Uygulamalarını kolayca oluştur</string>
+    <string name="omni_about_try">Test Et</string>
+    <string name="omni_about_try_note">Hataları hızlıca tespit et</string>
+    <string name="omni_about_own">Kişiselleştir</string>
+    <string name="omni_about_own_note">Sana uygun temalarla</string>
+    <string name="omni_about_join">Gelişime Katıl</string>
+    <string name="omni_about_join_note">Daha iyi bir gelecek için birlikte</string>
+    <string name="omni_about_reserved">Tüm hakları saklıdır.</string>
+    <string name="omni_about_thanks">Omni Builder’ı kullandığınız için teşekkür ederiz!</string>
+    <string name="omni_about_thanks_note">Daha iyi bir geliştirme deneyimi için daima yanınızdayız.</string>
+    <string name="omni_feedback_kind_fault_note">Bir sorun var</string>
+    <string name="omni_feedback_kind_idea_note">Yeni bir fikir</string>
+    <string name="omni_feedback_kind_question_note">Teşekkür et</string>
+    <string name="omni_feedback_kind_other_note">Diğer konular</string>
+    <string name="omni_feedback_shot_note">Sorunu daha hızlı anlamamıza yardımcı olur.</string>
+    <string name="omni_feedback_reach">İletişim (İsteğe Bağlı)</string>
+    <string name="omni_feedback_reach_note">Gerekirse sizinle iletişime geçebiliriz.</string>
 </resources>

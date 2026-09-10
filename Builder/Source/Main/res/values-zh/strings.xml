@@ -235,10 +235,6 @@
     <string name="omni_theme_active">使用中</string>
     <string name="omni_about_version">版本 %1$s</string>
     <string name="omni_about_note">这里的一切都在本机上构建。你写的任何东西都不会被送往别处。</string>
-    <string name="omni_about_feature_fast">快</string>
-    <string name="omni_about_feature_safe">已签名</string>
-    <string name="omni_about_feature_alone">离线</string>
-    <string name="omni_about_feature_spoken">十种语言</string>
     <string name="omni_about_policy">隐私政策</string>
     <string name="omni_about_policy_note">这个应用保存什么，又永远不发送什么</string>
     <string name="omni_about_policy_body">你的项目、你的密钥和你的包，都留在本机上这个应用自己的存储里。你写的任何东西都不会上传，应用也不会自行打开任何连接。你点开的链接，会交给你选择用来打开它的那个应用。</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">在手机上：设置 › 关于手机 › 软件信息，连点版本号七次，然后在开发者选项里打开 USB 调试。</string>
     <string name="omni_adb_d_three">测试连接</string>
     <string name="omni_adb_d_three_note">用能传数据的线连上手机，在 platform-tools 文件夹里打开终端，执行 adb devices。</string>
+    <string name="omni_about_make">构建</string>
+    <string name="omni_about_make_note">轻松做出你的应用</string>
+    <string name="omni_about_try">测试</string>
+    <string name="omni_about_try_note">快速找出故障</string>
+    <string name="omni_about_own">个性化</string>
+    <string name="omni_about_own_note">用适合你的主题</string>
+    <string name="omni_about_join">参与</string>
+    <string name="omni_about_join_note">一起把它变得更好</string>
+    <string name="omni_about_reserved">保留所有权利。</string>
+    <string name="omni_about_thanks">谢谢你使用 Omni Builder！</string>
+    <string name="omni_about_thanks_note">我们一直在，为了更好的开发体验。</string>
+    <string name="omni_feedback_kind_fault_note">出问题了</string>
+    <string name="omni_feedback_kind_idea_note">新的想法</string>
+    <string name="omni_feedback_kind_question_note">说声谢谢</string>
+    <string name="omni_feedback_kind_other_note">其他</string>
+    <string name="omni_feedback_shot_note">这能帮我们更快弄清问题。</string>
+    <string name="omni_feedback_reach">联系方式（可选）</string>
+    <string name="omni_feedback_reach_note">需要时我们可以联系你。</string>
 </resources>

@@ -235,10 +235,6 @@
     <string name="omni_theme_active">IN USO</string>
     <string name="omni_about_version">Versione %1$s</string>
     <string name="omni_about_note">Tutto qui viene costruito su questo dispositivo. Niente di ciò che scrivi viene inviato altrove.</string>
-    <string name="omni_about_feature_fast">VELOCE</string>
-    <string name="omni_about_feature_safe">FIRMATO</string>
-    <string name="omni_about_feature_alone">OFFLINE</string>
-    <string name="omni_about_feature_spoken">10 LINGUE</string>
     <string name="omni_about_policy">Informativa sulla riservatezza</string>
     <string name="omni_about_policy_note">Che cosa tiene questa app e che cosa non invia mai</string>
     <string name="omni_about_policy_body">I tuoi progetti, le tue chiavi e i tuoi pacchetti restano nella memoria propria di questa app, su questo dispositivo. Niente di ciò che scrivi viene caricato, e l’app non apre da sé alcuna connessione. Un collegamento che tocchi viene consegnato all’app con cui scegli di aprirlo.</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">Sul telefono, Impostazioni › Info sul telefono › Informazioni software, tocca sette volte il numero build, poi accendi il debug USB nelle opzioni sviluppatore.</string>
     <string name="omni_adb_d_three">Prova il collegamento</string>
     <string name="omni_adb_d_three_note">Collega il telefono con un cavo che porti dati, apri un terminale nella cartella platform-tools ed esegui adb devices.</string>
+    <string name="omni_about_make">Costruire</string>
+    <string name="omni_about_make_note">Crea le tue app con facilità</string>
+    <string name="omni_about_try">Provare</string>
+    <string name="omni_about_try_note">Trova i guasti in fretta</string>
+    <string name="omni_about_own">Personalizzare</string>
+    <string name="omni_about_own_note">Con temi che ti si addicono</string>
+    <string name="omni_about_join">Partecipare</string>
+    <string name="omni_about_join_note">Insieme, per una migliore</string>
+    <string name="omni_about_reserved">Tutti i diritti riservati.</string>
+    <string name="omni_about_thanks">Grazie per usare Omni Builder!</string>
+    <string name="omni_about_thanks_note">Siamo qui per una migliore esperienza di sviluppo.</string>
+    <string name="omni_feedback_kind_fault_note">Qualcosa non va</string>
+    <string name="omni_feedback_kind_idea_note">Un’idea nuova</string>
+    <string name="omni_feedback_kind_question_note">Dire grazie</string>
+    <string name="omni_feedback_kind_other_note">Altro</string>
+    <string name="omni_feedback_shot_note">Ci aiuta a capire prima il problema.</string>
+    <string name="omni_feedback_reach">Contatto (facoltativo)</string>
+    <string name="omni_feedback_reach_note">Possiamo raggiungerti se serve.</string>
 </resources>

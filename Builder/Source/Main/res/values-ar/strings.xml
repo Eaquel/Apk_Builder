@@ -235,10 +235,6 @@
     <string name="omni_theme_active">قيد الاستعمال</string>
     <string name="omni_about_version">الإصدار %1$s</string>
     <string name="omni_about_note">كل شيء هنا يُبنى على هذا الجهاز. لا يُرسَل شيء مما تكتبه إلى أي مكان.</string>
-    <string name="omni_about_feature_fast">سريع</string>
-    <string name="omni_about_feature_safe">موقَّع</string>
-    <string name="omni_about_feature_alone">دون اتصال</string>
-    <string name="omni_about_feature_spoken">عشر لغات</string>
     <string name="omni_about_policy">سياسة الخصوصية</string>
     <string name="omni_about_policy_note">ما يحتفظ به هذا التطبيق وما لا يرسله أبدًا</string>
     <string name="omni_about_policy_body">تبقى مشاريعك ومفاتيحك وحزمك في مخزن هذا التطبيق نفسه على هذا الجهاز. لا يُرفَع شيء مما تكتبه، ولا يفتح التطبيق من تلقاء نفسه أي اتصال. والرابط الذي تلمسه يُسلَّم إلى التطبيق الذي تختاره لفتحه.</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">في الهاتف: الإعدادات › حول الهاتف › معلومات البرمجيات، انقر رقم البناء سبع مرات، ثم شغّل تنقيح USB في خيارات المطوّر.</string>
     <string name="omni_adb_d_three">اختبر الاتصال</string>
     <string name="omni_adb_d_three_note">صِل الهاتف بكبل ينقل البيانات، وافتح طرفية في مجلد platform-tools ونفّذ adb devices.</string>
+    <string name="omni_about_make">اصنع</string>
+    <string name="omni_about_make_note">أنشئ تطبيقاتك بيسر</string>
+    <string name="omni_about_try">اختبر</string>
+    <string name="omni_about_try_note">اعثر على الأعطال سريعًا</string>
+    <string name="omni_about_own">خصّص</string>
+    <string name="omni_about_own_note">بمظاهر تناسبك</string>
+    <string name="omni_about_join">شارك</string>
+    <string name="omni_about_join_note">معًا، نحو أفضل</string>
+    <string name="omni_about_reserved">كل الحقوق محفوظة.</string>
+    <string name="omni_about_thanks">شكرًا لاستعمالك Omni Builder!</string>
+    <string name="omni_about_thanks_note">نحن هنا من أجل تجربة تطوير أفضل.</string>
+    <string name="omni_feedback_kind_fault_note">ثمة خلل</string>
+    <string name="omni_feedback_kind_idea_note">فكرة جديدة</string>
+    <string name="omni_feedback_kind_question_note">قل شكرًا</string>
+    <string name="omni_feedback_kind_other_note">شيء آخر</string>
+    <string name="omni_feedback_shot_note">يعيننا ذلك على فهم المشكلة أسرع.</string>
+    <string name="omni_feedback_reach">التواصل (اختياري)</string>
+    <string name="omni_feedback_reach_note">نستطيع مراسلتك إن لزم.</string>
 </resources>

@@ -235,10 +235,6 @@
     <string name="omni_theme_active">IN USE</string>
     <string name="omni_about_version">Version %1$s</string>
     <string name="omni_about_note">Everything here is built on this device. Nothing you write is sent anywhere.</string>
-    <string name="omni_about_feature_fast">FAST</string>
-    <string name="omni_about_feature_safe">SIGNED</string>
-    <string name="omni_about_feature_alone">OFFLINE</string>
-    <string name="omni_about_feature_spoken">10 LANGUAGES</string>
     <string name="omni_about_policy">Privacy policy</string>
     <string name="omni_about_policy_note">What this app keeps, and what it never sends</string>
     <string name="omni_about_policy_body">Your projects, your keys and your packages stay in this app’s own storage on this device. Nothing you write is uploaded, and the app opens no connection of its own. A link you tap is handed to whichever app you choose to open it with.</string>
@@ -487,4 +483,22 @@
     <string name="omni_adb_d_two_note">On the phone, Settings › About phone › Software information, tap the build number seven times, then turn USB debugging on under developer options.</string>
     <string name="omni_adb_d_three">Test the connection</string>
     <string name="omni_adb_d_three_note">Plug the phone in with a cable that carries data, open a terminal in the platform-tools folder and run adb devices.</string>
+    <string name="omni_about_make">Build</string>
+    <string name="omni_about_make_note">Make your apps with ease</string>
+    <string name="omni_about_try">Test</string>
+    <string name="omni_about_try_note">Find faults quickly</string>
+    <string name="omni_about_own">Make it yours</string>
+    <string name="omni_about_own_note">With themes that suit you</string>
+    <string name="omni_about_join">Join in</string>
+    <string name="omni_about_join_note">Together, for a better one</string>
+    <string name="omni_about_reserved">All rights reserved.</string>
+    <string name="omni_about_thanks">Thank you for using Omni Builder!</string>
+    <string name="omni_about_thanks_note">We are here for a better development experience.</string>
+    <string name="omni_feedback_kind_fault_note">Something is wrong</string>
+    <string name="omni_feedback_kind_idea_note">A new idea</string>
+    <string name="omni_feedback_kind_question_note">Say thanks</string>
+    <string name="omni_feedback_kind_other_note">Anything else</string>
+    <string name="omni_feedback_shot_note">It helps us understand the trouble sooner.</string>
+    <string name="omni_feedback_reach">Contact (optional)</string>
+    <string name="omni_feedback_reach_note">We can reach you if we need to.</string>
 </resources>
