@@ -348,4 +348,14 @@
     <string name="omni_shell_refused">Здесь не удалось запустить оболочку.</string>
     <string name="omni_shell_note">Работает в %1$s. Клавиатура открывается по касанию.</string>
     <string name="omni_kinds_holds">Поддерживаемые языки:</string>
+    <string name="omni_brand_note">Среда разработки Android</string>
+    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_find_project">Искать в проекте</string>
+    <string name="omni_raise_open">Открыть проект</string>
+    <string name="omni_raise_more">Ещё</string>
+    <string name="omni_files_sorting">Сортировать по</string>
+    <string name="omni_files_reversed">Обратить порядок</string>
+    <string name="omni_action_forward">Вперёд</string>
+    <string name="omni_rate_support">Ваша поддержка много для нас значит.</string>
+    <string name="omni_about_head">Всё об Omni Builder.</string>
 </resources>

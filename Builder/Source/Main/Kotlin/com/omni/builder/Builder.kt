@@ -2523,6 +2523,10 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
         SHIELD,
         MAIL,
         BOLT,
+        FORWARD,
+        UP,
+        SWAP,
+        HEART,
     }
 
     private companion object {
@@ -3057,6 +3061,46 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 path.lineTo(20.5f, 7.4f)
                 canvas.drawPath(path, paint)
             }
+            Shape.HEART -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 20.2f)
+                path.cubicTo(2.4f, 13.8f, 4.4f, 5.2f, 9.4f, 5.2f)
+                path.cubicTo(11f, 5.2f, 12f, 6.4f, 12f, 7.6f)
+                path.cubicTo(12f, 6.4f, 13f, 5.2f, 14.6f, 5.2f)
+                path.cubicTo(19.6f, 5.2f, 21.6f, 13.8f, 12f, 20.2f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.FORWARD -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(9f, 5f)
+                path.lineTo(16f, 12f)
+                path.lineTo(9f, 19f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.UP -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 19.5f)
+                path.lineTo(12f, 4.5f)
+                path.moveTo(5.5f, 11f)
+                path.lineTo(12f, 4.5f)
+                path.lineTo(18.5f, 11f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SWAP -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(4f, 9f)
+                path.lineTo(19f, 9f)
+                path.moveTo(15.5f, 5.5f)
+                path.lineTo(19f, 9f)
+                path.lineTo(15.5f, 12.5f)
+                path.moveTo(20f, 15f)
+                path.lineTo(5f, 15f)
+                path.moveTo(8.5f, 11.5f)
+                path.lineTo(5f, 15f)
+                path.lineTo(8.5f, 18.5f)
+                canvas.drawPath(path, paint)
+            }
             Shape.BOLT -> {
                 paint.style = Paint.Style.FILL
                 path.moveTo(13.6f, 3.4f)
@@ -3402,10 +3446,8 @@ class BuilderActivity : Activity() {
     private lateinit var drawer: LinearLayout
     private lateinit var shade: View
     private lateinit var crown: LinearLayout
-    private lateinit var crownBack: View
-    private lateinit var crownMenu: View
-    private lateinit var crownSplit: View
-    private lateinit var crownTitle: TextView
+    private lateinit var footer: LinearLayout
+    private lateinit var raise: LinearLayout
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var results: LinearLayout
@@ -3466,6 +3508,10 @@ class BuilderActivity : Activity() {
     private var feedbackShot: String? = null
     private var helpFor = ""
     private var helpBand = 0
+
+    private var raised = false
+    private val wentBefore = mutableListOf<String>()
+    private val wentAfter = mutableListOf<String>()
 
     private var searchFor = ""
     private var searchCase = false
@@ -3539,46 +3585,20 @@ class BuilderActivity : Activity() {
             }
         }
 
-        crownBack = markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() }
-        crownMenu = markControl(Mark.Shape.MENU, R.string.omni_menu_title) { openTheDrawer() }
-        crownSplit = markControl(Mark.Shape.SPLIT, R.string.omni_files_split) {
-            val here = screen
-            secondFolder = if (secondFolder == null && here is Screen.Files) here.folder else null
-            render(true)
-        }
-        crownTitle = TextView(this).apply {
-            typeface = Type.heading
-            setTextColor(palette.foreground)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-            letterSpacing = Type.TRACKING * 0.5f
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-        }
         crown = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(2), gap(1), gap(2), gap(1))
-            addView(crownMenu, LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)))
-            addView(crownBack, LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)))
-            addView(
-                crownTitle,
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                    marginStart = gap(2)
-                    marginEnd = gap(2)
-                },
-            )
-            addView(
-                crownSplit,
-                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
-            )
-            addView(
-                markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
-                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
-            )
-            addView(
-                markControl(Mark.Shape.GEAR, R.string.omni_tab_settings) { go(Screen.Settings) },
-                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
-            )
+            setPadding(gap(2), gap(2), gap(2), gap(2))
+            setBackgroundColor(palette.surface)
+        }
+        footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(palette.background)
+        }
+        raise = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
         }
 
         val roof = View(this)
@@ -3586,7 +3606,9 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(roof, LinearLayout.LayoutParams(MATCH_PARENT, 0))
             addView(crown, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
             addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(footer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
         ceremony = FrameLayout(this).apply {
@@ -3600,6 +3622,14 @@ class BuilderActivity : Activity() {
             setBackgroundColor(palette.background)
             addView(aurora, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             addView(shell, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(
+                raise,
+                FrameLayout.LayoutParams(
+                    WRAP_CONTENT,
+                    WRAP_CONTENT,
+                    Gravity.END or Gravity.BOTTOM,
+                ).apply { setMargins(gap(4), gap(4), gap(4), gap(6)) },
+            )
             addView(shade, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             addView(
                 drawer,
@@ -3676,7 +3706,9 @@ class BuilderActivity : Activity() {
                 roof.layoutParams = above
             }
             drawer.setPadding(0, top, 0, bottom)
-            scroller.setPadding(0, 0, 0, keyboard + bottom)
+            footer.setPadding(gap(2), gap(1), gap(2), gap(1) + bottom)
+            footer.visibility = if (keyboard > 0) View.GONE else footer.visibility
+            scroller.setPadding(0, 0, 0, keyboard)
             insets
         }
     }
@@ -3821,6 +3853,8 @@ class BuilderActivity : Activity() {
             formMinSdk = Preferences.newMinSdk(this, OLDEST_PLATFORM)
             formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
         }
+        rememberWalk(next)
+        raised = false
         screen = next
         closeTheDrawer()
         answerBackTheWayThisScreenWants()
@@ -3926,6 +3960,8 @@ class BuilderActivity : Activity() {
 
         if (standing == "TAMPERED") {
             drawer.removeAllViews()
+            footer.visibility = View.GONE
+            raise.visibility = View.GONE
             crown.visibility = View.GONE
             content.addView(notice(getString(R.string.omni_integrity_refused_title), palette.error))
             content.addView(body(getString(R.string.omni_integrity_refused_body)))
@@ -3937,6 +3973,8 @@ class BuilderActivity : Activity() {
 
         crown.visibility = View.VISIBLE
         drawCrown()
+        drawFooter()
+        drawRaise()
         drawTheDrawer()
 
         when (val here = screen) {
@@ -4057,40 +4095,374 @@ class BuilderActivity : Activity() {
         packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
     }.getOrDefault("").ifEmpty { "1.0" }
 
-    private fun drawCrown() {
-        val here = screen
-        crownBack.visibility = if (here is Screen.Projects) View.GONE else View.VISIBLE
-        crownSplit.visibility = if (here is Screen.Files) View.VISIBLE else View.GONE
-        crownSplit.foreground = Mark(
-            Mark.Shape.SPLIT,
-            if (secondFolder == null) palette.foreground else palette.accent,
+    private fun homeLike(here: Screen): Boolean = here is Screen.Projects || here is Screen.Files
+
+    private fun brandBlock(named: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(
+            ImageView(context).apply {
+                setImageResource(R.drawable.omni_brand)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            },
+            LinearLayout.LayoutParams(gap(11), gap(11)).apply {
+                marginStart = gap(1)
+                marginEnd = gap(3)
+            },
         )
-        if (here !is Screen.Files) {
-            secondFolder = null
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    TextView(context).apply {
+                        text = named
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        maxLines = 1
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_brand_note)
+                        setTextColor(palette.accent)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        maxLines = 1
+                    }
+                )
+            }
+        )
+    }
+
+    private fun crownAction(mark: Mark.Shape, named: Int, tint: Int, onPress: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(TOUCH_UNITS)
+            setPadding(gap(2), gap(1), gap(2), gap(1))
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(named)
+            readAs(Button::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { onPress() }
+            addView(
+                View(context).apply { foreground = Mark(mark, tint) },
+                LinearLayout.LayoutParams(gap(6), gap(6)),
+            )
+            if (wideEnough()) {
+                addView(
+                    TextView(context).apply {
+                        text = getString(named)
+                        setTextColor(palette.foreground)
+                        typeface = Type.strong
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        maxLines = 1
+                        setPadding(gap(2), 0, 0, 0)
+                    }
+                )
+            }
         }
-        crownTitle.text = when (here) {
-            is Screen.Projects -> getString(R.string.omni_projects_title)
-            is Screen.Kinds -> getString(R.string.omni_kinds_title)
-            is Screen.NewProject -> getString(R.string.omni_projects_new)
-            is Screen.WebToApk -> getString(R.string.omni_web_title)
-            is Screen.Files -> File(here.root).name
-            is Screen.Health -> getString(R.string.omni_health_title)
-            is Screen.Editor -> here.path.substringAfterLast('/')
-            is Screen.Picture -> here.path.substringAfterLast('/')
-            is Screen.Build -> getString(R.string.omni_build_title)
-            is Screen.Trash -> getString(R.string.omni_tab_trash)
-            is Screen.Settings -> getString(R.string.omni_tab_settings)
-            is Screen.Keys -> getString(R.string.omni_keys_title)
-            is Screen.NewKey -> getString(R.string.omni_keys_new)
-            is Screen.Logcat -> getString(R.string.omni_menu_logcat)
-            is Screen.Terminal -> getString(R.string.omni_tab_shell)
-            is Screen.Theme -> getString(R.string.omni_settings_theme)
-            is Screen.Languages -> getString(R.string.omni_settings_language)
-            is Screen.Feedback -> getString(R.string.omni_feedback_title)
-            is Screen.Rate -> getString(R.string.omni_rate_title)
-            is Screen.About -> getString(R.string.omni_settings_about)
-            is Screen.Help -> getString(R.string.omni_help_title)
+
+    private fun drawCrown() {
+        crown.removeAllViews()
+        val here = screen
+        val each = LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS))
+        if (homeLike(here)) {
+            crown.addView(
+                markControl(Mark.Shape.MENU, R.string.omni_menu_title) { openTheDrawer() },
+                each,
+            )
+            crown.addView(
+                brandBlock(getString(R.string.omni_app_name)),
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            val root = openProject
+            if (root != null) {
+                crown.addView(
+                    if (building) {
+                        crownAction(Mark.Shape.STOP, R.string.omni_stage_stop, palette.accent) {
+                            go(Screen.Build(root))
+                        }
+                    } else {
+                        crownAction(Mark.Shape.PLAY, R.string.omni_tab_build, palette.foreground) {
+                            go(Screen.Build(root))
+                        }
+                    }
+                )
+            }
+            crown.addView(
+                crownAction(Mark.Shape.LOG, R.string.omni_tab_shell, palette.foreground) {
+                    go(Screen.Terminal)
+                }
+            )
+            crown.addView(
+                markControl(Mark.Shape.FIND, R.string.omni_find_project) { askToSearch() },
+                each,
+            )
+            crown.addView(
+                markControl(Mark.Shape.MORE, R.string.omni_action_more) { homeMenu() },
+                each,
+            )
+        } else {
+            crown.addView(
+                markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() },
+                each,
+            )
+            crown.addView(
+                brandBlock(getString(R.string.omni_app_shown, versionShown())),
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            if (here is Screen.Logcat || here is Screen.WebToApk || here is Screen.Terminal) {
+                crown.addView(
+                    markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
+                    each,
+                )
+            }
         }
+    }
+
+    private fun footControl(mark: Mark.Shape, named: Int, on: Boolean, onPress: () -> Unit): View =
+        View(this).apply {
+            contentDescription = getString(named)
+            isClickable = on
+            isFocusable = on
+            readAs(Button::class.java.name)
+            background = reacting(Color.TRANSPARENT, gap(5).toFloat(), palette.accent)
+            foreground = Mark(mark, if (on) palette.foreground else palette.divider)
+            setOnClickListener { if (on) onPress() }
+        }
+
+    private fun drawFooter() {
+        footer.removeAllViews()
+        val here = screen
+        if (!homeLike(here)) {
+            footer.visibility = View.GONE
+            return
+        }
+        footer.visibility = View.VISIBLE
+        val walked = here is Screen.Files
+        val deep = (here as? Screen.Files)?.folder?.isNotEmpty() == true
+        val holds = LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f)
+        footer.addView(
+            footControl(Mark.Shape.BACK, R.string.omni_action_back, wentBefore.isNotEmpty()) {
+                stepWalked(-1)
+            },
+            holds,
+        )
+        footer.addView(
+            footControl(Mark.Shape.FORWARD, R.string.omni_action_forward, wentAfter.isNotEmpty()) {
+                stepWalked(1)
+            },
+            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
+        )
+        footer.addView(
+            footControl(Mark.Shape.ADD, R.string.omni_action_new_file, walked) {
+                if (here is Screen.Files) {
+                    askForName(getString(R.string.omni_action_new_file), "") { name ->
+                        act(
+                            Builder.nativeWriteFile(here.root, joined(here.folder, name), ""),
+                            "saved",
+                        )
+                    }
+                }
+            },
+            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
+        )
+        footer.addView(
+            footControl(Mark.Shape.SWAP, R.string.omni_files_split, walked) {
+                if (here is Screen.Files) {
+                    val beside = secondFolder
+                    if (beside == null) {
+                        secondFolder = here.folder
+                    } else {
+                        secondFolder = here.folder
+                        go(Screen.Files(here.root, beside))
+                        return@footControl
+                    }
+                    render(true)
+                }
+            },
+            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
+        )
+        footer.addView(
+            footControl(
+                Mark.Shape.UP,
+                R.string.omni_files_root,
+                deep,
+            ) {
+                if (here is Screen.Files) {
+                    go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
+                }
+            },
+            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
+        )
+    }
+
+    private fun raiseAction(named: Int, mark: Mark.Shape, onPress: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                gravity = Gravity.END
+                bottomMargin = gap(3)
+            }
+            addView(
+                TextView(context).apply {
+                    text = getString(named)
+                    setTextColor(palette.foreground)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setPadding(gap(4), gap(2), gap(4), gap(2))
+                    background = pill(palette.raised, gap(5).toFloat())
+                }
+            )
+            addView(
+                View(context).apply {
+                    background = GradientDrawable().apply {
+                        this.shape = GradientDrawable.OVAL
+                        setColor(palette.raised)
+                    }
+                    foreground = Mark(mark, palette.foreground)
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = getString(named)
+                    readAs(Button::class.java.name)
+                    setOnClickListener { onPress() }
+                },
+                LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginStart = gap(3) },
+            )
+            setOnClickListener { onPress() }
+            isClickable = true
+        }
+
+    private fun drawRaise() {
+        raise.removeAllViews()
+        if (!homeLike(screen)) {
+            raise.visibility = View.GONE
+            return
+        }
+        raise.visibility = View.VISIBLE
+        if (raised) {
+            raise.addView(
+                raiseAction(R.string.omni_projects_new, Mark.Shape.NOTE) {
+                    raised = false
+                    go(Screen.Kinds)
+                }
+            )
+            raise.addView(
+                raiseAction(R.string.omni_raise_open, Mark.Shape.FOLDER) {
+                    raised = false
+                    go(Screen.Projects)
+                }
+            )
+        }
+        raise.addView(
+            View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(if (raised) palette.raised else palette.accent)
+                }
+                foreground = Mark(
+                    if (raised) Mark.Shape.AWAY else Mark.Shape.ADD,
+                    if (raised) palette.foreground else palette.background,
+                )
+                isClickable = true
+                isFocusable = true
+                contentDescription = getString(R.string.omni_raise_more)
+                readAs(Button::class.java.name)
+                setOnClickListener {
+                    raised = !raised
+                    drawRaise()
+                }
+            },
+            LinearLayout.LayoutParams(gap(16), gap(16)).apply { gravity = Gravity.END },
+        )
+    }
+
+    private fun askToSearch() {
+        val root = openProject
+        results.removeAllViews()
+        if (root == null) {
+            results.addView(notice(getString(R.string.omni_projects_none), palette.warning))
+            return
+        }
+        askForName(getString(R.string.omni_find_project), searchFor) { word ->
+            if (word.isBlank()) {
+                return@askForName
+            }
+            working({ Builder.nativeSearchProject(root, word, searchCase, searchWord) })
+            finished@{ answer ->
+                val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+                if (!document.optBoolean("searched", false)) {
+                    showRefusal(Refusal.parse(document), results)
+                    return@finished
+                }
+                searchFor = word
+                showFound(root, document.optJSONObject("result"))
+            }
+        }
+    }
+
+    private fun homeMenu() {
+        val root = openProject
+        val named = mutableListOf(getString(R.string.omni_find_project))
+        val doing = mutableListOf<() -> Unit>({ askToSearch() })
+        named.add(getString(R.string.omni_menu_logcat))
+        doing.add { go(Screen.Logcat) }
+        named.add(getString(R.string.omni_settings_theme))
+        doing.add { go(Screen.Theme) }
+        if (root != null) {
+            named.add(getString(R.string.omni_files_sorting))
+            doing.add { sortMenu() }
+        }
+        named.add(getString(R.string.omni_tab_settings))
+        doing.add { go(Screen.Settings) }
+        named.add(getString(R.string.omni_help_title))
+        doing.add { go(Screen.Help) }
+        AlertDialog.Builder(this)
+            .setItems(named.toTypedArray()) { _, which -> doing[which]() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun sortMenu() {
+        val named = Order.entries.map { getString(it.label) } +
+            getString(R.string.omni_files_reversed)
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.omni_files_sorting))
+            .setItems(named.toTypedArray()) { _, which ->
+                if (which < Order.entries.size) {
+                    filesOrder = Order.entries[which]
+                } else {
+                    filesReversed = !filesReversed
+                }
+                render(false)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun rememberWalk(next: Screen) {
+        val here = screen
+        if (here is Screen.Files && next is Screen.Files && here.folder != next.folder) {
+            wentBefore.add(here.folder)
+            wentAfter.clear()
+        }
+    }
+
+    private fun stepWalked(by: Int) {
+        val here = screen as? Screen.Files ?: return
+        if (by < 0) {
+            val back = wentBefore.removeLastOrNull() ?: return
+            wentAfter.add(here.folder)
+            screen = Screen.Files(here.root, back)
+        } else {
+            val on = wentAfter.removeLastOrNull() ?: return
+            wentBefore.add(here.folder)
+            screen = Screen.Files(here.root, on)
+        }
+        render(true)
     }
 
     private fun wideEnough(): Boolean =
@@ -4303,6 +4675,13 @@ class BuilderActivity : Activity() {
     private fun keysFolder() = File(filesDir, "Keys")
 
     private fun renderProjects() {
+        content.addView(
+            screenHead(
+                Mark.Shape.HOME,
+                getString(R.string.omni_projects_title),
+                getString(R.string.omni_projects_note),
+            )
+        )
 
         val projects = runCatching {
             ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
@@ -6208,6 +6587,13 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderBuild(root: String) {
+        content.addView(
+            screenHead(
+                Mark.Shape.PACKAGE,
+                getString(R.string.omni_build_title),
+                getString(R.string.omni_build_both_note),
+            )
+        )
         val summary = summaryOf(root)
         content.addView(
             quiet(summary?.label?.ifEmpty { null } ?: File(root).name)
@@ -6741,8 +7127,8 @@ class BuilderActivity : Activity() {
 
     private fun renderLogcat() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
+            screenHead(
+                Mark.Shape.LOG,
                 getString(R.string.omni_menu_logcat),
                 getString(R.string.omni_log_note),
             )
@@ -7167,6 +7553,39 @@ class BuilderActivity : Activity() {
         background = pill(Ink.fade(tint, 0.16f), gap(2).toFloat())
     }
 
+    private fun screenHead(mark: Mark.Shape, title: String, detail: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(5), 0, gap(3))
+            addView(
+                View(context).apply { foreground = Mark(mark, palette.foreground) },
+                LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(4) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = detail
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            setLineSpacing(gap(1).toFloat(), 1f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
     private fun mascot(art: Int, title: String, detail: String): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -7517,8 +7936,8 @@ class BuilderActivity : Activity() {
 
     private fun renderTheme() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
+            screenHead(
+                Mark.Shape.BRUSH,
                 getString(R.string.omni_settings_theme),
                 getString(R.string.omni_theme_note),
             )
@@ -7592,8 +8011,8 @@ class BuilderActivity : Activity() {
 
     private fun renderLanguages() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
+            screenHead(
+                Mark.Shape.GLOBE,
                 getString(R.string.omni_settings_language),
                 getString(R.string.omni_language_note),
             )
@@ -7630,6 +8049,13 @@ class BuilderActivity : Activity() {
         Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName"))
 
     private fun renderRate() {
+        content.addView(
+            screenHead(
+                Mark.Shape.HEART,
+                getString(R.string.omni_rate_title),
+                getString(R.string.omni_rate_support),
+            )
+        )
         content.addView(
             ImageView(this).apply {
                 setImageResource(R.drawable.omni_art_rate)
@@ -7693,13 +8119,20 @@ class BuilderActivity : Activity() {
 
     private fun renderAbout() {
         content.addView(
+            screenHead(
+                Mark.Shape.INFO,
+                getString(R.string.omni_settings_about),
+                getString(R.string.omni_about_head),
+            )
+        )
+        content.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(0, gap(4), 0, gap(2))
                 addView(
                     ImageView(context).apply {
-                        setImageResource(R.drawable.omni_mascot)
+                        setImageResource(R.drawable.omni_brand_large)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                     },
                     LinearLayout.LayoutParams(gap(22), gap(22)),
@@ -7852,8 +8285,8 @@ class BuilderActivity : Activity() {
 
     private fun renderFeedback() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
+            screenHead(
+                Mark.Shape.SPEECH,
                 getString(R.string.omni_feedback_title),
                 getString(R.string.omni_feedback_note),
             )

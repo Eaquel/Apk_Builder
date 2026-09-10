@@ -348,4 +348,14 @@
     <string name="omni_shell_refused">Não foi possível iniciar uma shell aqui.</string>
     <string name="omni_shell_note">A trabalhar em %1$s. O teclado abre ao toque.</string>
     <string name="omni_kinds_holds">Linguagens suportadas:</string>
+    <string name="omni_brand_note">Ambiente de desenvolvimento Android</string>
+    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_find_project">Procurar no projeto</string>
+    <string name="omni_raise_open">Abrir um projeto</string>
+    <string name="omni_raise_more">Mais</string>
+    <string name="omni_files_sorting">Ordenar por</string>
+    <string name="omni_files_reversed">Inverter a ordem</string>
+    <string name="omni_action_forward">Avançar</string>
+    <string name="omni_rate_support">O teu apoio é muito importante para nós.</string>
+    <string name="omni_about_head">Tudo sobre o Omni Builder.</string>
 </resources>

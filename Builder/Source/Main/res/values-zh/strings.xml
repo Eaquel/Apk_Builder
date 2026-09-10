@@ -348,4 +348,14 @@
     <string name="omni_shell_refused">这里无法启动 shell。</string>
     <string name="omni_shell_note">正在 %1$s 中工作。轻触即可打开键盘。</string>
     <string name="omni_kinds_holds">支持的语言：</string>
+    <string name="omni_brand_note">Android 开发环境</string>
+    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_find_project">在项目中搜索</string>
+    <string name="omni_raise_open">打开项目</string>
+    <string name="omni_raise_more">更多</string>
+    <string name="omni_files_sorting">排序方式</string>
+    <string name="omni_files_reversed">反转顺序</string>
+    <string name="omni_action_forward">前进</string>
+    <string name="omni_rate_support">你的支持对我们很重要。</string>
+    <string name="omni_about_head">关于 Omni Builder 的一切。</string>
 </resources>

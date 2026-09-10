@@ -348,4 +348,14 @@
     <string name="omni_shell_refused">تعذّر بدء صدفة هنا.</string>
     <string name="omni_shell_note">يعمل في %1$s. وتُفتح لوحة المفاتيح بلمسة.</string>
     <string name="omni_kinds_holds">اللغات المدعومة:</string>
+    <string name="omni_brand_note">بيئة تطوير أندرويد</string>
+    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_find_project">ابحث في المشروع</string>
+    <string name="omni_raise_open">افتح مشروعًا</string>
+    <string name="omni_raise_more">المزيد</string>
+    <string name="omni_files_sorting">الترتيب حسب</string>
+    <string name="omni_files_reversed">اعكس الترتيب</string>
+    <string name="omni_action_forward">إلى الأمام</string>
+    <string name="omni_rate_support">دعمك يهمّنا كثيرًا.</string>
+    <string name="omni_about_head">كل شيء عن Omni Builder.</string>
 </resources>
