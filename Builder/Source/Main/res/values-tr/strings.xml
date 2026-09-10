@@ -347,4 +347,5 @@
     <string name="omni_tab_shell">Terminal</string>
     <string name="omni_shell_refused">Burada bir kabuk başlatılamadı.</string>
     <string name="omni_shell_note">%1$s içinde çalışıyor. Dokununca klavye açılır.</string>
+    <string name="omni_kinds_holds">Desteklenen diller:</string>
 </resources>

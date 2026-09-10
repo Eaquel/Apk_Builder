@@ -347,4 +347,5 @@
     <string name="omni_tab_shell">Terminal</string>
     <string name="omni_shell_refused">No se pudo iniciar un intérprete aquí.</string>
     <string name="omni_shell_note">Trabajando en %1$s. El teclado se abre al tocar.</string>
+    <string name="omni_kinds_holds">Lenguajes admitidos:</string>
 </resources>

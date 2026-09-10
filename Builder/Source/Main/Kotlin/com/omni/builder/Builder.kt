@@ -3084,176 +3084,6 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }
 
-internal class Flag(private val tag: String) : Drawable() {
-
-    private companion object {
-        const val WIDE = 24f
-        const val TALL = 16f
-    }
-
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
-
-    private fun band(canvas: Canvas, top: Float, bottom: Float, colour: Int) {
-        paint.color = colour
-        canvas.drawRect(0f, top, WIDE, bottom, paint)
-    }
-
-    private fun column(canvas: Canvas, left: Float, right: Float, colour: Int) {
-        paint.color = colour
-        canvas.drawRect(left, 0f, right, TALL, paint)
-    }
-
-    private fun star(canvas: Canvas, across: Float, down: Float, reach: Float, turned: Float) {
-        path.rewind()
-        var point = 0
-        while (point < 10) {
-            val out = if (point % 2 == 0) reach else reach * 0.42f
-            val turn = turned - PI.toFloat() / 2f + point * PI.toFloat() / 5f
-            val x = across + cos(turn) * out
-            val y = down + sin(turn) * out
-            if (point == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            point += 1
-        }
-        path.close()
-        canvas.drawPath(path, paint)
-    }
-
-    private fun crescent(canvas: Canvas, across: Float, down: Float, reach: Float, over: Int) {
-        canvas.drawCircle(across, down, reach, paint)
-        val was = paint.color
-        paint.color = over
-        canvas.drawCircle(across + reach * 0.32f, down, reach * 0.80f, paint)
-        paint.color = was
-    }
-
-    private fun union(canvas: Canvas) {
-        paint.color = 0xFF012169.toInt()
-        canvas.drawRect(0f, 0f, WIDE, TALL, paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 4.4f
-        paint.color = 0xFFFFFFFF.toInt()
-        path.rewind()
-        path.moveTo(0f, 0f)
-        path.lineTo(WIDE, TALL)
-        path.moveTo(WIDE, 0f)
-        path.lineTo(0f, TALL)
-        canvas.drawPath(path, paint)
-        paint.strokeWidth = 1.9f
-        paint.color = 0xFFC8102E.toInt()
-        canvas.drawPath(path, paint)
-        paint.style = Paint.Style.FILL
-        paint.color = 0xFFFFFFFF.toInt()
-        canvas.drawRect(0f, TALL / 2f - 2.7f, WIDE, TALL / 2f + 2.7f, paint)
-        canvas.drawRect(WIDE / 2f - 2.7f, 0f, WIDE / 2f + 2.7f, TALL, paint)
-        paint.color = 0xFFC8102E.toInt()
-        canvas.drawRect(0f, TALL / 2f - 1.6f, WIDE, TALL / 2f + 1.6f, paint)
-        canvas.drawRect(WIDE / 2f - 1.6f, 0f, WIDE / 2f + 1.6f, TALL, paint)
-    }
-
-    override fun draw(canvas: Canvas) {
-        val across = bounds.width().toFloat()
-        val down = bounds.height().toFloat()
-        if (across <= 0f || down <= 0f) return
-        val unit = min(across / WIDE, down / TALL)
-        canvas.save()
-        canvas.translate(
-            bounds.left + (across - WIDE * unit) / 2f,
-            bounds.top + (down - TALL * unit) / 2f,
-        )
-        canvas.scale(unit, unit)
-        path.rewind()
-        path.addRoundRect(0f, 0f, WIDE, TALL, 2f, 2f, Path.Direction.CW)
-        canvas.clipPath(path)
-        paint.style = Paint.Style.FILL
-        when (tag) {
-            "tr" -> {
-                band(canvas, 0f, TALL, 0xFFE30A17.toInt())
-                paint.color = 0xFFFFFFFF.toInt()
-                crescent(canvas, 9.2f, 8f, 4.3f, 0xFFE30A17.toInt())
-                star(canvas, 15.1f, 8f, 2.3f, 0f)
-            }
-            "de" -> {
-                band(canvas, 0f, TALL / 3f, 0xFF000000.toInt())
-                band(canvas, TALL / 3f, TALL * 2f / 3f, 0xFFDD0000.toInt())
-                band(canvas, TALL * 2f / 3f, TALL, 0xFFFFCE00.toInt())
-            }
-            "es" -> {
-                band(canvas, 0f, TALL, 0xFFAA151B.toInt())
-                band(canvas, TALL / 4f, TALL * 3f / 4f, 0xFFF1BF00.toInt())
-            }
-            "fr" -> {
-                column(canvas, 0f, WIDE / 3f, 0xFF002395.toInt())
-                column(canvas, WIDE / 3f, WIDE * 2f / 3f, 0xFFFFFFFF.toInt())
-                column(canvas, WIDE * 2f / 3f, WIDE, 0xFFED2939.toInt())
-            }
-            "it" -> {
-                column(canvas, 0f, WIDE / 3f, 0xFF008C45.toInt())
-                column(canvas, WIDE / 3f, WIDE * 2f / 3f, 0xFFF4F5F0.toInt())
-                column(canvas, WIDE * 2f / 3f, WIDE, 0xFFCD212A.toInt())
-            }
-            "pt" -> {
-                column(canvas, 0f, WIDE * 2f / 5f, 0xFF006600.toInt())
-                column(canvas, WIDE * 2f / 5f, WIDE, 0xFFFF0000.toInt())
-                paint.color = 0xFFFFE900.toInt()
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.1f
-                canvas.drawCircle(WIDE * 2f / 5f, 8f, 3.2f, paint)
-                paint.style = Paint.Style.FILL
-                paint.color = 0xFFFFFFFF.toInt()
-                canvas.drawCircle(WIDE * 2f / 5f, 8f, 1.7f, paint)
-                paint.color = 0xFF003399.toInt()
-                canvas.drawCircle(WIDE * 2f / 5f, 8f, 1.1f, paint)
-            }
-            "ru" -> {
-                band(canvas, 0f, TALL / 3f, 0xFFFFFFFF.toInt())
-                band(canvas, TALL / 3f, TALL * 2f / 3f, 0xFF0039A6.toInt())
-                band(canvas, TALL * 2f / 3f, TALL, 0xFFD52B1E.toInt())
-            }
-            "ar" -> {
-                band(canvas, 0f, TALL, 0xFF006C35.toInt())
-                paint.color = 0xFFFFFFFF.toInt()
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 0.9f
-                path.rewind()
-                path.moveTo(4.4f, 6.4f)
-                path.cubicTo(8f, 3.8f, 16f, 8.4f, 19.6f, 5.8f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawRect(4.4f, 10.2f, 19.6f, 11.2f, paint)
-                path.rewind()
-                path.moveTo(4.4f, 12.4f)
-                path.lineTo(7f, 10.7f)
-                path.lineTo(4.4f, 9f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            "zh" -> {
-                band(canvas, 0f, TALL, 0xFFDE2910.toInt())
-                paint.color = 0xFFFFDE00.toInt()
-                star(canvas, 5.4f, 4.6f, 2.6f, 0f)
-                star(canvas, 9.6f, 2.2f, 1.1f, 0.35f)
-                star(canvas, 11.4f, 4.4f, 1.1f, 0.7f)
-                star(canvas, 11.4f, 7.1f, 1.1f, 1.05f)
-                star(canvas, 9.6f, 9.1f, 1.1f, 1.4f)
-            }
-            else -> union(canvas)
-        }
-        canvas.restore()
-    }
-
-    override fun setAlpha(alpha: Int) {
-        paint.alpha = alpha
-    }
-
-    override fun setColorFilter(filter: ColorFilter?) {
-        paint.colorFilter = filter
-    }
-
-    @Deprecated("The platform asks for this and nothing reads it.")
-    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
-}
-
 class FlowLayout(
     context: Context,
     private val betweenX: Int,
@@ -3391,9 +3221,18 @@ class BuilderActivity : Activity() {
 
         const val LOG_TICK_MILLIS = 400L
 
-        val NATIVE_TILES = listOf("Kotlin", "Rust", "C++", "Java")
+        val NATIVE_TILES = listOf(
+            R.drawable.omni_tech_kotlin to "Kotlin",
+            R.drawable.omni_tech_rust to "Rust",
+            R.drawable.omni_tech_cpp to "C++",
+            R.drawable.omni_tech_java to "Java",
+        )
 
-        val WEB_TILES = listOf("HTML", "CSS", "JS")
+        val WEB_TILES = listOf(
+            R.drawable.omni_tech_html to "HTML",
+            R.drawable.omni_tech_css to "CSS",
+            R.drawable.omni_tech_js to "JavaScript",
+        )
 
         val WEB_PARTS = listOf("script", "storage", "pictures", "whole", "cached")
 
@@ -7029,7 +6868,7 @@ class BuilderActivity : Activity() {
         title: String,
         detail: String,
         edge: Int,
-        tiles: List<String>,
+        tiles: List<Pair<Int, String>>,
         onPress: () -> Unit,
     ): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -7080,20 +6919,90 @@ class BuilderActivity : Activity() {
             }
         )
         addView(
-            FlowLayout(context, gap(2), gap(2)).apply {
-                setPadding(0, gap(3), 0, 0)
-                tiles.forEach { addView(tile(it, edge)) }
+            TextView(context).apply {
+                text = getString(R.string.omni_kinds_holds)
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setPadding(0, gap(3), 0, gap(1))
+            }
+        )
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                tiles.forEach { badge ->
+                    addView(
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.VERTICAL
+                            gravity = Gravity.CENTER_HORIZONTAL
+                            setPadding(gap(1), gap(2), gap(1), gap(2))
+                            background = GradientDrawable().apply {
+                                this.shape = GradientDrawable.RECTANGLE
+                                cornerRadius = gap(3).toFloat()
+                                setColor(Ink.fade(edge, 0.08f))
+                                setStroke(gap(1) / 2, Ink.fade(edge, 0.45f))
+                            }
+                            addView(
+                                ImageView(context).apply {
+                                    setImageResource(badge.first)
+                                    scaleType = ImageView.ScaleType.FIT_CENTER
+                                },
+                                LinearLayout.LayoutParams(gap(9), gap(9)),
+                            )
+                            addView(
+                                TextView(context).apply {
+                                    text = badge.second
+                                    setTextColor(palette.foreground)
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                    setPadding(0, gap(1), 0, 0)
+                                }
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                            marginStart = gap(1) / 2
+                            marginEnd = gap(1) / 2
+                        },
+                    )
+                }
             }
         )
     }
 
     private fun renderKinds() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
-                getString(R.string.omni_kinds_title),
-                getString(R.string.omni_kinds_note),
-            )
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_kinds_title)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_kinds_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(R.drawable.omni_mascot_waving)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    },
+                    LinearLayout.LayoutParams(gap(24), gap(20)).apply { marginStart = gap(2) },
+                )
+            }
         )
         content.addView(
             kindCard(
@@ -7157,11 +7066,40 @@ class BuilderActivity : Activity() {
 
     private fun renderWebToApk() {
         content.addView(
-            mascot(
-                R.drawable.omni_mascot,
-                getString(R.string.omni_web_title),
-                getString(R.string.omni_web_note),
-            )
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_web_title)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_web_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(R.drawable.omni_art_web)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    },
+                    LinearLayout.LayoutParams(gap(28), gap(20)).apply { marginStart = gap(2) },
+                )
+            }
         )
         val where = card()
         where.addView(
@@ -7506,6 +7444,25 @@ class BuilderActivity : Activity() {
             .show()
     }
 
+    private fun themeArt(shown: Palette): Int = when (shown.key) {
+        Palette.HACKER.key -> R.drawable.omni_theme_hacker
+        Palette.ANIME.key -> R.drawable.omni_theme_anime
+        else -> R.drawable.omni_theme_dark
+    }
+
+    private fun flagOf(tag: String): Int = when (tag) {
+        "tr" -> R.drawable.omni_flag_tr
+        "de" -> R.drawable.omni_flag_de
+        "fr" -> R.drawable.omni_flag_fr
+        "es" -> R.drawable.omni_flag_es
+        "ru" -> R.drawable.omni_flag_ru
+        "ar" -> R.drawable.omni_flag_ar
+        "zh" -> R.drawable.omni_flag_zh
+        "pt" -> R.drawable.omni_flag_pt
+        "it" -> R.drawable.omni_flag_it
+        else -> R.drawable.omni_flag_en
+    }
+
     private fun themeCard(shown: Palette, active: Boolean, onPress: () -> Unit): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -7530,8 +7487,12 @@ class BuilderActivity : Activity() {
                 bottomMargin = gap(1)
             }
             addView(
-                ThemeArt(context, shown),
-                LinearLayout.LayoutParams(MATCH_PARENT, gap(28)),
+                ImageView(context).apply {
+                    setImageResource(themeArt(shown))
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    adjustViewBounds = false
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, gap(34)),
             )
             addView(
                 LinearLayout(context).apply {
@@ -7593,8 +7554,11 @@ class BuilderActivity : Activity() {
                 }
             }
             addView(
-                View(context).apply { background = Flag(tag) },
-                LinearLayout.LayoutParams(gap(9), gap(6)).apply { marginEnd = gap(3) },
+                ImageView(context).apply {
+                    setImageResource(flagOf(tag))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                },
+                LinearLayout.LayoutParams(gap(11), gap(8)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -7666,25 +7630,15 @@ class BuilderActivity : Activity() {
         Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName"))
 
     private fun renderRate() {
-        val stage = FrameLayout(this).apply {
-            background = sheet(palette.surface, palette.divider)
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(4)
+        content.addView(
+            ImageView(this).apply {
+                setImageResource(R.drawable.omni_art_rate)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, gap(40)).apply {
+                    topMargin = gap(4)
+                }
             }
-            addView(
-                ThemeArt(context, palette),
-                FrameLayout.LayoutParams(MATCH_PARENT, gap(34)),
-            )
-            addView(
-                ImageView(context).apply {
-                    setImageResource(R.drawable.omni_mascot)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                },
-                FrameLayout.LayoutParams(gap(24), gap(24), Gravity.CENTER),
-            )
-        }
-        content.addView(stage)
-        content.addView(starRow())
+        )
         content.addView(
             TextView(this).apply {
                 text = getString(R.string.omni_rate_title)
@@ -9725,145 +9679,6 @@ internal object Tape {
         dropouts(canvas, paint, w, h, life, strength)
         bloom(canvas, paint, w, h, life, strength)
         headSwitch(canvas, paint, w, h, life, strength)
-    }
-}
-
-class ThemeArt(context: Context, private val shown: Palette) : View(context) {
-
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
-
-    private fun rain(canvas: Canvas, wide: Float, tall: Float) {
-        paint.style = Paint.Style.FILL
-        paint.typeface = Type.data
-        paint.textAlign = Paint.Align.CENTER
-        paint.textSize = tall / 9f
-        val columns = 12
-        var column = 0
-        while (column < columns) {
-            val across = wide * (column + 0.5f) / columns
-            val head = Ink.scatter(column, 11) * tall
-            var letter = 0
-            while (letter < 8) {
-                val down = (head + letter * tall / 7f) % (tall * 1.12f)
-                paint.color = Ink.fade(shown.accent, 0.14f + 0.7f * (letter / 7f))
-                canvas.drawText(
-                    if (Ink.scatter(column, letter) > 0.5f) "1" else "0",
-                    across,
-                    down,
-                    paint,
-                )
-                letter += 1
-            }
-            column += 1
-        }
-        paint.textAlign = Paint.Align.LEFT
-    }
-
-    private fun bloom(canvas: Canvas, wide: Float, tall: Float) {
-        paint.style = Paint.Style.FILL
-        paint.shader = RadialGradient(
-            wide * 0.26f,
-            tall * 0.3f,
-            tall * 0.9f,
-            Ink.fade(shown.glowFirst, 0.85f),
-            Color.TRANSPARENT,
-            Shader.TileMode.CLAMP,
-        )
-        canvas.drawRect(0f, 0f, wide, tall, paint)
-        paint.shader = RadialGradient(
-            wide * 0.8f,
-            tall * 0.74f,
-            tall * 0.8f,
-            Ink.fade(shown.glowThird, 0.8f),
-            Color.TRANSPARENT,
-            Shader.TileMode.CLAMP,
-        )
-        canvas.drawRect(0f, 0f, wide, tall, paint)
-        paint.shader = null
-        var petal = 0
-        while (petal < 9) {
-            paint.color = Ink.fade(shown.accent, 0.10f + 0.14f * Ink.scatter(petal, 5))
-            canvas.drawCircle(
-                wide * Ink.scatter(petal, 2),
-                tall * Ink.scatter(petal, 7),
-                tall * (0.02f + 0.05f * Ink.scatter(petal, 9)),
-                paint,
-            )
-            petal += 1
-        }
-        val figure = Chibi(Chibi.Face.RIBBON, shown)
-        val edge = (tall * 0.82f).toInt()
-        val left = ((wide - edge) / 2f).toInt()
-        val top = ((tall - edge) / 2f).toInt()
-        figure.setBounds(left, top, left + edge, top + edge)
-        figure.draw(canvas)
-    }
-
-    private fun pane(canvas: Canvas, wide: Float, tall: Float) {
-        paint.style = Paint.Style.FILL
-        paint.color = shown.raised
-        path.rewind()
-        path.addRoundRect(
-            wide * 0.11f,
-            tall * 0.16f,
-            wide * 0.89f,
-            tall * 0.9f,
-            tall * 0.07f,
-            tall * 0.07f,
-            Path.Direction.CW,
-        )
-        canvas.drawPath(path, paint)
-        paint.color = shown.divider
-        canvas.save()
-        canvas.clipPath(path)
-        canvas.drawRect(wide * 0.11f, tall * 0.16f, wide * 0.89f, tall * 0.32f, paint)
-        canvas.restore()
-        val dots = listOf(shown.error, shown.warning, shown.ok)
-        dots.forEachIndexed { index, colour ->
-            paint.color = colour
-            canvas.drawCircle(
-                wide * 0.16f + index * tall * 0.1f,
-                tall * 0.24f,
-                tall * 0.028f,
-                paint,
-            )
-        }
-        val widths = listOf(0.44f, 0.62f, 0.3f, 0.54f, 0.38f)
-        widths.forEachIndexed { index, reach ->
-            paint.color = if (index % 2 == 0) {
-                Ink.fade(shown.accent, 0.8f)
-            } else {
-                Ink.fade(shown.foreground, 0.42f)
-            }
-            val top = tall * (0.4f + index * 0.1f)
-            canvas.drawRoundRect(
-                wide * 0.16f,
-                top,
-                wide * (0.16f + reach),
-                top + tall * 0.05f,
-                tall * 0.025f,
-                tall * 0.025f,
-                paint,
-            )
-        }
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val wide = width.toFloat()
-        val tall = height.toFloat()
-        if (wide <= 0f || tall <= 0f) {
-            return
-        }
-        paint.style = Paint.Style.FILL
-        paint.color = shown.background
-        canvas.drawRect(0f, 0f, wide, tall, paint)
-        when (shown.key) {
-            Palette.HACKER.key -> rain(canvas, wide, tall)
-            Palette.ANIME.key -> bloom(canvas, wide, tall)
-            else -> pane(canvas, wide, tall)
-        }
-        Ink.vignette(canvas, paint, wide, tall, 0.5f)
     }
 }
 

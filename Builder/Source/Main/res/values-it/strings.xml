@@ -347,4 +347,5 @@
     <string name="omni_tab_shell">Terminale</string>
     <string name="omni_shell_refused">Non è stato possibile avviare una shell qui.</string>
     <string name="omni_shell_note">Lavora in %1$s. La tastiera si apre a un tocco.</string>
+    <string name="omni_kinds_holds">Linguaggi supportati:</string>
 </resources>

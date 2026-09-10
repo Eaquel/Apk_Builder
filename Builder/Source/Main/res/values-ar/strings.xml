@@ -347,4 +347,5 @@
     <string name="omni_tab_shell">الطرفية</string>
     <string name="omni_shell_refused">تعذّر بدء صدفة هنا.</string>
     <string name="omni_shell_note">يعمل في %1$s. وتُفتح لوحة المفاتيح بلمسة.</string>
+    <string name="omni_kinds_holds">اللغات المدعومة:</string>
 </resources>

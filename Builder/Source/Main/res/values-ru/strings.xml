@@ -347,4 +347,5 @@
     <string name="omni_tab_shell">Терминал</string>
     <string name="omni_shell_refused">Здесь не удалось запустить оболочку.</string>
     <string name="omni_shell_note">Работает в %1$s. Клавиатура открывается по касанию.</string>
+    <string name="omni_kinds_holds">Поддерживаемые языки:</string>
 </resources>
