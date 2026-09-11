@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_tab_build">BAUEN</string>
+    <string name="omni_tab_build">Bauen</string>
     <string name="omni_tab_trash">PAPIERKORB</string>
     <string name="omni_tab_settings">EINSTELLUNGEN</string>
     <string name="omni_projects_title">Projekte</string>
@@ -67,10 +67,11 @@
     <string name="omni_files_split">TEILEN</string>
     <string name="omni_defaults_title">Neue Projekte</string>
     <string name="omni_defaults_seal">Jedes Paket, das hier entsteht, trägt ein Siegel gegen den Schlüssel, der es signiert hat. Eine neu verpackte Kopie zeigt ein anderes Zertifikat, und das Siegel verweigert den Start.</string>
-    <string name="omni_files_by_name">NAME</string>
-    <string name="omni_files_by_size">GRÖSSE</string>
-    <string name="omni_files_by_changed">DATUM</string>
-    <string name="omni_files_by_kind">ART</string>
+    <string name="omni_files_by_name">Nach Name (A → Z)</string>
+    <string name="omni_files_by_name_back">Nach Name (Z → A)</string>
+    <string name="omni_files_by_size">Nach Größe</string>
+    <string name="omni_files_by_changed">Nach Änderungsdatum</string>
+    <string name="omni_files_by_kind">Nach Art</string>
     <string name="omni_files_copy_across">In den anderen Bereich kopieren</string>
     <string name="omni_files_move_across">In den anderen Bereich verschieben</string>
     <string name="omni_files_tools">WERKZEUGE</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">Aus den eigenen Builds dieses Geräts berechnet.</string>
     <string name="omni_stage_built">PAKET GESCHRIEBEN</string>
     <string name="omni_stage_stop">STOPP</string>
+    <string name="omni_stage_stop_build">Bau anhalten</string>
     <string name="omni_stage_stopped">BUILD ANGEHALTEN</string>
     <string name="omni_result_verified">Nachgeprüft</string>
     <string name="omni_result_verified_yes">Das Paket verifiziert gegen seinen eigenen Schlüssel</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s hält bei Zeile %2$d</string>
     <string name="omni_editor_line">ZEILE</string>
     <string name="omni_editor_line_ask">Zeilennummer</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">Was Sie hier zuletzt getippt haben, wurde aufbewahrt und zurückgelegt. Speichern Sie es oder bearbeiten Sie es weg.</string>
     <string name="omni_search_none">In diesem Projekt steht das nirgends.</string>
     <string name="omni_search_found">%1$d in %2$d Dateien</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">Hier konnte keine Shell gestartet werden.</string>
     <string name="omni_shell_note">Arbeitet in %1$s. Die Tastatur öffnet sich bei einer Berührung.</string>
     <string name="omni_kinds_holds">Unterstützte Sprachen:</string>
+    <string name="omni_kinds_holds_web">Unterstützte Web-Technologien:</string>
     <string name="omni_brand_note">Android-Entwicklungsumgebung</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">Im Projekt suchen</string>
     <string name="omni_raise_open">Projekt öffnen</string>
     <string name="omni_raise_more">Mehr</string>
-    <string name="omni_files_sorting">Sortieren nach</string>
-    <string name="omni_files_reversed">Reihenfolge umkehren</string>
+    <string name="omni_files_sorting">Sortieroptionen</string>
     <string name="omni_action_forward">Vorwärts</string>
     <string name="omni_rate_support">Deine Unterstützung zählt für uns.</string>
     <string name="omni_about_head">Alles über Omni Builder.</string>

@@ -67,10 +67,11 @@
     <string name="omni_files_split">बाँटें</string>
     <string name="omni_defaults_title">नई परियोजनाएँ</string>
     <string name="omni_defaults_seal">यहाँ बना हर पैकेज उस कुंजी के विरुद्ध एक मुहर रखता है जिसने उसे हस्ताक्षरित किया। दोबारा पैक की गई नकल दूसरा प्रमाणपत्र दिखाती है, और मुहर शुरू होने से मना कर देती है।</string>
-    <string name="omni_files_by_name">नाम</string>
-    <string name="omni_files_by_size">आकार</string>
-    <string name="omni_files_by_changed">बदला</string>
-    <string name="omni_files_by_kind">किस्म</string>
+    <string name="omni_files_by_name">नाम से (A → Z)</string>
+    <string name="omni_files_by_name_back">नाम से (Z → A)</string>
+    <string name="omni_files_by_size">आकार से</string>
+    <string name="omni_files_by_changed">बदलने की तिथि से</string>
+    <string name="omni_files_by_kind">किस्म से</string>
     <string name="omni_files_copy_across">दूसरे पटल पर नकल करें</string>
     <string name="omni_files_move_across">दूसरे पटल पर ले जाएँ</string>
     <string name="omni_files_tools">औज़ार</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">इसी उपकरण की अपनी बनावटों से आँका गया।</string>
     <string name="omni_stage_built">पैकेज लिख दिया गया</string>
     <string name="omni_stage_stop">रोकें</string>
+    <string name="omni_stage_stop_build">बनावट रोकें</string>
     <string name="omni_stage_stopped">बनावट रुक गई</string>
     <string name="omni_result_verified">वापस जाँचा</string>
     <string name="omni_result_verified_yes">पैकेज अपनी ही कुंजी के विरुद्ध सही उतरता है</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s पंक्ति %2$d पर रुकता है</string>
     <string name="omni_editor_line">पंक्ति</string>
     <string name="omni_editor_line_ask">पंक्ति संख्या</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">पिछली बार आपने यहाँ जो लिखा था वह रख लिया गया और वापस डाल दिया गया। उसे सहेजिए, या मिटा दीजिए।</string>
     <string name="omni_search_none">इस परियोजना में कहीं वह नहीं है।</string>
     <string name="omni_search_found">%2$d फ़ाइलों में %1$d</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">यहाँ शेल शुरू नहीं हो सका।</string>
     <string name="omni_shell_note">%1$s में काम हो रहा है। छूने पर कुंजीपटल खुलता है।</string>
     <string name="omni_kinds_holds">जिन भाषाओं का यह साथ देता है:</string>
+    <string name="omni_kinds_holds_web">समर्थित वेब तकनीकें:</string>
     <string name="omni_brand_note">Android विकास का परिवेश</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">परियोजना में खोजें</string>
     <string name="omni_raise_open">परियोजना खोलें</string>
     <string name="omni_raise_more">और</string>
-    <string name="omni_files_sorting">इसके अनुसार क्रम</string>
-    <string name="omni_files_reversed">क्रम उलट दें</string>
+    <string name="omni_files_sorting">क्रम विकल्प</string>
     <string name="omni_action_forward">आगे</string>
     <string name="omni_rate_support">आपका साथ हमारे लिए मायने रखता है।</string>
     <string name="omni_about_head">Omni Builder के बारे में सब कुछ।</string>

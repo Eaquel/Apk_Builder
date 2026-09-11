@@ -67,10 +67,11 @@
     <string name="omni_files_split">分割</string>
     <string name="omni_defaults_title">新しいプロジェクトの既定</string>
     <string name="omni_defaults_seal">ここで作られるすべてのパッケージは、署名した鍵に対する封印を持ちます。再梱包された複製は別の証明書を示すので、封印が起動を拒みます。</string>
-    <string name="omni_files_by_name">名前</string>
-    <string name="omni_files_by_size">サイズ</string>
-    <string name="omni_files_by_changed">更新日</string>
-    <string name="omni_files_by_kind">種類</string>
+    <string name="omni_files_by_name">名前順（A → Z）</string>
+    <string name="omni_files_by_name_back">名前順（Z → A）</string>
+    <string name="omni_files_by_size">大きさ順</string>
+    <string name="omni_files_by_changed">更新日時順</string>
+    <string name="omni_files_by_kind">種類順</string>
     <string name="omni_files_copy_across">反対側のペインへコピー</string>
     <string name="omni_files_move_across">反対側のペインへ移動</string>
     <string name="omni_files_tools">ツール</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">この端末自身のビルドから見積もりました。</string>
     <string name="omni_stage_built">パッケージを書きました</string>
     <string name="omni_stage_stop">停止</string>
+    <string name="omni_stage_stop_build">ビルドを止める</string>
     <string name="omni_stage_stopped">ビルドを停止しました</string>
     <string name="omni_result_verified">確かめ直し</string>
     <string name="omni_result_verified_yes">パッケージは自身の鍵で検証できます</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s は %2$d 行で終わります</string>
     <string name="omni_editor_line">行</string>
     <string name="omni_editor_line_ask">行番号</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">前回ここで入力した内容が保たれ、戻されました。保存するか、消してください。</string>
     <string name="omni_search_none">このプロジェクトにそれを含むものはありません。</string>
     <string name="omni_search_found">%2$d 個のファイルに %1$d 件</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">ここでは殻を起こせませんでした。</string>
     <string name="omni_shell_note">%1$s で作業中。触れると鍵盤が開きます。</string>
     <string name="omni_kinds_holds">対応する言語:</string>
+    <string name="omni_kinds_holds_web">対応するウェブ技術:</string>
     <string name="omni_brand_note">Android 開発環境</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">プロジェクトを検索</string>
     <string name="omni_raise_open">プロジェクトを開く</string>
     <string name="omni_raise_more">その他</string>
     <string name="omni_files_sorting">並べ替え</string>
-    <string name="omni_files_reversed">順序を逆にする</string>
     <string name="omni_action_forward">進む</string>
     <string name="omni_rate_support">あなたの支えが力になります。</string>
     <string name="omni_about_head">Omni Builder のすべて。</string>

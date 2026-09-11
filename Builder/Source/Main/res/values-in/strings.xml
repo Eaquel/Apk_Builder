@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_tab_build">BANGUN</string>
+    <string name="omni_tab_build">Bangun</string>
     <string name="omni_tab_trash">TEMPAT SAMPAH</string>
     <string name="omni_tab_settings">PENGATURAN</string>
     <string name="omni_projects_title">Proyek</string>
@@ -67,10 +67,11 @@
     <string name="omni_files_split">BELAH</string>
     <string name="omni_defaults_title">Proyek baru</string>
     <string name="omni_defaults_seal">Setiap paket yang dibangun di sini membawa segel terhadap kunci yang menandatanganinya. Salinan yang dibungkus ulang menyodorkan sertifikat lain, dan segelnya menolak memulai.</string>
-    <string name="omni_files_by_name">NAMA</string>
-    <string name="omni_files_by_size">UKURAN</string>
-    <string name="omni_files_by_changed">DIUBAH</string>
-    <string name="omni_files_by_kind">JENIS</string>
+    <string name="omni_files_by_name">Menurut nama (A → Z)</string>
+    <string name="omni_files_by_name_back">Menurut nama (Z → A)</string>
+    <string name="omni_files_by_size">Menurut ukuran</string>
+    <string name="omni_files_by_changed">Menurut tanggal ubah</string>
+    <string name="omni_files_by_kind">Menurut jenis</string>
     <string name="omni_files_copy_across">Salin ke panel seberang</string>
     <string name="omni_files_move_across">Pindah ke panel seberang</string>
     <string name="omni_files_tools">PERKAKAS</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">Diperkirakan dari bangunan perangkat ini sendiri.</string>
     <string name="omni_stage_built">PAKET DITULIS</string>
     <string name="omni_stage_stop">HENTIKAN</string>
+    <string name="omni_stage_stop_build">Hentikan bangunan</string>
     <string name="omni_stage_stopped">BANGUNAN DIHENTIKAN</string>
     <string name="omni_result_verified">Diperiksa balik</string>
     <string name="omni_result_verified_yes">Paket ini terbukti dengan kuncinya sendiri</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s berhenti di baris %2$d</string>
     <string name="omni_editor_line">BARIS</string>
     <string name="omni_editor_line_ask">Nomor baris</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">Yang kamu ketik di sini terakhir kali disimpan dan dikembalikan. Simpan, atau sunting hingga hilang.</string>
     <string name="omni_search_none">Tidak ada di proyek ini yang memuat itu.</string>
     <string name="omni_search_found">%1$d di %2$d berkas</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">Sebuah cangkang tidak bisa dimulai di sini.</string>
     <string name="omni_shell_note">Bekerja di %1$s. Papan ketik terbuka pada sentuhan.</string>
     <string name="omni_kinds_holds">Bahasa yang didukungnya:</string>
+    <string name="omni_kinds_holds_web">Teknologi web yang didukung:</string>
     <string name="omni_brand_note">Lingkungan pengembangan Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">Cari di proyek</string>
     <string name="omni_raise_open">Buka proyek</string>
     <string name="omni_raise_more">Lainnya</string>
-    <string name="omni_files_sorting">Urutkan menurut</string>
-    <string name="omni_files_reversed">Balik urutannya</string>
+    <string name="omni_files_sorting">Pilihan urutan</string>
     <string name="omni_action_forward">Maju</string>
     <string name="omni_rate_support">Dukunganmu berarti bagi kami.</string>
     <string name="omni_about_head">Semua tentang Omni Builder.</string>

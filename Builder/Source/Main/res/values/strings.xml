@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_tab_build">BUILD</string>
+    <string name="omni_tab_build">Build</string>
     <string name="omni_tab_trash">TRASH</string>
     <string name="omni_tab_settings">SETTINGS</string>
     <string name="omni_projects_title">Projects</string>
@@ -67,10 +67,11 @@
     <string name="omni_files_split">SPLIT</string>
     <string name="omni_defaults_title">New projects</string>
     <string name="omni_defaults_seal">Every package this builds carries a seal against the key that signed it. A repackaged copy presents a different certificate, and the seal refuses to start.</string>
-    <string name="omni_files_by_name">NAME</string>
-    <string name="omni_files_by_size">SIZE</string>
-    <string name="omni_files_by_changed">CHANGED</string>
-    <string name="omni_files_by_kind">KIND</string>
+    <string name="omni_files_by_name">By name (A → Z)</string>
+    <string name="omni_files_by_name_back">By name (Z → A)</string>
+    <string name="omni_files_by_size">By size</string>
+    <string name="omni_files_by_changed">By date changed</string>
+    <string name="omni_files_by_kind">By kind</string>
     <string name="omni_files_copy_across">Copy to the other pane</string>
     <string name="omni_files_move_across">Move to the other pane</string>
     <string name="omni_files_tools">TOOLS</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">Estimated from this device\'s own builds.</string>
     <string name="omni_stage_built">PACKAGE WRITTEN</string>
     <string name="omni_stage_stop">STOP</string>
+    <string name="omni_stage_stop_build">Stop the build</string>
     <string name="omni_stage_stopped">BUILD STOPPED</string>
     <string name="omni_result_verified">Checked back</string>
     <string name="omni_result_verified_yes">The package verifies against its own key</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s stops at line %2$d</string>
     <string name="omni_editor_line">LINE</string>
     <string name="omni_editor_line_ask">Line number</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">What you typed here last time was kept and put back. Save it, or edit it away.</string>
     <string name="omni_search_none">Nothing in this project holds that.</string>
     <string name="omni_search_found">%1$d in %2$d files</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">A shell could not be started here.</string>
     <string name="omni_shell_note">Working in %1$s. The keyboard opens on a tap.</string>
     <string name="omni_kinds_holds">Languages it supports:</string>
+    <string name="omni_kinds_holds_web">Web technologies it supports:</string>
     <string name="omni_brand_note">Android development environment</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">Search the project</string>
     <string name="omni_raise_open">Open a project</string>
     <string name="omni_raise_more">More</string>
-    <string name="omni_files_sorting">Sort by</string>
-    <string name="omni_files_reversed">Turn the order around</string>
+    <string name="omni_files_sorting">Sort options</string>
     <string name="omni_action_forward">Forward</string>
     <string name="omni_rate_support">Your support matters to us.</string>
     <string name="omni_about_head">Everything about Omni Builder.</string>

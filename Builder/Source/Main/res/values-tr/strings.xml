@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_tab_build">DERLE</string>
+    <string name="omni_tab_build">Build</string>
     <string name="omni_tab_trash">ÇÖP</string>
     <string name="omni_tab_settings">AYARLAR</string>
     <string name="omni_projects_title">Projeler</string>
@@ -67,10 +67,11 @@
     <string name="omni_files_split">BÖL</string>
     <string name="omni_defaults_title">Yeni projeler</string>
     <string name="omni_defaults_seal">Bu yapının ürettiği her paket, onu imzalayan anahtara karşı bir mühür taşır. Yeniden paketlenmiş bir kopya başka bir sertifika sunar ve mühür başlamayı reddeder.</string>
-    <string name="omni_files_by_name">AD</string>
-    <string name="omni_files_by_size">BOYUT</string>
-    <string name="omni_files_by_changed">TARİH</string>
-    <string name="omni_files_by_kind">TÜR</string>
+    <string name="omni_files_by_name">Ada Göre (A → Z)</string>
+    <string name="omni_files_by_name_back">Ada Göre (Z → A)</string>
+    <string name="omni_files_by_size">Boyuta Göre</string>
+    <string name="omni_files_by_changed">Değiştirme Tarihine Göre</string>
+    <string name="omni_files_by_kind">Türe Göre</string>
     <string name="omni_files_copy_across">Diğer bölmeye kopyala</string>
     <string name="omni_files_move_across">Diğer bölmeye taşı</string>
     <string name="omni_files_tools">ARAÇLAR</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">Bu cihazın kendi derlemelerinden hesaplandı.</string>
     <string name="omni_stage_built">PAKET YAZILDI</string>
     <string name="omni_stage_stop">DURDUR</string>
+    <string name="omni_stage_stop_build">Build Durdur</string>
     <string name="omni_stage_stopped">DERLEME DURDURULDU</string>
     <string name="omni_result_verified">Geri denetim</string>
     <string name="omni_result_verified_yes">Paket kendi anahtarıyla doğrulanıyor</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s %2$d. satırda duruyor</string>
     <string name="omni_editor_line">SATIR</string>
     <string name="omni_editor_line_ask">Satır numarası</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">Buraya en son yazdıkların saklanıp geri kondu. Kaydet ya da düzenleyip çıkar.</string>
     <string name="omni_search_none">Bu projede bunu içeren bir şey yok.</string>
     <string name="omni_search_found">%2$d dosyada %1$d sonuç</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">Burada bir kabuk başlatılamadı.</string>
     <string name="omni_shell_note">%1$s içinde çalışıyor. Dokununca klavye açılır.</string>
     <string name="omni_kinds_holds">Desteklenen diller:</string>
+    <string name="omni_kinds_holds_web">Desteklenen Web Teknolojileri:</string>
     <string name="omni_brand_note">Android Geliştirme Ortamı</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">Projede ara</string>
     <string name="omni_raise_open">Proje aç</string>
     <string name="omni_raise_more">Daha fazla</string>
-    <string name="omni_files_sorting">Sıralama seçenekleri</string>
-    <string name="omni_files_reversed">Sırayı ters çevir</string>
+    <string name="omni_files_sorting">Sıralama Seçenekleri</string>
     <string name="omni_action_forward">İleri</string>
     <string name="omni_rate_support">Desteğin bizim için çok önemli!</string>
     <string name="omni_about_head">Omni Builder hakkında detaylı bilgiler.</string>

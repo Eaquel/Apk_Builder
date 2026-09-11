@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_tab_build">البناء</string>
+    <string name="omni_tab_build">بناء</string>
     <string name="omni_tab_trash">المهملات</string>
     <string name="omni_tab_settings">الإعدادات</string>
     <string name="omni_projects_title">المشاريع</string>
@@ -67,10 +67,11 @@
     <string name="omni_files_split">تقسيم</string>
     <string name="omni_defaults_title">مشاريع جديدة</string>
     <string name="omni_defaults_seal">كل حزمة تُبنى هنا تحمل ختمًا مرتبطًا بالمفتاح الذي وقّعها. النسخة المعاد تغليفها تقدّم شهادة أخرى، فيرفض الختم البدء.</string>
-    <string name="omni_files_by_name">الاسم</string>
-    <string name="omni_files_by_size">الحجم</string>
-    <string name="omni_files_by_changed">التاريخ</string>
-    <string name="omni_files_by_kind">النوع</string>
+    <string name="omni_files_by_name">حسب الاسم (A → Z)</string>
+    <string name="omni_files_by_name_back">حسب الاسم (Z → A)</string>
+    <string name="omni_files_by_size">حسب الحجم</string>
+    <string name="omni_files_by_changed">حسب تاريخ التعديل</string>
+    <string name="omni_files_by_kind">حسب النوع</string>
     <string name="omni_files_copy_across">نسخ إلى اللوحة الأخرى</string>
     <string name="omni_files_move_across">نقل إلى اللوحة الأخرى</string>
     <string name="omni_files_tools">أدوات</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">مُقدَّر من عمليات البناء على هذا الجهاز.</string>
     <string name="omni_stage_built">كُتبت الحزمة</string>
     <string name="omni_stage_stop">إيقاف</string>
+    <string name="omni_stage_stop_build">إيقاف البناء</string>
     <string name="omni_stage_stopped">تم إيقاف البناء</string>
     <string name="omni_result_verified">إعادة التحقق</string>
     <string name="omni_result_verified_yes">تتحقق الحزمة بمفتاحها الخاص</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s يتوقف عند السطر %2$d</string>
     <string name="omni_editor_line">سطر</string>
     <string name="omni_editor_line_ask">رقم السطر</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">ما كتبته هنا آخر مرة حُفظ وأُعيد. احفظه، أو حرّره حتى يزول.</string>
     <string name="omni_search_none">لا شيء في هذا المشروع يحوي ذلك.</string>
     <string name="omni_search_found">%1$d في %2$d ملفات</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">تعذّر بدء صدفة هنا.</string>
     <string name="omni_shell_note">يعمل في %1$s. وتُفتح لوحة المفاتيح بلمسة.</string>
     <string name="omni_kinds_holds">اللغات المدعومة:</string>
+    <string name="omni_kinds_holds_web">تقنيات الويب المدعومة:</string>
     <string name="omni_brand_note">بيئة تطوير أندرويد</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">ابحث في المشروع</string>
     <string name="omni_raise_open">افتح مشروعًا</string>
     <string name="omni_raise_more">المزيد</string>
-    <string name="omni_files_sorting">الترتيب حسب</string>
-    <string name="omni_files_reversed">اعكس الترتيب</string>
+    <string name="omni_files_sorting">خيارات الترتيب</string>
     <string name="omni_action_forward">إلى الأمام</string>
     <string name="omni_rate_support">دعمك يهمّنا كثيرًا.</string>
     <string name="omni_about_head">كل شيء عن Omni Builder.</string>

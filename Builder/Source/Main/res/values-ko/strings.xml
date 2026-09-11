@@ -67,10 +67,11 @@
     <string name="omni_files_split">나누기</string>
     <string name="omni_defaults_title">새 프로젝트 기본값</string>
     <string name="omni_defaults_seal">여기서 만들어지는 모든 패키지는 서명한 키에 대한 봉인을 지닙니다. 다시 포장된 사본은 다른 인증서를 내밀고, 봉인은 실행을 거부합니다.</string>
-    <string name="omni_files_by_name">이름</string>
-    <string name="omni_files_by_size">크기</string>
-    <string name="omni_files_by_changed">수정일</string>
-    <string name="omni_files_by_kind">종류</string>
+    <string name="omni_files_by_name">이름순 (A → Z)</string>
+    <string name="omni_files_by_name_back">이름순 (Z → A)</string>
+    <string name="omni_files_by_size">크기순</string>
+    <string name="omni_files_by_changed">바뀐 때순</string>
+    <string name="omni_files_by_kind">갈래순</string>
     <string name="omni_files_copy_across">건너편 창으로 복사</string>
     <string name="omni_files_move_across">건너편 창으로 이동</string>
     <string name="omni_files_tools">도구</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">이 기기 자신의 빌드에서 헤아렸습니다.</string>
     <string name="omni_stage_built">패키지를 썼습니다</string>
     <string name="omni_stage_stop">멈춤</string>
+    <string name="omni_stage_stop_build">빌드 멈추기</string>
     <string name="omni_stage_stopped">빌드를 멈췄습니다</string>
     <string name="omni_result_verified">되짚어 확인</string>
     <string name="omni_result_verified_yes">패키지가 자신의 키로 검증됩니다</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s은(는) %2$d행에서 끝납니다</string>
     <string name="omni_editor_line">행</string>
     <string name="omni_editor_line_ask">행 번호</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">지난번에 여기 적은 것이 남아 있어 되돌려 놓았습니다. 저장하거나 지우세요.</string>
     <string name="omni_search_none">이 프로젝트에는 그것을 담은 것이 없습니다.</string>
     <string name="omni_search_found">파일 %2$d개에서 %1$d건</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">여기서 셸을 띄우지 못했습니다.</string>
     <string name="omni_shell_note">%1$s에서 일하는 중. 누르면 자판이 열립니다.</string>
     <string name="omni_kinds_holds">지원하는 언어:</string>
+    <string name="omni_kinds_holds_web">지원하는 웹 기술:</string>
     <string name="omni_brand_note">Android 개발 환경</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">프로젝트에서 찾기</string>
     <string name="omni_raise_open">프로젝트 열기</string>
     <string name="omni_raise_more">더 보기</string>
-    <string name="omni_files_sorting">정렬 기준</string>
-    <string name="omni_files_reversed">순서 뒤집기</string>
+    <string name="omni_files_sorting">정렬 방식</string>
     <string name="omni_action_forward">앞으로</string>
     <string name="omni_rate_support">당신의 응원이 큰 힘이 됩니다.</string>
     <string name="omni_about_head">Omni Builder에 관한 모든 것.</string>

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_tab_build">СБОРКА</string>
+    <string name="omni_tab_build">Сборка</string>
     <string name="omni_tab_trash">КОРЗИНА</string>
     <string name="omni_tab_settings">НАСТРОЙКИ</string>
     <string name="omni_projects_title">Проекты</string>
@@ -67,10 +67,11 @@
     <string name="omni_files_split">РАЗДЕЛИТЬ</string>
     <string name="omni_defaults_title">Новые проекты</string>
     <string name="omni_defaults_seal">Каждый пакет, собранный здесь, несёт печать, привязанную к ключу, которым он подписан. Переупакованная копия предъявляет другой сертификат, и печать отказывается запускаться.</string>
-    <string name="omni_files_by_name">ИМЯ</string>
-    <string name="omni_files_by_size">РАЗМЕР</string>
-    <string name="omni_files_by_changed">ДАТА</string>
-    <string name="omni_files_by_kind">ТИП</string>
+    <string name="omni_files_by_name">По имени (A → Z)</string>
+    <string name="omni_files_by_name_back">По имени (Z → A)</string>
+    <string name="omni_files_by_size">По размеру</string>
+    <string name="omni_files_by_changed">По дате изменения</string>
+    <string name="omni_files_by_kind">По типу</string>
     <string name="omni_files_copy_across">Копировать в другую панель</string>
     <string name="omni_files_move_across">Переместить в другую панель</string>
     <string name="omni_files_tools">ИНСТРУМЕНТЫ</string>
@@ -166,6 +167,7 @@
     <string name="omni_stage_learned">Рассчитано по собственным сборкам этого устройства.</string>
     <string name="omni_stage_built">ПАКЕТ ЗАПИСАН</string>
     <string name="omni_stage_stop">ОСТАНОВИТЬ</string>
+    <string name="omni_stage_stop_build">Остановить сборку</string>
     <string name="omni_stage_stopped">СБОРКА ОСТАНОВЛЕНА</string>
     <string name="omni_result_verified">Перепроверка</string>
     <string name="omni_result_verified_yes">Пакет проверяется собственным ключом</string>
@@ -182,6 +184,7 @@
     <string name="omni_editor_elsewhere">%1$s останавливается на строке %2$d</string>
     <string name="omni_editor_line">СТРОКА</string>
     <string name="omni_editor_line_ask">Номер строки</string>
+    <string name="omni_editor_spot">%1$d:%2$d</string>
     <string name="omni_editor_restored">То, что вы набрали здесь в прошлый раз, сохранено и возвращено. Сохраните это или удалите правкой.</string>
     <string name="omni_search_none">В этом проекте такого нет.</string>
     <string name="omni_search_found">%1$d в %2$d файлах</string>
@@ -343,13 +346,13 @@
     <string name="omni_shell_refused">Здесь не удалось запустить оболочку.</string>
     <string name="omni_shell_note">Работает в %1$s. Клавиатура открывается по касанию.</string>
     <string name="omni_kinds_holds">Поддерживаемые языки:</string>
+    <string name="omni_kinds_holds_web">Поддерживаемые веб-технологии:</string>
     <string name="omni_brand_note">Среда разработки Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_find_project">Искать в проекте</string>
     <string name="omni_raise_open">Открыть проект</string>
     <string name="omni_raise_more">Ещё</string>
-    <string name="omni_files_sorting">Сортировать по</string>
-    <string name="omni_files_reversed">Обратить порядок</string>
+    <string name="omni_files_sorting">Параметры сортировки</string>
     <string name="omni_action_forward">Вперёд</string>
     <string name="omni_rate_support">Ваша поддержка много для нас значит.</string>
     <string name="omni_about_head">Всё об Omni Builder.</string>
