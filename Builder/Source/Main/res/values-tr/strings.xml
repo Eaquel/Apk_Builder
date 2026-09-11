@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">Türe Göre</string>
     <string name="omni_files_copy_across">Diğer bölmeye kopyala</string>
     <string name="omni_files_move_across">Diğer bölmeye taşı</string>
-    <string name="omni_files_holds">içinde %1$d</string>
     <string name="omni_files_needs_name">Önce bir ad yaz.</string>
     <string name="omni_editor_changed_elsewhere">Bu dosya açıldığından beri başka bir yerde değişti. Yeniden kaydetmek o değişikliğin üzerine yazar.</string>
     <string name="omni_created">PROJE OLUŞTURULDU</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">Zaten düzenliydi.</string>
     <string name="omni_build_said">Derlemenin söyleyecek %1$d şeyi vardı</string>
     <string name="omni_health_title">Proje sağlığı</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Burada yapılacak bir şey yok.</string>
     <string name="omni_health_not">Yayınlanmadan önce yapılacak birkaç şey var.</string>
     <string name="omni_health_code">Kod</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Proje Bilgileri</string>
     <string name="omni_facts_name">Proje Adı</string>
     <string name="omni_facts_where">Proje Dizini</string>
+    <string name="omni_facts_made">Oluşturulma tarihi</string>
     <string name="omni_facts_changed">Son Düzenleme</string>
     <string name="omni_facts_holds">Toplam Dosya</string>
     <string name="omni_facts_counted">%1$d dosya, %2$d klasör</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">Uygulama Görselini Değiştir</string>
     <string name="omni_project_package">Paket Adını Düzenle</string>
     <string name="omni_project_clear">Proje Önbelleğini Temizle</string>
+    <string name="omni_project_delete">Projeyi Sil</string>
     <string name="omni_project_export">Projeyi ZIP Olarak Dışa Aktar</string>
+    <string name="omni_project_share">Projeyi Paylaş</string>
     <string name="omni_project_cleared">%1$d derlenmiş dosya silindi.</string>
     <string name="omni_project_exported">Proje ZIP olarak yazıldı.</string>
     <string name="omni_help_hello">Merhaba!</string>

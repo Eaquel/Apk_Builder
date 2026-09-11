@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">حسب النوع</string>
     <string name="omni_files_copy_across">نسخ إلى اللوحة الأخرى</string>
     <string name="omni_files_move_across">نقل إلى اللوحة الأخرى</string>
-    <string name="omni_files_holds">بداخله %1$d</string>
     <string name="omni_files_needs_name">اكتب اسمًا أولًا.</string>
     <string name="omni_editor_changed_elsewhere">تغيّر هذا الملف في مكان آخر منذ فتحه. الحفظ مرة أخرى يكتب فوق ذلك التغيير.</string>
     <string name="omni_created">أُنشئ المشروع</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">كان منسّقًا أصلًا.</string>
     <string name="omni_build_said">‏%1$d أمور كان للبناء أن يقولها</string>
     <string name="omni_health_title">حال المشروع</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">لا شيء هنا يحتاج عملًا.</string>
     <string name="omni_health_not">بعض هذا يحتاج عملًا قبل النشر.</string>
     <string name="omni_health_code">الشيفرة</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">بيانات المشروع</string>
     <string name="omni_facts_name">اسم المشروع</string>
     <string name="omni_facts_where">مجلد المشروع</string>
+    <string name="omni_facts_made">تاريخ الإنشاء</string>
     <string name="omni_facts_changed">آخر تعديل</string>
     <string name="omni_facts_holds">يحوي</string>
     <string name="omni_facts_counted">%1$d ملفًا و%2$d مجلدًا</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">غيّر صورة التطبيق</string>
     <string name="omni_project_package">حرّر اسم الحزمة</string>
     <string name="omni_project_clear">امسح ما بناه المشروع</string>
+    <string name="omni_project_delete">حذف المشروع</string>
     <string name="omni_project_export">صدّر المشروع كملف ZIP</string>
+    <string name="omni_project_share">مشاركة المشروع</string>
     <string name="omni_project_cleared">حُذف %1$d ملفًا مبنيًّا.</string>
     <string name="omni_project_exported">كُتب المشروع ملف ZIP.</string>
     <string name="omni_help_hello">مرحبًا!</string>

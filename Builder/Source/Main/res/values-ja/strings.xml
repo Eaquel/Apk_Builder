@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">種類順</string>
     <string name="omni_files_copy_across">反対側のペインへコピー</string>
     <string name="omni_files_move_across">反対側のペインへ移動</string>
-    <string name="omni_files_holds">中に %1$d 個</string>
     <string name="omni_files_needs_name">先に名前を入力してください。</string>
     <string name="omni_editor_changed_elsewhere">このファイルは開いてから別の場所で変更されました。もう一度保存すると、その変更を上書きします。</string>
     <string name="omni_created">プロジェクトを作成しました</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">すでに整っていました。</string>
     <string name="omni_build_said">ビルドが伝えたこと %1$d 件</string>
     <string name="omni_health_title">プロジェクトの健康</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">ここに手を入れるところはありません。</string>
     <string name="omni_health_not">出す前に手を入れるところがあります。</string>
     <string name="omni_health_code">コード</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">プロジェクトの情報</string>
     <string name="omni_facts_name">プロジェクト名</string>
     <string name="omni_facts_where">プロジェクトのフォルダー</string>
+    <string name="omni_facts_made">作成日時</string>
     <string name="omni_facts_changed">最終更新</string>
     <string name="omni_facts_holds">中身</string>
     <string name="omni_facts_counted">%1$d 個のファイル、%2$d 個のフォルダー</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">アプリの画像を替える</string>
     <string name="omni_project_package">パッケージ名を編集</string>
     <string name="omni_project_clear">プロジェクトが作ったものを消す</string>
+    <string name="omni_project_delete">プロジェクトを削除</string>
     <string name="omni_project_export">プロジェクトを ZIP で書き出す</string>
+    <string name="omni_project_share">プロジェクトを共有</string>
     <string name="omni_project_cleared">作られたファイルを %1$d 個消しました。</string>
     <string name="omni_project_exported">プロジェクトを ZIP として書き出しました。</string>
     <string name="omni_help_hello">こんにちは！</string>

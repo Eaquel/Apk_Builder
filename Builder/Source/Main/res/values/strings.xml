@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">By kind</string>
     <string name="omni_files_copy_across">Copy to the other pane</string>
     <string name="omni_files_move_across">Move to the other pane</string>
-    <string name="omni_files_holds">%1$d inside</string>
     <string name="omni_files_needs_name">Type a name first.</string>
     <string name="omni_editor_changed_elsewhere">This file changed somewhere else since it was opened. Saving again writes over that change.</string>
     <string name="omni_created">PROJECT CREATED</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">It was already laid out.</string>
     <string name="omni_build_said">%1$d things the build had to say</string>
     <string name="omni_health_title">Project health</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Nothing here needs doing.</string>
     <string name="omni_health_not">Some of this needs doing before it ships.</string>
     <string name="omni_health_code">Code</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Project details</string>
     <string name="omni_facts_name">Project name</string>
     <string name="omni_facts_where">Project folder</string>
+    <string name="omni_facts_made">Created</string>
     <string name="omni_facts_changed">Last changed</string>
     <string name="omni_facts_holds">Holds</string>
     <string name="omni_facts_counted">%1$d files, %2$d folders</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">Change the app picture</string>
     <string name="omni_project_package">Edit the package name</string>
     <string name="omni_project_clear">Clear what the project built</string>
+    <string name="omni_project_delete">Delete the project</string>
     <string name="omni_project_export">Export the project as a ZIP</string>
+    <string name="omni_project_share">Share the project</string>
     <string name="omni_project_cleared">%1$d built files removed.</string>
     <string name="omni_project_exported">The project was written out as a ZIP.</string>
     <string name="omni_help_hello">Hello!</string>

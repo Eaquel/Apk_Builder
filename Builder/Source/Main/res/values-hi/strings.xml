@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">किस्म से</string>
     <string name="omni_files_copy_across">दूसरे पटल पर नकल करें</string>
     <string name="omni_files_move_across">दूसरे पटल पर ले जाएँ</string>
-    <string name="omni_files_holds">%1$d भीतर</string>
     <string name="omni_files_needs_name">पहले नाम लिखिए।</string>
     <string name="omni_editor_changed_elsewhere">खुलने के बाद यह फ़ाइल कहीं और बदली गई है। दोबारा सहेजने पर वह बदलाव मिट जाएगा।</string>
     <string name="omni_created">परियोजना बनी</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">यह पहले से सजा हुआ था।</string>
     <string name="omni_build_said">%1$d बातें जो बनावट को कहनी थीं</string>
     <string name="omni_health_title">परियोजना की सेहत</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">यहाँ कुछ करने को नहीं है।</string>
     <string name="omni_health_not">भेजने से पहले इसमें से कुछ करना बाकी है।</string>
     <string name="omni_health_code">कोड</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">परियोजना का ब्योरा</string>
     <string name="omni_facts_name">परियोजना का नाम</string>
     <string name="omni_facts_where">परियोजना का फ़ोल्डर</string>
+    <string name="omni_facts_made">बनाया गया</string>
     <string name="omni_facts_changed">अंतिम बदलाव</string>
     <string name="omni_facts_holds">रखता है</string>
     <string name="omni_facts_counted">%1$d फ़ाइलें, %2$d फ़ोल्डर</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">ऐप की तस्वीर बदलें</string>
     <string name="omni_project_package">पैकेज नाम बदलें</string>
     <string name="omni_project_clear">परियोजना ने जो बनाया उसे हटाएँ</string>
+    <string name="omni_project_delete">प्रोजेक्ट हटाएं</string>
     <string name="omni_project_export">परियोजना को ZIP में बाहर लिखें</string>
+    <string name="omni_project_share">प्रोजेक्ट साझा करें</string>
     <string name="omni_project_cleared">%1$d बनी हुई फ़ाइलें हटाई गईं।</string>
     <string name="omni_project_exported">परियोजना ZIP के रूप में बाहर लिख दी गई।</string>
     <string name="omni_help_hello">नमस्ते!</string>

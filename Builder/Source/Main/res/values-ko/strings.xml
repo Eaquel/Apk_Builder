@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">갈래순</string>
     <string name="omni_files_copy_across">건너편 창으로 복사</string>
     <string name="omni_files_move_across">건너편 창으로 이동</string>
-    <string name="omni_files_holds">안에 %1$d개</string>
     <string name="omni_files_needs_name">이름을 먼저 적으세요.</string>
     <string name="omni_editor_changed_elsewhere">이 파일은 연 뒤에 다른 곳에서 바뀌었습니다. 다시 저장하면 그 변경을 덮어씁니다.</string>
     <string name="omni_created">프로젝트를 만들었습니다</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">이미 정돈되어 있었습니다.</string>
     <string name="omni_build_said">빌드가 남긴 말 %1$d건</string>
     <string name="omni_health_title">프로젝트 건강</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">여기서 손볼 것이 없습니다.</string>
     <string name="omni_health_not">내보내기 전에 손볼 것이 있습니다.</string>
     <string name="omni_health_code">코드</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">프로젝트 정보</string>
     <string name="omni_facts_name">프로젝트 이름</string>
     <string name="omni_facts_where">프로젝트 폴더</string>
+    <string name="omni_facts_made">생성일</string>
     <string name="omni_facts_changed">마지막 수정</string>
     <string name="omni_facts_holds">담긴 것</string>
     <string name="omni_facts_counted">파일 %1$d개, 폴더 %2$d개</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">앱 그림 바꾸기</string>
     <string name="omni_project_package">패키지 이름 고치기</string>
     <string name="omni_project_clear">프로젝트가 만든 것 지우기</string>
+    <string name="omni_project_delete">프로젝트 삭제</string>
     <string name="omni_project_export">프로젝트를 ZIP으로 내보내기</string>
+    <string name="omni_project_share">프로젝트 공유</string>
     <string name="omni_project_cleared">만들어진 파일 %1$d개를 지웠습니다.</string>
     <string name="omni_project_exported">프로젝트를 ZIP으로 썼습니다.</string>
     <string name="omni_help_hello">안녕하세요!</string>

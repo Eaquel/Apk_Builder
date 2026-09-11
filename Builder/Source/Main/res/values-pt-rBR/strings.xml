@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">Por tipo</string>
     <string name="omni_files_copy_across">Copiar para o outro painel</string>
     <string name="omni_files_move_across">Mover para o outro painel</string>
-    <string name="omni_files_holds">%1$d dentro</string>
     <string name="omni_files_needs_name">Digite um nome primeiro.</string>
     <string name="omni_editor_changed_elsewhere">Este arquivo mudou em outro lugar desde que foi aberto. Salvar de novo escreve por cima dessa mudança.</string>
     <string name="omni_created">PROJETO CRIADO</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">Já estava formatado.</string>
     <string name="omni_build_said">%1$d coisas que a compilação teve a dizer</string>
     <string name="omni_health_title">Saúde do projeto</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Nada aqui precisa ser feito.</string>
     <string name="omni_health_not">Parte disto precisa ser feita antes de publicar.</string>
     <string name="omni_health_code">Código</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Detalhes do projeto</string>
     <string name="omni_facts_name">Nome do projeto</string>
     <string name="omni_facts_where">Pasta do projeto</string>
+    <string name="omni_facts_made">Criado</string>
     <string name="omni_facts_changed">Última alteração</string>
     <string name="omni_facts_holds">Contém</string>
     <string name="omni_facts_counted">%1$d arquivos, %2$d pastas</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">Trocar a imagem do app</string>
     <string name="omni_project_package">Editar o nome do pacote</string>
     <string name="omni_project_clear">Limpar o que o projeto compilou</string>
+    <string name="omni_project_delete">Excluir o projeto</string>
     <string name="omni_project_export">Exportar o projeto como ZIP</string>
+    <string name="omni_project_share">Compartilhar o projeto</string>
     <string name="omni_project_cleared">%1$d arquivos compilados removidos.</string>
     <string name="omni_project_exported">O projeto foi escrito como um ZIP.</string>
     <string name="omni_help_hello">Olá!</string>

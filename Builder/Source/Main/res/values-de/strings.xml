@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">Nach Art</string>
     <string name="omni_files_copy_across">In den anderen Bereich kopieren</string>
     <string name="omni_files_move_across">In den anderen Bereich verschieben</string>
-    <string name="omni_files_holds">%1$d darin</string>
     <string name="omni_files_needs_name">Gib zuerst einen Namen ein.</string>
     <string name="omni_editor_changed_elsewhere">Diese Datei wurde seit dem Öffnen anderswo geändert. Erneutes Speichern überschreibt diese Änderung.</string>
     <string name="omni_created">PROJEKT ERSTELLT</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">Es war bereits ausgerichtet.</string>
     <string name="omni_build_said">%1$d Dinge, die der Build anzumerken hatte</string>
     <string name="omni_health_title">Projektzustand</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Hier ist nichts zu tun.</string>
     <string name="omni_health_not">Einiges davon gehört erledigt, bevor es ausgeliefert wird.</string>
     <string name="omni_health_code">Code</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Projektangaben</string>
     <string name="omni_facts_name">Projektname</string>
     <string name="omni_facts_where">Projektordner</string>
+    <string name="omni_facts_made">Erstellt</string>
     <string name="omni_facts_changed">Zuletzt geändert</string>
     <string name="omni_facts_holds">Enthält</string>
     <string name="omni_facts_counted">%1$d Dateien, %2$d Ordner</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">App-Bild wechseln</string>
     <string name="omni_project_package">Paketnamen bearbeiten</string>
     <string name="omni_project_clear">Gebautes des Projekts löschen</string>
+    <string name="omni_project_delete">Projekt löschen</string>
     <string name="omni_project_export">Projekt als ZIP ausgeben</string>
+    <string name="omni_project_share">Projekt teilen</string>
     <string name="omni_project_cleared">%1$d gebaute Dateien entfernt.</string>
     <string name="omni_project_exported">Das Projekt wurde als ZIP geschrieben.</string>
     <string name="omni_help_hello">Hallo!</string>

@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">По типу</string>
     <string name="omni_files_copy_across">Копировать в другую панель</string>
     <string name="omni_files_move_across">Переместить в другую панель</string>
-    <string name="omni_files_holds">внутри: %1$d</string>
     <string name="omni_files_needs_name">Сначала введите имя.</string>
     <string name="omni_editor_changed_elsewhere">Этот файл изменился в другом месте с момента открытия. Повторное сохранение перезапишет это изменение.</string>
     <string name="omni_created">ПРОЕКТ СОЗДАН</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">Оно уже было выровнено.</string>
     <string name="omni_build_said">%1$d замечаний от сборки</string>
     <string name="omni_health_title">Состояние проекта</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Здесь делать нечего.</string>
     <string name="omni_health_not">Кое-что из этого стоит сделать до выпуска.</string>
     <string name="omni_health_code">Код</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Сведения о проекте</string>
     <string name="omni_facts_name">Имя проекта</string>
     <string name="omni_facts_where">Папка проекта</string>
+    <string name="omni_facts_made">Создан</string>
     <string name="omni_facts_changed">Последнее изменение</string>
     <string name="omni_facts_holds">Содержит</string>
     <string name="omni_facts_counted">файлов: %1$d, папок: %2$d</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">Сменить картинку приложения</string>
     <string name="omni_project_package">Изменить имя пакета</string>
     <string name="omni_project_clear">Очистить собранное проектом</string>
+    <string name="omni_project_delete">Удалить проект</string>
     <string name="omni_project_export">Выгрузить проект как ZIP</string>
+    <string name="omni_project_share">Поделиться проектом</string>
     <string name="omni_project_cleared">Удалено собранных файлов: %1$d.</string>
     <string name="omni_project_exported">Проект записан как ZIP.</string>
     <string name="omni_help_hello">Здравствуйте!</string>

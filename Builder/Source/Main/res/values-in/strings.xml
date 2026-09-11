@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">Menurut jenis</string>
     <string name="omni_files_copy_across">Salin ke panel seberang</string>
     <string name="omni_files_move_across">Pindah ke panel seberang</string>
-    <string name="omni_files_holds">%1$d di dalam</string>
     <string name="omni_files_needs_name">Ketik nama dulu.</string>
     <string name="omni_editor_changed_elsewhere">Berkas ini berubah di tempat lain sejak dibuka. Menyimpannya lagi akan menimpa perubahan itu.</string>
     <string name="omni_created">PROYEK DIBUAT</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">Ia sudah rapi.</string>
     <string name="omni_build_said">%1$d hal yang disampaikan bangunan</string>
     <string name="omni_health_title">Kesehatan proyek</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Tak ada yang perlu dikerjakan di sini.</string>
     <string name="omni_health_not">Ada yang perlu dikerjakan sebelum ini dilepas.</string>
     <string name="omni_health_code">Kode</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Rincian proyek</string>
     <string name="omni_facts_name">Nama proyek</string>
     <string name="omni_facts_where">Map proyek</string>
+    <string name="omni_facts_made">Dibuat</string>
     <string name="omni_facts_changed">Terakhir diubah</string>
     <string name="omni_facts_holds">Berisi</string>
     <string name="omni_facts_counted">%1$d berkas, %2$d map</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">Ganti gambar aplikasi</string>
     <string name="omni_project_package">Sunting nama paket</string>
     <string name="omni_project_clear">Bersihkan yang dibangun proyek</string>
+    <string name="omni_project_delete">Hapus proyek</string>
     <string name="omni_project_export">Ekspor proyek sebagai ZIP</string>
+    <string name="omni_project_share">Bagikan proyek</string>
     <string name="omni_project_cleared">%1$d berkas bangunan dihapus.</string>
     <string name="omni_project_exported">Proyek ditulis keluar sebagai ZIP.</string>
     <string name="omni_help_hello">Halo!</string>

@@ -70,7 +70,6 @@
     <string name="omni_files_by_kind">Por tipo</string>
     <string name="omni_files_copy_across">Copiar al otro panel</string>
     <string name="omni_files_move_across">Mover al otro panel</string>
-    <string name="omni_files_holds">%1$d dentro</string>
     <string name="omni_files_needs_name">Escribe primero un nombre.</string>
     <string name="omni_editor_changed_elsewhere">Este archivo cambió en otro lugar desde que se abrió. Guardar de nuevo sobrescribe ese cambio.</string>
     <string name="omni_created">PROYECTO CREADO</string>
@@ -196,7 +195,6 @@
     <string name="omni_editor_shaped_none">Ya estaba alineado.</string>
     <string name="omni_build_said">%1$d cosas que la construcción tuvo que decir</string>
     <string name="omni_health_title">Salud del proyecto</string>
-    <string name="omni_health_marked">%1$s •</string>
     <string name="omni_health_well">Aquí no hay nada que hacer.</string>
     <string name="omni_health_not">Algo de esto hay que hacerlo antes de publicarlo.</string>
     <string name="omni_health_code">Código</string>
@@ -382,6 +380,7 @@
     <string name="omni_facts_title">Datos del proyecto</string>
     <string name="omni_facts_name">Nombre del proyecto</string>
     <string name="omni_facts_where">Carpeta del proyecto</string>
+    <string name="omni_facts_made">Creado</string>
     <string name="omni_facts_changed">Último cambio</string>
     <string name="omni_facts_holds">Contiene</string>
     <string name="omni_facts_counted">%1$d archivos, %2$d carpetas</string>
@@ -392,7 +391,9 @@
     <string name="omni_project_picture">Cambiar la imagen de la app</string>
     <string name="omni_project_package">Editar el nombre del paquete</string>
     <string name="omni_project_clear">Borrar lo que el proyecto construyó</string>
+    <string name="omni_project_delete">Eliminar el proyecto</string>
     <string name="omni_project_export">Exportar el proyecto como ZIP</string>
+    <string name="omni_project_share">Compartir el proyecto</string>
     <string name="omni_project_cleared">%1$d archivos construidos eliminados.</string>
     <string name="omni_project_exported">El proyecto se escribió como ZIP.</string>
     <string name="omni_help_hello">¡Hola!</string>
