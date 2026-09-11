@@ -2503,6 +2503,8 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
         BINARY,
         FONT,
         TABLE,
+        BRACES,
+        CUP,
         SORT,
         SORTED_UP,
         SORTED_DOWN,
@@ -2595,6 +2597,34 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 canvas.drawCircle(12f, 6f, 1.6f, paint)
                 canvas.drawCircle(12f, 12f, 1.6f, paint)
                 canvas.drawCircle(12f, 18f, 1.6f, paint)
+            }
+            Shape.BRACES -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(10f, 4.5f)
+                path.cubicTo(7.4f, 4.5f, 8.6f, 10.4f, 5.6f, 12f)
+                path.cubicTo(8.6f, 13.6f, 7.4f, 19.5f, 10f, 19.5f)
+                path.moveTo(14f, 4.5f)
+                path.cubicTo(16.6f, 4.5f, 15.4f, 10.4f, 18.4f, 12f)
+                path.cubicTo(15.4f, 13.6f, 16.6f, 19.5f, 14f, 19.5f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.CUP -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(6f, 11f)
+                path.lineTo(6f, 15.4f)
+                path.cubicTo(6f, 17.6f, 8f, 18.8f, 11f, 18.8f)
+                path.cubicTo(14f, 18.8f, 16f, 17.6f, 16f, 15.4f)
+                path.lineTo(16f, 11f)
+                path.close()
+                path.moveTo(16f, 12f)
+                path.cubicTo(19.4f, 12f, 19.4f, 16f, 16.4f, 16.2f)
+                path.moveTo(10f, 8.4f)
+                path.cubicTo(8.6f, 6.6f, 11.4f, 5.8f, 10.4f, 3.4f)
+                path.moveTo(13.2f, 8.4f)
+                path.cubicTo(11.8f, 6.6f, 14.6f, 5.8f, 13.6f, 3.4f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.STROKE
+                canvas.drawLine(5f, 20.6f, 17f, 20.6f, paint)
             }
             Shape.SORTED_UP, Shape.SORTED_DOWN -> {
                 paint.style = Paint.Style.STROKE
@@ -2940,19 +2970,28 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 canvas.drawPath(path, paint)
             }
             Shape.ROBOT -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(5f, 8f, 19f, 19.4f, 3.2f, 3.2f, Path.Direction.CW)
-                path.moveTo(12f, 8f)
-                path.lineTo(12f, 5.4f)
-                path.moveTo(3.4f, 12.4f)
-                path.lineTo(3.4f, 15f)
-                path.moveTo(20.6f, 12.4f)
-                path.lineTo(20.6f, 15f)
-                canvas.drawPath(path, paint)
-                canvas.drawCircle(12f, 4.2f, 1.2f, paint)
                 paint.style = Paint.Style.FILL
-                canvas.drawCircle(9.2f, 13f, 1.4f, paint)
-                canvas.drawCircle(14.8f, 13f, 1.4f, paint)
+                path.moveTo(10f, 3f)
+                path.lineTo(12.1f, 8.3f)
+                path.lineTo(17.4f, 10.4f)
+                path.lineTo(12.1f, 12.5f)
+                path.lineTo(10f, 17.8f)
+                path.lineTo(7.9f, 12.5f)
+                path.lineTo(2.6f, 10.4f)
+                path.lineTo(7.9f, 8.3f)
+                path.close()
+                canvas.drawPath(path, paint)
+                path.reset()
+                path.moveTo(17.6f, 14.2f)
+                path.lineTo(18.7f, 17f)
+                path.lineTo(21.5f, 18.1f)
+                path.lineTo(18.7f, 19.2f)
+                path.lineTo(17.6f, 22f)
+                path.lineTo(16.5f, 19.2f)
+                path.lineTo(13.7f, 18.1f)
+                path.lineTo(16.5f, 17f)
+                path.close()
+                canvas.drawPath(path, paint)
             }
             Shape.LOG -> {
                 paint.style = Paint.Style.STROKE
@@ -2966,12 +3005,21 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
             }
             Shape.BRUSH -> {
                 paint.style = Paint.Style.STROKE
-                canvas.drawCircle(12f, 12f, 8f, paint)
+                path.moveTo(15.6f, 20.4f)
+                path.cubicTo(9.2f, 21.6f, 3.4f, 17.2f, 3.4f, 11.6f)
+                path.cubicTo(3.4f, 6.6f, 7.6f, 3f, 12.6f, 3f)
+                path.cubicTo(17.6f, 3f, 20.8f, 6.2f, 20.8f, 10.4f)
+                path.cubicTo(20.8f, 13.4f, 18.6f, 14.6f, 16.4f, 14.6f)
+                path.lineTo(14.8f, 14.6f)
+                path.cubicTo(13.4f, 14.6f, 12.8f, 15.6f, 13.4f, 16.8f)
+                path.cubicTo(14f, 18f, 17f, 20.2f, 15.6f, 20.4f)
+                path.close()
+                canvas.drawPath(path, paint)
                 paint.style = Paint.Style.FILL
-                canvas.drawCircle(9.2f, 9.2f, 1.3f, paint)
-                canvas.drawCircle(14.8f, 9.6f, 1.3f, paint)
-                canvas.drawCircle(8.6f, 14.6f, 1.3f, paint)
-                canvas.drawCircle(13.4f, 15.4f, 1.3f, paint)
+                canvas.drawCircle(8.2f, 9f, 1.3f, paint)
+                canvas.drawCircle(12.4f, 7f, 1.3f, paint)
+                canvas.drawCircle(16.6f, 9.4f, 1.3f, paint)
+                canvas.drawCircle(7.6f, 14f, 1.3f, paint)
             }
             Shape.GLOBE -> {
                 paint.style = Paint.Style.STROKE
@@ -3659,6 +3707,8 @@ class BuilderActivity : Activity() {
         )
 
         const val LARGEST_ICON_EDGE = 512
+        const val PLAIN_LAUNCHER = 0xFF3DDC84.toInt()
+
         const val PROJECT_RES = "Res"
         const val PROJECT_ICON = "Icon.png"
 
@@ -4366,7 +4416,8 @@ class BuilderActivity : Activity() {
         packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
     }.getOrDefault("").ifEmpty { "1.0" }
 
-    private fun homeLike(here: Screen): Boolean = here is Screen.Projects || here is Screen.Files
+    private fun homeLike(here: Screen): Boolean =
+        here is Screen.Projects || here is Screen.Files || here is Screen.NewProject
 
     private fun brandMark(drawn: Int, round: Int): View = ImageView(this).apply {
         setImageResource(drawn)
@@ -4380,16 +4431,18 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun brandBlock(named: String): View = LinearLayout(this).apply {
+    private fun brandBlock(named: String, full: Boolean): View = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        addView(
-            brandMark(R.drawable.omni_brand, gap(2)),
-            LinearLayout.LayoutParams(gap(11), gap(11)).apply {
-                marginStart = gap(1)
-                marginEnd = gap(3)
-            },
-        )
+        if (full) {
+            addView(
+                brandMark(R.drawable.omni_brand, gap(2)),
+                LinearLayout.LayoutParams(gap(11), gap(11)).apply {
+                    marginStart = gap(1)
+                    marginEnd = gap(3)
+                },
+            )
+        }
         addView(
             LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -4402,14 +4455,38 @@ class BuilderActivity : Activity() {
                         maxLines = 1
                     }
                 )
-                addView(
-                    TextView(context).apply {
-                        text = getString(R.string.omni_brand_note)
-                        setTextColor(palette.accent)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        maxLines = 1
-                    }
-                )
+                if (full) {
+                    addView(
+                        TextView(context).apply {
+                            text = getString(R.string.omni_brand_note)
+                            setTextColor(palette.accent)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            maxLines = 1
+                        }
+                    )
+                }
+            }
+        )
+    }
+
+    private fun crownTitle(title: String, note: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(gap(2), 0, gap(2), 0)
+        addView(
+            TextView(context).apply {
+                text = title
+                setTextColor(palette.foreground)
+                typeface = Type.heading
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+                maxLines = 1
+            }
+        )
+        addView(
+            TextView(context).apply {
+                text = note
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                maxLines = 1
             }
         )
     }
@@ -4470,7 +4547,7 @@ class BuilderActivity : Activity() {
                 each,
             )
             crown.addView(
-                brandBlock(getString(R.string.omni_app_name)),
+                brandBlock(getString(R.string.omni_app_name), false),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
             val root = openProject
@@ -4499,35 +4576,55 @@ class BuilderActivity : Activity() {
                 markControl(Mark.Shape.FIND, R.string.omni_find_project) { askToSearch() },
                 each,
             )
-            val more = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
-            more.setOnClickListener { homeMenu(more) }
-            crown.addView(more, each)
+            if (here is Screen.NewProject) {
+                crown.addView(
+                    markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
+                    each,
+                )
+            } else {
+                val more = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
+                more.setOnClickListener { homeMenu(more) }
+                crown.addView(more, each)
+            }
         } else {
             crown.addView(
                 markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() },
                 each,
             )
+            if (here is Screen.Terminal) {
+                crown.addView(
+                    crownTitle(
+                        getString(R.string.omni_tab_shell),
+                        getString(R.string.omni_brand_note),
+                    ),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                crown.addView(
+                    markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
+                    each,
+                )
+                return
+            }
+            if (here is Screen.Logcat) {
+                crown.addView(
+                    crownTitle(
+                        getString(R.string.omni_menu_logcat),
+                        getString(R.string.omni_log_note),
+                    ),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                crown.addView(
+                    markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
+                    each,
+                )
+                return
+            }
             if (here is Screen.Assistant) {
                 crown.addView(
-                    LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(gap(2), 0, gap(2), 0)
-                        addView(
-                            TextView(context).apply {
-                                text = getString(R.string.omni_menu_assistant)
-                                setTextColor(palette.foreground)
-                                typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
-                            }
-                        )
-                        addView(
-                            TextView(context).apply {
-                                text = getString(R.string.omni_app_name)
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                            }
-                        )
-                    },
+                    crownTitle(
+                        getString(R.string.omni_menu_assistant),
+                        getString(R.string.omni_app_name),
+                    ),
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
                 crown.addView(
@@ -4590,10 +4687,10 @@ class BuilderActivity : Activity() {
                 return
             }
             crown.addView(
-                brandBlock(getString(R.string.omni_app_shown, versionShown())),
+                brandBlock(getString(R.string.omni_app_shown, versionShown()), true),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
-            if (here is Screen.Logcat || here is Screen.WebToApk || here is Screen.Terminal) {
+            if (here is Screen.WebToApk) {
                 crown.addView(
                     markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
                     each,
@@ -4623,13 +4720,13 @@ class BuilderActivity : Activity() {
     private fun drawFooter() {
         footer.removeAllViews()
         val here = screen
-        if (!homeLike(here)) {
+        if (here !is Screen.Files) {
             footer.visibility = View.GONE
             return
         }
         footer.visibility = View.VISIBLE
-        val walked = here is Screen.Files
-        val deep = (here as? Screen.Files)?.folder?.isNotEmpty() == true
+        val walked = true
+        val deep = here.folder.isNotEmpty()
         val holds = LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f)
         footer.addView(
             footControl(Mark.Shape.BACK, R.string.omni_action_back, wentBefore.isNotEmpty()) {
@@ -4645,30 +4742,26 @@ class BuilderActivity : Activity() {
         )
         footer.addView(
             footControl(Mark.Shape.ADD, R.string.omni_action_new_file, walked) {
-                if (here is Screen.Files) {
-                    askForName(getString(R.string.omni_action_new_file), "") { name ->
-                        act(
-                            Builder.nativeWriteFile(here.root, joined(here.folder, name), ""),
-                            "saved",
-                        )
-                    }
+                askForName(getString(R.string.omni_action_new_file), "") { name ->
+                    act(
+                        Builder.nativeWriteFile(here.root, joined(here.folder, name), ""),
+                        "saved",
+                    )
                 }
             },
             LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
         )
         footer.addView(
             footControl(Mark.Shape.SWAP, R.string.omni_files_split, walked) {
-                if (here is Screen.Files) {
-                    val beside = secondFolder
-                    if (beside == null) {
-                        secondFolder = here.folder
-                    } else {
-                        secondFolder = here.folder
-                        go(Screen.Files(here.root, beside))
-                        return@footControl
-                    }
-                    render(true)
+                val beside = secondFolder
+                if (beside == null) {
+                    secondFolder = here.folder
+                } else {
+                    secondFolder = here.folder
+                    go(Screen.Files(here.root, beside))
+                    return@footControl
                 }
+                render(true)
             },
             LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
         )
@@ -4677,11 +4770,7 @@ class BuilderActivity : Activity() {
                 Mark.Shape.UP,
                 R.string.omni_files_root,
                 deep,
-            ) {
-                if (here is Screen.Files) {
-                    go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
-                }
-            },
+            ) { go(Screen.Files(here.root, here.folder.substringBeforeLast('/', ""))) },
             LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
         )
     }
@@ -4725,7 +4814,7 @@ class BuilderActivity : Activity() {
 
     private fun drawRaise() {
         raise.removeAllViews()
-        if (!homeLike(screen)) {
+        if (screen !is Screen.Projects) {
             raise.visibility = View.GONE
             return
         }
@@ -4758,7 +4847,7 @@ class BuilderActivity : Activity() {
                     setColor(if (raised) palette.raised else palette.accent)
                 }
                 foreground = Mark(
-                    if (raised) Mark.Shape.AWAY else Mark.Shape.ADD,
+                    if (raised) Mark.Shape.CLOSE else Mark.Shape.ADD,
                     if (raised) palette.foreground else palette.background,
                 )
                 isClickable = true
@@ -5023,10 +5112,7 @@ class BuilderActivity : Activity() {
         gravity = Gravity.CENTER_VERTICAL
         setPadding(gap(4), gap(5), gap(4), gap(4))
         addView(
-            ImageView(context).apply {
-                setImageResource(R.drawable.omni_mascot)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-            },
+            brandMark(R.drawable.omni_brand, gap(3)),
             LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(3) },
         )
         addView(
@@ -5034,25 +5120,30 @@ class BuilderActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 addView(
                     TextView(context).apply {
-                        text = getString(R.string.omni_app_name)
+                        text = getString(R.string.omni_app_shown, versionShown())
                         setTextColor(palette.foreground)
                         typeface = Type.heading
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                        letterSpacing = 0.05f
                     }
                 )
                 addView(
                     TextView(context).apply {
-                        text = getString(R.string.omni_about_version, versionShown())
+                        text = getString(R.string.omni_brand_note)
                         setTextColor(palette.accent)
-                        typeface = Type.label
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        letterSpacing = Type.TRACKING
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     }
                 )
             },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
         )
+    }
+
+    private fun languageShown(): String {
+        val tag = Preferences.language(this)
+        if (tag.isEmpty()) {
+            return getString(R.string.omni_language_auto)
+        }
+        return Preferences.LANGUAGES.firstOrNull { it.first == tag }?.second ?: tag
     }
 
     private fun drawerSection(value: String) = TextView(this).apply {
@@ -5064,33 +5155,51 @@ class BuilderActivity : Activity() {
         setPadding(gap(4), gap(4), gap(4), gap(1))
     }
 
-    private fun drawerRow(shape: Mark.Shape, named: Int, active: Boolean, onPress: () -> Unit) =
+    private fun drawerRow(
+        shape: Mark.Shape,
+        named: Int,
+        active: Boolean,
+        under: String = "",
+        onPress: () -> Unit,
+    ) =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = gap(TOUCH_UNITS)
-            setPadding(gap(4), gap(2), gap(4), gap(2))
+            setPadding(gap(4), gap(3), gap(4), gap(3))
             isClickable = true
             isFocusable = true
-            contentDescription = getString(named)
+            contentDescription = said(getString(named), under)
             readAs(Button::class.java.name)
             background = touchable(
-                pill(if (active) Ink.fade(palette.accent, 0.16f) else Color.TRANSPARENT, 0f),
+                pill(if (active) palette.raised else Color.TRANSPARENT, gap(2).toFloat()),
                 palette.accent,
             )
             setOnClickListener { onPress() }
             addView(
-                View(context).apply {
-                    foreground = Mark(shape, if (active) palette.accent else palette.muted)
-                },
-                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(4) },
+                View(context).apply { foreground = Mark(shape, palette.foreground) },
+                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(4) },
             )
             addView(
-                TextView(context).apply {
-                    text = getString(named)
-                    setTextColor(if (active) palette.accent else palette.foreground)
-                    typeface = if (active) Type.label else Type.strong
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = getString(named)
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    if (under.isNotEmpty()) {
+                        addView(
+                            TextView(context).apply {
+                                text = under
+                                setTextColor(palette.accent)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            }
+                        )
+                    }
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
@@ -5136,9 +5245,12 @@ class BuilderActivity : Activity() {
             }
         )
         list.addView(
-            drawerRow(Mark.Shape.GLOBE, R.string.omni_settings_language, here is Screen.Languages) {
-                leaveFor(Screen.Languages)
-            }
+            drawerRow(
+                Mark.Shape.GLOBE,
+                R.string.omni_settings_language,
+                here is Screen.Languages,
+                getString(R.string.omni_language_default, languageShown()),
+            ) { leaveFor(Screen.Languages) }
         )
         list.addView(
             drawerRow(Mark.Shape.SPEECH, R.string.omni_feedback_title, here is Screen.Feedback) {
@@ -5146,7 +5258,7 @@ class BuilderActivity : Activity() {
             }
         )
         list.addView(
-            drawerRow(Mark.Shape.STAR, R.string.omni_rate_title, here is Screen.Rate) {
+            drawerRow(Mark.Shape.HEART, R.string.omni_rate_title, here is Screen.Rate) {
                 leaveFor(Screen.Rate)
             }
         )
@@ -5187,55 +5299,74 @@ class BuilderActivity : Activity() {
     private fun keysFolder() = File(filesDir, "Keys")
 
     private fun renderProjects() {
-        content.addView(
-            screenHead(
-                Mark.Shape.HOME,
-                getString(R.string.omni_projects_title),
-                getString(R.string.omni_projects_note),
-            )
-        )
-
         val projects = runCatching {
             ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
         }.getOrDefault(emptyList())
 
-        val card = card()
         if (projects.isEmpty()) {
-            card.addView(quiet(getString(R.string.omni_projects_none)))
+            content.addView(quiet(getString(R.string.omni_projects_none)))
+            return
         }
-        projects.forEachIndexed { index, project ->
-            if (index > 0) {
-                card.addView(rule(), MATCH_PARENT, 1)
-            }
-            val open = project.root == openProject
-            card.addView(
-                pictured(
-                    File(project.root, "$PROJECT_RES/$PROJECT_ICON").absolutePath,
-                    project.label.ifEmpty { project.name },
-                    "${project.packageName}  ·  ${project.versionName}  ·  " +
-                        "API ${project.minSdk}–${project.targetSdk}  ·  " +
-                        getString(R.string.omni_projects_files, project.files),
-                    if (open) getString(R.string.omni_projects_open_now) else "",
-                    palette.ok,
-                ) { openHere(project.root) }.apply {
-                    setOnLongClickListener {
-                        projectMenu(project.root)
-                        true
+        projects.forEach { project ->
+            content.addView(projectRow(project))
+        }
+    }
+
+    private fun projectRow(project: ProjectSummary): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = gap(TOUCH_UNITS)
+        setPadding(gap(2), gap(3), gap(2), gap(3))
+        isClickable = true
+        isFocusable = true
+        contentDescription = project.label.ifEmpty { project.name }
+        readAs(Button::class.java.name)
+        background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+        setOnClickListener { openHere(project.root) }
+        addView(
+            thumbnail(
+                File(project.root, "$PROJECT_RES/$PROJECT_ICON").absolutePath,
+                gap(13),
+            ),
+            LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(3) },
+        )
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    TextView(context).apply {
+                        text = project.label.ifEmpty { project.name }
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        maxLines = 1
                     }
-                }
-            )
-        }
-        content.addView(card)
-        content.addView(primary(getString(R.string.omni_projects_new)) { go(Screen.Kinds) })
-        content.addView(quiet(getString(R.string.omni_projects_note)))
+                )
+                addView(
+                    TextView(context).apply {
+                        text = project.root
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                    }
+                )
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        addView(
+            markControl(Mark.Shape.MORE, R.string.omni_action_more) { projectMenu(project.root) },
+            LinearLayout.LayoutParams(gap(9), gap(9)),
+        )
     }
 
     private fun renderNewProject() {
-        content.addView(
+        val head = card()
+        head.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, gap(4), 0, gap(3))
+                setPadding(0, gap(1), 0, gap(1))
                 addView(
                     thumbnail(formImage.orEmpty(), gap(18)),
                     LinearLayout.LayoutParams(gap(18), gap(18)).apply { marginEnd = gap(4) },
@@ -5257,6 +5388,7 @@ class BuilderActivity : Activity() {
                                 setTextColor(palette.muted)
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                                 setLineSpacing(gap(1).toFloat(), 1f)
+                                setPadding(0, gap(1), 0, 0)
                             }
                         )
                     },
@@ -5264,10 +5396,10 @@ class BuilderActivity : Activity() {
                 )
             }
         )
+        content.addView(head)
 
-        val identity = card()
-        identity.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
-        identity.addView(
+        content.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
+        content.addView(
             field(getString(R.string.omni_form_package), formPackage) { formPackage = it }
         )
         val versions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -5283,8 +5415,7 @@ class BuilderActivity : Activity() {
             },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(2) },
         )
-        identity.addView(versions)
-        content.addView(identity)
+        content.addView(versions)
 
         content.addView(label(getString(R.string.omni_form_image)))
         content.addView(
@@ -5306,30 +5437,37 @@ class BuilderActivity : Activity() {
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         addView(
-                            subtle(
+                            markedButton(
+                                Mark.Shape.IMAGE,
                                 getString(R.string.omni_form_image_choose),
                                 palette.accent,
-                            ) { chooseImage(null) }.apply {
-                                background = reacting(
-                                    Color.TRANSPARENT,
-                                    gap(3).toFloat(),
-                                    palette.accent,
-                                )
-                            }
+                                true,
+                            ) { chooseImage(null) },
+                            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
                         )
                         addView(
-                            subtle(getString(R.string.omni_action_clear), palette.foreground) {
+                            markedButton(
+                                Mark.Shape.TRASH,
+                                getString(R.string.omni_action_clear),
+                                palette.foreground,
+                                false,
+                            ) {
                                 formImage = null
                                 render(false)
-                            }.apply {
-                                background = reacting(
-                                    palette.raised,
-                                    gap(3).toFloat(),
-                                    palette.accent,
-                                )
+                            },
+                            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                                topMargin = gap(2)
+                            },
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_form_image_note)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                gravity = Gravity.CENTER
+                                setPadding(0, gap(2), 0, 0)
                             }
                         )
-                        addView(quiet(getString(R.string.omni_form_image_note)))
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
@@ -5337,52 +5475,54 @@ class BuilderActivity : Activity() {
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(1) },
         )
 
-        content.addView(
-            noteCard(
-                getString(R.string.omni_form_platforms),
-                getString(R.string.omni_form_platforms_note),
-            )
-        )
-        val platforms = card()
-        platforms.addView(
-            keyValue(
-                getString(R.string.omni_form_platforms),
-                "",
-                getString(
-                    R.string.omni_form_platforms_span,
-                    releaseNamed(formMinSdk),
-                    releaseNamed(formTargetSdk),
-                ),
-                palette.accent,
-            )
-        )
-        platforms.addView(label(getString(R.string.omni_form_min_sdk)))
-        platforms.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { ANDROID_RELEASES[it].first == formMinSdk },
-            ) {
-                formMinSdk = ANDROID_RELEASES[it].first
-                if (formTargetSdk < formMinSdk) {
-                    formTargetSdk = formMinSdk
-                }
-                render(false)
+        val told = card()
+        told.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, gap(1), 0, gap(1))
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.INFO, palette.accent) },
+                    LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_form_platforms)
+                                setTextColor(palette.accent)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(
+                                    R.string.omni_form_platforms_note,
+                                    releaseNamed(formMinSdk),
+                                    releaseNamed(formTargetSdk),
+                                )
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setPadding(0, gap(2), 0, 0)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_form_platforms_bits)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setPadding(0, gap(3), 0, 0)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
             }
         )
-        platforms.addView(label(getString(R.string.omni_form_target_sdk)))
-        platforms.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { ANDROID_RELEASES[it].first == formTargetSdk },
-            ) {
-                formTargetSdk = ANDROID_RELEASES[it].first
-                if (formMinSdk > formTargetSdk) {
-                    formMinSdk = formTargetSdk
-                }
-                render(false)
-            }
-        )
-        content.addView(platforms)
+        content.addView(told)
 
         content.addView(primary(getString(R.string.omni_action_create)) { createProject() })
         content.addView(
@@ -5504,6 +5644,33 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private fun upRow(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = gap(TOUCH_UNITS)
+        setPadding(gap(2), gap(1), gap(2), gap(1))
+        isClickable = true
+        isFocusable = true
+        contentDescription = ".."
+        readAs(Button::class.java.name)
+        background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+        setOnClickListener { go(Screen.Projects) }
+        addView(
+            View(context).apply { foreground = Mark(Mark.Shape.FOLDER, palette.accent) },
+            LinearLayout.LayoutParams(gap(7), gap(7)).apply {
+                marginStart = gap(7)
+                marginEnd = gap(3)
+            },
+        )
+        addView(
+            TextView(context).apply {
+                text = ".."
+                setTextColor(palette.foreground)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            }
+        )
+    }
+
     private fun treePane(root: String, entries: List<FileEntry>): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -5514,6 +5681,7 @@ class BuilderActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, gap(1), 0, gap(2))
             }
+            rows.addView(upRow())
             growTree(rows, root, "", 0, entries)
             if (rows.childCount == 0) {
                 rows.addView(quiet(getString(R.string.omni_files_empty)).apply {
@@ -5565,56 +5733,9 @@ class BuilderActivity : Activity() {
             )
         }
         content.addView(panes)
-        content.addView(breadcrumb(root, folder))
-
-        val making = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, gap(1), 0, gap(1))
-        }
-        making.addView(
-            subtle(getString(R.string.omni_action_new_file), palette.accent) {
-                askForName(getString(R.string.omni_action_new_file), "") { name ->
-                    act(Builder.nativeWriteFile(root, joined(folder, name), ""), "saved")
-                }
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
-        )
-        making.addView(
-            subtle(getString(R.string.omni_action_new_folder), palette.accent) {
-                askForName(getString(R.string.omni_action_new_folder), "") { name ->
-                    act(Builder.nativeNewFolder(root, joined(folder, name)), "made")
-                }
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
-        )
-        content.addView(making)
-
         if (folder.isEmpty()) {
-            content.addView(label(getString(R.string.omni_files_tools)))
-            val tools = FlowLayout(this, gap(2), gap(2)).apply {
-                setPadding(0, gap(1), 0, gap(1))
-            }
-            val troubled = troubleSeen[root] == true
-            tools.addView(
-                tool(
-                    if (troubled) {
-                        getString(R.string.omni_health_marked, getString(R.string.omni_health_title))
-                    } else {
-                        getString(R.string.omni_health_title)
-                    },
-                    if (troubled) palette.warning else palette.accent,
-                ) { go(Screen.Health(root)) }
-            )
-            tools.addView(
-                tool(getString(R.string.omni_tab_build), palette.ok) { go(Screen.Build(root)) }
-            )
-            tools.addView(
-                tool(getString(R.string.omni_action_more), palette.muted) { projectMenu(root) }
-            )
-            content.addView(tools)
             lookForTrouble(root)
         }
-        content.addView(quiet(getString(R.string.omni_trash_note)))
     }
 
     private fun renderHealth(root: String) {
@@ -6096,6 +6217,7 @@ class BuilderActivity : Activity() {
                 Mark.Shape.PACKAGE to Ink.hot(palette.ok, 0.15f)
             ARCHIVE_SUFFIXES.any { name.endsWith(it) } ->
                 Mark.Shape.ARCHIVE to palette.warning
+            name.endsWith(".java") -> Mark.Shape.CUP to Ink.hot(palette.error, 0.25f)
             CODE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.CODE to palette.accent
             name.endsWith(".xml") -> Mark.Shape.MARKUP to Ink.hot(palette.warning, -0.1f)
             PICTURE_SUFFIXES.any { name.endsWith(it) } ->
@@ -6106,6 +6228,7 @@ class BuilderActivity : Activity() {
             FONT_SUFFIXES.any { name.endsWith(it) } ->
                 Mark.Shape.FONT to Ink.hot(palette.accent, -0.2f)
             BINARY_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.BINARY to palette.error
+            name.endsWith(".json") -> Mark.Shape.BRACES to Ink.hot(palette.glowFirst, 0.75f)
             TABLE_SUFFIXES.any { name.endsWith(it) } ->
                 Mark.Shape.TABLE to Ink.hot(palette.ok, -0.25f)
             NOTE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.NOTE to palette.muted
@@ -6171,7 +6294,18 @@ class BuilderActivity : Activity() {
                 }
             }
         }
-        return View(this).apply { background = pill(palette.raised, gap(2).toFloat()) }
+        return plainLauncher()
+    }
+
+    private fun plainLauncher(): View = ImageView(this).apply {
+        setImageResource(R.drawable.omni_brand)
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = gap(3).toFloat()
+            setColor(PLAIN_LAUNCHER)
+        }
+        setPadding(gap(2), gap(2), gap(2), gap(2))
     }
 
     private fun fileRow(
@@ -6563,15 +6697,13 @@ class BuilderActivity : Activity() {
             content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
         }
 
-        val sheet = card()
-        sheet.addView(
+        content.addView(
             editor,
             LinearLayout.LayoutParams(
                 MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.62f).toInt(),
+                (resources.displayMetrics.heightPixels * 0.74f).toInt(),
             ),
         )
-        content.addView(sheet)
         content.addView(symbolBar(editor, ::mark))
         editor.postDelayed(watch, WATCH_CODE_MILLIS)
     }
@@ -6666,8 +6798,8 @@ class BuilderActivity : Activity() {
                     typeface = Type.data
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                     minWidth = gap(TOUCH_UNITS)
-                    setPadding(gap(2), gap(2), gap(2), gap(2))
-                    background = reacting(palette.raised, gap(2).toFloat(), palette.accent)
+                    setPadding(gap(3), gap(3), gap(3), gap(3))
+                    background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
                     setOnClickListener {
                         val from = editor.selectionStart.coerceAtLeast(0)
                         val to = editor.selectionEnd.coerceAtLeast(from)
@@ -6684,10 +6816,9 @@ class BuilderActivity : Activity() {
         return HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             contentDescription = getString(R.string.omni_editor_symbols)
+            setBackgroundColor(palette.surface)
             addView(row, MATCH_PARENT, WRAP_CONTENT)
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(2)
-            }
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
         }
     }
 
@@ -7579,7 +7710,13 @@ class BuilderActivity : Activity() {
             background = sheet(palette.background, palette.divider)
             setPadding(gap(1), gap(1), gap(1), gap(1))
         }
-        frame.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, gap(74)))
+        frame.addView(
+            view,
+            LinearLayout.LayoutParams(
+                MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.7f).toInt(),
+            ),
+        )
         content.addView(frame)
         content.addView(shellKeys(view))
 
@@ -8277,7 +8414,14 @@ class BuilderActivity : Activity() {
 
     private fun projectMenu(root: String) {
         val summary = summaryOf(root)
+        val troubled = troubleSeen[root] == true
         val named = arrayOf(
+            if (troubled) {
+                getString(R.string.omni_health_marked, getString(R.string.omni_health_title))
+            } else {
+                getString(R.string.omni_health_title)
+            },
+            getString(R.string.omni_action_new_folder),
             getString(R.string.omni_project_rename),
             getString(R.string.omni_project_picture),
             getString(R.string.omni_project_package),
@@ -8290,7 +8434,14 @@ class BuilderActivity : Activity() {
             .setTitle(File(root).name)
             .setItems(named) { _, which ->
                 when (which) {
-                    0 -> askForName(
+                    0 -> go(Screen.Health(root))
+                    1 -> {
+                        val here = (screen as? Screen.Files)?.folder.orEmpty()
+                        askForName(getString(R.string.omni_action_new_folder), "") { name ->
+                            act(Builder.nativeNewFolder(root, joined(here, name)), "made")
+                        }
+                    }
+                    2 -> askForName(
                         getString(R.string.omni_project_rename),
                         File(root).name,
                     ) { asked ->
@@ -8307,16 +8458,16 @@ class BuilderActivity : Activity() {
                             go(Screen.Files(into.absolutePath, ""))
                         }
                     }
-                    1 -> chooseImage(root)
-                    2 -> askForName(
+                    3 -> chooseImage(root)
+                    4 -> askForName(
                         getString(R.string.omni_form_package),
                         summary?.packageName.orEmpty(),
                     ) { asked ->
                         act(Builder.nativeManifestSet(root, "package", asked.trim()), "set")
                     }
-                    3 -> showProjectFacts(root)
-                    4 -> clearProjectCache(root)
-                    5 -> exportProject(root)
+                    5 -> showProjectFacts(root)
+                    6 -> clearProjectCache(root)
+                    7 -> exportProject(root)
                     else -> summary?.let { deleteProject(it) }
                 }
             }
@@ -8326,11 +8477,8 @@ class BuilderActivity : Activity() {
 
     private fun renderLogcat() {
         content.addView(
-            screenHead(
-                Mark.Shape.LOG,
-                getString(R.string.omni_menu_logcat),
-                getString(R.string.omni_log_note),
-            )
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(3) },
         )
 
         val bound = card()
@@ -8641,8 +8789,10 @@ class BuilderActivity : Activity() {
                             text = badge.second
                             setTextColor(palette.foreground)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            gravity = Gravity.CENTER
                             setPadding(0, gap(1), 0, 0)
-                        }
+                        },
+                        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
                     )
                 }
             },
@@ -8896,6 +9046,51 @@ class BuilderActivity : Activity() {
             }
         )
         return holder
+    }
+
+    private fun markedButton(
+        mark: Mark.Shape,
+        named: String,
+        tint: Int,
+        outlined: Boolean,
+        onPress: () -> Unit,
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        minimumHeight = gap(TOUCH_UNITS)
+        setPadding(gap(3), gap(2), gap(3), gap(2))
+        isClickable = true
+        isFocusable = true
+        contentDescription = named
+        readAs(Button::class.java.name)
+        background = touchable(
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(3).toFloat()
+                setColor(if (outlined) Color.TRANSPARENT else palette.raised)
+                if (outlined) {
+                    setStroke(gap(1) / 2, tint)
+                }
+            },
+            palette.accent,
+        )
+        setOnClickListener { onPress() }
+        addView(
+            View(context).apply {
+                foreground = Mark(mark, tint)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+        )
+        addView(
+            TextView(context).apply {
+                text = named
+                setTextColor(tint)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                maxLines = 1
+            }
+        )
     }
 
     private fun markedRow(mark: Mark.Shape, tint: Int, title: String, note: String, onPress: () -> Unit) =
@@ -9521,15 +9716,21 @@ class BuilderActivity : Activity() {
         else -> R.drawable.omni_flag_en
     }
 
+    private fun themeNote(shown: Palette): Int = when (shown.key) {
+        Palette.HACKER.key -> R.string.omni_theme_hacker_note
+        Palette.ANIME.key -> R.string.omni_theme_anime_note
+        else -> R.string.omni_theme_dark_note
+    }
+
     private fun themeCard(shown: Palette, active: Boolean, onPress: () -> Unit): View =
         LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            clipToOutline = true
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(gap(3), gap(3), gap(3), gap(3))
             background = touchable(
                 GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = gap(4).toFloat()
-                    setColor(palette.surface)
+                    setColor(Color.TRANSPARENT)
                     setStroke(gap(1) / 2, if (active) palette.accent else palette.divider)
                 },
                 palette.accent,
@@ -9537,39 +9738,69 @@ class BuilderActivity : Activity() {
             isClickable = true
             isFocusable = true
             isSelected = active
-            contentDescription = shown.label
-            readAs(android.widget.ToggleButton::class.java.name)
+            contentDescription = said(shown.label, getString(themeNote(shown)))
+            readAs(android.widget.RadioButton::class.java.name)
             setOnClickListener { onPress() }
             layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
                 topMargin = gap(2)
-                bottomMargin = gap(1)
+                bottomMargin = gap(2)
             }
             addView(
                 ImageView(context).apply {
                     setImageResource(themeArt(shown))
                     scaleType = ImageView.ScaleType.CENTER_CROP
-                    adjustViewBounds = false
+                    clipToOutline = true
+                    background = GradientDrawable().apply {
+                        this.shape = GradientDrawable.RECTANGLE
+                        cornerRadius = gap(3).toFloat()
+                        setColor(palette.raised)
+                    }
                 },
-                LinearLayout.LayoutParams(MATCH_PARENT, gap(34)),
+                LinearLayout.LayoutParams(gap(46), gap(32)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(gap(4), gap(3), gap(4), gap(3))
+                    orientation = LinearLayout.VERTICAL
                     addView(
                         TextView(context).apply {
                             text = shown.label
                             setTextColor(palette.foreground)
                             typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                        },
-                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(themeNote(shown))
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            setLineSpacing(gap(1).toFloat(), 1f)
+                            setPadding(0, gap(1), 0, 0)
+                        }
                     )
                     if (active) {
-                        addView(tile(getString(R.string.omni_theme_active), palette.accent))
+                        addView(
+                            tile(getString(R.string.omni_theme_active), palette.accent),
+                            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                                gravity = Gravity.END
+                                topMargin = gap(2)
+                            },
+                        )
                     }
-                }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply {
+                    background = GradientDrawable().apply {
+                        this.shape = GradientDrawable.OVAL
+                        setColor(Color.TRANSPARENT)
+                        setStroke(gap(1) / 2, if (active) palette.accent else palette.muted)
+                    }
+                    foreground = if (active) Mark(Mark.Shape.TICK, palette.accent) else null
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
             )
         }
 
@@ -9580,6 +9811,10 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_settings_theme),
                 getString(R.string.omni_theme_note),
             )
+        )
+        content.addView(
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(2) },
         )
         for (shown in listOf(Palette.HACKER, Palette.ANIME, Palette.DARK)) {
             content.addView(
@@ -11834,11 +12069,9 @@ class BuilderActivity : Activity() {
     }
 
     private fun label(value: String) = TextView(this).apply {
-        text = value.uppercase(Locale.getDefault())
+        text = value
         setTextColor(palette.muted)
-        typeface = Type.label
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-        letterSpacing = Type.TRACKING
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         setPadding(0, gap(3), 0, gap(1))
     }
 
@@ -12062,22 +12295,26 @@ class BuilderActivity : Activity() {
         }
         holder.addView(
             TextView(this).apply {
-                text = label.uppercase(Locale.getDefault())
+                text = label
                 setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                letterSpacing = 0.12f
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setPadding(0, 0, 0, gap(1))
             }
         )
         val editor = EditText(this).apply {
             setText(initial)
             setTextColor(palette.foreground)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setBackgroundColor(Color.TRANSPARENT)
-            setPadding(0, gap(1), 0, gap(1))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(3).toFloat()
+                setColor(palette.surface)
+                setStroke(gap(1) / 2, palette.divider)
+            }
+            setPadding(gap(3), gap(3), gap(3), gap(3))
             isSingleLine = true
         }
-        holder.addView(editor)
-        holder.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+        holder.addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         return holder to editor
     }
 
@@ -12333,12 +12570,16 @@ class LauncherPreview(context: Context, private val palette: Palette) : View(con
 
     private companion object {
         const val SHAPES = 3
+        const val PLAIN = 0xFF3DDC84.toInt()
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val mask = Path()
     private val box = RectF()
     private var picture: Bitmap? = null
+    private val android = ImageView(context).apply {
+        setImageResource(R.drawable.omni_brand)
+    }
 
     fun show(path: String?) {
         picture = path?.let { runCatching { BitmapFactory.decodeFile(it) }.getOrNull() }
@@ -12364,15 +12605,27 @@ class LauncherPreview(context: Context, private val palette: Palette) : View(con
                 else -> mask.addRoundRect(box, edge * 0.42f, edge * 0.42f, Path.Direction.CW)
             }
 
+            val held = picture
             paint.style = Paint.Style.FILL
-            paint.color = palette.raised
+            paint.color = if (held == null) PLAIN else palette.raised
             canvas.drawPath(mask, paint)
 
-            val held = picture
             if (held != null) {
                 canvas.save()
                 canvas.clipPath(mask)
                 canvas.drawBitmap(held, null, box, paint)
+                canvas.restore()
+            } else {
+                canvas.save()
+                canvas.clipPath(mask)
+                val inset = edge * 0.2f
+                android.drawable.setBounds(
+                    (box.left + inset).toInt(),
+                    (box.top + inset).toInt(),
+                    (box.right - inset).toInt(),
+                    (box.bottom - inset).toInt(),
+                )
+                android.drawable.draw(canvas)
                 canvas.restore()
             }
 
