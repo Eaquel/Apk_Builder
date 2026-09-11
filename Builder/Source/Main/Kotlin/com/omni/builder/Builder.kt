@@ -3946,10 +3946,10 @@ class BuilderActivity : Activity() {
         )
 
         val HELP_POPULAR = listOf(
-            R.string.omni_help_adb,
+            R.string.omni_help_band_adb,
             R.string.omni_menu_assistant,
-            R.string.omni_help_docs,
-            R.string.omni_help_trouble,
+            R.string.omni_help_band_using,
+            R.string.omni_help_band_fixing,
         )
 
         val DOC_ROWS = listOf(
@@ -4223,7 +4223,7 @@ class BuilderActivity : Activity() {
         crown = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(2), gap(2), gap(2), gap(2))
+            setPadding(gap(2), gap(1), gap(2), gap(1))
             setBackgroundColor(palette.surface)
         }
         footer = LinearLayout(this).apply {
@@ -4747,7 +4747,7 @@ class BuilderActivity : Activity() {
         if (full) {
             addView(
                 brandMark(R.drawable.omni_brand, gap(3)),
-                LinearLayout.LayoutParams(gap(11), gap(11)).apply {
+                LinearLayout.LayoutParams(gap(10), gap(10)).apply {
                     marginStart = gap(1)
                     marginEnd = gap(3)
                 },
@@ -4811,7 +4811,7 @@ class BuilderActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(TOUCH_UNITS)
+            minimumHeight = gap(10)
             setPadding(gap(2), gap(1), gap(2), gap(1))
             isClickable = true
             isFocusable = true
@@ -4850,7 +4850,7 @@ class BuilderActivity : Activity() {
     private fun drawCrown() {
         crown.removeAllViews()
         val here = screen
-        val each = LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS))
+        val each = LinearLayout.LayoutParams(gap(10), gap(10))
         if (homeLike(here)) {
             crown.addView(
                 markControl(Mark.Shape.MENU, R.string.omni_menu_title) { openTheDrawer() },
@@ -5226,7 +5226,7 @@ class BuilderActivity : Activity() {
         rows += MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_menu_assistant)) {
             go(Screen.Assistant)
         }
-        rows += MenuChoice(Mark.Shape.BRUSH, getString(R.string.omni_settings_theme)) {
+        rows += MenuChoice(Mark.Shape.BRUSH, getString(R.string.omni_menu_theme)) {
             go(Screen.Theme)
         }
         if (root != null) {
@@ -5238,7 +5238,7 @@ class BuilderActivity : Activity() {
         }
         rows += MenuChoice(
             Mark.Shape.HELP_FILL,
-            getString(R.string.omni_help_title),
+            getString(R.string.omni_menu_help),
             parted = true,
         ) { go(Screen.Help) }
         anchoredMenu(under, rows)
@@ -5292,7 +5292,9 @@ class BuilderActivity : Activity() {
         rows.forEach { row ->
             if (row.parted) {
                 list.addView(
-                    rule(),
+                    View(this).apply {
+                        setBackgroundColor(Ink.hot(palette.divider, 0.25f))
+                    },
                     LinearLayout.LayoutParams(MATCH_PARENT, 1).apply {
                         topMargin = gap(1)
                         bottomMargin = gap(1)
@@ -9534,7 +9536,7 @@ class BuilderActivity : Activity() {
                         setImageResource(R.drawable.omni_mascot_reading)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                     },
-                    LinearLayout.LayoutParams(gap(24), gap(20)).apply { marginStart = gap(2) },
+                    LinearLayout.LayoutParams(gap(28), gap(23)).apply { marginStart = gap(2) },
                 )
             }
         )
@@ -11186,20 +11188,39 @@ class BuilderActivity : Activity() {
                 this.shape = GradientDrawable.RECTANGLE
                 cornerRadius = gap(4).toFloat()
                 setColor(palette.surface)
-                setStroke(gap(1) / 2, Ink.fade(tint, 0.45f))
+                setStroke(1, Ink.fade(tint, 0.35f))
             },
             tint,
         )
         setOnClickListener { onPress() }
         addView(
+            FrameLayout(context).apply {
+                background = GradientDrawable().apply {
+                    this.shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(Ink.fade(tint, 0.12f))
+                }
+                addView(
+                    View(context).apply { foreground = Mark(mark, tint) },
+                    FrameLayout.LayoutParams(gap(7), gap(7), Gravity.CENTER),
+                )
+            },
+            LinearLayout.LayoutParams(gap(10), gap(10)),
+        )
+        addView(
             LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(3), 0, gap(1))
                 addView(
-                    badge(mark, tint),
-                    LinearLayout.LayoutParams(gap(12), gap(12)),
+                    TextView(context).apply {
+                        text = title
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
-                addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
                 addView(
                     View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
                     LinearLayout.LayoutParams(gap(6), gap(6)),
@@ -11208,18 +11229,9 @@ class BuilderActivity : Activity() {
         )
         addView(
             TextView(context).apply {
-                text = title
-                setTextColor(palette.foreground)
-                typeface = Type.strong
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                setPadding(0, gap(3), 0, gap(1))
-            }
-        )
-        addView(
-            TextView(context).apply {
                 text = detail
                 setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setLineSpacing(gap(1).toFloat(), 1f)
             }
         )
@@ -11262,14 +11274,14 @@ class BuilderActivity : Activity() {
                                 text = getString(R.string.omni_help_hello)
                                 setTextColor(palette.foreground)
                                 typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
                             }
                         )
                         addView(
                             TextView(context).apply {
                                 text = getString(R.string.omni_help_note)
                                 setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                                 setLineSpacing(gap(1).toFloat(), 1f)
                             }
                         )
@@ -11286,14 +11298,20 @@ class BuilderActivity : Activity() {
             }
         )
 
-        val search = card()
-        search.addView(
+        content.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(4), 0, gap(4), 0)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(6).toFloat()
+                    setColor(Color.TRANSPARENT)
+                    setStroke(1, Ink.hot(palette.divider, 0.2f))
+                }
                 addView(
                     View(context).apply { foreground = Mark(Mark.Shape.FIND, palette.muted) },
-                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                    LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
                 )
                 addView(
                     EditText(context).apply {
@@ -11303,7 +11321,12 @@ class BuilderActivity : Activity() {
                         setTextColor(palette.foreground)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                         setBackgroundColor(Color.TRANSPARENT)
+                        setPadding(0, gap(2), 0, gap(2))
                         isSingleLine = true
+                        setOnEditorActionListener { _, _, _ ->
+                            go(Screen.HelpFaq)
+                            true
+                        }
                         addTextChangedListener(object : TextWatcher {
                             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
                             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
@@ -11314,25 +11337,38 @@ class BuilderActivity : Activity() {
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
-                addView(
-                    subtle(getString(R.string.omni_help_search_go), palette.accent) {
-                        go(Screen.HelpFaq)
-                    }
-                )
-            }
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(3) },
         )
-        content.addView(search)
 
-        content.addView(label(getString(R.string.omni_help_popular)))
         content.addView(
-            chips(HELP_POPULAR.map { getString(it) }, { false }) { which ->
-                go(
-                    when (which) {
-                        0 -> Screen.HelpAdb
-                        1 -> Screen.HelpTalk
-                        2 -> Screen.HelpDocs
-                        else -> Screen.HelpFaq
-                    }
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_help_popular)
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                        marginEnd = gap(3)
+                    },
+                )
+                addView(
+                    chips(HELP_POPULAR.map { getString(it) }, { false }) { which ->
+                        go(
+                            when (which) {
+                                0 -> Screen.HelpAdb
+                                1 -> Screen.HelpTalk
+                                2 -> Screen.HelpDocs
+                                else -> Screen.HelpFaq
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
             }
         )
@@ -13004,7 +13040,7 @@ class BuilderActivity : Activity() {
         selected: (Int) -> Boolean,
         onPick: (Int) -> Unit,
     ): View {
-        val holder = FlowLayout(this, gap(2), gap(2)).apply {
+        val holder = FlowLayout(this, gap(2), gap(1)).apply {
             setPadding(0, gap(1), 0, gap(1))
         }
         val views = mutableListOf<Button>()
@@ -13025,7 +13061,9 @@ class BuilderActivity : Activity() {
         labels.forEachIndexed { index, text ->
             val chip = control().apply {
                 this.text = text
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                minHeight = 0
+                minimumHeight = 0
                 setPadding(gap(4), gap(2), gap(4), gap(2))
                 maxLines = 1
                 readAs(android.widget.ToggleButton::class.java.name)

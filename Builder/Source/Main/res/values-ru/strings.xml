@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">Центр помощи</string>
+    <string name="omni_find_project">Поиск по проекту</string>
     <string name="omni_tab_build">Сборка</string>
     <string name="omni_tab_trash">КОРЗИНА</string>
     <string name="omni_tab_settings">НАСТРОЙКИ</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Оценить приложение</string>
     <string name="omni_rate_store">Оценить в Play Store</string>
-    <string name="omni_help_title">Справочный центр</string>
-    <string name="omni_help_note">Короткие ответы на вопросы, которые задают об этом приложении чаще всего.</string>
-    <string name="omni_help_search">Искать в справке</string>
+    <string name="omni_menu_help">Помощь</string>
+    <string name="omni_menu_theme">Сменить тему</string>
+    <string name="omni_help_search">С чем нужна помощь?</string>
+    <string name="omni_help_popular">Популярное:</string>
+    <string name="omni_help_note">Здесь всё, что вы хотите знать об Omni Builder. Учитесь быстро, открывайте больше.</string>
+    <string name="omni_help_hello">Привет! 👋</string>
     <string name="omni_help_search_go">ИСКАТЬ</string>
     <string name="omni_help_none">Здесь этому ничто не отвечает.</string>
     <string name="omni_help_band_all">Всё</string>
+    <string name="omni_help_band_fixing">Устранение ошибок</string>
+    <string name="omni_help_band_using">Использование</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">Начало</string>
     <string name="omni_help_band_making">Сборка</string>
     <string name="omni_help_band_trouble">Затруднения</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">Поддерживаемые веб-технологии:</string>
     <string name="omni_brand_note">Среда разработки Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">Искать в проекте</string>
     <string name="omni_raise_open">Открыть проект</string>
     <string name="omni_raise_more">Ещё</string>
     <string name="omni_files_sorting">Параметры сортировки</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">Поделиться проектом</string>
     <string name="omni_project_cleared">Удалено собранных файлов: %1$d.</string>
     <string name="omni_project_exported">Проект записан как ZIP.</string>
-    <string name="omni_help_hello">Здравствуйте!</string>
-    <string name="omni_help_popular">Популярное</string>
     <string name="omni_help_more">Всё ещё нужна помощь?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Руководство по ADB</string>

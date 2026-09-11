@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">도움말 센터</string>
+    <string name="omni_find_project">프로젝트에서 검색</string>
     <string name="omni_tab_build">빌드</string>
     <string name="omni_tab_trash">휴지통</string>
     <string name="omni_tab_settings">설정</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">앱 평가하기</string>
     <string name="omni_rate_store">Play 스토어에서 평가</string>
-    <string name="omni_help_title">도움말 센터</string>
-    <string name="omni_help_note">이 앱에 가장 많이 오는 물음에 대한 짧은 답.</string>
-    <string name="omni_help_search">도움말 검색</string>
+    <string name="omni_menu_help">도움말</string>
+    <string name="omni_menu_theme">테마 변경</string>
+    <string name="omni_help_search">무엇을 도와드릴까요?</string>
+    <string name="omni_help_popular">인기:</string>
+    <string name="omni_help_note">Omni Builder에 대해 알고 싶은 모든 것이 여기에. 빠르게 배우고 더 발견하세요.</string>
+    <string name="omni_help_hello">안녕하세요! 👋</string>
     <string name="omni_help_search_go">검색</string>
     <string name="omni_help_none">여기에 맞는 것이 없습니다.</string>
     <string name="omni_help_band_all">전체</string>
+    <string name="omni_help_band_fixing">오류 해결</string>
+    <string name="omni_help_band_using">앱 사용법</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">시작</string>
     <string name="omni_help_band_making">만들기</string>
     <string name="omni_help_band_trouble">문제</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">지원하는 웹 기술:</string>
     <string name="omni_brand_note">Android 개발 환경</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">프로젝트에서 찾기</string>
     <string name="omni_raise_open">프로젝트 열기</string>
     <string name="omni_raise_more">더 보기</string>
     <string name="omni_files_sorting">정렬 방식</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">프로젝트 공유</string>
     <string name="omni_project_cleared">만들어진 파일 %1$d개를 지웠습니다.</string>
     <string name="omni_project_exported">프로젝트를 ZIP으로 썼습니다.</string>
-    <string name="omni_help_hello">안녕하세요!</string>
-    <string name="omni_help_popular">많이 찾는 것</string>
     <string name="omni_help_more">아직 도움이 필요하신가요?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB 안내</string>

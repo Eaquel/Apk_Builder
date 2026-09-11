@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">Yardım Merkezi</string>
+    <string name="omni_find_project">Projede Ara</string>
     <string name="omni_tab_build">Build</string>
     <string name="omni_tab_trash">ÇÖP</string>
     <string name="omni_tab_settings">AYARLAR</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Uygulamayı Değerlendir</string>
     <string name="omni_rate_store">Play Store\'da Değerlendir</string>
-    <string name="omni_help_title">Yardım merkezi</string>
-    <string name="omni_help_note">Bu uygulamaya en çok sorulan soruların kısa yanıtları.</string>
-    <string name="omni_help_search">Yardımda ara</string>
+    <string name="omni_menu_help">Yardım</string>
+    <string name="omni_menu_theme">Tema Değiştir</string>
+    <string name="omni_help_search">Ne hakkında yardım almak istiyorsun?</string>
+    <string name="omni_help_popular">Popüler:</string>
+    <string name="omni_help_note">Omni Builder hakkında merak ettiğin her şey burada. Hızlıca öğren, daha fazlasını keşfet!</string>
+    <string name="omni_help_hello">Merhaba! 👋</string>
     <string name="omni_help_search_go">ARA</string>
     <string name="omni_help_none">Buna uyan bir şey yok.</string>
     <string name="omni_help_band_all">Tümü</string>
+    <string name="omni_help_band_fixing">Hata Çözümü</string>
+    <string name="omni_help_band_using">Uygulama Kullanımı</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">Başlangıç</string>
     <string name="omni_help_band_making">Üretim</string>
     <string name="omni_help_band_trouble">Sorunlar</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">Desteklenen Web Teknolojileri:</string>
     <string name="omni_brand_note">Android Geliştirme Ortamı</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">Projede ara</string>
     <string name="omni_raise_open">Proje Aç</string>
     <string name="omni_raise_more">Daha fazla</string>
     <string name="omni_files_sorting">Sıralama Seçenekleri</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">Projeyi Paylaş</string>
     <string name="omni_project_cleared">%1$d derlenmiş dosya silindi.</string>
     <string name="omni_project_exported">Proje ZIP olarak yazıldı.</string>
-    <string name="omni_help_hello">Merhaba!</string>
-    <string name="omni_help_popular">Popüler</string>
     <string name="omni_help_more">Hâlâ yardıma mı ihtiyacın var?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB Rehberi</string>

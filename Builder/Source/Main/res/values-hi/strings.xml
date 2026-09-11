@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">सहायता केंद्र</string>
+    <string name="omni_find_project">प्रोजेक्ट में खोजें</string>
     <string name="omni_tab_build">बनाएँ</string>
     <string name="omni_tab_trash">कूड़ादान</string>
     <string name="omni_tab_settings">सेटिंग</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">ऐप को आँकिए</string>
     <string name="omni_rate_store">Play Store पर रेट करें</string>
-    <string name="omni_help_title">मदद केंद्र</string>
-    <string name="omni_help_note">इस ऐप से सबसे ज़्यादा पूछे जाने वाले सवालों के छोटे उत्तर।</string>
-    <string name="omni_help_search">मदद में खोजें</string>
+    <string name="omni_menu_help">मदद</string>
+    <string name="omni_menu_theme">थीम बदलें</string>
+    <string name="omni_help_search">किस बारे में मदद चाहिए?</string>
+    <string name="omni_help_popular">लोकप्रिय:</string>
+    <string name="omni_help_note">Omni Builder के बारे में जो जानना चाहें, सब यहीं है। जल्दी सीखें, और खोजें।</string>
+    <string name="omni_help_hello">नमस्ते! 👋</string>
     <string name="omni_help_search_go">खोजें</string>
     <string name="omni_help_none">यहाँ उससे कुछ मेल नहीं खाता।</string>
     <string name="omni_help_band_all">सब</string>
+    <string name="omni_help_band_fixing">त्रुटि समाधान</string>
+    <string name="omni_help_band_using">ऐप का उपयोग</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">शुरुआत</string>
     <string name="omni_help_band_making">बनाना</string>
     <string name="omni_help_band_trouble">परेशानी</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">समर्थित वेब तकनीकें:</string>
     <string name="omni_brand_note">Android विकास का परिवेश</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">परियोजना में खोजें</string>
     <string name="omni_raise_open">परियोजना खोलें</string>
     <string name="omni_raise_more">और</string>
     <string name="omni_files_sorting">क्रम विकल्प</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">प्रोजेक्ट साझा करें</string>
     <string name="omni_project_cleared">%1$d बनी हुई फ़ाइलें हटाई गईं।</string>
     <string name="omni_project_exported">परियोजना ZIP के रूप में बाहर लिख दी गई।</string>
-    <string name="omni_help_hello">नमस्ते!</string>
-    <string name="omni_help_popular">लोकप्रिय</string>
     <string name="omni_help_more">अब भी मदद चाहिए?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB मार्गदर्शिका</string>

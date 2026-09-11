@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">Centro de ayuda</string>
+    <string name="omni_find_project">Buscar en el proyecto</string>
     <string name="omni_tab_build">Compilar</string>
     <string name="omni_tab_trash">PAPELERA</string>
     <string name="omni_tab_settings">AJUSTES</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Valorar la aplicación</string>
     <string name="omni_rate_store">Valorar en Play Store</string>
-    <string name="omni_help_title">Centro de ayuda</string>
-    <string name="omni_help_note">Respuestas breves a las preguntas que más se hacen sobre esta aplicación.</string>
-    <string name="omni_help_search">Buscar en la ayuda</string>
+    <string name="omni_menu_help">Ayuda</string>
+    <string name="omni_menu_theme">Cambiar el tema</string>
+    <string name="omni_help_search">¿Con qué necesitas ayuda?</string>
+    <string name="omni_help_popular">Populares:</string>
+    <string name="omni_help_note">Todo lo que quieras saber sobre Omni Builder está aquí. Aprende rápido y descubre más.</string>
+    <string name="omni_help_hello">¡Hola! 👋</string>
     <string name="omni_help_search_go">BUSCAR</string>
     <string name="omni_help_none">Aquí no hay nada que coincida.</string>
     <string name="omni_help_band_all">Todo</string>
+    <string name="omni_help_band_fixing">Solución de errores</string>
+    <string name="omni_help_band_using">Uso de la app</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">Empezar</string>
     <string name="omni_help_band_making">Construir</string>
     <string name="omni_help_band_trouble">Problemas</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">Tecnologías web compatibles:</string>
     <string name="omni_brand_note">Entorno de desarrollo Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">Buscar en el proyecto</string>
     <string name="omni_raise_open">Abrir proyecto</string>
     <string name="omni_raise_more">Más</string>
     <string name="omni_files_sorting">Opciones de orden</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">Compartir el proyecto</string>
     <string name="omni_project_cleared">%1$d archivos construidos eliminados.</string>
     <string name="omni_project_exported">El proyecto se escribió como ZIP.</string>
-    <string name="omni_help_hello">¡Hola!</string>
-    <string name="omni_help_popular">Populares</string>
     <string name="omni_help_more">¿Todavía necesitas ayuda?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Guía de ADB</string>

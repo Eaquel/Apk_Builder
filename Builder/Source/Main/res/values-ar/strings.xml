@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">مركز المساعدة</string>
+    <string name="omni_find_project">البحث في المشروع</string>
     <string name="omni_tab_build">بناء</string>
     <string name="omni_tab_trash">المهملات</string>
     <string name="omni_tab_settings">الإعدادات</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">قيّم التطبيق</string>
     <string name="omni_rate_store">قيّمه في متجر Play</string>
-    <string name="omni_help_title">مركز المساعدة</string>
-    <string name="omni_help_note">أجوبة قصيرة عن أكثر ما يُسأل عن هذا التطبيق.</string>
-    <string name="omni_help_search">ابحث في المساعدة</string>
+    <string name="omni_menu_help">مساعدة</string>
+    <string name="omni_menu_theme">تغيير السمة</string>
+    <string name="omni_help_search">بماذا تريد المساعدة؟</string>
+    <string name="omni_help_popular">الأكثر شيوعًا:</string>
+    <string name="omni_help_note">كل ما تريد معرفته عن Omni Builder هنا. تعلّم بسرعة واكتشف المزيد.</string>
+    <string name="omni_help_hello">مرحبًا! 👋</string>
     <string name="omni_help_search_go">ابحث</string>
     <string name="omni_help_none">لا شيء هنا يوافق ذلك.</string>
     <string name="omni_help_band_all">الكل</string>
+    <string name="omni_help_band_fixing">حل الأخطاء</string>
+    <string name="omni_help_band_using">استخدام التطبيق</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">البداية</string>
     <string name="omni_help_band_making">البناء</string>
     <string name="omni_help_band_trouble">المشكلات</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">تقنيات الويب المدعومة:</string>
     <string name="omni_brand_note">بيئة تطوير أندرويد</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">ابحث في المشروع</string>
     <string name="omni_raise_open">افتح مشروعًا</string>
     <string name="omni_raise_more">المزيد</string>
     <string name="omni_files_sorting">خيارات الترتيب</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">مشاركة المشروع</string>
     <string name="omni_project_cleared">حُذف %1$d ملفًا مبنيًّا.</string>
     <string name="omni_project_exported">كُتب المشروع ملف ZIP.</string>
-    <string name="omni_help_hello">مرحبًا!</string>
-    <string name="omni_help_popular">الشائع</string>
     <string name="omni_help_more">أما زلت تحتاج عونًا؟</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">دليل ADB</string>

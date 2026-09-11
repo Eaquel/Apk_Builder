@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">ヘルプセンター</string>
+    <string name="omni_find_project">プロジェクトを検索</string>
     <string name="omni_tab_build">ビルド</string>
     <string name="omni_tab_trash">ごみ箱</string>
     <string name="omni_tab_settings">設定</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">アプリを評価する</string>
     <string name="omni_rate_store">Play ストアで評価</string>
-    <string name="omni_help_title">ヘルプセンター</string>
-    <string name="omni_help_note">このアプリによく寄せられる問いへの短い答え。</string>
-    <string name="omni_help_search">ヘルプを検索</string>
+    <string name="omni_menu_help">ヘルプ</string>
+    <string name="omni_menu_theme">テーマを変更</string>
+    <string name="omni_help_search">どんなことを知りたいですか？</string>
+    <string name="omni_help_popular">人気：</string>
+    <string name="omni_help_note">Omni Builder について知りたいことはすべてここに。すぐに学んで、もっと見つけよう。</string>
+    <string name="omni_help_hello">こんにちは！👋</string>
     <string name="omni_help_search_go">検索</string>
     <string name="omni_help_none">これに当たるものはありません。</string>
     <string name="omni_help_band_all">すべて</string>
+    <string name="omni_help_band_fixing">エラー解決</string>
+    <string name="omni_help_band_using">アプリの使い方</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">はじめ</string>
     <string name="omni_help_band_making">作る</string>
     <string name="omni_help_band_trouble">困りごと</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">対応するウェブ技術:</string>
     <string name="omni_brand_note">Android 開発環境</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">プロジェクトを検索</string>
     <string name="omni_raise_open">プロジェクトを開く</string>
     <string name="omni_raise_more">その他</string>
     <string name="omni_files_sorting">並べ替え</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">プロジェクトを共有</string>
     <string name="omni_project_cleared">作られたファイルを %1$d 個消しました。</string>
     <string name="omni_project_exported">プロジェクトを ZIP として書き出しました。</string>
-    <string name="omni_help_hello">こんにちは！</string>
-    <string name="omni_help_popular">よく見られるもの</string>
     <string name="omni_help_more">まだ助けが要りますか？</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB の案内</string>

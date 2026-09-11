@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">帮助中心</string>
+    <string name="omni_find_project">在项目中搜索</string>
     <string name="omni_tab_build">构建</string>
     <string name="omni_tab_trash">回收站</string>
     <string name="omni_tab_settings">设置</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder：%1$s</string>
     <string name="omni_rate_title">评价此应用</string>
     <string name="omni_rate_store">在 Play 商店评分</string>
-    <string name="omni_help_title">帮助中心</string>
-    <string name="omni_help_note">关于这个应用最常被问到的问题的简短答案。</string>
-    <string name="omni_help_search">在帮助中搜索</string>
+    <string name="omni_menu_help">帮助</string>
+    <string name="omni_menu_theme">更换主题</string>
+    <string name="omni_help_search">想了解什么？</string>
+    <string name="omni_help_popular">热门：</string>
+    <string name="omni_help_note">关于 Omni Builder 想知道的一切都在这里。快速上手，发现更多。</string>
+    <string name="omni_help_hello">你好！👋</string>
     <string name="omni_help_search_go">搜索</string>
     <string name="omni_help_none">这里没有匹配的内容。</string>
     <string name="omni_help_band_all">全部</string>
+    <string name="omni_help_band_fixing">错误排查</string>
+    <string name="omni_help_band_using">应用使用</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">入门</string>
     <string name="omni_help_band_making">构建</string>
     <string name="omni_help_band_trouble">疑难</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">支持的网页技术：</string>
     <string name="omni_brand_note">Android 开发环境</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">在项目中搜索</string>
     <string name="omni_raise_open">打开项目</string>
     <string name="omni_raise_more">更多</string>
     <string name="omni_files_sorting">排序选项</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">分享项目</string>
     <string name="omni_project_cleared">已删除 %1$d 个构建文件。</string>
     <string name="omni_project_exported">项目已写为 ZIP。</string>
-    <string name="omni_help_hello">你好！</string>
-    <string name="omni_help_popular">热门</string>
     <string name="omni_help_more">还需要帮忙吗？</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB 指南</string>

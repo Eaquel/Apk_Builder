@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_help_title">Pusat bantuan</string>
+    <string name="omni_find_project">Cari di proyek</string>
     <string name="omni_tab_build">Bangun</string>
     <string name="omni_tab_trash">TEMPAT SAMPAH</string>
     <string name="omni_tab_settings">PENGATURAN</string>
@@ -253,12 +255,18 @@
     <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Nilai Aplikasi Ini</string>
     <string name="omni_rate_store">Nilai di Play Store</string>
-    <string name="omni_help_title">Pusat bantuan</string>
-    <string name="omni_help_note">Jawaban singkat atas pertanyaan yang paling sering datang.</string>
-    <string name="omni_help_search">Cari di bantuan</string>
+    <string name="omni_menu_help">Bantuan</string>
+    <string name="omni_menu_theme">Ganti tema</string>
+    <string name="omni_help_search">Butuh bantuan soal apa?</string>
+    <string name="omni_help_popular">Populer:</string>
+    <string name="omni_help_note">Semua yang ingin kamu tahu tentang Omni Builder ada di sini. Belajar cepat, temukan lebih banyak.</string>
+    <string name="omni_help_hello">Halo! 👋</string>
     <string name="omni_help_search_go">CARI</string>
     <string name="omni_help_none">Tak ada yang cocok dengan itu.</string>
     <string name="omni_help_band_all">Semua</string>
+    <string name="omni_help_band_fixing">Atasi galat</string>
+    <string name="omni_help_band_using">Pemakaian aplikasi</string>
+    <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_band_start">Awal</string>
     <string name="omni_help_band_making">Membangun</string>
     <string name="omni_help_band_trouble">Masalah</string>
@@ -333,7 +341,6 @@
     <string name="omni_kinds_holds_web">Teknologi web yang didukung:</string>
     <string name="omni_brand_note">Lingkungan pengembangan Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
-    <string name="omni_find_project">Cari di proyek</string>
     <string name="omni_raise_open">Buka Proyek</string>
     <string name="omni_raise_more">Lainnya</string>
     <string name="omni_files_sorting">Pilihan urutan</string>
@@ -403,8 +410,6 @@
     <string name="omni_project_share">Bagikan proyek</string>
     <string name="omni_project_cleared">%1$d berkas bangunan dihapus.</string>
     <string name="omni_project_exported">Proyek ditulis keluar sebagai ZIP.</string>
-    <string name="omni_help_hello">Halo!</string>
-    <string name="omni_help_popular">Populer</string>
     <string name="omni_help_more">Masih perlu bantuan?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Panduan ADB</string>
