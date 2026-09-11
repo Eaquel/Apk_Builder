@@ -723,6 +723,11 @@ def check_speech() -> str:
             "RUSSIAN",
             "ARABIC",
             "CHINESE",
+            "JAPANESE",
+            "KOREAN",
+            "HINDI",
+            "INDONESIAN",
+            "BRAZILIAN",
         )
         for name, wanted in ((f"{language}_LINES", lines), (f"{language}_WORDS", words))
     ]

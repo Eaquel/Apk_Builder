@@ -10873,9 +10873,17 @@ class BuilderActivity : Activity() {
     private fun deviceLanguage(): String {
         val spoken = Resources.getSystem().configuration.locales
         for (index in 0 until spoken.size()) {
-            val tag = spoken.get(index).language
-            if (Preferences.LANGUAGES.any { it.first == tag }) {
-                return tag
+            val here = spoken.get(index)
+            val full = here.toLanguageTag()
+            val exact = Preferences.LANGUAGES.firstOrNull { it.first.equals(full, true) }
+            if (exact != null) {
+                return exact.first
+            }
+            val plain = Preferences.LANGUAGES.firstOrNull {
+                Locale.forLanguageTag(it.first).language == here.language
+            }
+            if (plain != null) {
+                return plain.first
             }
         }
         return BASE_LOCALE
