@@ -795,7 +795,7 @@ JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellOpen(
     setenv("TMPDIR", (home_text + "/tmp").c_str(), 1);
     setenv("TERM", "xterm-256color", 1);
     setenv("LANG", "C.UTF-8", 1);
-    setenv("PS1", "$ ", 1);
+    setenv("PS1", "\033[1;32mBuilder@Host\033[0m :\033[1;34m~\033[0m$ ", 1);
     if (chdir(folder_text.c_str()) != 0) {
       const int ignored = chdir(home_text.c_str());
       (void)ignored;
