@@ -123,7 +123,6 @@
     <string name="omni_settings_integrity">Keutuhan</string>
     <string name="omni_settings_logs">Catatan</string>
     <string name="omni_working">Bekerja…</string>
-    <string name="omni_action_install">PASANG</string>
     <string name="omni_action_share">BAGIKAN</string>
     <string name="omni_settings_theme">Tema</string>
     <string name="omni_settings_about">Tentang</string>
@@ -134,18 +133,6 @@
     <string name="omni_picture_size">Gambar</string>
     <string name="omni_form_image_set">GAMBAR DIPASANG</string>
     <string name="omni_form_image_unreadable">Gambar itu tidak terbaca.</string>
-    <string name="omni_install_allow">Android bertanya sekali sebelum sebuah aplikasi boleh memasang aplikasi lain. Izinkan untuk yang ini di layar yang baru terbuka, lalu tekan pasang lagi.</string>
-    <string name="omni_install_working">Menyerahkan paket kepada Android…</string>
-    <string name="omni_install_done">%1$s terpasang.</string>
-    <string name="omni_install_failed">Tidak terpasang: %1$s</string>
-    <string name="omni_install_ok">terpasang</string>
-    <string name="omni_install_aborted">pemasangan dibatalkan</string>
-    <string name="omni_install_blocked">sesuatu di perangkat ini menghalanginya</string>
-    <string name="omni_install_conflict">aplikasi lain sudah memiliki nama paket itu</string>
-    <string name="omni_install_incompatible">perangkat ini tidak bisa menjalankannya</string>
-    <string name="omni_install_invalid">Android tidak mau membaca paketnya</string>
-    <string name="omni_install_storage">ruangnya tidak cukup</string>
-    <string name="omni_install_refused">Android menolaknya</string>
     <string name="omni_settings_logs_empty">Tidak ada yang tercatat pada jalan ini.</string>
     <string name="omni_settings_logs_copied">DISALIN</string>
     <string name="omni_settings_logs_note">Catatan itu tinggal di penyimpanan aplikasi ini sendiri dan tidak di tempat lain. Salin dari sini bila kamu menginginkannya di tempat yang bisa kamu baca.</string>

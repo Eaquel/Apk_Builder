@@ -123,7 +123,6 @@
     <string name="omni_settings_integrity">अखंडता</string>
     <string name="omni_settings_logs">लॉग</string>
     <string name="omni_working">चल रहा है…</string>
-    <string name="omni_action_install">लगाएँ</string>
     <string name="omni_action_share">साझा करें</string>
     <string name="omni_settings_theme">रंगरूप</string>
     <string name="omni_settings_about">परिचय</string>
@@ -134,18 +133,6 @@
     <string name="omni_picture_size">तस्वीर</string>
     <string name="omni_form_image_set">तस्वीर तय हुई</string>
     <string name="omni_form_image_unreadable">वह तस्वीर पढ़ी नहीं जा सकी।</string>
-    <string name="omni_install_allow">Android एक बार पूछता है कि कोई ऐप्लिकेशन दूसरा लगा सकता है या नहीं। अभी खुले परदे पर इसे इसकी अनुमति दीजिए, फिर दोबारा लगाएँ दबाइए।</string>
-    <string name="omni_install_working">पैकेज Android को सौंपा जा रहा है…</string>
-    <string name="omni_install_done">%1$s लग गया।</string>
-    <string name="omni_install_failed">नहीं लगा: %1$s</string>
-    <string name="omni_install_ok">लग गया</string>
-    <string name="omni_install_aborted">लगाना रद्द कर दिया गया</string>
-    <string name="omni_install_blocked">इस उपकरण की किसी चीज़ ने रोक दिया</string>
-    <string name="omni_install_conflict">उस पैकेज नाम का मालिक पहले से कोई और ऐप्लिकेशन है</string>
-    <string name="omni_install_incompatible">यह उपकरण इसे नहीं चला सकता</string>
-    <string name="omni_install_invalid">Android ने पैकेज पढ़ने से मना कर दिया</string>
-    <string name="omni_install_storage">पर्याप्त जगह नहीं है</string>
-    <string name="omni_install_refused">Android ने मना कर दिया</string>
     <string name="omni_settings_logs_empty">इस बार कुछ भी दर्ज नहीं हुआ।</string>
     <string name="omni_settings_logs_copied">नकल हो गई</string>
     <string name="omni_settings_logs_note">लॉग इसी ऐप्लिकेशन के अपने भंडार में रहता है, और कहीं नहीं। यदि आप इसे कहीं और पढ़ना चाहते हैं तो यहाँ से नकल कीजिए।</string>

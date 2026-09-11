@@ -123,7 +123,6 @@
     <string name="omni_settings_integrity">完全性</string>
     <string name="omni_settings_logs">ログ</string>
     <string name="omni_working">処理中…</string>
-    <string name="omni_action_install">インストール</string>
     <string name="omni_action_share">共有</string>
     <string name="omni_settings_theme">テーマ</string>
     <string name="omni_settings_about">このアプリについて</string>
@@ -134,18 +133,6 @@
     <string name="omni_picture_size">画像</string>
     <string name="omni_form_image_set">画像を設定しました</string>
     <string name="omni_form_image_unreadable">その画像は読めませんでした。</string>
-    <string name="omni_install_allow">あるアプリが別のアプリを入れる前に、Android は一度だけ確認します。いま開いた画面でこのアプリに許可してから、もう一度インストールを押してください。</string>
-    <string name="omni_install_working">パッケージを Android に渡しています…</string>
-    <string name="omni_install_done">%1$s をインストールしました。</string>
-    <string name="omni_install_failed">入りませんでした: %1$s</string>
-    <string name="omni_install_ok">インストールしました</string>
-    <string name="omni_install_aborted">インストールは取り消されました</string>
-    <string name="omni_install_blocked">この端末の何かが妨げました</string>
-    <string name="omni_install_conflict">別のアプリがそのパッケージ名をすでに持っています</string>
-    <string name="omni_install_incompatible">この端末では動きません</string>
-    <string name="omni_install_invalid">Android がパッケージを読めませんでした</string>
-    <string name="omni_install_storage">空きが足りません</string>
-    <string name="omni_install_refused">Android が拒みました</string>
     <string name="omni_settings_logs_empty">この実行では何も記録されていません。</string>
     <string name="omni_settings_logs_copied">コピーしました</string>
     <string name="omni_settings_logs_note">ログはこのアプリ自身の保存領域だけにあります。どこかで読みたいなら、ここから写してください。</string>

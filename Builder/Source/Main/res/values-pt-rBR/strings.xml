@@ -123,7 +123,6 @@
     <string name="omni_settings_integrity">Integridade</string>
     <string name="omni_settings_logs">Registro</string>
     <string name="omni_working">Trabalhando…</string>
-    <string name="omni_action_install">INSTALAR</string>
     <string name="omni_action_share">COMPARTILHAR</string>
     <string name="omni_settings_theme">Tema</string>
     <string name="omni_settings_about">Sobre</string>
@@ -134,18 +133,6 @@
     <string name="omni_picture_size">Imagem</string>
     <string name="omni_form_image_set">IMAGEM DEFINIDA</string>
     <string name="omni_form_image_unreadable">Não deu para ler essa imagem.</string>
-    <string name="omni_install_allow">O Android pergunta uma vez antes de deixar um aplicativo instalar outro. Permita para este na tela que acabou de abrir, depois toque em instalar de novo.</string>
-    <string name="omni_install_working">Entregando o pacote ao Android…</string>
-    <string name="omni_install_done">%1$s foi instalado.</string>
-    <string name="omni_install_failed">Não instalado: %1$s</string>
-    <string name="omni_install_ok">instalado</string>
-    <string name="omni_install_aborted">a instalação foi cancelada</string>
-    <string name="omni_install_blocked">alguma coisa neste aparelho bloqueou</string>
-    <string name="omni_install_conflict">outro aplicativo já é dono desse nome de pacote</string>
-    <string name="omni_install_incompatible">este aparelho não consegue rodar isso</string>
-    <string name="omni_install_invalid">o Android não quis ler o pacote</string>
-    <string name="omni_install_storage">não há espaço suficiente</string>
-    <string name="omni_install_refused">o Android recusou</string>
     <string name="omni_settings_logs_empty">Nada foi registrado nesta execução.</string>
     <string name="omni_settings_logs_copied">COPIADO</string>
     <string name="omni_settings_logs_note">O registro fica no armazenamento do próprio aplicativo e em nenhum outro lugar. Copie daqui se quiser em algum lugar onde possa lê-lo.</string>

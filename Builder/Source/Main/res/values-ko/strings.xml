@@ -123,7 +123,6 @@
     <string name="omni_settings_integrity">무결성</string>
     <string name="omni_settings_logs">기록</string>
     <string name="omni_working">처리 중…</string>
-    <string name="omni_action_install">설치</string>
     <string name="omni_action_share">공유</string>
     <string name="omni_settings_theme">테마</string>
     <string name="omni_settings_about">앱 정보</string>
@@ -134,18 +133,6 @@
     <string name="omni_picture_size">그림</string>
     <string name="omni_form_image_set">그림을 설정했습니다</string>
     <string name="omni_form_image_unreadable">그 그림을 읽지 못했습니다.</string>
-    <string name="omni_install_allow">어떤 앱이 다른 앱을 설치하기 전에 Android가 한 번 묻습니다. 방금 열린 화면에서 이 앱에 허락한 뒤 설치를 다시 누르세요.</string>
-    <string name="omni_install_working">패키지를 Android에 넘기는 중…</string>
-    <string name="omni_install_done">%1$s을(를) 설치했습니다.</string>
-    <string name="omni_install_failed">설치되지 않음: %1$s</string>
-    <string name="omni_install_ok">설치했습니다</string>
-    <string name="omni_install_aborted">설치가 취소되었습니다</string>
-    <string name="omni_install_blocked">이 기기의 무언가가 막았습니다</string>
-    <string name="omni_install_conflict">다른 앱이 그 패키지 이름을 이미 가지고 있습니다</string>
-    <string name="omni_install_incompatible">이 기기에서는 돌지 않습니다</string>
-    <string name="omni_install_invalid">Android가 패키지를 읽지 못했습니다</string>
-    <string name="omni_install_storage">공간이 모자랍니다</string>
-    <string name="omni_install_refused">Android가 거부했습니다</string>
     <string name="omni_settings_logs_empty">이번 실행에서는 기록된 것이 없습니다.</string>
     <string name="omni_settings_logs_copied">복사했습니다</string>
     <string name="omni_settings_logs_note">기록은 이 앱 자신의 저장 공간에만 있습니다. 어딘가에서 읽고 싶다면 여기서 옮기세요.</string>
