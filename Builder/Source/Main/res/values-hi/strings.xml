@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">अभी कोई संस्करण-नियंत्रण ग्राहक नहीं जुड़ा है। प्रपत्र यहाँ है; जो भंडार लाता वह नहीं है, और उसकी जगह कुछ बनावटी नहीं रखा जाएगा।</string>
     <string name="omni_facts_title">परियोजना का ब्योरा</string>
     <string name="omni_facts_name">परियोजना का नाम</string>
+    <string name="omni_facts_activity">मुख्य गतिविधि</string>
+    <string name="omni_facts_about">विवरण</string>
+    <string name="omni_facts_span">डिफ़ॉल्ट SDK सीमा</string>
     <string name="omni_facts_where">परियोजना का फ़ोल्डर</string>
     <string name="omni_facts_made">बनाया गया</string>
     <string name="omni_facts_changed">अंतिम बदलाव</string>

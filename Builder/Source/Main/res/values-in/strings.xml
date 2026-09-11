@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">Belum ada klien kendali versi yang tersambung. Formulirnya ada di sini; yang akan mengambil lumbungnya belum ada, dan tak ada yang akan dipalsukan sebagai gantinya.</string>
     <string name="omni_facts_title">Rincian proyek</string>
     <string name="omni_facts_name">Nama proyek</string>
+    <string name="omni_facts_activity">Aktivitas utama</string>
+    <string name="omni_facts_about">Deskripsi</string>
+    <string name="omni_facts_span">Rentang SDK bawaan</string>
     <string name="omni_facts_where">Map proyek</string>
     <string name="omni_facts_made">Dibuat</string>
     <string name="omni_facts_changed">Terakhir diubah</string>

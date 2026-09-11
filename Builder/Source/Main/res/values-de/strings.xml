@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">Es ist noch kein Versionsverwaltungs-Client angeschlossen. Das Formular ist da; was das Repository holen würde, nicht, und nichts wird an seiner Stelle vorgetäuscht.</string>
     <string name="omni_facts_title">Projektangaben</string>
     <string name="omni_facts_name">Projektname</string>
+    <string name="omni_facts_activity">Hauptaktivität</string>
+    <string name="omni_facts_about">Beschreibung</string>
+    <string name="omni_facts_span">Standard-SDK-Bereich</string>
     <string name="omni_facts_where">Projektordner</string>
     <string name="omni_facts_made">Erstellt</string>
     <string name="omni_facts_changed">Zuletzt geändert</string>

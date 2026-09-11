@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">لا عميل لإدارة الإصدارات موصول بعد. النموذج هنا؛ أما ما يجلب المستودع فليس كذلك، ولن يُصطنع شيء مكانه.</string>
     <string name="omni_facts_title">بيانات المشروع</string>
     <string name="omni_facts_name">اسم المشروع</string>
+    <string name="omni_facts_activity">النشاط الرئيسي</string>
+    <string name="omni_facts_about">الوصف</string>
+    <string name="omni_facts_span">نطاق SDK الافتراضي</string>
     <string name="omni_facts_where">مجلد المشروع</string>
     <string name="omni_facts_made">تاريخ الإنشاء</string>
     <string name="omni_facts_changed">آخر تعديل</string>

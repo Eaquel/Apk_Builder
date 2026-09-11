@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">Aucun client de gestion de versions n’est encore branché. Le formulaire est là ; ce qui irait chercher le dépôt ne l’est pas, et rien ne sera simulé à sa place.</string>
     <string name="omni_facts_title">Détails du projet</string>
     <string name="omni_facts_name">Nom du projet</string>
+    <string name="omni_facts_activity">Activité principale</string>
+    <string name="omni_facts_about">Description</string>
+    <string name="omni_facts_span">Plage de SDK par défaut</string>
     <string name="omni_facts_where">Dossier du projet</string>
     <string name="omni_facts_made">Créé le</string>
     <string name="omni_facts_changed">Dernière modification</string>

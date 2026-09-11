@@ -39,6 +39,7 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
@@ -3909,6 +3910,7 @@ class BuilderActivity : Activity() {
 
         const val PROJECT_RES = "Res"
         const val PROJECT_ICON = "Icon.png"
+        const val PROJECT_FILE = "Builder.json"
 
         val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
@@ -8540,43 +8542,110 @@ class BuilderActivity : Activity() {
         return files to (folders - 1).coerceAtLeast(0)
     }
 
+    private fun projectNote(root: String): String = runCatching {
+        JSONObject(Builder.nativeReadFile(root, PROJECT_FILE))
+            .optJSONObject("read")
+            ?.optString("text")
+            ?.let { JSONObject(it).optString("description") }
+            .orEmpty()
+    }.getOrDefault("")
+
+    private fun keepProjectNote(root: String, said: String) {
+        val answer = runCatching {
+            JSONObject(Builder.nativeReadFile(root, PROJECT_FILE))
+        }.getOrNull()
+        val text = answer?.optJSONObject("read")?.optString("text").orEmpty()
+        val settings = runCatching { JSONObject(text) }.getOrDefault(JSONObject())
+        settings.put("description", said)
+        act(Builder.nativeWriteFile(root, PROJECT_FILE, settings.toString(2)), "saved")
+    }
+
+    private fun mainActivityOf(root: String): String = runCatching {
+        JSONObject(Builder.nativeManifestFacts(root))
+            .optJSONObject("manifest")
+            ?.optJSONArray("activities")
+            ?.takeIf { it.length() > 0 }
+            ?.optString(0)
+            .orEmpty()
+            .substringAfterLast('.')
+    }.getOrDefault("")
+
+    private fun factPair(named: String, said: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(1))
+            addView(
+                TextView(context).apply {
+                    text = named
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = said
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                }
+            )
+        }
+
+    private fun badgedIcon(root: String, edge: Int): View = FrameLayout(this).apply {
+        addView(
+            thumbnail(File(root, "$PROJECT_RES/$PROJECT_ICON").absolutePath, edge),
+            FrameLayout.LayoutParams(edge, edge),
+        )
+        addView(
+            View(context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(palette.raised)
+                    setStroke(gap(1) / 2, palette.divider)
+                }
+                foreground = Mark(Mark.Shape.PEN, palette.foreground)
+                isClickable = true
+                isFocusable = true
+                contentDescription = getString(R.string.omni_project_picture)
+                readAs(Button::class.java.name)
+                setOnClickListener { chooseImage(root) }
+            },
+            FrameLayout.LayoutParams(gap(9), gap(9), Gravity.END or Gravity.BOTTOM),
+        )
+    }
+
     private fun showProjectFacts(root: String) {
         val summary = summaryOf(root)
         val here = File(root)
         val (files, folders) = countedIn(root)
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(gap(5), gap(3), gap(5), gap(2))
+            setPadding(gap(5), gap(1), gap(5), gap(3))
         }
         sheet.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 0, gap(3))
+                gravity = Gravity.TOP
+                setPadding(0, gap(3), 0, gap(3))
                 addView(
-                    thumbnail(File(root, "$PROJECT_RES/$PROJECT_ICON").absolutePath, gap(20)),
-                    LinearLayout.LayoutParams(gap(20), gap(20)).apply { marginEnd = gap(4) },
+                    badgedIcon(root, gap(20)),
+                    LinearLayout.LayoutParams(gap(20), gap(20)).apply { marginEnd = gap(5) },
                 )
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
-                        addView(quiet(getString(R.string.omni_facts_name)))
+                        addView(factPair(getString(R.string.omni_facts_name), here.name))
                         addView(
-                            TextView(context).apply {
-                                text = here.name
-                                setTextColor(palette.foreground)
-                                typeface = Type.strong
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                            }
+                            factPair(
+                                getString(R.string.omni_form_package),
+                                summary?.packageName.orEmpty(),
+                            )
                         )
-                        addView(quiet(getString(R.string.omni_form_package)))
-                        addView(
-                            TextView(context).apply {
-                                text = summary?.packageName.orEmpty()
-                                setTextColor(palette.foreground)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                            }
-                        )
+                        val started = mainActivityOf(root)
+                        if (started.isNotEmpty()) {
+                            addView(
+                                factPair(getString(R.string.omni_facts_activity), started)
+                            )
+                        }
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
@@ -8607,7 +8676,7 @@ class BuilderActivity : Activity() {
         )
         sheet.addView(
             factRow(
-                getString(R.string.omni_form_platforms),
+                getString(R.string.omni_facts_span),
                 getString(
                     R.string.omni_form_platforms_span,
                     releaseNamed(summary?.minSdk ?: OLDEST_PLATFORM),
@@ -8617,11 +8686,112 @@ class BuilderActivity : Activity() {
                 R.string.omni_health_title,
             ) { go(Screen.Health(root)) }
         )
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.omni_facts_title))
-            .setView(ScrollView(this).apply { addView(sheet, MATCH_PARENT, WRAP_CONTENT) })
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
+        sheet.addView(
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { topMargin = gap(3) },
+        )
+        sheet.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_facts_about)
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(0, gap(3), 0, gap(2))
+            }
+        )
+        val note = TextView(this).apply {
+            text = projectNote(root)
+            setTextColor(palette.foreground)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        }
+        sheet.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = sheet(Color.TRANSPARENT, palette.divider)
+                setPadding(gap(3), gap(3), gap(3), gap(3))
+                addView(note, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.PEN, palette.foreground)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(R.string.omni_facts_about)
+                        readAs(Button::class.java.name)
+                        background = reacting(Color.TRANSPARENT, gap(5).toFloat(), palette.accent)
+                        setOnClickListener {
+                            askForName(
+                                getString(R.string.omni_facts_about),
+                                note.text.toString(),
+                            ) { said ->
+                                keepProjectNote(root, said)
+                                note.text = said
+                            }
+                        }
+                    },
+                    LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
+        showSheet(Mark.Shape.INFO, getString(R.string.omni_facts_title), sheet)
+    }
+
+    private fun showSheet(marked: Mark.Shape, titled: String, body: View) {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(4).toFloat()
+                setColor(palette.background)
+                setStroke(gap(1) / 2, palette.divider)
+            }
+        }
+        panel.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(5), gap(4), gap(5), gap(4))
+                addView(
+                    View(context).apply { foreground = Mark(marked, palette.foreground) },
+                    LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    TextView(context).apply {
+                        text = titled
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+                    }
+                )
+            }
+        )
+        panel.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+        val scroll = ScrollView(this).apply { addView(body, MATCH_PARENT, WRAP_CONTENT) }
+        panel.addView(
+            scroll,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { weight = 1f },
+        )
+        val shown = AlertDialog.Builder(this).setView(panel).create()
+        panel.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                setPadding(gap(5), gap(2), gap(5), gap(4))
+                addView(
+                    control().apply {
+                        text = getString(android.R.string.ok)
+                        setTextColor(Color.WHITE)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        setPadding(gap(7), gap(3), gap(7), gap(3))
+                        background = reacting(palette.accent, gap(2).toFloat(), Color.WHITE)
+                        setOnClickListener { shown.dismiss() }
+                    },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+                )
+            }
+        )
+        shown.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        shown.show()
     }
 
     private fun clearProjectCache(root: String) {

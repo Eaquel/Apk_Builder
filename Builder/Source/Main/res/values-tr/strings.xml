@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">Henüz bağlı bir sürüm kontrol istemcisi yok. Form burada; depoyu getirecek olan şey değil ve yerine sahtesi konmayacak.</string>
     <string name="omni_facts_title">Proje Bilgileri</string>
     <string name="omni_facts_name">Proje Adı</string>
+    <string name="omni_facts_activity">Ana Aktivite</string>
+    <string name="omni_facts_about">Açıklama</string>
+    <string name="omni_facts_span">Varsayılan SDK Aralığı</string>
     <string name="omni_facts_where">Proje Dizini</string>
     <string name="omni_facts_made">Oluşturulma tarihi</string>
     <string name="omni_facts_changed">Son Düzenleme</string>

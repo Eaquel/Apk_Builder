@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">まだ版管理の道具はつながっていません。書式はここにありますが、リポジトリーを取ってくるものはまだなく、代わりに偽物を置くこともしません。</string>
     <string name="omni_facts_title">プロジェクトの情報</string>
     <string name="omni_facts_name">プロジェクト名</string>
+    <string name="omni_facts_activity">メインアクティビティ</string>
+    <string name="omni_facts_about">説明</string>
+    <string name="omni_facts_span">既定の SDK 範囲</string>
     <string name="omni_facts_where">プロジェクトのフォルダー</string>
     <string name="omni_facts_made">作成日時</string>
     <string name="omni_facts_changed">最終更新</string>

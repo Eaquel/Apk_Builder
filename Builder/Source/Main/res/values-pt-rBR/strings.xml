@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">Nenhum cliente de controle de versão está ligado ainda. O formulário está aqui; o que buscaria o repositório não está, e nada será forjado no lugar.</string>
     <string name="omni_facts_title">Detalhes do projeto</string>
     <string name="omni_facts_name">Nome do projeto</string>
+    <string name="omni_facts_activity">Atividade principal</string>
+    <string name="omni_facts_about">Descrição</string>
+    <string name="omni_facts_span">Intervalo de SDK padrão</string>
     <string name="omni_facts_where">Pasta do projeto</string>
     <string name="omni_facts_made">Criado</string>
     <string name="omni_facts_changed">Última alteração</string>

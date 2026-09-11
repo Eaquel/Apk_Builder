@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">Nessun client di controllo di versione è ancora collegato. Il modulo c’è; ciò che andrebbe a prendere il repository no, e al suo posto non verrà finto niente.</string>
     <string name="omni_facts_title">Dati del progetto</string>
     <string name="omni_facts_name">Nome del progetto</string>
+    <string name="omni_facts_activity">Attività principale</string>
+    <string name="omni_facts_about">Descrizione</string>
+    <string name="omni_facts_span">Intervallo SDK predefinito</string>
     <string name="omni_facts_where">Cartella del progetto</string>
     <string name="omni_facts_made">Creato</string>
     <string name="omni_facts_changed">Ultima modifica</string>

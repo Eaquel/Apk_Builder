@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">No version-control client is wired in yet. The form is here; what would fetch the repository is not, and nothing will be faked in its place.</string>
     <string name="omni_facts_title">Project details</string>
     <string name="omni_facts_name">Project name</string>
+    <string name="omni_facts_activity">Main activity</string>
+    <string name="omni_facts_about">Description</string>
+    <string name="omni_facts_span">Default SDK range</string>
     <string name="omni_facts_where">Project folder</string>
     <string name="omni_facts_made">Created</string>
     <string name="omni_facts_changed">Last changed</string>

@@ -379,6 +379,9 @@
     <string name="omni_clone_unwired">还没有接上版本控制客户端。表单在这里，但真正去取仓库的东西还没有，也不会拿假的顶上。</string>
     <string name="omni_facts_title">项目信息</string>
     <string name="omni_facts_name">项目名称</string>
+    <string name="omni_facts_activity">主 Activity</string>
+    <string name="omni_facts_about">描述</string>
+    <string name="omni_facts_span">默认 SDK 范围</string>
     <string name="omni_facts_where">项目目录</string>
     <string name="omni_facts_made">创建时间</string>
     <string name="omni_facts_changed">最后修改</string>
