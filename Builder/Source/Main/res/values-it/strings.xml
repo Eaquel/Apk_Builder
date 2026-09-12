@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">Tipo di feedback</string>
     <string name="omni_feedback_note">Le tue idee, i suggerimenti e i problemi contano per noi.</string>
     <string name="omni_feedback_subject">Oggetto</string>
+    <string name="omni_feedback_detail_hint">Spiega nel dettaglio...</string>
+    <string name="omni_feedback_subject_hint">Scrivi un titolo breve e chiaro...</string>
     <string name="omni_feedback_detail">Descrizione</string>
     <string name="omni_feedback_shot_chosen">Un’immagine è allegata.</string>
     <string name="omni_feedback_send_note">Questo apre l’app di posta di questo dispositivo con tutto già compilato. Niente lascia il dispositivo finché non lo invii tu.</string>

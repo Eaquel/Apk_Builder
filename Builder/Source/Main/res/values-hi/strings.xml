@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">प्रतिक्रिया का प्रकार</string>
     <string name="omni_feedback_note">आपके विचार, सुझाव और समस्याएँ हमारे लिए अहम हैं।</string>
     <string name="omni_feedback_subject">विषय</string>
+    <string name="omni_feedback_detail_hint">कृपया विस्तार से बताएं...</string>
+    <string name="omni_feedback_subject_hint">छोटा और स्पष्ट शीर्षक लिखें...</string>
     <string name="omni_feedback_detail">विवरण</string>
     <string name="omni_feedback_shot_chosen">एक तस्वीर लगी है।</string>
     <string name="omni_feedback_send_note">यह इसी उपकरण के मेल ऐप को सब कुछ भरा हुआ खोल देता है। जब तक आप स्वयं न भेजें, कुछ भी उपकरण से बाहर नहीं जाता।</string>

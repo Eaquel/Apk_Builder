@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">Geri Bildirim Türü</string>
     <string name="omni_feedback_note">Fikirlerin, önerilerin ve sorunların bizim için önemli.</string>
     <string name="omni_feedback_subject">Konu</string>
+    <string name="omni_feedback_detail_hint">Lütfen detaylı bir şekilde açıklayın...</string>
+    <string name="omni_feedback_subject_hint">Kısa ve net bir başlık yazın...</string>
     <string name="omni_feedback_detail">Açıklama</string>
     <string name="omni_feedback_shot_chosen">Bir görsel eklendi.</string>
     <string name="omni_feedback_send_note">Bu, cihazdaki posta uygulamasını her şey doldurulmuş olarak açar. Sen göndermeden hiçbir şey cihazdan çıkmaz.</string>

@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">Tipo de comentário</string>
     <string name="omni_feedback_note">As tuas ideias, sugestões e problemas são importantes para nós.</string>
     <string name="omni_feedback_subject">Assunto</string>
+    <string name="omni_feedback_detail_hint">Explique em pormenor...</string>
+    <string name="omni_feedback_subject_hint">Escreva um título curto e claro...</string>
     <string name="omni_feedback_detail">Descrição</string>
     <string name="omni_feedback_shot_chosen">Está uma imagem anexada.</string>
     <string name="omni_feedback_send_note">Isto abre a aplicação de correio deste aparelho com tudo preenchido. Nada sai do aparelho até seres tu a enviar.</string>

@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">Type de retour</string>
     <string name="omni_feedback_note">Vos idées, suggestions et problèmes comptent pour nous.</string>
     <string name="omni_feedback_subject">Sujet</string>
+    <string name="omni_feedback_detail_hint">Expliquez en détail…</string>
+    <string name="omni_feedback_subject_hint">Écrivez un titre court et clair…</string>
     <string name="omni_feedback_detail">Description</string>
     <string name="omni_feedback_shot_chosen">Une image est jointe.</string>
     <string name="omni_feedback_send_note">Cela ouvre l’application de courrier de cet appareil, tout rempli. Rien ne quitte l’appareil tant que tu n’envoies pas toi-même.</string>

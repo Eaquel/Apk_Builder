@@ -1040,7 +1040,7 @@ data class Palette(
             label = "Dark Theme",
             background = 0xFF030F18.toInt(),
             surface = 0xFF061521.toInt(),
-            raised = 0xFF14283A.toInt(),
+            raised = 0xFF0C1A22.toInt(),
             foreground = 0xFFFFFFFF.toInt(),
             muted = 0xFF8FB7CD.toInt(),
             accent = 0xFF008BFE.toInt(),
@@ -1913,10 +1913,8 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
         )
         fade = LinearGradient(
             0f, 0f, 0f, tall.toFloat(),
-            Color.argb(0, Color.red(palette.background), Color.green(palette.background),
-                Color.blue(palette.background)),
-            Color.argb(210, Color.red(palette.background), Color.green(palette.background),
-                Color.blue(palette.background)),
+            Ink.hot(palette.background, 0.017f),
+            Ink.dim(palette.background, 0.12f),
             Shader.TileMode.CLAMP,
         )
         sky = LinearGradient(
@@ -2589,7 +2587,7 @@ internal class Mark(
             var step = GLOW_STEPS
             while (step >= 1) {
                 swell = step * GLOW_SWELL
-                bleed = 30 - step * 7
+                bleed = 44 - step * 10
                 stamp(canvas, unit, widest)
                 step -= 1
             }
@@ -3330,28 +3328,14 @@ internal class Mark(
             }
             Shape.BRAIN -> {
                 paint.style = Paint.Style.STROKE
+                canvas.drawCircle(8.8f, 7.6f, 3.1f, paint)
+                canvas.drawCircle(7.2f, 12.2f, 3.1f, paint)
+                canvas.drawCircle(9.0f, 16.6f, 3.1f, paint)
+                canvas.drawCircle(15.2f, 7.6f, 3.1f, paint)
+                canvas.drawCircle(16.8f, 12.2f, 3.1f, paint)
+                canvas.drawCircle(15.0f, 16.6f, 3.1f, paint)
                 path.moveTo(12f, 5.2f)
-                path.cubicTo(9.6f, 3.2f, 5.6f, 4.6f, 5.8f, 7.8f)
-                path.cubicTo(3.2f, 9f, 3.4f, 12.6f, 5.6f, 13.6f)
-                path.cubicTo(4.6f, 16.4f, 6.8f, 19.2f, 9.4f, 18.6f)
-                path.cubicTo(10f, 20.6f, 12f, 20.6f, 12f, 18.6f)
-                path.close()
-                path.moveTo(12f, 5.2f)
-                path.cubicTo(14.4f, 3.2f, 18.4f, 4.6f, 18.2f, 7.8f)
-                path.cubicTo(20.8f, 9f, 20.6f, 12.6f, 18.4f, 13.6f)
-                path.cubicTo(19.4f, 16.4f, 17.2f, 19.2f, 14.6f, 18.6f)
-                path.cubicTo(14f, 20.6f, 12f, 20.6f, 12f, 18.6f)
-                path.close()
-                path.moveTo(12f, 5.2f)
-                path.lineTo(12f, 18.6f)
-                path.moveTo(8.4f, 8.6f)
-                path.lineTo(10f, 10.2f)
-                path.moveTo(15.6f, 8.6f)
-                path.lineTo(14f, 10.2f)
-                path.moveTo(8.8f, 15f)
-                path.lineTo(10.2f, 13.6f)
-                path.moveTo(15.2f, 15f)
-                path.lineTo(13.8f, 13.6f)
+                path.lineTo(12f, 19f)
                 canvas.drawPath(path, paint)
             }
             Shape.SHIELD_FILL -> {
@@ -8521,7 +8505,7 @@ class BuilderActivity : Activity() {
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.RECTANGLE
                         cornerRadius = gap(5) / 2f
-                        setColor(if (mine) Ink.fade(palette.accent, 0.18f) else palette.surface)
+                        setColor(if (mine) Ink.fade(palette.accent, 0.18f) else palette.raised)
                         setStroke(1, palette.divider)
                     }
                     if (cut > 0) {
@@ -10452,10 +10436,10 @@ class BuilderActivity : Activity() {
             setPadding(0, gap(4), 0, gap(2))
             addView(
                 View(context).apply {
-                    foreground = Mark(mark, tint, 1.2f, glow = true)
+                    foreground = Mark(mark, tint, 1.3f, glow = true)
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
-                LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(4) },
+                LinearLayout.LayoutParams(gap(15), gap(15)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -10499,7 +10483,7 @@ class BuilderActivity : Activity() {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = gap(5).toFloat()
-                setColor(Color.TRANSPARENT)
+                setColor(palette.raised)
                 setStroke(1, Ink.fade(palette.accent, 0.4f))
             }
             addView(
@@ -10723,6 +10707,7 @@ class BuilderActivity : Activity() {
         initial: String,
         limit: Int,
         lines: Int,
+        said: Int,
         onChange: (String) -> Unit,
     ): View {
         val counter = TextView(this).apply {
@@ -10733,6 +10718,8 @@ class BuilderActivity : Activity() {
         }
         val writing = EditText(this).apply {
             setText(initial)
+            hint = getString(said)
+            setHintTextColor(palette.muted)
             setTextColor(palette.foreground)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setBackgroundColor(Color.TRANSPARENT)
@@ -10758,17 +10745,17 @@ class BuilderActivity : Activity() {
                 onChange(written)
             }
         })
-        writing.setPadding(gap(4), gap(3), gap(4), gap(3))
+        writing.setPadding(gap(4), gap(2), gap(4), gap(2))
         writing.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = gap(3) / 2f
-            setColor(Color.TRANSPARENT)
-            setStroke(1, Ink.hot(palette.divider, 0.2f))
+            setColor(palette.raised)
+            setStroke(1, palette.divider)
         }
         counter.gravity = Gravity.END
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, gap(3), 0, gap(1))
+            setPadding(0, gap(1), 0, gap(1))
             addView(label(named))
             addView(writing, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(
@@ -11539,7 +11526,7 @@ class BuilderActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(gap(2), gap(2), gap(2), gap(2))
+            setPadding(gap(2), gap(3) / 2, gap(2), gap(3) / 2)
             isClickable = true
             isFocusable = true
             isSelected = on
@@ -11569,7 +11556,7 @@ class BuilderActivity : Activity() {
                     addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
                     addView(
                         View(context).apply { background = radioMark(on) },
-                        LinearLayout.LayoutParams(gap(7) / 2, gap(7) / 2),
+                        LinearLayout.LayoutParams(gap(3), gap(3)),
                     )
                 },
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
@@ -11578,7 +11565,7 @@ class BuilderActivity : Activity() {
                 View(context).apply {
                     foreground = Mark(mark, if (on) palette.accent else palette.foreground)
                 },
-                LinearLayout.LayoutParams(gap(6), gap(6)),
+                LinearLayout.LayoutParams(gap(5), gap(5)),
             )
             addView(
                 TextView(context).apply {
@@ -11587,7 +11574,7 @@ class BuilderActivity : Activity() {
                     typeface = Type.strong
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     gravity = Gravity.CENTER
-                    setPadding(0, gap(2), 0, 0)
+                    setPadding(0, gap(1), 0, 0)
                 }
             )
             addView(
@@ -11638,6 +11625,7 @@ class BuilderActivity : Activity() {
                 feedbackSubject,
                 SUBJECT_LIMIT,
                 1,
+                R.string.omni_feedback_subject_hint,
             ) { feedbackSubject = it }
         )
         content.addView(
@@ -11646,6 +11634,7 @@ class BuilderActivity : Activity() {
                 feedbackDetail,
                 DETAIL_LIMIT,
                 3,
+                R.string.omni_feedback_detail_hint,
             ) { feedbackDetail = it }
         )
 
@@ -11800,10 +11789,10 @@ class BuilderActivity : Activity() {
         setOnClickListener { onPress() }
         addView(
             View(context).apply {
-                foreground = Mark(mark, tint, 1.15f, glow = true)
+                foreground = Mark(mark, tint, 1.3f, glow = true)
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             },
-            LinearLayout.LayoutParams(gap(11), gap(11)),
+            LinearLayout.LayoutParams(gap(15), gap(15)),
         )
         addView(
             LinearLayout(context).apply {
@@ -11831,7 +11820,7 @@ class BuilderActivity : Activity() {
             TextView(context).apply {
                 text = detail
                 setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setLineSpacing(gap(3) / 4f, 1f)
             }
         )
@@ -11909,7 +11898,7 @@ class BuilderActivity : Activity() {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = gap(5).toFloat()
-                    setColor(Color.TRANSPARENT)
+                    setColor(palette.raised)
                     setStroke(1, Ink.fade(palette.accent, 0.4f))
                 }
                 addView(
@@ -14466,6 +14455,15 @@ internal object Ink {
         Color.green(colour),
         Color.blue(colour),
     )
+
+    fun dim(colour: Int, by: Float): Int {
+        val held = (1f - by.coerceIn(0f, 1f))
+        return Color.rgb(
+            (Color.red(colour) * held).toInt(),
+            (Color.green(colour) * held).toInt(),
+            (Color.blue(colour) * held).toInt(),
+        )
+    }
 
     fun hot(colour: Int, by: Float): Int {
         val held = by.coerceIn(0f, 1f)

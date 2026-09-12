@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">反馈类型</string>
     <string name="omni_feedback_note">你的想法、建议和问题对我们很重要。</string>
     <string name="omni_feedback_subject">主题</string>
+    <string name="omni_feedback_detail_hint">请详细说明……</string>
+    <string name="omni_feedback_subject_hint">写一个简短清楚的标题……</string>
     <string name="omni_feedback_detail">描述</string>
     <string name="omni_feedback_shot_chosen">已附上一张图片。</string>
     <string name="omni_feedback_send_note">这会打开本机的邮件应用，内容已填好。在你亲自发送之前，没有任何东西离开本机。</string>

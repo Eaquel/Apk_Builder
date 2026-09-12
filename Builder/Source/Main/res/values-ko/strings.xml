@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">피드백 종류</string>
     <string name="omni_feedback_note">여러분의 의견과 제안, 문제 제보가 소중합니다.</string>
     <string name="omni_feedback_subject">제목</string>
+    <string name="omni_feedback_detail_hint">자세히 설명해 주세요…</string>
+    <string name="omni_feedback_subject_hint">짧고 분명한 제목을 적어 주세요…</string>
     <string name="omni_feedback_detail">설명</string>
     <string name="omni_feedback_shot_chosen">그림이 붙어 있습니다.</string>
     <string name="omni_feedback_send_note">이것은 이 기기의 메일 앱을 모두 채운 채로 엽니다. 당신이 직접 보내기 전에는 아무것도 기기를 떠나지 않습니다.</string>

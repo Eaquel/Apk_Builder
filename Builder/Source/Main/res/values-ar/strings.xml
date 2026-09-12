@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">نوع الملاحظات</string>
     <string name="omni_feedback_note">أفكارك واقتراحاتك ومشكلاتك تهمنا.</string>
     <string name="omni_feedback_subject">الموضوع</string>
+    <string name="omni_feedback_detail_hint">يرجى الشرح بالتفصيل...</string>
+    <string name="omni_feedback_subject_hint">اكتب عنوانًا قصيرًا وواضحًا...</string>
     <string name="omni_feedback_detail">الوصف</string>
     <string name="omni_feedback_shot_chosen">أُرفقت صورة.</string>
     <string name="omni_feedback_send_note">يفتح هذا تطبيق البريد على الجهاز وكل شيء مملوء. ولا يغادر الجهاز شيء حتى ترسله بنفسك.</string>

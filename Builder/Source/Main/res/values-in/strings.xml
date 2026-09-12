@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">Jenis masukan</string>
     <string name="omni_feedback_note">Ide, saran, dan masalahmu penting bagi kami.</string>
     <string name="omni_feedback_subject">Judul</string>
+    <string name="omni_feedback_detail_hint">Jelaskan secara rinci...</string>
+    <string name="omni_feedback_subject_hint">Tulis judul yang singkat dan jelas...</string>
     <string name="omni_feedback_detail">Uraian</string>
     <string name="omni_feedback_shot_chosen">Sebuah gambar terlampir.</string>
     <string name="omni_feedback_send_note">Ini membuka aplikasi surel di perangkat ini dengan semuanya terisi. Tak ada yang meninggalkan perangkat sampai kamu sendiri mengirimnya.</string>

@@ -237,6 +237,8 @@
     <string name="omni_feedback_kind">フィードバックの種類</string>
     <string name="omni_feedback_note">あなたの意見・提案・不具合の報告を大切にしています。</string>
     <string name="omni_feedback_subject">件名</string>
+    <string name="omni_feedback_detail_hint">詳しく説明してください…</string>
+    <string name="omni_feedback_subject_hint">短く分かりやすい見出しを…</string>
     <string name="omni_feedback_detail">説明</string>
     <string name="omni_feedback_shot_chosen">画像が添えられています。</string>
     <string name="omni_feedback_send_note">これはこの端末のメールアプリを、すべて入力した状態で開きます。あなたが自分で送るまで、何も端末を離れません。</string>
