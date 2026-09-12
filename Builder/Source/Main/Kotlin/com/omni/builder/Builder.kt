@@ -1037,7 +1037,7 @@ data class Palette(
     companion object {
         val DARK = Palette(
             key = "dark",
-            label = "Dark",
+            label = "Dark Theme",
             background = 0xFF0A1620.toInt(),
             surface = 0xFF0E1C25.toInt(),
             raised = 0xFF202E3A.toInt(),
@@ -2471,6 +2471,7 @@ internal class Mark(
     private val shape: Shape,
     private val colour: Int,
     private val heft: Float = 1f,
+    private val glow: Boolean = false,
 ) : Drawable() {
 
     enum class Shape {
@@ -2551,6 +2552,14 @@ internal class Mark(
         BUG,
         BULB,
         STAR_LINE,
+        BRAIN,
+        SCREEN,
+        SHIELD_FILL,
+        NOTE_FILL,
+        MAIL_FILL,
+        PERSON_FILL,
+        HEART_FILL,
+        COPYRIGHT,
     }
 
     private companion object {
@@ -2565,10 +2574,29 @@ internal class Mark(
     }
     private val path = Path()
 
+    private var swell = 0f
+    private var bleed = 255
+
     override fun draw(canvas: Canvas) {
         val edge = min(bounds.width(), bounds.height()).toFloat()
         if (edge <= 0f) return
         val unit = edge / GRID
+        if (glow) {
+            var step = 3
+            while (step >= 1) {
+                swell = step * 2.1f
+                bleed = 30 - step * 7
+                stamp(canvas, unit)
+                step -= 1
+            }
+            swell = 0f
+            bleed = 255
+        }
+        stamp(canvas, unit)
+    }
+
+    private fun stamp(canvas: Canvas, unit: Float) {
+        val edge = unit * GRID
         canvas.save()
         canvas.translate(
             bounds.left + (bounds.width() - edge) / 2f,
@@ -2576,7 +2604,8 @@ internal class Mark(
         )
         canvas.scale(unit, unit)
         paint.color = colour
-        paint.strokeWidth = STROKE * heft
+        paint.alpha = bleed
+        paint.strokeWidth = STROKE * heft + swell
         path.rewind()
         when (shape) {
             Shape.FOLDER -> {
@@ -2685,9 +2714,11 @@ internal class Mark(
             }
             Shape.BACK -> {
                 paint.style = Paint.Style.STROKE
-                path.moveTo(14f, 6f)
-                path.lineTo(8f, 12f)
-                path.lineTo(14f, 18f)
+                path.moveTo(20.4f, 12f)
+                path.lineTo(4.4f, 12f)
+                path.moveTo(11.2f, 5.2f)
+                path.lineTo(4.4f, 12f)
+                path.lineTo(11.2f, 18.8f)
                 canvas.drawPath(path, paint)
             }
             Shape.GEAR -> {
@@ -3284,6 +3315,132 @@ internal class Mark(
                 path.close()
                 canvas.drawPath(path, paint)
             }
+            Shape.SCREEN -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(2.6f, 4.4f, 21.4f, 16.6f, 1.8f, 1.8f, Path.Direction.CW)
+                path.moveTo(9f, 20.4f)
+                path.lineTo(15f, 20.4f)
+                path.moveTo(12f, 16.6f)
+                path.lineTo(12f, 20.4f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.BRAIN -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 5.2f)
+                path.cubicTo(9.6f, 3.2f, 5.6f, 4.6f, 5.8f, 7.8f)
+                path.cubicTo(3.2f, 9f, 3.4f, 12.6f, 5.6f, 13.6f)
+                path.cubicTo(4.6f, 16.4f, 6.8f, 19.2f, 9.4f, 18.6f)
+                path.cubicTo(10f, 20.6f, 12f, 20.6f, 12f, 18.6f)
+                path.close()
+                path.moveTo(12f, 5.2f)
+                path.cubicTo(14.4f, 3.2f, 18.4f, 4.6f, 18.2f, 7.8f)
+                path.cubicTo(20.8f, 9f, 20.6f, 12.6f, 18.4f, 13.6f)
+                path.cubicTo(19.4f, 16.4f, 17.2f, 19.2f, 14.6f, 18.6f)
+                path.cubicTo(14f, 20.6f, 12f, 20.6f, 12f, 18.6f)
+                path.close()
+                path.moveTo(12f, 5.2f)
+                path.lineTo(12f, 18.6f)
+                path.moveTo(8.4f, 8.6f)
+                path.lineTo(10f, 10.2f)
+                path.moveTo(15.6f, 8.6f)
+                path.lineTo(14f, 10.2f)
+                path.moveTo(8.8f, 15f)
+                path.lineTo(10.2f, 13.6f)
+                path.moveTo(15.2f, 15f)
+                path.lineTo(13.8f, 13.6f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SHIELD_FILL -> {
+                canvas.saveLayer(0f, 0f, GRID, GRID, null)
+                paint.style = Paint.Style.FILL
+                path.moveTo(12f, 3f)
+                path.lineTo(20.2f, 6.6f)
+                path.lineTo(20.2f, 12.4f)
+                path.cubicTo(20.2f, 17.2f, 16.4f, 19.8f, 12f, 21.4f)
+                path.cubicTo(7.6f, 19.8f, 3.8f, 17.2f, 3.8f, 12.4f)
+                path.lineTo(3.8f, 6.6f)
+                path.close()
+                canvas.drawPath(path, paint)
+                paint.xfermode = CLEARING
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                path.rewind()
+                path.moveTo(8.6f, 12.2f)
+                path.lineTo(11f, 14.6f)
+                path.lineTo(15.6f, 9.6f)
+                canvas.drawPath(path, paint)
+                paint.xfermode = null
+                canvas.restore()
+            }
+            Shape.NOTE_FILL -> {
+                canvas.saveLayer(0f, 0f, GRID, GRID, null)
+                paint.style = Paint.Style.FILL
+                path.moveTo(5.6f, 3.4f)
+                path.lineTo(14.4f, 3.4f)
+                path.lineTo(18.4f, 7.8f)
+                path.lineTo(18.4f, 20.6f)
+                path.lineTo(5.6f, 20.6f)
+                path.close()
+                canvas.drawPath(path, paint)
+                paint.xfermode = CLEARING
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 1.8f
+                path.rewind()
+                var line = 0
+                while (line < 3) {
+                    val y = 11.4f + line * 3.4f
+                    path.moveTo(8.4f, y)
+                    path.lineTo(if (line == 2) 12.6f else 15.6f, y)
+                    line += 1
+                }
+                canvas.drawPath(path, paint)
+                paint.xfermode = null
+                canvas.restore()
+            }
+            Shape.MAIL_FILL -> {
+                canvas.saveLayer(0f, 0f, GRID, GRID, null)
+                paint.style = Paint.Style.FILL
+                path.addRoundRect(2.8f, 5f, 21.2f, 19f, 2.4f, 2.4f, Path.Direction.CW)
+                canvas.drawPath(path, paint)
+                paint.xfermode = CLEARING
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                path.rewind()
+                path.moveTo(5.6f, 8f)
+                path.lineTo(12f, 13.4f)
+                path.lineTo(18.4f, 8f)
+                canvas.drawPath(path, paint)
+                paint.xfermode = null
+                canvas.restore()
+            }
+            Shape.PERSON_FILL -> {
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(12f, 7.6f, 4.2f, paint)
+                path.moveTo(3.8f, 21f)
+                path.cubicTo(3.8f, 15.4f, 7.4f, 13.2f, 12f, 13.2f)
+                path.cubicTo(16.6f, 13.2f, 20.2f, 15.4f, 20.2f, 21f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.HEART_FILL -> {
+                paint.style = Paint.Style.FILL
+                path.moveTo(12f, 20.8f)
+                path.cubicTo(1.6f, 13.9f, 3.8f, 4.6f, 9.2f, 4.6f)
+                path.cubicTo(10.9f, 4.6f, 12f, 5.9f, 12f, 7.2f)
+                path.cubicTo(12f, 5.9f, 13.1f, 4.6f, 14.8f, 4.6f)
+                path.cubicTo(20.2f, 4.6f, 22.4f, 13.9f, 12f, 20.8f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.COPYRIGHT -> {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                canvas.drawCircle(12f, 12f, 8.6f, paint)
+                path.moveTo(15f, 8.9f)
+                path.cubicTo(13.2f, 7.3f, 8.6f, 7.9f, 8.6f, 12f)
+                path.cubicTo(8.6f, 16.1f, 13.2f, 16.7f, 15f, 15.1f)
+                canvas.drawPath(path, paint)
+            }
             Shape.PEOPLE -> {
                 paint.style = Paint.Style.FILL
                 canvas.drawCircle(9f, 8.4f, 3.4f, paint)
@@ -3691,7 +3848,6 @@ private sealed interface Screen {
 
     data object Projects : Screen
 
-    data object Kinds : Screen
 
     data object NewProject : Screen
 
@@ -3835,11 +3991,22 @@ class BuilderActivity : Activity() {
             R.string.omni_help_band_start,
             R.string.omni_help_band_making,
             R.string.omni_help_band_files,
+            R.string.omni_help_band_common,
             R.string.omni_help_band_web,
             R.string.omni_help_band_trouble,
         )
 
-        val HELP_BANDS = listOf(1, 2, 2, 2, 2, 5, 2, 2, 4, 3)
+        val HELP_BANDS = listOf(4, 1, 1, 2, 2, 6, 2, 2, 5, 3)
+
+        val DOC_BAND_NAMES = listOf(
+            R.string.omni_help_band_all,
+            R.string.omni_band_start,
+            R.string.omni_band_making,
+            R.string.omni_band_features,
+            R.string.omni_band_tools,
+        )
+
+        val DOC_BANDS = listOf(1, 2, 2, 3, 3, 4, 3, 2, 3, 4, 4, 4)
 
         val TALK_STEPS = listOf(
             R.string.omni_talk_step_ask to R.string.omni_talk_step_ask_note,
@@ -3852,6 +4019,12 @@ class BuilderActivity : Activity() {
             R.string.omni_talk_step_fix to R.string.omni_talk_step_fix_note,
             R.string.omni_talk_step_private to R.string.omni_talk_step_private_note,
             R.string.omni_talk_step_tips to R.string.omni_talk_step_tips_note,
+        )
+
+        val ADB_OPEN = listOf(
+            R.string.omni_adb_o_one to R.string.omni_adb_o_one_note,
+            R.string.omni_adb_o_two to R.string.omni_adb_o_two_note,
+            R.string.omni_adb_o_three to R.string.omni_adb_o_three_note,
         )
 
         val ADB_ALONE = listOf(
@@ -4126,6 +4299,7 @@ class BuilderActivity : Activity() {
     private var feedbackShot: String? = null
     private var helpFor = ""
     private var helpBand = 0
+    private var docBand = 0
     private var helpOpen = -1
     private var adbTab = 0
 
@@ -4436,14 +4610,6 @@ class BuilderActivity : Activity() {
         if (next == screen && !navigating) {
             return
         }
-        if (next is Screen.Kinds && screen !is Screen.Kinds) {
-            formLabel = DEFAULT_LABEL
-            formVersionName = "1.0.0"
-            formVersionCode = "1"
-            formPackage = Preferences.newPackage(this, DEFAULT_PACKAGE)
-            formMinSdk = Preferences.newMinSdk(this, OLDEST_PLATFORM)
-            formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
-        }
         rememberWalk(next)
         raised = false
         screen = next
@@ -4568,7 +4734,7 @@ class BuilderActivity : Activity() {
             return
         }
 
-        crown.visibility = View.VISIBLE
+        crown.visibility = if (screen is Screen.Terminal) View.GONE else View.VISIBLE
         drawCrown()
         drawFooter()
         drawRaise()
@@ -4576,7 +4742,6 @@ class BuilderActivity : Activity() {
 
         when (val here = screen) {
             is Screen.Projects -> renderProjects()
-            is Screen.Kinds -> renderKinds()
             is Screen.NewProject -> renderNewProject()
             is Screen.WebToApk -> renderWebToApk()
             is Screen.Files -> renderFiles(here.root, here.folder)
@@ -4662,9 +4827,8 @@ class BuilderActivity : Activity() {
         }
         when (val here = screen) {
             is Screen.Projects -> finish()
-            is Screen.Kinds -> go(Screen.Projects)
-            is Screen.NewProject -> go(Screen.Kinds)
-            is Screen.WebToApk -> go(Screen.Kinds)
+            is Screen.NewProject -> go(Screen.Projects)
+            is Screen.WebToApk -> go(Screen.Projects)
             is Screen.Help -> go(Screen.About)
             is Screen.HelpAdb -> go(Screen.Help)
             is Screen.HelpTalk -> go(Screen.Help)
@@ -4694,6 +4858,8 @@ class BuilderActivity : Activity() {
             readAs(Button::class.java.name)
             background = reacting(Color.TRANSPARENT, gap(6).toFloat(), palette.accent)
             foreground = Mark(shape, palette.foreground)
+            val squeeze = gap(3) / 2
+            setPadding(squeeze, squeeze, squeeze, squeeze)
             setOnClickListener { onPress() }
         }
 
@@ -4703,16 +4869,8 @@ class BuilderActivity : Activity() {
 
     private fun screenNamed(here: Screen): String = getString(
         when (here) {
-            is Screen.Kinds -> R.string.omni_kinds_title
             is Screen.WebToApk -> R.string.omni_web_title
-            is Screen.Theme -> R.string.omni_settings_theme
-            is Screen.Languages -> R.string.omni_settings_language
-            is Screen.Feedback -> R.string.omni_feedback_title
-            is Screen.Rate -> R.string.omni_rate_title
-            is Screen.About -> R.string.omni_settings_about
             is Screen.Help -> R.string.omni_help_title
-            is Screen.HelpAdb -> R.string.omni_help_adb
-            is Screen.HelpTalk -> R.string.omni_help_talk_title
             is Screen.HelpDocs -> R.string.omni_help_docs
             is Screen.HelpFaq -> R.string.omni_help_faq
             is Screen.Settings -> R.string.omni_tab_settings
@@ -4728,17 +4886,17 @@ class BuilderActivity : Activity() {
     private fun homeLike(here: Screen): Boolean =
         here is Screen.Projects || here is Screen.Files || here is Screen.NewProject
 
-    private fun brandMark(drawn: Int, round: Int): View = ImageView(this).apply {
-        setImageResource(drawn)
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        val inset = round / 2
-        setPadding(inset, inset, inset, inset)
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = round.toFloat()
-            setColor(palette.raised)
+    private fun brandMark(drawn: Int, round: Int, inset: Int = round / 2): View =
+        ImageView(this).apply {
+            setImageResource(drawn)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(inset, inset, inset, inset)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = round.toFloat()
+                setColor(Ink.fade(Ink.hot(palette.accent, 0.25f), 0.28f))
+            }
         }
-    }
 
     private fun brandBlock(named: String, full: Boolean, note: String = ""): View =
         LinearLayout(this).apply {
@@ -4746,9 +4904,9 @@ class BuilderActivity : Activity() {
         gravity = Gravity.CENTER_VERTICAL
         if (full) {
             addView(
-                brandMark(R.drawable.omni_brand, gap(3)),
-                LinearLayout.LayoutParams(gap(10), gap(10)).apply {
-                    marginStart = gap(1)
+                brandMark(R.drawable.omni_brand, gap(2), gap(3) / 2),
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply {
+                    marginStart = gap(2)
                     marginEnd = gap(3)
                 },
             )
@@ -4761,7 +4919,7 @@ class BuilderActivity : Activity() {
                         text = named
                         setTextColor(palette.foreground)
                         typeface = if (full) Type.heading else Type.body
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, if (full) 17f else 20f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, if (full) 15f else 20f)
                         maxLines = 1
                     }
                 )
@@ -4769,7 +4927,7 @@ class BuilderActivity : Activity() {
                     addView(
                         TextView(context).apply {
                             text = note.ifEmpty { getString(R.string.omni_brand_note) }
-                            setTextColor(palette.marker)
+                            setTextColor(palette.muted)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                             maxLines = 1
                         }
@@ -4778,6 +4936,41 @@ class BuilderActivity : Activity() {
             }
         )
     }
+
+    private fun guideCrown(mark: Mark.Shape, tint: Int, title: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                filledMark(mark, Ink.fade(tint, 0.85f), gap(2)),
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply {
+                    marginStart = gap(2)
+                    marginEnd = gap(3)
+                },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            maxLines = 1
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(R.string.omni_app_name)
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            maxLines = 1
+                        }
+                    )
+                }
+            )
+        }
 
     private fun crownTitle(title: String, note: String): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -4996,6 +5189,30 @@ class BuilderActivity : Activity() {
                 )
                 return
             }
+            if (here is Screen.HelpAdb || here is Screen.HelpTalk) {
+                val guided = here is Screen.HelpAdb
+                crown.addView(
+                    guideCrown(
+                        if (guided) Mark.Shape.LOG else Mark.Shape.BRAIN,
+                        if (guided) palette.accent else 0xFFB06BFF.toInt(),
+                        getString(
+                            if (guided) R.string.omni_help_adb
+                            else R.string.omni_help_talk_title
+                        ),
+                    ),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                crown.addView(
+                    markControl(Mark.Shape.FIND, R.string.omni_help_search) {
+                        go(Screen.HelpFaq)
+                    },
+                    each,
+                )
+                val guideMore = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
+                guideMore.setOnClickListener { homeMenu(guideMore) }
+                crown.addView(guideMore, each)
+                return
+            }
             crown.addView(
                 brandBlock(
                     getString(R.string.omni_app_shown, versionShown()),
@@ -5114,7 +5331,7 @@ class BuilderActivity : Activity() {
                     setTextColor(palette.foreground)
                     typeface = Type.strong
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                    setPadding(gap(5), gap(3), gap(5), gap(3))
+                    setPadding(gap(5), gap(2), gap(5), gap(2))
                     background = pill(LABEL_PILL, gap(6).toFloat())
                 }
             )
@@ -5131,7 +5348,7 @@ class BuilderActivity : Activity() {
                     readAs(Button::class.java.name)
                     setOnClickListener { onPress() }
                 },
-                LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginStart = gap(3) },
+                LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginStart = gap(3) },
             )
             setOnClickListener { onPress() }
             isClickable = true
@@ -5148,7 +5365,7 @@ class BuilderActivity : Activity() {
             raise.addView(
                 raiseAction(R.string.omni_projects_new, Mark.Shape.PAGE_ADD) {
                     raised = false
-                    go(Screen.Kinds)
+                    showKinds()
                 }
             )
             raise.addView(
@@ -5175,6 +5392,8 @@ class BuilderActivity : Activity() {
                     if (raised) Mark.Shape.CLOSE else Mark.Shape.ADD,
                     palette.foreground,
                 )
+                val squeeze = gap(3)
+                setPadding(squeeze, squeeze, squeeze, squeeze)
                 isClickable = true
                 isFocusable = true
                 contentDescription = getString(R.string.omni_raise_more)
@@ -5184,7 +5403,9 @@ class BuilderActivity : Activity() {
                     drawRaise()
                 }
             },
-            LinearLayout.LayoutParams(gap(16), gap(16)).apply { gravity = Gravity.END },
+            LinearLayout.LayoutParams(gap(27) / 2, gap(27) / 2).apply {
+                gravity = Gravity.END
+            },
         )
     }
 
@@ -5411,9 +5632,9 @@ class BuilderActivity : Activity() {
         val side = if (bleeds) {
             if (screen is Screen.Terminal) 0 else gap(2)
         } else {
-            ((room - most) / 2).coerceAtLeast(0) + gap(4)
+            ((room - most) / 2).coerceAtLeast(0) + gap(7) / 2
         }
-        val top = if (bleeds) gap(1) else gap(3)
+        val top = if (bleeds) gap(1) else gap(2)
         if (content.paddingLeft != side || content.paddingTop != top) {
             content.setPadding(side, top, side, if (bleeds) 0 else gap(8))
         }
@@ -5675,7 +5896,7 @@ class BuilderActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         minimumHeight = gap(TOUCH_UNITS)
-        setPadding(gap(2), gap(3), gap(2), gap(3))
+        setPadding(gap(2), gap(2), gap(2), gap(2))
         isClickable = true
         isFocusable = true
         contentDescription = project.label.ifEmpty { project.name }
@@ -5685,9 +5906,9 @@ class BuilderActivity : Activity() {
         addView(
             thumbnail(
                 File(project.root, "$PROJECT_RES/$PROJECT_ICON").absolutePath,
-                gap(13),
+                gap(11),
             ),
-            LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(3) },
+            LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
         )
         addView(
             LinearLayout(context).apply {
@@ -5696,8 +5917,7 @@ class BuilderActivity : Activity() {
                     TextView(context).apply {
                         text = project.label.ifEmpty { project.name }
                         setTextColor(palette.foreground)
-                        typeface = Type.heading
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                         maxLines = 1
                     }
                 )
@@ -5790,7 +6010,7 @@ class BuilderActivity : Activity() {
                 }
                 addView(
                     LauncherPreview(context, palette).apply { show(formImage) },
-                    LinearLayout.LayoutParams(gap(26), gap(26)).apply { marginEnd = gap(4) },
+                    LinearLayout.LayoutParams(gap(20), gap(20)).apply { marginEnd = gap(4) },
                 )
                 addView(
                     LinearLayout(context).apply {
@@ -5885,7 +6105,9 @@ class BuilderActivity : Activity() {
 
         content.addView(primary(getString(R.string.omni_action_create)) { createProject() })
         content.addView(
-            subtle(getString(R.string.omni_action_cancel), palette.muted) { go(Screen.Kinds) }
+            subtle(getString(R.string.omni_action_cancel), palette.muted) {
+                go(Screen.Projects)
+            }
         )
     }
 
@@ -7182,8 +7404,8 @@ class BuilderActivity : Activity() {
                     setTextColor(palette.foreground)
                     typeface = Type.data
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                    minWidth = gap(TOUCH_UNITS)
-                    setPadding(gap(3), gap(3), gap(3), gap(3))
+                    minWidth = gap(7)
+                    setPadding(gap(2), gap(3), gap(2), gap(3))
                     background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
                     setOnClickListener {
                         val from = editor.selectionStart.coerceAtLeast(0)
@@ -8234,36 +8456,55 @@ class BuilderActivity : Activity() {
         }
         return holder
     }
-    private fun talkBubble(mine: Boolean, said: String): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = if (mine) Gravity.END else Gravity.START
-        setPadding(0, gap(2), 0, gap(2))
-        if (!mine) {
+    private fun talkBubble(mine: Boolean, said: String, lead: Boolean = false): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (mine) Gravity.END else Gravity.START
+            setPadding(0, gap(2), 0, gap(1))
+            if (!mine) {
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(R.drawable.omni_mascot)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(gap(21), gap(21)),
+                )
+            }
+            val cut = if (lead) said.indexOf('\n') else -1
             addView(
-                ImageView(context).apply {
-                    setImageResource(R.drawable.omni_mascot)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(gap(3), gap(3), gap(3), gap(3))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = gap(5) / 2f
+                        setColor(if (mine) Ink.fade(palette.accent, 0.18f) else palette.surface)
+                        setStroke(1, palette.divider)
+                    }
+                    if (cut > 0) {
+                        addView(
+                            TextView(context).apply {
+                                text = said.substring(0, cut)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+                                setPadding(0, 0, 0, gap(1) / 2)
+                            }
+                        )
+                    }
+                    addView(
+                        TextView(context).apply {
+                            text = if (cut > 0) said.substring(cut + 1) else said
+                            setTextColor(Ink.hot(palette.muted, 0.34f))
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            setLineSpacing(gap(1) / 2f, 1f)
+                        }
+                    )
                 },
-                LinearLayout.LayoutParams(gap(22), gap(22)).apply { marginEnd = gap(3) },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
         }
-        addView(
-            TextView(context).apply {
-                text = said
-                setTextColor(palette.foreground)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setLineSpacing(gap(1).toFloat(), 1f)
-                setPadding(gap(4), gap(3), gap(4), gap(3))
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = gap(4).toFloat()
-                    setColor(if (mine) Ink.fade(palette.accent, 0.18f) else palette.surface)
-                    setStroke(gap(1) / 2, palette.divider)
-                }
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
-    }
 
     private fun talkMenu() {
         val named = arrayOf(
@@ -8322,13 +8563,15 @@ class BuilderActivity : Activity() {
         if (talkHeld.isEmpty()) {
             talkHeld.add(false to getString(R.string.omni_talk_hello))
         }
-        talkHeld.forEach { content.addView(talkBubble(it.first, it.second)) }
+        talkHeld.forEachIndexed { at, one ->
+            content.addView(talkBubble(one.first, one.second, at == 0 && !one.first))
+        }
         content.addView(
             TextView(this).apply {
                 text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
                 setTextColor(palette.muted)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setPadding(gap(17), 0, 0, gap(3))
+                setPadding(gap(21), 0, 0, gap(3))
             }
         )
 
@@ -8339,8 +8582,8 @@ class BuilderActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    badge(Mark.Shape.FOLDER, palette.accent),
-                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                    filledMark(Mark.Shape.FOLDER, Ink.fade(palette.accent, 0.9f), gap(5) / 2),
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
                 )
                 addView(
                     LinearLayout(context).apply {
@@ -9303,7 +9546,7 @@ class BuilderActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(gap(4), gap(10), gap(4), gap(10))
             addView(
-                View(context).apply { foreground = Mark(Mark.Shape.LOG, palette.divider) },
+                View(context).apply { foreground = Mark(Mark.Shape.NOTE, palette.divider) },
                 LinearLayout.LayoutParams(gap(14), gap(14)),
             )
             addView(
@@ -9503,12 +9746,79 @@ class BuilderActivity : Activity() {
         )
     }
 
-    private fun renderKinds() {
-        content.addView(
+    private fun newProjectForm() {
+        formLabel = DEFAULT_LABEL
+        formVersionName = "1.0.0"
+        formVersionCode = "1"
+        formPackage = Preferences.newPackage(this, DEFAULT_PACKAGE)
+        formMinSdk = Preferences.newMinSdk(this, OLDEST_PLATFORM)
+        formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
+    }
+
+    private fun showKinds() {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(4), gap(3), gap(4), gap(4))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(5).toFloat()
+                setColor(palette.surface)
+                setStroke(1, palette.divider)
+            }
+        }
+        val shown = AlertDialog.Builder(this).setView(
+            ScrollView(this).apply {
+                setPadding(gap(2), gap(2), gap(2), gap(2))
+                addView(panel, MATCH_PARENT, WRAP_CONTENT)
+            }
+        ).create()
+        panel.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, gap(4), 0, gap(2))
+                addView(
+                    brandMark(R.drawable.omni_brand, gap(2), gap(3) / 2),
+                    LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_app_name)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_kinds_hail)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.CLOSE, palette.muted)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(R.string.omni_action_cancel)
+                        readAs(Button::class.java.name)
+                        setOnClickListener { shown.dismiss() }
+                    },
+                    LinearLayout.LayoutParams(gap(6), gap(6)),
+                )
+            }
+        )
+        panel.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(3), 0, gap(2))
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
@@ -9517,15 +9827,16 @@ class BuilderActivity : Activity() {
                                 text = getString(R.string.omni_kinds_title)
                                 setTextColor(palette.foreground)
                                 typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
                             }
                         )
                         addView(
                             TextView(context).apply {
                                 text = getString(R.string.omni_kinds_note)
                                 setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                setLineSpacing(gap(1) / 2f, 1f)
+                                setPadding(0, gap(1), 0, 0)
                             }
                         )
                     },
@@ -9535,23 +9846,28 @@ class BuilderActivity : Activity() {
                     ImageView(context).apply {
                         setImageResource(R.drawable.omni_mascot_reading)
                         scaleType = ImageView.ScaleType.FIT_CENTER
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
-                    LinearLayout.LayoutParams(gap(28), gap(23)).apply { marginStart = gap(2) },
+                    LinearLayout.LayoutParams(gap(30), gap(25)).apply { marginStart = gap(1) },
                 )
             }
         )
-        content.addView(
+        panel.addView(
             kindCard(
-                Mark.Shape.CODE,
+                Mark.Shape.DROID,
                 getString(R.string.omni_kinds_native),
                 getString(R.string.omni_kinds_native_note),
                 palette.accent,
                 NATIVE_TILES,
                 R.string.omni_kinds_holds,
                 false,
-            ) { go(Screen.NewProject) }
+            ) {
+                shown.dismiss()
+                newProjectForm()
+                go(Screen.NewProject)
+            }
         )
-        content.addView(
+        panel.addView(
             kindCard(
                 Mark.Shape.WEB,
                 getString(R.string.omni_kinds_web),
@@ -9560,11 +9876,46 @@ class BuilderActivity : Activity() {
                 WEB_TILES,
                 R.string.omni_kinds_holds_web,
                 true,
-            ) { go(Screen.WebToApk) }
+            ) {
+                shown.dismiss()
+                newProjectForm()
+                go(Screen.WebToApk)
+            }
         )
-        content.addView(
-            subtle(getString(R.string.omni_action_cancel), palette.muted) { go(Screen.Projects) }
+        panel.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_action_cancel)
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                gravity = Gravity.CENTER
+                setPadding(0, gap(3), 0, gap(3))
+                isClickable = true
+                isFocusable = true
+                readAs(Button::class.java.name)
+                background = touchable(
+                    GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = gap(3).toFloat()
+                        setColor(Color.TRANSPARENT)
+                        setStroke(1, palette.divider)
+                    },
+                    palette.accent,
+                )
+                setOnClickListener { shown.dismiss() }
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(3) },
         )
+        panel.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_kinds_spark)
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                gravity = Gravity.CENTER
+                setPadding(0, gap(3), 0, 0)
+            }
+        )
+        shown.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        shown.show()
     }
 
     private fun createPage() {
@@ -9646,7 +9997,7 @@ class BuilderActivity : Activity() {
         val ring = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(Color.TRANSPARENT)
-            setStroke(gap(1) / 2, if (picked) palette.accent else palette.muted)
+            setStroke(gap(3) / 8, if (picked) palette.accent else palette.muted)
         }
         if (!picked) {
             return ring
@@ -9656,7 +10007,7 @@ class BuilderActivity : Activity() {
             setColor(palette.accent)
         }
         return android.graphics.drawable.LayerDrawable(arrayOf(ring, dot)).apply {
-            setLayerInset(1, gap(2), gap(2), gap(2), gap(2))
+            setLayerInset(1, gap(3) / 4, gap(3) / 4, gap(3) / 4, gap(3) / 4)
         }
     }
 
@@ -9760,24 +10111,36 @@ class BuilderActivity : Activity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, gap(4), 0, gap(2))
+                setPadding(0, gap(1), 0, gap(2))
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         addView(
                             TextView(context).apply {
-                                text = getString(R.string.omni_web_title)
+                                val whole = getString(R.string.omni_web_title)
+                                val cut = whole.lastIndexOf(' ')
+                                text = SpannableStringBuilder(whole).apply {
+                                    if (cut in 0 until whole.length - 1) {
+                                        setSpan(
+                                            ForegroundColorSpan(palette.accent),
+                                            cut + 1,
+                                            whole.length,
+                                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                                        )
+                                    }
+                                }
                                 setTextColor(palette.foreground)
                                 typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
                             }
                         )
                         addView(
                             TextView(context).apply {
                                 text = getString(R.string.omni_web_note)
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setTextColor(Ink.hot(palette.muted, 0.3f))
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1) / 2f, 1f)
+                                setPadding(0, gap(2), 0, 0)
                             }
                         )
                     },
@@ -9787,8 +10150,9 @@ class BuilderActivity : Activity() {
                     ImageView(context).apply {
                         setImageResource(R.drawable.omni_art_web)
                         scaleType = ImageView.ScaleType.FIT_CENTER
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
-                    LinearLayout.LayoutParams(gap(28), gap(20)).apply { marginStart = gap(2) },
+                    LinearLayout.LayoutParams(gap(38), gap(26)).apply { marginStart = gap(1) },
                 )
             }
         )
@@ -10005,9 +10369,44 @@ class BuilderActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, gap(5), 0, gap(3))
+            setPadding(0, gap(1), 0, gap(1))
             addView(
                 View(context).apply { foreground = Mark(mark, palette.foreground) },
+                LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(4) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = detail
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setLineSpacing(gap(1) / 2f, 1f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
+    private fun guideHead(mark: Mark.Shape, tint: Int, title: String, detail: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, gap(4), 0, gap(2))
+            addView(
+                View(context).apply {
+                    foreground = Mark(mark, tint, 1.2f, glow = true)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
                 LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(4) },
             )
             addView(
@@ -10018,19 +10417,115 @@ class BuilderActivity : Activity() {
                             text = title
                             setTextColor(palette.foreground)
                             typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                         }
                     )
                     addView(
                         TextView(context).apply {
                             text = detail
-                            setTextColor(palette.muted)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                            setLineSpacing(gap(1).toFloat(), 1f)
+                            setTextColor(Ink.hot(palette.muted, 0.28f))
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            setLineSpacing(gap(1) / 2f, 1f)
+                            setPadding(0, gap(1), 0, 0)
                         }
                     )
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                ImageView(context).apply {
+                    setImageResource(R.drawable.omni_mascot_reading)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(26), gap(21)).apply { marginStart = gap(1) },
+            )
+        }
+
+    private fun seekField(hint: String, held: String, onTyped: (String) -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(9)
+            setPadding(gap(5), 0, gap(5), 0)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(5).toFloat()
+                setColor(Color.TRANSPARENT)
+                setStroke(1, Ink.fade(palette.accent, 0.4f))
+            }
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.FIND, palette.muted, 1.1f) },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(4) },
+            )
+            addView(
+                EditText(context).apply {
+                    setText(held)
+                    this.hint = hint
+                    setHintTextColor(palette.muted)
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    setBackgroundColor(Color.TRANSPARENT)
+                    setPadding(0, gap(2), 0, gap(2))
+                    isSingleLine = true
+                    addTextChangedListener(object : TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                        override fun afterTextChanged(s: Editable?) {
+                            onTyped(s?.toString().orEmpty())
+                        }
+                    })
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
+    private fun bandRow(names: List<String>, picked: Int, onPick: (Int) -> Unit): View =
+        HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, gap(3), 0, gap(2))
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    names.forEachIndexed { at, named ->
+                        val on = at == picked
+                        addView(
+                            TextView(context).apply {
+                                text = named
+                                setTextColor(if (on) Color.WHITE else Ink.hot(palette.muted, 0.4f))
+                                typeface = if (on) Type.strong else Type.body
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                gravity = Gravity.CENTER
+                                setPadding(gap(4), gap(3) / 2, gap(4), gap(3) / 2)
+                                isClickable = true
+                                isFocusable = true
+                                readAs(Button::class.java.name)
+                                background = touchable(
+                                    GradientDrawable().apply {
+                                        shape = GradientDrawable.RECTANGLE
+                                        cornerRadius = gap(5).toFloat()
+                                        setColor(
+                                            if (on) palette.accent
+                                            else Ink.fade(palette.accent, 0.1f)
+                                        )
+                                        setStroke(
+                                            1,
+                                            if (on) palette.accent
+                                            else Ink.fade(palette.accent, 0.24f),
+                                        )
+                                    },
+                                    palette.accent,
+                                )
+                                setOnClickListener { onPick(at) }
+                            },
+                            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                                marginEnd = gap(2)
+                            },
+                        )
+                    }
+                },
+                MATCH_PARENT,
+                WRAP_CONTENT,
             )
         }
 
@@ -10191,7 +10686,7 @@ class BuilderActivity : Activity() {
         val writing = EditText(this).apply {
             setText(initial)
             setTextColor(palette.foreground)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setBackgroundColor(Color.TRANSPARENT)
             setPadding(0, gap(1), 0, gap(1))
             filters = arrayOf(android.text.InputFilter.LengthFilter(limit))
@@ -10218,9 +10713,9 @@ class BuilderActivity : Activity() {
         writing.setPadding(gap(4), gap(3), gap(4), gap(3))
         writing.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = gap(3).toFloat()
-            setColor(palette.surface)
-            setStroke(1, palette.divider)
+            cornerRadius = gap(3) / 2f
+            setColor(Color.TRANSPARENT)
+            setStroke(1, Ink.hot(palette.divider, 0.2f))
         }
         counter.gravity = Gravity.END
         return LinearLayout(this).apply {
@@ -10340,11 +10835,15 @@ class BuilderActivity : Activity() {
         else -> R.string.omni_theme_dark_note
     }
 
-    private fun themeCard(shown: Palette, active: Boolean, onPress: () -> Unit): View =
-        LinearLayout(this).apply {
+    private fun themeCard(shown: Palette, active: Boolean, onPress: () -> Unit): View {
+        val radio = View(this).apply {
+            background = radioMark(active)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.TOP
-            setPadding(gap(3), gap(3), gap(3), gap(3))
+            setPadding(gap(5) / 2, gap(5) / 2, gap(5) / 2, gap(5) / 2)
             background = touchable(
                 GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
@@ -10363,10 +10862,6 @@ class BuilderActivity : Activity() {
             contentDescription = said(shown.label, getString(themeNote(shown)))
             readAs(android.widget.RadioButton::class.java.name)
             setOnClickListener { onPress() }
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(2)
-                bottomMargin = gap(2)
-            }
             addView(
                 ImageView(context).apply {
                     setImageResource(themeArt(shown))
@@ -10374,11 +10869,11 @@ class BuilderActivity : Activity() {
                     clipToOutline = true
                     background = GradientDrawable().apply {
                         this.shape = GradientDrawable.RECTANGLE
-                        cornerRadius = gap(3).toFloat()
+                        cornerRadius = gap(2).toFloat()
                         setColor(palette.raised)
                     }
                 },
-                LinearLayout.LayoutParams(gap(35), gap(23)).apply { marginEnd = gap(4) },
+                LinearLayout.LayoutParams(gap(49), gap(32)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -10388,15 +10883,15 @@ class BuilderActivity : Activity() {
                             text = shown.label
                             setTextColor(palette.foreground)
                             typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                         }
                     )
                     addView(
                         TextView(context).apply {
                             text = getString(themeNote(shown))
                             setTextColor(palette.muted)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                            setLineSpacing(gap(1).toFloat(), 1f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setLineSpacing(gap(1) / 2f, 1f)
                             setPadding(0, gap(1), 0, 0)
                         }
                     )
@@ -10412,14 +10907,22 @@ class BuilderActivity : Activity() {
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
-            addView(
-                View(context).apply {
-                    background = radioMark(active)
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
-                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
-            )
         }
+        return FrameLayout(this).apply {
+            addView(row, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(
+                radio,
+                FrameLayout.LayoutParams(gap(5), gap(5), Gravity.TOP or Gravity.END).apply {
+                    topMargin = gap(4)
+                    marginEnd = gap(4)
+                },
+            )
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+                bottomMargin = gap(2)
+            }
+        }
+    }
 
     private fun renderTheme() {
         content.addView(
@@ -10449,8 +10952,8 @@ class BuilderActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(15)
-            setPadding(gap(3), gap(2), gap(3), gap(2))
+            minimumHeight = gap(13)
+            setPadding(gap(3), gap(1), gap(3), gap(1))
             isClickable = true
             isFocusable = true
             isSelected = current
@@ -10646,15 +11149,15 @@ class BuilderActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(gap(1), gap(2), gap(1), gap(2))
             addView(
-                View(context).apply { foreground = Mark(mark, tint) },
-                LinearLayout.LayoutParams(gap(9), gap(9)),
+                View(context).apply { foreground = Mark(mark, tint, 1.2f) },
+                LinearLayout.LayoutParams(gap(6), gap(6)),
             )
             addView(
                 TextView(context).apply {
                     text = getString(named)
                     setTextColor(palette.foreground)
                     typeface = Type.strong
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                     gravity = Gravity.CENTER
                     setPadding(0, gap(2), 0, 0)
                 }
@@ -10663,7 +11166,7 @@ class BuilderActivity : Activity() {
                 TextView(context).apply {
                     text = getString(note)
                     setTextColor(palette.muted)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
                     gravity = Gravity.CENTER
                     setLineSpacing(gap(1) / 2f, 1f)
                 }
@@ -10674,8 +11177,8 @@ class BuilderActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(TOUCH_UNITS)
-            setPadding(0, gap(2), 0, gap(2))
+            minimumHeight = gap(11)
+            setPadding(0, gap(1), 0, gap(1))
             isClickable = true
             isFocusable = true
             contentDescription = said(title, note)
@@ -10684,7 +11187,7 @@ class BuilderActivity : Activity() {
             setOnClickListener { onPress() }
             addView(
                 View(context).apply { foreground = Mark(mark, tint) },
-                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(4) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -10700,15 +11203,17 @@ class BuilderActivity : Activity() {
                         TextView(context).apply {
                             text = note
                             setTextColor(palette.muted)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         }
                     )
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
             addView(
-                View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.accent) },
-                LinearLayout.LayoutParams(gap(6), gap(6)),
+                View(context).apply {
+                    foreground = Mark(Mark.Shape.FORWARD, palette.accent, 1.2f)
+                },
+                LinearLayout.LayoutParams(gap(4), gap(4)),
             )
         }
 
@@ -10725,42 +11230,50 @@ class BuilderActivity : Activity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(0, gap(3), 0, gap(2))
+                setPadding(0, gap(1), 0, gap(1))
+                val held = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
                 addView(
-                    brandMark(R.drawable.omni_brand_large, gap(4)),
-                    LinearLayout.LayoutParams(gap(20), gap(20)),
+                    brandMark(R.drawable.omni_brand_large, gap(3), gap(9) / 4),
+                    LinearLayout.LayoutParams(gap(27) / 2, gap(27) / 2),
                 )
                 addView(
                     TextView(context).apply {
                         text = getString(R.string.omni_app_name)
                         setTextColor(palette.foreground)
                         typeface = Type.heading
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
                         setPadding(0, gap(2), 0, 0)
-                    }
+                    },
+                    held,
                 )
                 addView(
                     TextView(context).apply {
                         text = getString(R.string.omni_brand_note)
                         setTextColor(palette.muted)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        setPadding(0, 0, 0, gap(2))
-                    }
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        letterSpacing = 0.07f
+                        setPadding(0, gap(1) / 2, 0, gap(1))
+                    },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
                 )
                 addView(
-                    tile(
-                        getString(R.string.omni_about_version, versionShown()),
-                        palette.foreground,
-                    )
+                    TextView(context).apply {
+                        text = getString(R.string.omni_about_version, versionShown())
+                        setTextColor(Ink.hot(palette.accent, 0.66f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                        setPadding(gap(4), gap(3) / 2, gap(4), gap(3) / 2)
+                        background = pill(Ink.fade(palette.accent, 0.15f), gap(3).toFloat())
+                    },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
                 )
                 addView(
                     TextView(context).apply {
                         text = getString(R.string.omni_about_note)
-                        setTextColor(palette.muted)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setTextColor(Ink.hot(palette.muted, 0.3f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                         gravity = Gravity.CENTER
-                        setLineSpacing(gap(1).toFloat(), 1f)
-                        setPadding(gap(2), gap(3), gap(2), gap(2))
+                        setLineSpacing(gap(1) / 2f, 1f)
+                        setPadding(gap(2), gap(1), gap(2), 0)
                     }
                 )
             }
@@ -10768,7 +11281,7 @@ class BuilderActivity : Activity() {
         face.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(0, gap(2), 0, gap(2))
+                setPadding(0, gap(1), 0, gap(1))
                 val cells = listOf(
                     featureCell(
                         Mark.Shape.CODE,
@@ -10789,7 +11302,7 @@ class BuilderActivity : Activity() {
                         0xFFFF5C8A.toInt(),
                     ),
                     featureCell(
-                        Mark.Shape.SPEECH,
+                        Mark.Shape.PEOPLE,
                         R.string.omni_about_join,
                         R.string.omni_about_join_note,
                         palette.ok,
@@ -10803,7 +11316,7 @@ class BuilderActivity : Activity() {
         val rows = card()
         rows.addView(
             aboutRow(
-                Mark.Shape.SHIELD,
+                Mark.Shape.SHIELD_FILL,
                 palette.accent,
                 getString(R.string.omni_about_policy),
                 getString(R.string.omni_about_policy_note),
@@ -10817,7 +11330,7 @@ class BuilderActivity : Activity() {
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
             aboutRow(
-                Mark.Shape.NOTE,
+                Mark.Shape.NOTE_FILL,
                 0xFFB06BFF.toInt(),
                 getString(R.string.omni_about_terms),
                 getString(R.string.omni_about_terms_note),
@@ -10831,10 +11344,10 @@ class BuilderActivity : Activity() {
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
             aboutRow(
-                Mark.Shape.MAIL,
+                Mark.Shape.MAIL_FILL,
                 palette.ok,
                 getString(R.string.omni_about_contact),
-                getString(R.string.omni_feedback_note),
+                getString(R.string.omni_about_contact_note),
             ) { go(Screen.Feedback) }
         )
         content.addView(rows)
@@ -10842,7 +11355,7 @@ class BuilderActivity : Activity() {
         val who = card()
         who.addView(
             aboutRow(
-                Mark.Shape.SPEECH,
+                Mark.Shape.PERSON_FILL,
                 palette.warning,
                 getString(R.string.omni_about_developer),
                 getString(R.string.omni_about_developer_name),
@@ -10851,8 +11364,8 @@ class BuilderActivity : Activity() {
         who.addView(rule(), MATCH_PARENT, 1)
         who.addView(
             aboutRow(
-                Mark.Shape.INFO,
-                palette.accent,
+                Mark.Shape.COPYRIGHT,
+                palette.marker,
                 getString(R.string.omni_about_reserved),
                 getString(
                     R.string.omni_about_rights,
@@ -10871,9 +11384,13 @@ class BuilderActivity : Activity() {
         thanks.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(2), gap(2), gap(2), 0)
                 addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.HEART, palette.accent) },
-                    LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.HEART_FILL, palette.accent)
+                    },
+                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(4) },
                 )
                 addView(
                     LinearLayout(context).apply {
@@ -10881,22 +11398,41 @@ class BuilderActivity : Activity() {
                         addView(
                             TextView(context).apply {
                                 text = getString(R.string.omni_about_thanks)
-                                setTextColor(palette.accent)
+                                setTextColor(palette.foreground)
                                 typeface = Type.strong
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                             }
                         )
                         addView(
                             TextView(context).apply {
                                 text = getString(R.string.omni_about_thanks_note)
                                 setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                                 setLineSpacing(gap(1).toFloat(), 1f)
                             }
                         )
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
+            }
+        )
+        thanks.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(gap(11), gap(4), gap(11), gap(2))
+                addView(rule(), LinearLayout.LayoutParams(0, 1, 1f))
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.DROID, palette.muted)
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply {
+                        marginStart = gap(3)
+                        marginEnd = gap(3)
+                    },
+                )
+                addView(rule(), LinearLayout.LayoutParams(0, 1, 1f))
             }
         )
         content.addView(thanks)
@@ -10954,7 +11490,7 @@ class BuilderActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(gap(2), gap(3), gap(2), gap(3))
+            setPadding(gap(2), gap(2), gap(2), gap(2))
             isClickable = true
             isFocusable = true
             isSelected = on
@@ -10963,9 +11499,14 @@ class BuilderActivity : Activity() {
             background = touchable(
                 GradientDrawable().apply {
                     this.shape = GradientDrawable.RECTANGLE
-                    cornerRadius = gap(3).toFloat()
-                    setColor(if (on) Ink.fade(palette.accent, 0.14f) else palette.raised)
-                    setStroke(gap(1) / 2, if (on) palette.accent else palette.divider)
+                    cornerRadius = gap(3) / 2f
+                    setColor(
+                        if (on) Ink.fade(palette.accent, 0.14f) else Color.TRANSPARENT
+                    )
+                    setStroke(
+                        if (on) gap(1) / 2 else 1,
+                        if (on) palette.accent else Ink.hot(palette.divider, 0.2f),
+                    )
                 },
                 palette.accent,
             )
@@ -10978,14 +11519,8 @@ class BuilderActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
                     addView(
-                        View(context).apply {
-                            background = GradientDrawable().apply {
-                                shape = GradientDrawable.OVAL
-                                setColor(if (on) palette.accent else Color.TRANSPARENT)
-                                setStroke(gap(1) / 2, if (on) palette.accent else palette.muted)
-                            }
-                        },
-                        LinearLayout.LayoutParams(gap(4), gap(4)),
+                        View(context).apply { background = radioMark(on) },
+                        LinearLayout.LayoutParams(gap(7) / 2, gap(7) / 2),
                     )
                 },
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
@@ -10994,14 +11529,14 @@ class BuilderActivity : Activity() {
                 View(context).apply {
                     foreground = Mark(mark, if (on) palette.accent else palette.foreground)
                 },
-                LinearLayout.LayoutParams(gap(9), gap(9)),
+                LinearLayout.LayoutParams(gap(6), gap(6)),
             )
             addView(
                 TextView(context).apply {
                     text = title
                     setTextColor(palette.foreground)
                     typeface = Type.strong
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     gravity = Gravity.CENTER
                     setPadding(0, gap(2), 0, 0)
                 }
@@ -11010,7 +11545,7 @@ class BuilderActivity : Activity() {
                 TextView(context).apply {
                     text = detail
                     setTextColor(palette.muted)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     gravity = Gravity.CENTER
                 }
             )
@@ -11061,7 +11596,7 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_feedback_detail),
                 feedbackDetail,
                 DETAIL_LIMIT,
-                5,
+                3,
             ) { feedbackDetail = it }
         )
 
@@ -11071,8 +11606,8 @@ class BuilderActivity : Activity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                minimumHeight = gap(26)
-                setPadding(gap(4), gap(5), gap(4), gap(5))
+                minimumHeight = gap(21)
+                setPadding(gap(4), gap(4), gap(4), gap(4))
                 isClickable = true
                 isFocusable = true
                 contentDescription = getString(R.string.omni_feedback_shot_pick)
@@ -11091,7 +11626,7 @@ class BuilderActivity : Activity() {
                     View(context).apply {
                         foreground = Mark(Mark.Shape.IMAGE, palette.muted)
                     },
-                    LinearLayout.LayoutParams(gap(10), gap(10)),
+                    LinearLayout.LayoutParams(gap(7), gap(7)),
                 )
                 addView(
                     TextView(context).apply {
@@ -11170,6 +11705,27 @@ class BuilderActivity : Activity() {
             }
     }
 
+    private fun helpChip(named: String, onPress: () -> Unit): View = TextView(this).apply {
+        text = named
+        setTextColor(Ink.hot(palette.muted, 0.4f))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        gravity = Gravity.CENTER
+        setPadding(gap(3), gap(3) / 2, gap(3), gap(3) / 2)
+        isClickable = true
+        isFocusable = true
+        readAs(Button::class.java.name)
+        background = touchable(
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(5).toFloat()
+                setColor(Ink.fade(palette.accent, 0.1f))
+                setStroke(1, Ink.fade(palette.accent, 0.24f))
+            },
+            palette.accent,
+        )
+        setOnClickListener { onPress() }
+    }
+
     private fun helpEntry(
         mark: Mark.Shape,
         tint: Int,
@@ -11194,36 +11750,31 @@ class BuilderActivity : Activity() {
         )
         setOnClickListener { onPress() }
         addView(
-            FrameLayout(context).apply {
-                background = GradientDrawable().apply {
-                    this.shape = GradientDrawable.RECTANGLE
-                    cornerRadius = gap(3).toFloat()
-                    setColor(Ink.fade(tint, 0.12f))
-                }
-                addView(
-                    View(context).apply { foreground = Mark(mark, tint) },
-                    FrameLayout.LayoutParams(gap(7), gap(7), Gravity.CENTER),
-                )
+            View(context).apply {
+                foreground = Mark(mark, tint, 1.15f, glow = true)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             },
-            LinearLayout.LayoutParams(gap(10), gap(10)),
+            LinearLayout.LayoutParams(gap(11), gap(11)),
         )
         addView(
             LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, gap(3), 0, gap(1))
+                setPadding(0, gap(4), 0, gap(1))
                 addView(
                     TextView(context).apply {
                         text = title
                         setTextColor(palette.foreground)
                         typeface = Type.heading
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
                 addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
-                    LinearLayout.LayoutParams(gap(6), gap(6)),
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.FORWARD, palette.accent, 1.15f)
+                    },
+                    LinearLayout.LayoutParams(gap(4), gap(4)),
                 )
             }
         )
@@ -11231,8 +11782,8 @@ class BuilderActivity : Activity() {
             TextView(context).apply {
                 text = detail
                 setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                setLineSpacing(gap(1).toFloat(), 1f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setLineSpacing(gap(3) / 4f, 1f)
             }
         )
     }
@@ -11265,7 +11816,7 @@ class BuilderActivity : Activity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, gap(4), 0, gap(2))
+                setPadding(0, 0, 0, gap(1))
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
@@ -11274,15 +11825,16 @@ class BuilderActivity : Activity() {
                                 text = getString(R.string.omni_help_hello)
                                 setTextColor(palette.foreground)
                                 typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
                             }
                         )
                         addView(
                             TextView(context).apply {
                                 text = getString(R.string.omni_help_note)
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setTextColor(Ink.hot(palette.muted, 0.28f))
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(3) / 4f, 1f)
+                                setPadding(0, gap(2), 0, 0)
                             }
                         )
                     },
@@ -11293,7 +11845,7 @@ class BuilderActivity : Activity() {
                         setImageResource(R.drawable.omni_mascot_reading)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                     },
-                    LinearLayout.LayoutParams(gap(24), gap(20)).apply { marginStart = gap(2) },
+                    LinearLayout.LayoutParams(gap(34), gap(26)).apply { marginStart = gap(2) },
                 )
             }
         )
@@ -11302,16 +11854,17 @@ class BuilderActivity : Activity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(gap(4), 0, gap(4), 0)
+                minimumHeight = gap(9)
+                setPadding(gap(5), 0, gap(5), 0)
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = gap(6).toFloat()
+                    cornerRadius = gap(5).toFloat()
                     setColor(Color.TRANSPARENT)
-                    setStroke(1, Ink.hot(palette.divider, 0.2f))
+                    setStroke(1, Ink.fade(palette.accent, 0.4f))
                 }
                 addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.FIND, palette.muted) },
-                    LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
+                    View(context).apply { foreground = Mark(Mark.Shape.FIND, palette.muted, 1.1f) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(4) },
                 )
                 addView(
                     EditText(context).apply {
@@ -11358,14 +11911,32 @@ class BuilderActivity : Activity() {
                     },
                 )
                 addView(
-                    chips(HELP_POPULAR.map { getString(it) }, { false }) { which ->
-                        go(
-                            when (which) {
-                                0 -> Screen.HelpAdb
-                                1 -> Screen.HelpTalk
-                                2 -> Screen.HelpDocs
-                                else -> Screen.HelpFaq
-                            }
+                    HorizontalScrollView(context).apply {
+                        isHorizontalScrollBarEnabled = false
+                        addView(
+                            LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                HELP_POPULAR.forEachIndexed { which, named ->
+                                    addView(
+                                        helpChip(getString(named)) {
+                                            go(
+                                                when (which) {
+                                                    0 -> Screen.HelpAdb
+                                                    1 -> Screen.HelpTalk
+                                                    2 -> Screen.HelpDocs
+                                                    else -> Screen.HelpFaq
+                                                }
+                                            )
+                                        },
+                                        LinearLayout.LayoutParams(
+                                            WRAP_CONTENT,
+                                            WRAP_CONTENT,
+                                        ).apply { marginEnd = gap(2) },
+                                    )
+                                }
+                            },
+                            MATCH_PARENT,
+                            WRAP_CONTENT,
                         )
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
@@ -11384,7 +11955,7 @@ class BuilderActivity : Activity() {
                         getString(R.string.omni_help_adb_note),
                     ) { go(Screen.HelpAdb) },
                     helpEntry(
-                        Mark.Shape.ROBOT,
+                        Mark.Shape.BRAIN,
                         0xFFB06BFF.toInt(),
                         getString(R.string.omni_menu_assistant),
                         getString(R.string.omni_help_talk_note),
@@ -11392,7 +11963,7 @@ class BuilderActivity : Activity() {
                     helpEntry(
                         Mark.Shape.PHONE,
                         palette.ok,
-                        getString(R.string.omni_help_docs),
+                        getString(R.string.omni_help_band_using),
                         getString(R.string.omni_help_docs_note),
                     ) { go(Screen.HelpDocs) },
                     helpEntry(
@@ -11407,21 +11978,45 @@ class BuilderActivity : Activity() {
         helpFooter()
     }
 
+    private fun filledMark(mark: Mark.Shape, tint: Int, round: Int): View =
+        FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = round.toFloat()
+                setColor(tint)
+            }
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            addView(
+                View(context).apply { foreground = Mark(mark, Color.WHITE, 1.2f) },
+                FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT).apply {
+                    val inset = gap(3) / 2
+                    setMargins(inset, inset, inset, inset)
+                },
+            )
+        }
+
     private fun numberedRow(at: Int, mark: Mark.Shape, tint: Int, title: String, detail: String) =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(TOUCH_UNITS)
-            setPadding(gap(1), gap(3), gap(1), gap(3))
+            setPadding(gap(3) / 2, gap(3) / 2, gap(3) / 2, gap(3) / 2)
             isClickable = true
             isFocusable = true
             contentDescription = said(title, detail)
             readAs(Button::class.java.name)
-            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            background = touchable(
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(palette.surface)
+                    setStroke(1, palette.divider)
+                },
+                palette.accent,
+            )
             setOnClickListener { showNote(title, detail) }
             addView(
-                badge(mark, tint),
-                LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
+                filledMark(mark, tint, gap(2)),
+                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -11430,68 +12025,85 @@ class BuilderActivity : Activity() {
                         TextView(context).apply {
                             text = getString(R.string.omni_help_numbered, at, title)
                             setTextColor(palette.foreground)
-                            typeface = Type.strong
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         }
                     )
                     addView(
                         TextView(context).apply {
                             text = detail
                             setTextColor(palette.muted)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                            setLineSpacing(gap(1).toFloat(), 1f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            setLineSpacing(0f, 1f)
+                            setPadding(0, gap(1) / 2, 0, 0)
                         }
                     )
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
             addView(
-                View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
-                LinearLayout.LayoutParams(gap(6), gap(6)),
+                View(context).apply {
+                    foreground = Mark(Mark.Shape.FORWARD, palette.accent, 1.15f)
+                },
+                LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginStart = gap(2) },
             )
         }
 
     private fun renderHelpDocs() {
         content.addView(
-            screenHead(
-                Mark.Shape.BOOK,
-                getString(R.string.omni_help_docs),
-                getString(R.string.omni_help_docs_note),
-            )
-        )
-        content.addView(
-            noteCard(
+            guideHead(
+                Mark.Shape.NOTE,
+                0xFF8B5CF6.toInt(),
                 getString(R.string.omni_help_docs),
                 getString(R.string.omni_help_docs_body),
             )
         )
-        val list = card()
-        DOC_ROWS.forEachIndexed { index, row ->
-            if (index > 0) {
-                list.addView(rule(), MATCH_PARENT, 1)
+        content.addView(
+            seekField(getString(R.string.omni_docs_search), helpFor) { helpFor = it }
+        )
+        content.addView(
+            bandRow(DOC_BAND_NAMES.map { getString(it) }, docBand) {
+                docBand = it
+                render(false)
             }
+        )
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val needle = helpFor.trim().lowercase(Locale.getDefault())
+        var shown = 0
+        DOC_ROWS.forEachIndexed { index, row ->
+            val whole = (getString(row.first) + " " + getString(row.second))
+                .lowercase(Locale.getDefault())
+            if (docBand != 0 && DOC_BANDS[index] != docBand) return@forEachIndexed
+            if (needle.isNotEmpty() && !whole.contains(needle)) return@forEachIndexed
+            shown += 1
             val (mark, tint) = docMark(index)
             list.addView(
-                numberedRow(index + 1, mark, tint, getString(row.first), getString(row.second))
+                numberedRow(index + 1, mark, tint, getString(row.first), getString(row.second)),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    topMargin = gap(1)
+                },
             )
         }
         content.addView(list)
+        if (shown == 0) {
+            content.addView(quiet(getString(R.string.omni_help_none)))
+        }
         helpFooter()
     }
 
     private fun docMark(at: Int): Pair<Mark.Shape, Int> = when (at) {
-        0 -> Mark.Shape.HOME to palette.accent
-        1 -> Mark.Shape.ADD to palette.ok
-        2 -> Mark.Shape.CODE to 0xFFB06BFF.toInt()
-        3 -> Mark.Shape.FOLDER to palette.warning
-        4 -> Mark.Shape.PLAY to 0xFFFF5C8A.toInt()
-        5 -> Mark.Shape.PHONE to palette.ok
-        6 -> Mark.Shape.BRUSH to 0xFFFF5C8A.toInt()
-        7 -> Mark.Shape.WEB to palette.accent
-        8 -> Mark.Shape.GEAR to palette.warning
-        9 -> Mark.Shape.SPEECH to palette.ok
-        10 -> Mark.Shape.ROBOT to 0xFFB06BFF.toInt()
-        else -> Mark.Shape.STAR to palette.accent
+        0 -> Mark.Shape.HOME to 0xFF2C7BE5.toInt()
+        1 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
+        2 -> Mark.Shape.CODE to 0xFF8B5CF6.toInt()
+        3 -> Mark.Shape.FOLDER to 0xFFF08A24.toInt()
+        4 -> Mark.Shape.PLAY to 0xFFEC4899.toInt()
+        5 -> Mark.Shape.NOTE to 0xFF06B6D4.toInt()
+        6 -> Mark.Shape.BRUSH to 0xFFF43F5E.toInt()
+        7 -> Mark.Shape.WEB to 0xFF2C7BE5.toInt()
+        8 -> Mark.Shape.GEAR to 0xFFF08A24.toInt()
+        9 -> Mark.Shape.SPEECH to 0xFF1FC77A.toInt()
+        10 -> Mark.Shape.BRAIN to 0xFF8B5CF6.toInt()
+        else -> Mark.Shape.STAR to 0xFFF5B301.toInt()
     }
 
     private fun foldRow(at: Int, question: String, answer: String): View {
@@ -11526,15 +12138,15 @@ class BuilderActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     addView(
-                        View(context).apply { foreground = Mark(mark, tint) },
-                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
+                        filledMark(mark, Ink.fade(tint, 0.9f), gap(2)),
+                        LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
                     )
                     addView(
                         TextView(context).apply {
                             text = getString(R.string.omni_help_numbered, at + 1, question)
                             setTextColor(palette.foreground)
-                            typeface = Type.strong
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         },
                         LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                     )
@@ -11542,10 +12154,11 @@ class BuilderActivity : Activity() {
                         View(context).apply {
                             foreground = Mark(
                                 if (open) Mark.Shape.AWAY else Mark.Shape.DOWN,
-                                palette.muted,
+                                palette.accent,
+                                1.15f,
                             )
                         },
-                        LinearLayout.LayoutParams(gap(6), gap(6)),
+                        LinearLayout.LayoutParams(gap(5), gap(5)),
                     )
                 }
             )
@@ -11565,24 +12178,18 @@ class BuilderActivity : Activity() {
 
     private fun renderHelpFaq() {
         content.addView(
-            screenHead(
-                Mark.Shape.HELP,
+            guideHead(
+                Mark.Shape.BOOK,
+                0xFFEC4899.toInt(),
                 getString(R.string.omni_help_faq),
                 getString(R.string.omni_help_faq_note),
             )
         )
-        val search = card()
-        search.addView(
-            field(getString(R.string.omni_help_search), helpFor) {
-                helpFor = it
-            }
-        )
-        search.addView(
-            subtle(getString(R.string.omni_help_search_go), palette.accent) { render(false) }
-        )
-        content.addView(search)
         content.addView(
-            chips(HELP_BAND_NAMES.map { getString(it) }, { it == helpBand }) {
+            seekField(getString(R.string.omni_faq_search), helpFor) { helpFor = it }
+        )
+        content.addView(
+            bandRow(HELP_BAND_NAMES.map { getString(it) }, helpBand) {
                 helpBand = it
                 helpOpen = -1
                 render(false)
@@ -11646,11 +12253,11 @@ class BuilderActivity : Activity() {
         )
         content.addView(
             grid(
-                if (wideEnough()) 2 else 1,
+                2,
                 TALK_STEPS.mapIndexed { index, step ->
                     LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
-                        setPadding(gap(4), gap(4), gap(4), gap(4))
+                        setPadding(gap(3), gap(3), gap(3), gap(3))
                         background = GradientDrawable().apply {
                             this.shape = GradientDrawable.RECTANGLE
                             cornerRadius = gap(4).toFloat()
@@ -11664,25 +12271,25 @@ class BuilderActivity : Activity() {
                                 addView(
                                     TextView(context).apply {
                                         text = (index + 1).toString()
-                                        setTextColor(palette.background)
-                                        typeface = Type.label
-                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                        setTextColor(Color.WHITE)
+                                        typeface = Type.heading
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                                         gravity = Gravity.CENTER
                                         background = GradientDrawable().apply {
                                             shape = GradientDrawable.OVAL
                                             setColor(palette.accent)
                                         }
                                     },
-                                    LinearLayout.LayoutParams(gap(8), gap(8)).apply {
-                                        marginEnd = gap(3)
+                                    LinearLayout.LayoutParams(gap(6), gap(6)).apply {
+                                        marginEnd = gap(2)
                                     },
                                 )
                                 addView(
                                     TextView(context).apply {
                                         text = getString(step.first)
                                         setTextColor(palette.foreground)
-                                        typeface = Type.strong
-                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                                        typeface = Type.heading
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                                     },
                                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                                 )
@@ -11692,8 +12299,8 @@ class BuilderActivity : Activity() {
                             TextView(context).apply {
                                 text = getString(step.second)
                                 setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                                setLineSpacing(gap(1).toFloat(), 1f)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                                setLineSpacing(gap(1) / 2f, 1f)
                                 setPadding(0, gap(2), 0, 0)
                             }
                         )
@@ -11769,36 +12376,163 @@ class BuilderActivity : Activity() {
             }
         }
 
+    private fun bulleted(body: String): String {
+        if (body.contains('\n')) {
+            return body
+        }
+        return body.split(Regex("(?<=[.!?])\\s+"))
+            .filter { it.isNotBlank() }
+            .joinToString("\n") { "\u2022 " + it.trim() }
+    }
+
+    private fun guideHero(mark: Mark.Shape, tint: Int, title: String, note: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, gap(2), 0, gap(2))
+            addView(
+                filledMark(mark, Ink.fade(tint, 0.85f), gap(3)),
+                LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(4) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = note
+                            setTextColor(Ink.hot(palette.muted, 0.28f))
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            setLineSpacing(gap(1) / 2f, 1f)
+                            setPadding(0, gap(1), 0, 0)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                ImageView(context).apply {
+                    setImageResource(R.drawable.omni_mascot_reading)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(24), gap(20)).apply { marginStart = gap(1) },
+            )
+        }
+
+    private fun bulletCard(title: String, body: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(gap(3), gap(3), gap(3), gap(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(3).toFloat()
+                setColor(Ink.fade(palette.accent, 0.07f))
+                setStroke(1, Ink.fade(palette.accent, 0.4f))
+            }
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+                bottomMargin = gap(1)
+            }
+            addView(
+                View(context).apply {
+                    foreground = Mark(Mark.Shape.INFO_FILL, palette.accent)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.warning)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = bulleted(body)
+                            setTextColor(Ink.hot(palette.muted, 0.3f))
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            setLineSpacing(gap(1) / 2f, 1f)
+                            setPadding(0, gap(1), 0, 0)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
     private fun renderHelpAdb() {
         content.addView(
-            screenHead(
-                Mark.Shape.LOG,
-                getString(R.string.omni_help_adb),
-                getString(R.string.omni_help_adb_note),
-            )
-        )
-        content.addView(
-            chips(
+            bandRow(
                 listOf(
+                    getString(R.string.omni_adb_open),
                     getString(R.string.omni_adb_alone),
                     getString(R.string.omni_adb_desk),
                 ),
-                { it == adbTab },
+                adbTab,
             ) {
                 adbTab = it
                 render(false)
             }
         )
-        val steps = if (adbTab == 0) ADB_ALONE else ADB_DESK
-        val art = if (adbTab == 0) ADB_ALONE_ART else ADB_DESK_ART
+        val marked = when (adbTab) {
+            0 -> Mark.Shape.BULB
+            1 -> Mark.Shape.PHONE
+            else -> Mark.Shape.SCREEN
+        }
         content.addView(
-            noteCard(
-                getString(R.string.omni_adb_first),
+            guideHero(
+                marked,
+                palette.accent,
                 getString(
-                    if (adbTab == 0) R.string.omni_adb_alone_first else R.string.omni_adb_desk_first
+                    when (adbTab) {
+                        0 -> R.string.omni_adb_open_head
+                        1 -> R.string.omni_adb_alone
+                        else -> R.string.omni_adb_desk
+                    }
+                ),
+                getString(
+                    when (adbTab) {
+                        0 -> R.string.omni_adb_open_note
+                        1 -> R.string.omni_adb_alone_note
+                        else -> R.string.omni_adb_desk_note
+                    }
                 ),
             )
         )
+        content.addView(
+            bulletCard(
+                getString(R.string.omni_adb_first),
+                getString(
+                    when (adbTab) {
+                        0 -> R.string.omni_adb_open_first
+                        1 -> R.string.omni_adb_alone_first
+                        else -> R.string.omni_adb_desk_first
+                    }
+                ),
+            )
+        )
+        val steps = when (adbTab) {
+            0 -> ADB_OPEN
+            1 -> ADB_ALONE
+            else -> ADB_DESK
+        }
+        val art = when (adbTab) {
+            1 -> ADB_ALONE_ART
+            2 -> ADB_DESK_ART
+            else -> emptyList()
+        }
         steps.forEachIndexed { index, step ->
             content.addView(
                 guideStep(
@@ -12719,11 +13453,11 @@ class BuilderActivity : Activity() {
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         background = sheet(palette.surface, palette.divider)
-        setPadding(gap(3), gap(2), gap(3), gap(2))
+        setPadding(gap(3), gap(3), gap(3), gap(1))
         layoutTransition = LayoutTransition()
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = gap(2)
-            bottomMargin = gap(1)
+            topMargin = gap(1)
+            bottomMargin = 0
         }
     }
 
@@ -12768,8 +13502,8 @@ class BuilderActivity : Activity() {
 
     private fun label(value: String) = TextView(this).apply {
         text = value
-        setTextColor(palette.muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setTextColor(palette.accent)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         setPadding(0, gap(2), 0, gap(2))
     }
 
