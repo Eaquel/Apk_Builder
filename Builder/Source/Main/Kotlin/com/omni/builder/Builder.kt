@@ -539,7 +539,6 @@ object Builder {
 
     external fun nativeProjectTree(root: String): String
 
-    external fun nativeProjectHealth(root: String): String
 
     external fun nativeLayOut(name: String, text: String): String
 
@@ -1118,6 +1117,8 @@ object Preferences {
     private const val NEW_PACKAGE = "new_package"
     private const val NEW_MIN_SDK = "new_min_sdk"
     private const val NEW_TARGET_SDK = "new_target_sdk"
+    private const val SEARCHES = "searches"
+    private const val SEARCHES_KEPT = 40
 
     val LANGUAGES: List<Triple<String, String, String>> = listOf(
         Triple("tr", "Türkçe", "TR"),
@@ -1180,6 +1181,23 @@ object Preferences {
 
     fun setTimings(context: Context, measured: String) {
         store(context).edit().putString(TIMINGS, measured).apply()
+    }
+
+    fun searches(context: Context): List<String> =
+        store(context).getString(SEARCHES, "").orEmpty()
+            .split('\n')
+            .filter { it.isNotBlank() }
+
+    fun remember(context: Context, word: String) {
+        val trimmed = word.trim()
+        if (trimmed.isEmpty()) return
+        val kept = (listOf(trimmed) + searches(context).filter { it != trimmed })
+            .take(SEARCHES_KEPT)
+        store(context).edit().putString(SEARCHES, kept.joinToString("\n")).apply()
+    }
+
+    fun forgetSearches(context: Context) {
+        store(context).edit().remove(SEARCHES).apply()
     }
 
     const val READING = "reading"
@@ -1780,7 +1798,7 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
         if (w <= 0f || h <= 0f) {
             return
         }
-        canvas.drawColor(palette.background)
+        canvas.drawColor(Color.BLACK)
         val life = (SystemClock.uptimeMillis() - started) / 1000f
         when (palette.key) {
             Palette.HACKER.key -> rain(canvas, w, h, life)
@@ -2324,7 +2342,7 @@ internal class TerminalView(
                 Color.rgb(grey, grey, grey)
             }
         }
-        return if (ground && found == Color.TRANSPARENT) palette.background else found
+        return if (ground && found == Color.TRANSPARENT) Color.BLACK else found
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -2351,7 +2369,7 @@ internal class TerminalView(
                 val ground = colourOf(if (reversed) cell.ink else cell.ground, true)
                 val left = c * cellWidth
                 val top = r * cellHeight
-                if (ground != palette.background) {
+                if (ground != Color.BLACK) {
                     paint.style = Paint.Style.FILL
                     paint.color = ground
                     canvas.drawRect(left, top, run * cellWidth, top + cellHeight, paint)
@@ -3644,14 +3662,17 @@ internal class Mark(
             }
             Shape.CLIP -> {
                 paint.style = Paint.Style.STROKE
-                path.moveTo(16.6f, 10.6f)
-                path.lineTo(9.6f, 17.6f)
-                path.cubicTo(7.6f, 19.6f, 4.6f, 16.6f, 6.6f, 14.6f)
-                path.lineTo(14.6f, 6.6f)
-                path.cubicTo(15.9f, 5.3f, 18f, 7.4f, 16.7f, 8.7f)
-                path.lineTo(9.2f, 16.2f)
-                path.cubicTo(8.6f, 16.8f, 7.7f, 15.9f, 8.3f, 15.3f)
-                path.lineTo(14.8f, 8.8f)
+                path.moveTo(16.6f, 6.4f)
+                path.lineTo(16.6f, 16.8f)
+                path.cubicTo(16.6f, 19.6f, 14.4f, 21.2f, 12f, 21.2f)
+                path.cubicTo(9.6f, 21.2f, 7.4f, 19.6f, 7.4f, 16.8f)
+                path.lineTo(7.4f, 5.9f)
+                path.cubicTo(7.4f, 4f, 8.9f, 2.8f, 10.6f, 2.8f)
+                path.cubicTo(12.3f, 2.8f, 13.8f, 4f, 13.8f, 5.9f)
+                path.lineTo(13.8f, 16.4f)
+                path.cubicTo(13.8f, 17.4f, 13f, 18.1f, 12f, 18.1f)
+                path.cubicTo(11f, 18.1f, 10.2f, 17.4f, 10.2f, 16.4f)
+                path.lineTo(10.2f, 6.6f)
                 canvas.drawPath(path, paint)
             }
             Shape.DOWN -> {
@@ -3845,8 +3866,6 @@ private sealed interface Screen {
 
     data class Editor(val root: String, val path: String) : Screen
 
-    data class Health(val root: String) : Screen
-
     data class Picture(val root: String, val path: String) : Screen
 
     data class Build(val root: String) : Screen
@@ -3884,6 +3903,8 @@ private sealed interface Screen {
     data object HelpDocs : Screen
 
     data object HelpFaq : Screen
+
+    data class Legal(val terms: Boolean) : Screen
 }
 
 class BuilderActivity : Activity() {
@@ -4228,6 +4249,8 @@ class BuilderActivity : Activity() {
         const val PROJECT_ICON = "Icon.png"
         const val PROJECT_FILE = "Builder.json"
 
+        val SHELL_BAR = 0xFF16181A.toInt()
+
         val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
         val CODE_SUFFIXES = listOf(
@@ -4268,6 +4291,12 @@ class BuilderActivity : Activity() {
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var results: LinearLayout
+    private lateinit var banner: LinearLayout
+
+    private var logPort = 0
+    private var logWireless = false
+    private var logWired = false
+    private var logSeeking = false
 
     private var screen: Screen = Screen.Projects
     private var navigating = false
@@ -4286,6 +4315,11 @@ class BuilderActivity : Activity() {
     private var formImage: String? = null
     private var imageForProject: String? = null
     private var secondFolder: String? = null
+    private var paneRight = false
+    private val besideBefore = mutableListOf<String>()
+    private val besideAfter = mutableListOf<String>()
+    private var leftBox: View? = null
+    private var rightBox: View? = null
     private var filesOrder = Order.NAME
     private val pickedIn = mutableMapOf<String, MutableSet<String>>()
 
@@ -4336,11 +4370,11 @@ class BuilderActivity : Activity() {
     private var raised = false
     private val opened = mutableSetOf<String>()
     private val wentBefore = mutableListOf<String>()
+    private var cameBefore: Screen? = null
+    private var talkRoot: String? = null
     private val wentAfter = mutableListOf<String>()
 
     private var searchFor = ""
-    private var searchCase = false
-    private var searchWord = false
 
     private var editorText = ""
     private var editor: CodeEditor? = null
@@ -4436,12 +4470,20 @@ class BuilderActivity : Activity() {
             gravity = Gravity.END
         }
 
+        banner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(gap(4), gap(3), gap(4), gap(3))
+        }
+
         val roof = View(this)
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(roof, LinearLayout.LayoutParams(MATCH_PARENT, 0))
             addView(crown, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+            addView(banner, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             addView(footer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
@@ -4636,6 +4678,9 @@ class BuilderActivity : Activity() {
         if (next == screen && !navigating) {
             return
         }
+        if (next is Screen.Help && !inHelp(screen)) {
+            cameBefore = screen
+        }
         rememberWalk(next)
         raised = false
         screen = next
@@ -4718,6 +4763,7 @@ class BuilderActivity : Activity() {
         keepTheDraft()
         hideOffers()
         hideMenus()
+        hideBanner()
         editor = null
         editorAt = null
         editorSaveMark = null
@@ -4726,6 +4772,8 @@ class BuilderActivity : Activity() {
         logView = null
         logCount = null
         logHollow = null
+        leftBox = null
+        rightBox = null
         if (screen !is Screen.Logcat) {
             stopTheLog()
         }
@@ -4771,7 +4819,6 @@ class BuilderActivity : Activity() {
             is Screen.NewProject -> renderNewProject()
             is Screen.WebToApk -> renderWebToApk()
             is Screen.Files -> renderFiles(here.root, here.folder)
-            is Screen.Health -> renderHealth(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
@@ -4787,6 +4834,7 @@ class BuilderActivity : Activity() {
             is Screen.Feedback -> renderFeedback()
             is Screen.Rate -> renderRate()
             is Screen.About -> renderAbout()
+            is Screen.Legal -> renderLegal(here.terms)
             is Screen.Help -> renderHelp()
             is Screen.HelpAdb -> renderHelpAdb()
             is Screen.HelpTalk -> renderHelpTalk()
@@ -4855,7 +4903,7 @@ class BuilderActivity : Activity() {
             is Screen.Projects -> finish()
             is Screen.NewProject -> go(Screen.Projects)
             is Screen.WebToApk -> go(Screen.Projects)
-            is Screen.Help -> go(Screen.About)
+            is Screen.Help -> go(cameBefore ?: Screen.Projects)
             is Screen.HelpAdb -> go(Screen.Help)
             is Screen.HelpTalk -> go(Screen.Help)
             is Screen.HelpDocs -> go(Screen.Help)
@@ -4868,12 +4916,65 @@ class BuilderActivity : Activity() {
                 } else {
                     go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
                 }
-            is Screen.Health -> go(Screen.Files(here.root, ""))
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
             is Screen.NewKey -> go(Screen.Keys)
+            is Screen.Legal -> go(Screen.About)
             else -> go(Screen.Projects)
         }
+    }
+
+    private val bannerAway = Runnable { hideBanner() }
+
+    private var bannerTurn = 0
+
+    private fun flash(
+        said: String,
+        tint: Int,
+        mark: Mark.Shape = Mark.Shape.INFO,
+        holding: Long = 2600L,
+    ) {
+        banner.removeCallbacks(bannerAway)
+        bannerTurn += 1
+        banner.animate().cancel()
+        banner.removeAllViews()
+        banner.setBackgroundColor(Ink.fade(tint, 0.16f))
+        banner.addView(
+            View(this).apply { foreground = Mark(mark, tint) },
+            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
+        )
+        banner.addView(
+            TextView(this).apply {
+                text = said
+                setTextColor(palette.foreground)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setLineSpacing(gap(1).toFloat(), 1f)
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        banner.visibility = View.VISIBLE
+        banner.alpha = 0f
+        banner.translationY = -gap(4).toFloat()
+        banner.animate().alpha(1f).translationY(0f).setDuration(LOOK_MILLIS * 3).start()
+        if (holding > 0L) {
+            banner.postDelayed(bannerAway, holding)
+        }
+    }
+
+    private fun hideBanner() {
+        banner.removeCallbacks(bannerAway)
+        if (banner.visibility != View.VISIBLE) {
+            return
+        }
+        bannerTurn += 1
+        val mine = bannerTurn
+        banner.animate()
+            .alpha(0f)
+            .translationY(-gap(4).toFloat())
+            .setDuration(LOOK_MILLIS * 2)
+            .withEndAction { if (mine == bannerTurn) banner.visibility = View.GONE }
+            .start()
     }
 
     private fun markControl(shape: Mark.Shape, named: Int, onPress: () -> Unit) =
@@ -4889,9 +4990,7 @@ class BuilderActivity : Activity() {
             setOnClickListener { onPress() }
         }
 
-    private fun versionShown(): String = runCatching {
-        packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
-    }.getOrDefault("").ifEmpty { "1.0" }
+    private fun versionShown(): String = getString(R.string.omni_version_shown)
 
     private fun screenNamed(here: Screen): String = getString(
         when (here) {
@@ -4904,10 +5003,15 @@ class BuilderActivity : Activity() {
             is Screen.NewKey -> R.string.omni_keys_new
             is Screen.Trash -> R.string.omni_trash_title
             is Screen.Build -> R.string.omni_tab_build
-            is Screen.Health -> R.string.omni_health_title
+            is Screen.Legal ->
+                if (here.terms) R.string.omni_about_terms else R.string.omni_about_policy
             else -> R.string.omni_brand_note
         }
     )
+
+    private fun inHelp(here: Screen): Boolean =
+        here is Screen.Help || here is Screen.HelpAdb || here is Screen.HelpTalk ||
+            here is Screen.HelpDocs || here is Screen.HelpFaq
 
     private fun homeLike(here: Screen): Boolean =
         here is Screen.Projects || here is Screen.Files || here is Screen.NewProject
@@ -5080,7 +5184,8 @@ class BuilderActivity : Activity() {
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
             val root = openProject
-            if (root != null) {
+            val listing = here is Screen.Files
+            if (root != null && listing) {
                 crown.addView(
                     if (building) {
                         crownAction(
@@ -5101,10 +5206,12 @@ class BuilderActivity : Activity() {
                     go(Screen.Terminal)
                 }
             )
-            crown.addView(
-                markControl(Mark.Shape.FIND, R.string.omni_find_project) { askToSearch() },
-                each,
-            )
+            if (listing) {
+                crown.addView(
+                    markControl(Mark.Shape.FIND, R.string.omni_find_project) { askToSearch() },
+                    each,
+                )
+            }
             if (here is Screen.NewProject) {
                 crown.addView(
                     markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
@@ -5172,10 +5279,9 @@ class BuilderActivity : Activity() {
                     },
                     each,
                 )
-                crown.addView(
-                    markControl(Mark.Shape.MORE, R.string.omni_action_more) { talkMenu() },
-                    each,
-                )
+                val talkMore = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
+                talkMore.setOnClickListener { talkMenu(talkMore) }
+                crown.addView(talkMore, each)
                 return
             }
             if (here is Screen.Editor) {
@@ -5271,8 +5377,100 @@ class BuilderActivity : Activity() {
             readAs(Button::class.java.name)
             background = reacting(Color.TRANSPARENT, gap(5).toFloat(), palette.accent)
             foreground = Mark(mark, if (on) palette.foreground else palette.divider)
+            val squeeze = gap(5) / 2
+            setPadding(squeeze, squeeze, squeeze, squeeze)
             setOnClickListener { if (on) onPress() }
         }
+
+    private fun paneFolder(): String {
+        val here = screen as? Screen.Files ?: return ""
+        return if (paneRight) secondFolder ?: here.folder else here.folder
+    }
+
+    private fun walkPane(to: String) {
+        val here = screen as? Screen.Files ?: return
+        if (paneRight) {
+            besideBefore.add(secondFolder ?: here.folder)
+            besideAfter.clear()
+            secondFolder = to
+            render(true)
+        } else {
+            go(Screen.Files(here.root, to))
+        }
+    }
+
+    private fun stepPane(by: Int) {
+        if (!paneRight) {
+            stepWalked(by)
+            return
+        }
+        val here = screen as? Screen.Files ?: return
+        val now = secondFolder ?: here.folder
+        if (by < 0) {
+            val back = besideBefore.removeLastOrNull() ?: return
+            besideAfter.add(now)
+            secondFolder = back
+        } else {
+            val on = besideAfter.removeLastOrNull() ?: return
+            besideBefore.add(now)
+            secondFolder = on
+        }
+        render(true)
+    }
+
+    private fun askToCreate(root: String, folder: String) {
+        val editor = styledField("", getString(R.string.omni_files_needs_name))
+        fun named(): String = editor.text.toString().trim()
+        dialogShell(
+            getString(R.string.omni_action_create),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(
+                    TextView(context).apply {
+                        text = if (folder.isEmpty()) root else "$root/$folder"
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.START
+                        setPadding(0, 0, 0, gap(2))
+                    }
+                )
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_files_file) to { it: AlertDialog ->
+                    val chosen = named()
+                    if (chosen.isEmpty()) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_files_needs_name), palette.warning)
+                        )
+                    } else {
+                        it.dismiss()
+                        act(
+                            Builder.nativeWriteFile(root, joined(folder, chosen), ""),
+                            "saved",
+                        )
+                    }
+                },
+                getString(R.string.omni_files_folder) to { it: AlertDialog ->
+                    val chosen = named()
+                    if (chosen.isEmpty()) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_files_needs_name), palette.warning)
+                        )
+                    } else {
+                        it.dismiss()
+                        act(Builder.nativeNewFolder(root, joined(folder, chosen)), "made")
+                    }
+                },
+            ),
+        )
+        editor.requestFocus()
+    }
 
     private fun drawFooter() {
         footer.removeAllViews()
@@ -5282,64 +5480,36 @@ class BuilderActivity : Activity() {
             return
         }
         footer.visibility = View.VISIBLE
-        val walked = true
-        val deep = here.folder.isNotEmpty()
-        val holds = LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f)
+        val holds = LinearLayout.LayoutParams(0, gap(10), 1f)
+        val backable = if (paneRight) besideBefore.isNotEmpty() else wentBefore.isNotEmpty()
+        val onward = if (paneRight) besideAfter.isNotEmpty() else wentAfter.isNotEmpty()
         footer.addView(
-            footControl(Mark.Shape.BACK, R.string.omni_action_back, wentBefore.isNotEmpty()) {
-                stepWalked(-1)
-            },
+            footControl(Mark.Shape.BACK, R.string.omni_action_back, backable) { stepPane(-1) },
             holds,
         )
         footer.addView(
-            footControl(Mark.Shape.FORWARD, R.string.omni_action_forward, wentAfter.isNotEmpty()) {
-                stepWalked(1)
-            },
-            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
+            footControl(Mark.Shape.FORWARD, R.string.omni_action_forward, onward) { stepPane(1) },
+            LinearLayout.LayoutParams(0, gap(10), 1f),
         )
-        val adding = footControl(Mark.Shape.ADD, R.string.omni_action_new_file, walked) { }
-        adding.setOnClickListener {
-            anchoredMenu(
-                adding,
-                listOf(
-                    MenuChoice(Mark.Shape.FILE, getString(R.string.omni_action_new_file)) {
-                        askForName(getString(R.string.omni_action_new_file), "") { name ->
-                            act(
-                                Builder.nativeWriteFile(here.root, joined(here.folder, name), ""),
-                                "saved",
-                            )
-                        }
-                    },
-                    MenuChoice(Mark.Shape.FOLDER, getString(R.string.omni_action_new_folder)) {
-                        askForName(getString(R.string.omni_action_new_folder), "") { name ->
-                            act(Builder.nativeNewFolder(here.root, joined(here.folder, name)), "made")
-                        }
-                    },
-                ),
-            )
-        }
-        footer.addView(adding, LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f))
         footer.addView(
-            footControl(Mark.Shape.SWAP, R.string.omni_files_split, walked) {
-                val beside = secondFolder
-                if (beside == null) {
-                    secondFolder = here.folder
+            footControl(Mark.Shape.PAGE_ADD, R.string.omni_action_create, true) {
+                askToCreate(here.root, paneFolder())
+            },
+            LinearLayout.LayoutParams(0, gap(10), 1f),
+        )
+        footer.addView(
+            footControl(Mark.Shape.SWAP, R.string.omni_files_mirror, true) {
+                val mine = paneFolder()
+                if (paneRight) {
+                    go(Screen.Files(here.root, mine))
                 } else {
-                    secondFolder = here.folder
-                    go(Screen.Files(here.root, beside))
-                    return@footControl
+                    besideBefore.add(secondFolder ?: here.folder)
+                    besideAfter.clear()
+                    secondFolder = mine
+                    render(true)
                 }
-                render(true)
             },
-            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
-        )
-        footer.addView(
-            footControl(
-                Mark.Shape.UP,
-                R.string.omni_files_root,
-                deep,
-            ) { go(Screen.Files(here.root, here.folder.substringBeforeLast('/', ""))) },
-            LinearLayout.LayoutParams(0, gap(TOUCH_UNITS), 1f),
+            LinearLayout.LayoutParams(0, gap(10), 1f),
         )
     }
 
@@ -5442,11 +5612,11 @@ class BuilderActivity : Activity() {
             results.addView(notice(getString(R.string.omni_projects_none), palette.warning))
             return
         }
-        askForName(getString(R.string.omni_find_project), searchFor) { word ->
+        askToFind(getString(R.string.omni_find_project), searchFor) { word ->
             if (word.isBlank()) {
-                return@askForName
+                return@askToFind
             }
-            working({ Builder.nativeSearchProject(root, word, searchCase, searchWord) })
+            working({ Builder.nativeSearchProject(root, word, false, false) })
             finished@{ answer ->
                 val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
                 if (!document.optBoolean("searched", false)) {
@@ -5460,10 +5630,12 @@ class BuilderActivity : Activity() {
     }
 
     private fun homeMenu(under: View) {
-        val root = openProject
+        val listing = screen is Screen.Files
         val rows = mutableListOf<MenuChoice>()
-        rows += MenuChoice(Mark.Shape.FIND, getString(R.string.omni_find_project)) {
-            askToSearch()
+        if (listing) {
+            rows += MenuChoice(Mark.Shape.FIND, getString(R.string.omni_find_project)) {
+                askToSearch()
+            }
         }
         rows += MenuChoice(
             Mark.Shape.LOG,
@@ -5476,7 +5648,7 @@ class BuilderActivity : Activity() {
         rows += MenuChoice(Mark.Shape.BRUSH, getString(R.string.omni_menu_theme)) {
             go(Screen.Theme)
         }
-        if (root != null) {
+        if (listing) {
             rows += MenuChoice(
                 Mark.Shape.SORT,
                 getString(R.string.omni_files_sorting),
@@ -6327,7 +6499,6 @@ class BuilderActivity : Activity() {
     private fun treePane(root: String, entries: List<FileEntry>): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = sheet(palette.background, palette.divider)
             addView(paneHead(root, "", true))
             addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
             val rows = LinearLayout(context).apply {
@@ -6349,165 +6520,192 @@ class BuilderActivity : Activity() {
             FileEntry.list(Builder.nativeProjectTree(root))
         }.getOrDefault(emptyList())
 
-        val beside = secondFolder
-        val panes = LinearLayout(this).apply {
-            orientation = if (wideEnough()) {
-                LinearLayout.HORIZONTAL
-            } else {
-                LinearLayout.VERTICAL
-            }
+        if (secondFolder == null) {
+            secondFolder = folder
         }
-        val across = panes.orientation == LinearLayout.HORIZONTAL
-        panes.addView(
-            treePane(root, entries),
-            if (across) {
-                LinearLayout.LayoutParams(0, MATCH_PARENT, 1f).apply {
-                    marginEnd = gap(1) / 2
-                }
-            } else {
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
-            },
-        )
-        if (beside != null || across) {
-            val other = beside ?: folder
-            panes.addView(
-                LinearLayout(this).apply {
+        val beside = secondFolder ?: folder
+        val panes = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val left = PaneBox(false).apply { addView(treePane(root, entries)) }
+        val right = PaneBox(true).apply {
+            addView(
+                LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    background = sheet(palette.background, palette.divider)
-                    addView(paneHead(root, other, false))
+                    addView(paneHead(root, beside, false))
                     addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
-                    addView(filePane(root, other, entries, folder))
-                },
-                if (across) {
-                    LinearLayout.LayoutParams(0, MATCH_PARENT, 1f).apply {
-                        marginStart = gap(1) / 2
-                    }
-                } else {
-                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                        topMargin = gap(2)
-                    }
-                },
+                    addView(filePane(root, beside, entries, folder))
+                }
             )
         }
+        panes.addView(
+            left,
+            LinearLayout.LayoutParams(0, MATCH_PARENT, 1f).apply { marginEnd = gap(1) / 2 },
+        )
+        panes.addView(
+            right,
+            LinearLayout.LayoutParams(0, MATCH_PARENT, 1f).apply { marginStart = gap(1) / 2 },
+        )
+        leftBox = left
+        rightBox = right
+        markPanes()
         content.addView(
             panes,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { weight = 1f },
         )
     }
 
-    private fun renderHealth(root: String) {
+    private fun paneSkin(chosen: Boolean): Drawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = gap(4).toFloat()
+        setColor(if (chosen) palette.surface else palette.background)
+        setStroke(if (chosen) gap(1) / 2 else 1, if (chosen) palette.accent else palette.divider)
+    }
 
-        val answer = runCatching { JSONObject(Builder.nativeProjectHealth(root)) }.getOrNull()
-        val health = answer?.optJSONObject("health")
-        if (answer == null || !answer.optBoolean("read", false) || health == null) {
-            answer?.let { showRefusal(Refusal.parse(it), content) }
-            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-                go(Screen.Files(root, ""))
-            })
-            return
+    private fun markPanes() {
+        leftBox?.background = paneSkin(!paneRight)
+        rightBox?.background = paneSkin(paneRight)
+    }
+
+    private fun choosePane(side: Boolean) {
+        if (paneRight == side) return
+        paneRight = side
+        markPanes()
+        drawFooter()
+    }
+
+    private inner class PaneBox(private val side: Boolean) : FrameLayout(this@BuilderActivity) {
+        private var fromX = 0f
+        private var fromY = 0f
+
+        override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    fromX = event.x
+                    fromY = event.y
+                    choosePane(side)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val slid = event.x - fromX
+                    if (abs(slid) > gap(6) && abs(slid) > abs(event.y - fromY)) {
+                        choosePane(slid < 0f)
+                    }
+                }
+            }
+            return false
         }
+    }
 
-        val settled = health.optBoolean("settled", false)
+    private fun renderLegal(terms: Boolean) {
+        val sections = if (terms) {
+            listOf(
+                R.string.omni_terms_one_head to R.string.omni_terms_one_body,
+                R.string.omni_terms_two_head to R.string.omni_terms_two_body,
+                R.string.omni_terms_three_head to R.string.omni_terms_three_body,
+                R.string.omni_terms_four_head to R.string.omni_terms_four_body,
+                R.string.omni_terms_five_head to R.string.omni_terms_five_body,
+                R.string.omni_terms_six_head to R.string.omni_terms_six_body,
+            )
+        } else {
+            listOf(
+                R.string.omni_policy_one_head to R.string.omni_policy_one_body,
+                R.string.omni_policy_two_head to R.string.omni_policy_two_body,
+                R.string.omni_policy_three_head to R.string.omni_policy_three_body,
+                R.string.omni_policy_four_head to R.string.omni_policy_four_body,
+                R.string.omni_policy_five_head to R.string.omni_policy_five_body,
+                R.string.omni_policy_six_head to R.string.omni_policy_six_body,
+            )
+        }
+        val lead = if (terms) R.string.omni_about_terms else R.string.omni_about_policy
+        val under = if (terms) R.string.omni_about_terms_note else R.string.omni_about_policy_note
+
         content.addView(
-            notice(
-                getString(if (settled) R.string.omni_health_well else R.string.omni_health_not),
-                if (settled) palette.ok else palette.warning,
-            )
-        )
-
-        val sizes = card()
-        listOf(
-            Triple(R.string.omni_health_code, "codeFiles", "codeBytes"),
-            Triple(R.string.omni_health_resources, "resourceFiles", "resourceBytes"),
-            Triple(R.string.omni_health_assets, "assetFiles", "assetBytes"),
-            Triple(R.string.omni_health_libraries, "libraryFiles", "libraryBytes"),
-        ).forEach { (label, files, bytes) ->
-            sizes.addView(
-                keyValue(
-                    getString(label),
-                    getString(R.string.omni_health_files, health.optInt(files)),
-                    size(health.optLong(bytes)),
-                    palette.muted,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, gap(2), 0, gap(1))
+                addView(
+                    View(context).apply {
+                        foreground = Mark(
+                            if (terms) Mark.Shape.NOTE_FILL else Mark.Shape.SHIELD_FILL,
+                            if (terms) 0xFFB06BFF.toInt() else palette.accent,
+                        )
+                    },
+                    LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(4) },
                 )
-            )
-        }
-        sizes.addView(rule(), MATCH_PARENT, 1)
-        sizes.addView(
-            keyValue(
-                getString(R.string.omni_health_whole),
-                getString(R.string.omni_health_files, health.optInt("files")),
-                size(health.optLong("bytes")),
-                palette.foreground,
-            )
-        )
-        content.addView(sizes)
-
-        if (!health.optBoolean("hasIcon", false)) {
-            content.addView(
-                row(
-                    getString(R.string.omni_health_no_icon),
-                    "",
-                    getString(R.string.omni_action_change),
-                    palette.warning,
-                ) { chooseImage(root) }
-            )
-        }
-
-        val uncompiled = health.optJSONArray("uncompiled")
-        if (uncompiled != null && uncompiled.length() > 0) {
-            content.addView(
-                notice(getString(R.string.omni_health_uncompiled, uncompiled.length()), palette.error)
-            )
-            val listed = card()
-            for (index in 0 until minOf(uncompiled.length(), 20)) {
-                val one = uncompiled.optJSONObject(index) ?: continue
-                listed.addView(
-                    keyValue(one.optString("path"), "", one.optString("language"), palette.error)
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(lead)
+                                setTextColor(palette.foreground)
+                                typeface = Type.heading
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(under)
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
             }
-            content.addView(listed)
-        }
+        )
 
-        val languages = health.optJSONArray("languages")
-        if (languages != null && languages.length() > 0) {
-            content.addView(heading(getString(R.string.omni_health_languages)))
-            val listed = card()
-            for (index in 0 until languages.length()) {
-                val one = languages.optJSONObject(index) ?: continue
-                val short = one.optInt("missingCount")
-                val spare = one.optInt("extraCount")
-                if (index > 0) {
-                    listed.addView(rule(), MATCH_PARENT, 1)
-                }
-                listed.addView(
-                    keyValue(
-                        one.optString("folder"),
-                        when {
-                            short > 0 && spare > 0 ->
-                                getString(R.string.omni_health_short_and_spare, short, spare)
-                            short > 0 -> getString(R.string.omni_health_short, short)
-                            spare > 0 -> getString(R.string.omni_health_spare, spare)
-                            else -> ""
+        sections.forEachIndexed { at, (head, said) ->
+            val block = card()
+            block.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = (at + 1).toString()
+                            setTextColor(palette.marker)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            gravity = Gravity.CENTER
+                            background = pill(Ink.fade(palette.accent, 0.16f), gap(5) / 2f)
                         },
-                        one.optInt("strings").toString(),
-                        if (short > 0 || spare > 0) palette.warning else palette.ok,
+                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
                     )
-                )
-                for (key in listOf("missing", "extra")) {
-                    val named = one.optJSONArray(key) ?: continue
-                    if (named.length() == 0) continue
-                    listed.addView(
-                        quiet((0 until named.length()).joinToString(", ") { named.getString(it) })
+                    addView(
+                        TextView(context).apply {
+                            text = getString(head)
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                     )
                 }
-            }
-            content.addView(listed)
-            content.addView(quiet(getString(R.string.omni_health_language_note)))
+            )
+            block.addView(
+                TextView(this).apply {
+                    text = getString(said)
+                    setTextColor(palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setLineSpacing(gap(3) / 2f, 1f)
+                    setPadding(0, gap(2), 0, gap(2))
+                }
+            )
+            content.addView(block)
         }
 
-        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Files(root, ""))
-        })
+        content.addView(
+            quiet(
+                getString(
+                    R.string.omni_legal_stamp,
+                    versionShown(),
+                    Calendar.getInstance().get(Calendar.YEAR).toString(),
+                )
+            ).apply { setPadding(gap(1), gap(3), gap(1), gap(6)) }
+        )
     }
 
     private fun inspectPackage(path: String) {
@@ -6874,9 +7072,13 @@ class BuilderActivity : Activity() {
 
     private fun stepPane(root: String, pane: String, into: String) {
         if (pane == secondFolder) {
+            besideBefore.add(pane)
+            besideAfter.clear()
             secondFolder = into
+            paneRight = true
             render(false)
         } else {
+            paneRight = false
             go(Screen.Files(root, into))
         }
     }
@@ -7126,59 +7328,141 @@ class BuilderActivity : Activity() {
             }
         )
 
-        AlertDialog.Builder(this)
-            .setTitle(if (entry.folder) "$name/" else name)
-            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
-                actions[which].second()
-            }
-            .show()
+        pickOne(if (entry.folder) "$name/" else name, actions.map { it.first }) { which ->
+            actions[which].second()
+        }
     }
 
     private fun askForSecret(title: String, onChosen: (CharArray) -> Unit) {
-        val field = EditText(this).apply {
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setTextColor(palette.foreground)
-            setPadding(gap(4), gap(3), gap(4), gap(3))
-        }
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(field)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val held = CharArray(field.text.length)
-                field.text.getChars(0, field.text.length, held, 0)
-                field.text.clear()
-                onChosen(held)
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        val field = styledField("", title, secret = true)
+        dialogShell(
+            title,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(field, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    val held = CharArray(field.text.length)
+                    field.text.getChars(0, field.text.length, held, 0)
+                    field.text.clear()
+                    it.dismiss()
+                    onChosen(held)
+                },
+            ),
+        )
         field.requestFocus()
     }
 
-    private fun askForName(title: String, initial: String, onChosen: (String) -> Unit) {
-        val editor = EditText(this).apply {
-            setText(initial)
-            setSelection(initial.length)
-            isSingleLine = true
-            setTextColor(palette.foreground)
-            setPadding(gap(4), gap(3), gap(4), gap(3))
+    private fun askToFind(title: String, initial: String, onChosen: (String) -> Unit) {
+        val editor = styledField(initial, title)
+        val past = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
         }
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(editor)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val chosen = editor.text.toString().trim()
-                if (chosen.isEmpty()) {
-                    results.removeAllViews()
-                    results.addView(
-                        notice(getString(R.string.omni_files_needs_name), palette.warning)
-                    )
-                } else {
-                    onChosen(chosen)
-                }
+        val keeper = markControl(Mark.Shape.CLOCK, R.string.omni_find_past) { }
+        fun fillPast() {
+            past.removeAllViews()
+            val kept = Preferences.searches(this)
+            if (kept.isEmpty()) {
+                past.addView(quiet(getString(R.string.omni_find_past_none)))
+                return
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            kept.forEach { word ->
+                past.addView(
+                    TextView(this).apply {
+                        text = word
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        minimumHeight = gap(9)
+                        gravity = Gravity.CENTER_VERTICAL
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setPadding(gap(2), gap(1), gap(2), gap(1))
+                        isClickable = true
+                        isFocusable = true
+                        readAs(Button::class.java.name)
+                        background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
+                        setOnClickListener {
+                            editor.setText(word)
+                            editor.setSelection(word.length)
+                            past.visibility = View.GONE
+                        }
+                    },
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+            }
+            past.addView(
+                subtle(getString(R.string.omni_find_past_clear), palette.muted) {
+                    Preferences.forgetSearches(this)
+                    fillPast()
+                }
+            )
+        }
+        keeper.setOnClickListener {
+            if (past.visibility == View.VISIBLE) {
+                past.visibility = View.GONE
+            } else {
+                fillPast()
+                past.visibility = View.VISIBLE
+            }
+        }
+        dialogShell(
+            title,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(past, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    val chosen = editor.text.toString().trim()
+                    if (chosen.isEmpty()) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_files_needs_name), palette.warning)
+                        )
+                    } else {
+                        it.dismiss()
+                        Preferences.remember(this, chosen)
+                        onChosen(chosen)
+                    }
+                },
+            ),
+            keeper,
+        )
+        editor.requestFocus()
+    }
+
+    private fun askForName(title: String, initial: String, onChosen: (String) -> Unit) {
+        val editor = styledField(initial, title)
+        dialogShell(
+            title,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    val chosen = editor.text.toString().trim()
+                    if (chosen.isEmpty()) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_files_needs_name), palette.warning)
+                        )
+                    } else {
+                        it.dismiss()
+                        onChosen(chosen)
+                    }
+                },
+            ),
+        )
         editor.requestFocus()
     }
 
@@ -7472,7 +7756,7 @@ class BuilderActivity : Activity() {
             changed()
         }
         actions += getString(R.string.omni_editor_find) to {
-            askForName(getString(R.string.omni_editor_find_ask), findHere) { asked ->
+            askToFind(getString(R.string.omni_editor_find_ask), findHere) { asked ->
                 findHere = asked
                 results.removeAllViews()
                 val at = editor.findFrom(asked, editor.selectionEnd)
@@ -7510,7 +7794,7 @@ class BuilderActivity : Activity() {
             changed()
         }
         actions += getString(R.string.omni_editor_replace) to {
-            askForName(getString(R.string.omni_editor_find_ask), findHere) { needle ->
+            askToFind(getString(R.string.omni_editor_find_ask), findHere) { needle ->
                 findHere = needle
                 askForName(getString(R.string.omni_editor_replace_with), "") { instead ->
                     results.removeAllViews()
@@ -7545,12 +7829,9 @@ class BuilderActivity : Activity() {
                 thrown?.let { showRefusal(Refusal.parse(it), results) }
             }
         }
-        AlertDialog.Builder(this)
-            .setTitle(path.substringAfterLast('/'))
-            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
-                actions[which].second()
-            }
-            .show()
+        pickOne(path.substringAfterLast('/'), actions.map { it.first }) { which ->
+            actions[which].second()
+        }
     }
 
     private fun checkWhileTyping(root: String, path: String, editor: CodeEditor) {
@@ -7814,8 +8095,6 @@ class BuilderActivity : Activity() {
                 return@finished
             }
             searchFor = word
-            searchCase = true
-            searchWord = true
             showFound(root, document.optJSONObject("result"))
         }
     }
@@ -8279,6 +8558,82 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private fun readProperty(named: String): String = runCatching {
+        val asking = ProcessBuilder("getprop", named).redirectErrorStream(true).start()
+        val said = asking.inputStream.bufferedReader().use { it.readText() }.trim()
+        asking.waitFor()
+        said
+    }.getOrDefault("")
+
+    private fun globalFlag(named: String): Boolean = runCatching {
+        Settings.Global.getInt(contentResolver, named, 0)
+    }.getOrDefault(0) == 1
+
+    private fun logReadsAll(): Boolean =
+        checkSelfPermission(android.Manifest.permission.READ_LOGS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun grantLine(): String =
+        "adb shell pm grant $packageName android.permission.READ_LOGS"
+
+    private fun seekTheDevice() {
+        if (logSeeking) {
+            return
+        }
+        logSeeking = true
+        flash(getString(R.string.omni_log_seeking), palette.accent, Mark.Shape.LINK, 0L)
+        Thread {
+            val wireless = globalFlag("adb_wifi_enabled")
+            val wired = globalFlag("adb_enabled")
+            val port = listOf("service.adb.tls.port", "service.adb.tcp.port")
+                .firstNotNullOfOrNull { readProperty(it).toIntOrNull()?.takeIf { open -> open > 0 } }
+                ?: 0
+            runOnUiThread {
+                logSeeking = false
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                logPort = port
+                logWireless = wireless
+                logWired = wired
+                if (screen is Screen.Logcat) {
+                    render(false)
+                }
+                when {
+                    logReadsAll() -> flash(
+                        getString(R.string.omni_log_bound_note),
+                        palette.ok,
+                        Mark.Shape.TICK,
+                    )
+                    port > 0 -> flash(
+                        getString(R.string.omni_log_seek_found, port.toString()),
+                        palette.ok,
+                        Mark.Shape.TICK,
+                        4200L,
+                    )
+                    wireless -> flash(
+                        getString(R.string.omni_log_seek_hidden),
+                        palette.warning,
+                        Mark.Shape.INFO,
+                        4200L,
+                    )
+                    wired -> flash(
+                        getString(R.string.omni_log_seek_wired),
+                        palette.warning,
+                        Mark.Shape.INFO,
+                        4200L,
+                    )
+                    else -> flash(
+                        getString(R.string.omni_log_seek_off),
+                        palette.error,
+                        Mark.Shape.INFO,
+                        4200L,
+                    )
+                }
+            }
+        }.start()
+    }
+
     private fun startTheLog() {
         if (logReading) {
             return
@@ -8288,7 +8643,11 @@ class BuilderActivity : Activity() {
         Thread {
             val reading = runCatching {
                 ProcessBuilder(
-                    listOf("logcat", "-v", "time", "--pid=" + android.os.Process.myPid())
+                    if (logReadsAll()) {
+                        listOf("logcat", "-v", "time")
+                    } else {
+                        listOf("logcat", "-v", "time", "--pid=" + android.os.Process.myPid())
+                    }
                 ).redirectErrorStream(true).start()
             }.getOrElse { why ->
                 runOnUiThread {
@@ -8343,6 +8702,55 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
         }
+        frame.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = gap(11)
+                setPadding(gap(1), 0, gap(2), 0)
+                setBackgroundColor(SHELL_BAR)
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.BACK, Color.WHITE)
+                        val squeeze = gap(3) / 2
+                        setPadding(squeeze, squeeze, squeeze, squeeze)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(R.string.omni_action_back)
+                        readAs(Button::class.java.name)
+                        background = reacting(Color.TRANSPARENT, gap(6).toFloat(), palette.accent)
+                        setOnClickListener { stepBack() }
+                    },
+                    LinearLayout.LayoutParams(gap(10), gap(10)),
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_tab_shell)
+                        setTextColor(Color.WHITE)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        maxLines = 1
+                        setPadding(gap(1), 0, 0, 0)
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.HELP, Color.WHITE)
+                        val squeeze = gap(3) / 2
+                        setPadding(squeeze, squeeze, squeeze, squeeze)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(R.string.omni_help_title)
+                        readAs(Button::class.java.name)
+                        background = reacting(Color.TRANSPARENT, gap(6).toFloat(), palette.accent)
+                        setOnClickListener { go(Screen.Help) }
+                    },
+                    LinearLayout.LayoutParams(gap(10), gap(10)),
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
         frame.addView(
             view,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { weight = 1f },
@@ -8532,57 +8940,151 @@ class BuilderActivity : Activity() {
             )
         }
 
-    private fun talkMenu() {
-        val named = arrayOf(
-            getString(R.string.omni_talk_clear),
-            getString(R.string.omni_talk_export),
-            getString(R.string.omni_talk_folder),
-            getString(R.string.omni_talk_switch),
-            getString(R.string.omni_help_title),
-        )
-        AlertDialog.Builder(this)
-            .setItems(named) { _, which ->
-                when (which) {
-                    0 -> {
-                        talkHeld.clear()
+    private fun talkFolder(): String? = talkRoot ?: openProject
+
+    private fun chooseTalkFolder() {
+        val known = runCatching {
+            ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
+        }.getOrDefault(emptyList())
+        if (known.isEmpty()) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_projects_none), palette.warning))
+            return
+        }
+        val here = talkFolder()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        lateinit var shown: AlertDialog
+        known.forEach { one ->
+            list.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = gap(13)
+                    setPadding(gap(2), gap(2), gap(2), gap(2))
+                    isClickable = true
+                    isFocusable = true
+                    isSelected = one.root == here
+                    readAs(android.widget.RadioButton::class.java.name)
+                    contentDescription = said(one.label.ifEmpty { one.name }, one.root)
+                    background = touchable(
+                        GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(3).toFloat()
+                            setColor(
+                                if (one.root == here) Ink.fade(palette.accent, 0.12f)
+                                else Color.TRANSPARENT
+                            )
+                            setStroke(
+                                1,
+                                if (one.root == here) palette.accent else Color.TRANSPARENT,
+                            )
+                        },
+                        palette.accent,
+                    )
+                    setOnClickListener {
+                        talkRoot = one.root
+                        shown.dismiss()
                         render(false)
                     }
-                    1 -> copyOut(
+                    addView(
+                        thumbnail(
+                            File(one.root, "$PROJECT_RES/$PROJECT_ICON").absolutePath,
+                            gap(9),
+                        ),
+                        LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                    )
+                    addView(
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.VERTICAL
+                            addView(
+                                TextView(context).apply {
+                                    text = one.label.ifEmpty { one.name }
+                                    setTextColor(palette.foreground)
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                                    maxLines = 1
+                                }
+                            )
+                            addView(
+                                TextView(context).apply {
+                                    text = one.root
+                                    setTextColor(palette.muted)
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                    maxLines = 1
+                                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                                }
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        View(context).apply { background = radioMark(one.root == here) },
+                        LinearLayout.LayoutParams(gap(5), gap(5)),
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        shown = dialogShell(
+            getString(R.string.omni_talk_folder),
+            list,
+            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+        )
+    }
+
+    private fun talkMenu(under: View) {
+        anchoredMenu(
+            under,
+            listOf(
+                MenuChoice(Mark.Shape.BROOM, getString(R.string.omni_talk_clear)) {
+                    talkHeld.clear()
+                    render(false)
+                },
+                MenuChoice(Mark.Shape.SHARE, getString(R.string.omni_talk_export)) {
+                    copyOut(
                         talkHeld.joinToString("\n\n") { it.second },
                         getString(R.string.omni_menu_assistant),
                     )
-                    2 -> go(Screen.Projects)
-                    3 -> results.addView(
+                },
+                MenuChoice(Mark.Shape.FOLDER, getString(R.string.omni_talk_folder)) {
+                    chooseTalkFolder()
+                },
+                MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_talk_switch)) {
+                    results.addView(
                         notice(getString(R.string.omni_talk_unwired), palette.warning)
                     )
-                    else -> go(Screen.Help)
-                }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+                },
+                MenuChoice(
+                    Mark.Shape.HELP_FILL,
+                    getString(R.string.omni_help_title),
+                    parted = true,
+                ) { go(Screen.Help) },
+            ),
+        )
     }
 
-    private fun talkAttach() {
-        val named = arrayOf(
-            getString(R.string.omni_talk_add_file),
-            getString(R.string.omni_talk_add_picture),
-            getString(R.string.omni_talk_add_link),
+    private fun talkAttach(under: View) {
+        val named = listOf(
+            Mark.Shape.NOTE to R.string.omni_talk_add_file,
+            Mark.Shape.IMAGE to R.string.omni_talk_add_picture,
+            Mark.Shape.LINK to R.string.omni_talk_add_link,
         )
-        AlertDialog.Builder(this)
-            .setItems(named) { _, which ->
-                if (which == 1) {
-                    chooseShot()
-                } else {
-                    askForName(named[which], "") { said ->
-                        if (said.isNotBlank()) {
-                            talkHeld.add(true to said)
-                            render(false)
+        anchoredMenu(
+            under,
+            named.mapIndexed { at, one ->
+                MenuChoice(one.first, getString(one.second)) {
+                    if (at == 1) {
+                        chooseShot()
+                    } else {
+                        askForName(getString(one.second), "") { said ->
+                            if (said.isNotBlank()) {
+                                talkHeld.add(true to said)
+                                render(false)
+                            }
                         }
                     }
                 }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            },
+        )
     }
 
     private fun renderAssistant() {
@@ -8601,7 +9103,7 @@ class BuilderActivity : Activity() {
             }
         )
 
-        val root = openProject
+        val root = talkFolder()
         val where = card()
         where.addView(
             LinearLayout(this).apply {
@@ -8651,12 +9153,12 @@ class BuilderActivity : Activity() {
                     },
                     palette.accent,
                 )
-                setOnClickListener { go(Screen.Projects) }
+                setOnClickListener { chooseTalkFolder() }
                 addView(
-                    ImageView(context).apply {
-                        setImageResource(R.drawable.omni_art_project)
-                        scaleType = ImageView.ScaleType.FIT_CENTER
-                    },
+                    thumbnail(
+                        File(root.orEmpty(), "$PROJECT_RES/$PROJECT_ICON").absolutePath,
+                        gap(10),
+                    ),
                     LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
                 )
                 addView(
@@ -8730,7 +9232,7 @@ class BuilderActivity : Activity() {
                         isFocusable = true
                         contentDescription = getString(R.string.omni_talk_add_file)
                         readAs(Button::class.java.name)
-                        setOnClickListener { talkAttach() }
+                        setOnClickListener { talkAttach(this) }
                     },
                     LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(2) },
                 )
@@ -8846,14 +9348,10 @@ class BuilderActivity : Activity() {
                         palette.accent,
                     )
                     setOnClickListener {
-                        AlertDialog.Builder(this@BuilderActivity)
-                            .setTitle(named)
-                            .setItems(choices.toTypedArray()) { _, which ->
-                                value.text = choices[which]
-                                onPick(which)
-                            }
-                            .setNegativeButton(android.R.string.cancel, null)
-                            .show()
+                        pickOne(named, choices) { which ->
+                            value.text = choices[which]
+                            onPick(which)
+                        }
                     }
                     addView(value, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                     addView(
@@ -8901,24 +9399,21 @@ class BuilderActivity : Activity() {
         )
         sheet.addView(intoHolder)
 
-        val shown = AlertDialog.Builder(this)
-            .setTitle(getString(R.string.omni_clone_title))
-            .setView(ScrollView(this).apply { addView(sheet, MATCH_PARENT, WRAP_CONTENT) })
-            .setPositiveButton(getString(R.string.omni_clone_go), null)
-            .setNegativeButton(android.R.string.cancel, null)
-            .create()
-        shown.show()
-        shown.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
-            cloneAddress = whereField.text?.toString().orEmpty().trim()
-            results.removeAllViews()
-            results.addView(notice(getString(R.string.omni_clone_unwired), palette.warning))
-            shown.dismiss()
-            if (intoField.text.isNullOrEmpty()) {
-                return@setOnClickListener
-            }
-        }
-        shown.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(palette.error)
-        shown.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(palette.accent)
+        dialogShell(
+            getString(R.string.omni_clone_title),
+            sheet,
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_clone_go) to { it: AlertDialog ->
+                    cloneAddress = whereField.text?.toString().orEmpty().trim()
+                    results.removeAllViews()
+                    results.addView(
+                        notice(getString(R.string.omni_clone_unwired), palette.warning)
+                    )
+                    it.dismiss()
+                },
+            ),
+        )
     }
 
     private fun factRow(
@@ -9118,9 +9613,7 @@ class BuilderActivity : Activity() {
                     releaseNamed(summary?.minSdk ?: OLDEST_PLATFORM),
                     releaseNamed(summary?.targetSdk ?: NEWEST_PLATFORM),
                 ),
-                Mark.Shape.INFO,
-                R.string.omni_health_title,
-            ) { go(Screen.Health(root)) }
+            )
         )
         sheet.addView(
             rule(),
@@ -9215,7 +9708,7 @@ class BuilderActivity : Activity() {
                 setPadding(gap(5), gap(2), gap(5), gap(4))
                 addView(
                     control().apply {
-                        text = getString(android.R.string.ok)
+                        text = getString(R.string.omni_action_confirm)
                         setTextColor(Color.WHITE)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                         setPadding(gap(7), gap(3), gap(7), gap(3))
@@ -9344,13 +9837,19 @@ class BuilderActivity : Activity() {
             LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(3) },
         )
 
+        val reading = logReadsAll()
         val bound = card()
         bound.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.PHONE, palette.accent) },
+                    View(context).apply {
+                        foreground = Mark(
+                            Mark.Shape.PHONE,
+                            if (reading) palette.ok else palette.accent,
+                        )
+                    },
                     LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
                 )
                 addView(
@@ -9372,7 +9871,7 @@ class BuilderActivity : Activity() {
                                     View(context).apply {
                                         background = GradientDrawable().apply {
                                             shape = GradientDrawable.OVAL
-                                            setColor(palette.error)
+                                            setColor(if (reading) palette.ok else palette.error)
                                         }
                                     },
                                     LinearLayout.LayoutParams(gap(2), gap(2)).apply {
@@ -9381,8 +9880,14 @@ class BuilderActivity : Activity() {
                                 )
                                 addView(
                                     TextView(context).apply {
-                                        text = getString(R.string.omni_log_unbound)
-                                        setTextColor(palette.error)
+                                        text = getString(
+                                            if (reading) {
+                                                R.string.omni_log_bound
+                                            } else {
+                                                R.string.omni_log_unbound
+                                            }
+                                        )
+                                        setTextColor(if (reading) palette.ok else palette.error)
                                         typeface = Type.strong
                                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                                     }
@@ -9391,7 +9896,13 @@ class BuilderActivity : Activity() {
                         )
                         addView(
                             TextView(context).apply {
-                                text = getString(R.string.omni_log_bind_note)
+                                text = getString(
+                                    if (reading) {
+                                        R.string.omni_log_bound_note
+                                    } else {
+                                        R.string.omni_log_bind_note
+                                    }
+                                )
                                 setTextColor(palette.muted)
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                                 setLineSpacing(gap(1).toFloat(), 1f)
@@ -9400,14 +9911,91 @@ class BuilderActivity : Activity() {
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
-                addView(
-                    logButton(Mark.Shape.LINK, R.string.omni_log_bind, true) { go(Screen.Help) },
-                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                        marginStart = gap(2)
-                    },
-                )
+                if (!reading) {
+                    addView(
+                        logButton(Mark.Shape.LINK, R.string.omni_log_bind, true) {
+                            seekTheDevice()
+                        },
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                            marginStart = gap(2)
+                        },
+                    )
+                }
             }
         )
+        if (!reading && (logPort > 0 || logWireless || logWired)) {
+            bound.addView(rule(), MATCH_PARENT, 1)
+            bound.addView(
+                factRow(
+                    getString(R.string.omni_log_seek_port),
+                    if (logPort > 0) {
+                        logPort.toString()
+                    } else {
+                        getString(R.string.omni_log_seek_unknown)
+                    },
+                    onPress = null,
+                )
+            )
+            bound.addView(
+                factRow(
+                    getString(R.string.omni_log_seek_switch),
+                    getString(
+                        when {
+                            logWireless -> R.string.omni_log_seek_wifi
+                            logWired -> R.string.omni_log_seek_cable
+                            else -> R.string.omni_log_seek_shut
+                        }
+                    ),
+                    onPress = null,
+                )
+            )
+            bound.addView(quiet(getString(R.string.omni_log_seek_grant)))
+            bound.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = sheet(palette.raised, palette.divider)
+                    setPadding(gap(3), gap(2), gap(2), gap(2))
+                    addView(
+                        HorizontalScrollView(context).apply {
+                            isHorizontalScrollBarEnabled = false
+                            addView(
+                                TextView(context).apply {
+                                    text = grantLine()
+                                    setTextColor(palette.marker)
+                                    typeface = Type.data
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                    maxLines = 1
+                                }
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(Mark.Shape.COPY, palette.foreground)
+                            isClickable = true
+                            isFocusable = true
+                            contentDescription = getString(R.string.omni_action_copy)
+                            readAs(Button::class.java.name)
+                            background = reacting(
+                                Color.TRANSPARENT,
+                                gap(5).toFloat(),
+                                palette.accent,
+                            )
+                            setOnClickListener {
+                                copyOut(grantLine(), getString(R.string.omni_log_device))
+                            }
+                        },
+                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    topMargin = gap(1)
+                    bottomMargin = gap(2)
+                },
+            )
+        }
         content.addView(bound)
 
         content.addView(
@@ -10328,11 +10916,16 @@ class BuilderActivity : Activity() {
                 formVersionCode = it
             }
         )
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.omni_web_facts))
-            .setView(ScrollView(this).apply { addView(sheet, MATCH_PARENT, WRAP_CONTENT) })
-            .setPositiveButton(android.R.string.ok) { _, _ -> render(false) }
-            .show()
+        dialogShell(
+            getString(R.string.omni_web_facts),
+            sheet,
+            listOf(
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    it.dismiss()
+                    render(false)
+                }
+            ),
+        )
     }
 
     private fun tile(text: String, tint: Int) = TextView(this).apply {
@@ -10833,12 +11426,161 @@ class BuilderActivity : Activity() {
         else -> Mark.Shape.HELP to 0xFF2C7BE5.toInt()
     }
 
+    private fun styledField(initial: String, said: String, secret: Boolean = false): EditText =
+        EditText(this).apply {
+            setText(initial)
+            setSelection(initial.length)
+            hint = said
+            setHintTextColor(palette.muted)
+            isSingleLine = true
+            setTextColor(palette.foreground)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setPadding(gap(4), gap(2), gap(4), gap(2))
+            if (secret) {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(3) / 2f
+                setColor(palette.raised)
+                setStroke(1, palette.divider)
+            }
+        }
+
+    private fun dialogWord(named: String, onPress: (AlertDialog) -> Unit, shown: AlertDialog): View =
+        TextView(this).apply {
+            text = named
+            setTextColor(palette.accent)
+            typeface = Type.strong
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
+            setPadding(gap(4), gap(2), gap(4), gap(2))
+            isClickable = true
+            isFocusable = true
+            readAs(Button::class.java.name)
+            background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
+            setOnClickListener { onPress(shown) }
+        }
+
+    private fun dialogShell(
+        titled: String,
+        body: View,
+        words: List<Pair<String, (AlertDialog) -> Unit>>,
+        crown: View? = null,
+    ): AlertDialog {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(4).toFloat()
+                setColor(palette.surface)
+                setStroke(1, palette.divider)
+            }
+        }
+        val shown = AlertDialog.Builder(this).setView(
+            FrameLayout(this).apply {
+                setPadding(gap(4), gap(4), gap(4), gap(4))
+                addView(panel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            }
+        ).create()
+        if (titled.isNotEmpty()) {
+            panel.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = titled
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                            setPadding(gap(5), gap(4), gap(5), gap(3))
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    if (crown != null) {
+                        addView(
+                            crown,
+                            LinearLayout.LayoutParams(gap(10), gap(10)).apply {
+                                marginEnd = gap(3)
+                            },
+                        )
+                    }
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        panel.addView(
+            ScrollView(this).apply {
+                isFillViewport = false
+                setPadding(gap(5), 0, gap(5), 0)
+                addView(body, MATCH_PARENT, WRAP_CONTENT)
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
+        panel.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                setPadding(gap(3), gap(3), gap(3), gap(3))
+                words.forEach { (named, onPress) ->
+                    addView(
+                        dialogWord(named, onPress, shown),
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                            marginStart = gap(1)
+                        },
+                    )
+                }
+            }
+        )
+        shown.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        shown.show()
+        return shown
+    }
+
+    private fun pickOne(titled: String, choices: List<String>, onPick: (Int) -> Unit) {
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        lateinit var shown: AlertDialog
+        choices.forEachIndexed { at, named ->
+            list.addView(
+                TextView(this).apply {
+                    text = named
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    minimumHeight = gap(11)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(gap(2), gap(2), gap(2), gap(2))
+                    isClickable = true
+                    isFocusable = true
+                    readAs(Button::class.java.name)
+                    background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
+                    setOnClickListener {
+                        shown.dismiss()
+                        onPick(at)
+                    }
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        shown = dialogShell(
+            titled,
+            list,
+            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+        )
+    }
+
     private fun showNote(title: String, said: String) {
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(said)
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
+        dialogShell(
+            title,
+            TextView(this).apply {
+                text = said
+                setTextColor(Ink.hot(palette.muted, 0.3f))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setLineSpacing(gap(1) / 2f, 1f)
+                setPadding(0, 0, 0, gap(2))
+            },
+            listOf(getString(R.string.omni_action_confirm) to { it: AlertDialog -> it.dismiss() }),
+        )
     }
 
     private fun themeArt(shown: Palette): Int = when (shown.key) {
@@ -11011,10 +11753,20 @@ class BuilderActivity : Activity() {
                     recreate()
                 }
             }
+            if (tag.isEmpty()) {
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.GLOBE, palette.marker)
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(gap(11), gap(8)).apply { marginEnd = gap(4) },
+                )
+            }
             addView(
                 ImageView(context).apply {
                     setImageResource(flagOf(tag))
                     scaleType = ImageView.ScaleType.FIT_CENTER
+                    visibility = if (tag.isEmpty()) View.GONE else View.VISIBLE
                 },
                 LinearLayout.LayoutParams(gap(11), gap(8)).apply { marginEnd = gap(4) },
             )
@@ -11054,16 +11806,26 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_language_note),
             )
         )
-        val current = Preferences.language(this).ifEmpty { deviceLanguage() }
+        val current = Preferences.language(this)
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
                 topMargin = gap(2)
             }
         }
-        Preferences.LANGUAGES.forEachIndexed { index, spoken ->
-            val picked = spoken.first == current
-            if (index > 0 && !picked) {
+        val spoken = deviceLanguage()
+        list.addView(
+            languageRow(
+                "",
+                getString(R.string.omni_language_auto),
+                Preferences.LANGUAGES.firstOrNull { it.first == spoken }?.second.orEmpty()
+                    .ifEmpty { spoken },
+                current.isEmpty(),
+            )
+        )
+        Preferences.LANGUAGES.forEach { one ->
+            val picked = one.first == current
+            if (!picked) {
                 list.addView(
                     rule(),
                     LinearLayout.LayoutParams(MATCH_PARENT, 1).apply {
@@ -11072,7 +11834,7 @@ class BuilderActivity : Activity() {
                     },
                 )
             }
-            list.addView(languageRow(spoken.first, spoken.second, spoken.third, picked))
+            list.addView(languageRow(one.first, one.second, one.third, picked))
         }
         content.addView(list)
         content.addView(
@@ -11356,12 +12118,7 @@ class BuilderActivity : Activity() {
                 palette.accent,
                 getString(R.string.omni_about_policy),
                 getString(R.string.omni_about_policy_note),
-            ) {
-                showNote(
-                    getString(R.string.omni_about_policy),
-                    getString(R.string.omni_about_policy_body),
-                )
-            }
+            ) { go(Screen.Legal(false)) }
         )
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
@@ -11370,12 +12127,7 @@ class BuilderActivity : Activity() {
                 0xFFB06BFF.toInt(),
                 getString(R.string.omni_about_terms),
                 getString(R.string.omni_about_terms_note),
-            ) {
-                showNote(
-                    getString(R.string.omni_about_terms),
-                    getString(R.string.omni_about_terms_body),
-                )
-            }
+            ) { go(Screen.Legal(true)) }
         )
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
@@ -11407,12 +12159,7 @@ class BuilderActivity : Activity() {
                     R.string.omni_about_rights,
                     Calendar.getInstance().get(Calendar.YEAR).toString(),
                 ),
-            ) {
-                showNote(
-                    getString(R.string.omni_about_terms),
-                    getString(R.string.omni_about_terms_body),
-                )
-            }
+            ) { go(Screen.Legal(true)) }
         )
         content.addView(who)
 
@@ -16276,28 +17023,37 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         val layout = layout
         if (layout != null && paddingLeft > 0) {
             gutter.textSize = textSize * 0.78f
+            val liftX = totalPaddingLeft.toFloat()
+            val liftY = totalPaddingTop.toFloat()
             val caretLine = layout.getLineForOffset(selectionStart.coerceIn(0, text?.length ?: 0))
-            val first = layout.getLineForVertical(scrollY)
-            val last = layout.getLineForVertical(scrollY + height)
+            val first = layout.getLineForVertical((scrollY - liftY).toInt())
+            val last = layout.getLineForVertical((scrollY + height - liftY).toInt())
+            val lowest = min(last, layout.lineCount - 1)
             val edge = (paddingLeft - gutter.textSize * 0.9f) + scrollX
 
             rule.color = Ink.fade(palette.accent, 0.06f)
             canvas.drawRect(
                 scrollX.toFloat(),
-                layout.getLineTop(caretLine).toFloat(),
+                liftY + layout.getLineTop(caretLine),
                 (scrollX + width).toFloat(),
-                layout.getLineBottom(caretLine).toFloat(),
+                liftY + layout.getLineBottom(caretLine),
                 rule,
             )
 
-            drawGuides(canvas, layout, first, min(last, layout.lineCount - 1))
+            canvas.save()
+            canvas.translate(0f, liftY)
+            drawGuides(canvas, layout, first, lowest)
+            canvas.restore()
 
             val faulty = faultLine - 1
-            if (faulty in first..min(last, layout.lineCount - 1)) {
+            if (faulty in first..lowest) {
+                canvas.save()
+                canvas.translate(liftX, liftY)
                 drawFault(canvas, layout, faulty)
+                canvas.restore()
             }
 
-            for (line in first..min(last, layout.lineCount - 1)) {
+            for (line in first..lowest) {
                 gutter.color = when (line) {
                     faulty -> palette.error
                     caretLine -> palette.accent
@@ -16306,14 +17062,17 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
                 canvas.drawText(
                     (line + 1).toString(),
                     edge,
-                    layout.getLineBaseline(line).toFloat(),
+                    liftY + layout.getLineBaseline(line),
                     gutter,
                 )
             }
 
             if (matchHere >= 0 && matchThere >= 0) {
+                canvas.save()
+                canvas.translate(liftX, liftY)
                 drawMatch(canvas, layout, matchHere)
                 drawMatch(canvas, layout, matchThere)
+                canvas.restore()
             }
 
             if (said.isNotEmpty()) {
