@@ -12312,10 +12312,108 @@ class BuilderActivity : Activity() {
         helpFooter()
     }
 
-    private fun guideStep(at: Int, title: String, detail: String, art: Int): View =
+    private fun linkPanel(title: String, url: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(gap(2), gap(2), gap(2), gap(2))
+            isClickable = true
+            isFocusable = true
+            contentDescription = said(title, url)
+            readAs(Button::class.java.name)
+            background = touchable(
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(2).toFloat()
+                    setColor(Ink.fade(palette.accent, 0.06f))
+                    setStroke(1, Ink.fade(palette.accent, 0.3f))
+                },
+                palette.accent,
+            )
+            setOnClickListener { hand(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            addView(
+                View(context).apply { foreground = Mark(Mark.Shape.LINK, palette.accent, 1.15f) },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = url
+                            setTextColor(Ink.hot(palette.accent, 0.45f))
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 8f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply {
+                    foreground = Mark(Mark.Shape.EXPORT, palette.accent, 1.1f)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginStart = gap(2) },
+            )
+        }
+
+    private fun noteStrip(body: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(gap(3), gap(2), gap(3), gap(2))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(2).toFloat()
+                setColor(Ink.fade(palette.accent, 0.09f))
+            }
+            addView(
+                View(context).apply {
+                    foreground = Mark(Mark.Shape.INFO_FILL, palette.accent)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                TextView(context).apply {
+                    val lead = getString(R.string.omni_note_lead)
+                    text = SpannableStringBuilder("$lead $body").apply {
+                        setSpan(
+                            StyleSpan(Typeface.BOLD),
+                            0,
+                            lead.length,
+                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                    }
+                    setTextColor(Ink.hot(palette.muted, 0.3f))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setLineSpacing(gap(1) / 2f, 1f)
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
+    private fun guideStep(
+        at: Int,
+        title: String,
+        detail: String,
+        art: Int,
+        extra: List<View> = emptyList(),
+    ): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(gap(4), gap(4), gap(4), gap(4))
+            setPadding(gap(3), gap(3), gap(3), gap(3))
             background = GradientDrawable().apply {
                 this.shape = GradientDrawable.RECTANGLE
                 cornerRadius = gap(4).toFloat()
@@ -12333,23 +12431,23 @@ class BuilderActivity : Activity() {
                     addView(
                         TextView(context).apply {
                             text = at.toString()
-                            setTextColor(palette.background)
-                            typeface = Type.label
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            setTextColor(Color.WHITE)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                             gravity = Gravity.CENTER
                             background = GradientDrawable().apply {
                                 shape = GradientDrawable.OVAL
-                                setColor(palette.accent)
+                                setColor(Ink.fade(palette.accent, 0.9f))
                             }
                         },
-                        LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
                     )
                     addView(
                         TextView(context).apply {
                             text = title
                             setTextColor(palette.foreground)
-                            typeface = Type.strong
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         },
                         LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                     )
@@ -12359,11 +12457,19 @@ class BuilderActivity : Activity() {
                 TextView(context).apply {
                     text = detail
                     setTextColor(palette.muted)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    setLineSpacing(gap(1).toFloat(), 1f)
-                    setPadding(0, gap(2), 0, gap(2))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setLineSpacing(gap(1) / 2f, 1f)
+                    setPadding(0, gap(2), 0, gap(1))
                 }
             )
+            extra.forEach { piece ->
+                addView(
+                    piece,
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                        topMargin = gap(2)
+                    },
+                )
+            }
             if (art != 0) {
                 addView(
                     ImageView(context).apply {
@@ -12371,7 +12477,9 @@ class BuilderActivity : Activity() {
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         adjustViewBounds = true
                     },
-                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                        topMargin = gap(2)
+                    },
                 )
             }
         }
@@ -12388,10 +12496,10 @@ class BuilderActivity : Activity() {
     private fun guideHero(mark: Mark.Shape, tint: Int, title: String, note: String): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, gap(2), 0, gap(2))
+            setPadding(0, gap(1), 0, gap(1))
             addView(
-                filledMark(mark, Ink.fade(tint, 0.85f), gap(3)),
-                LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginEnd = gap(4) },
+                filledMark(mark, Ink.fade(tint, 0.85f), gap(2)),
+                LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -12401,14 +12509,14 @@ class BuilderActivity : Activity() {
                             text = title
                             setTextColor(palette.foreground)
                             typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                         }
                     )
                     addView(
                         TextView(context).apply {
                             text = note
                             setTextColor(Ink.hot(palette.muted, 0.28f))
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                             setLineSpacing(gap(1) / 2f, 1f)
                             setPadding(0, gap(1), 0, 0)
                         }
@@ -12422,9 +12530,27 @@ class BuilderActivity : Activity() {
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
-                LinearLayout.LayoutParams(gap(24), gap(20)).apply { marginStart = gap(1) },
+                LinearLayout.LayoutParams(gap(16), gap(14)).apply { marginStart = gap(1) },
             )
+            addView(quipBubble(), LinearLayout.LayoutParams(gap(18), WRAP_CONTENT))
         }
+
+    private fun quipBubble(): View = TextView(this).apply {
+        text = getString(R.string.omni_guide_quip)
+        setTextColor(Ink.hot(palette.muted, 0.35f))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+        setLineSpacing(gap(1) / 2f, 1f)
+        setPadding(gap(3) / 2, gap(3) / 2, gap(3) / 2, gap(3) / 2)
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
+        hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = gap(2).toFloat()
+            setColor(Ink.fade(palette.accent, 0.1f))
+            setStroke(1, Ink.fade(palette.accent, 0.35f))
+        }
+    }
 
     private fun bulletCard(title: String, body: String): View =
         LinearLayout(this).apply {
@@ -12534,12 +12660,24 @@ class BuilderActivity : Activity() {
             else -> emptyList()
         }
         steps.forEachIndexed { index, step ->
+            val extra = if (adbTab == 2 && index == 0) {
+                listOf(
+                    linkPanel(
+                        getString(R.string.omni_adb_tools_link),
+                        getString(R.string.omni_adb_tools_url),
+                    ),
+                    noteStrip(getString(R.string.omni_adb_tools_only)),
+                )
+            } else {
+                emptyList()
+            }
             content.addView(
                 guideStep(
                     index + 1,
                     getString(step.first),
                     getString(step.second),
                     art.getOrElse(index) { 0 },
+                    extra,
                 )
             )
         }
