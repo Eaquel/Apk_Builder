@@ -1038,17 +1038,17 @@ data class Palette(
         val DARK = Palette(
             key = "dark",
             label = "Dark Theme",
-            background = 0xFF0A1620.toInt(),
-            surface = 0xFF0E1C25.toInt(),
-            raised = 0xFF202E3A.toInt(),
-            foreground = 0xFFEDF3F8.toInt(),
-            muted = 0xFF8FA3B4.toInt(),
-            accent = 0xFF159EFD.toInt(),
-            marker = 0xFF02BEFE.toInt(),
-            ok = 0xFF1AB74D.toInt(),
+            background = 0xFF030F18.toInt(),
+            surface = 0xFF061521.toInt(),
+            raised = 0xFF14283A.toInt(),
+            foreground = 0xFFFFFFFF.toInt(),
+            muted = 0xFF8FB7CD.toInt(),
+            accent = 0xFF008BFE.toInt(),
+            marker = 0xFF00CDFE.toInt(),
+            ok = 0xFF1FC77A.toInt(),
             warning = 0xFFF2A63D.toInt(),
             error = 0xFFF84048.toInt(),
-            divider = 0xFF1B2E3C.toInt(),
+            divider = 0xFF142D3E.toInt(),
             glowFirst = 0xFF0A2A44.toInt(),
             glowSecond = 0xFF06203A.toInt(),
             glowThird = 0xFF04182C.toInt(),
@@ -2565,6 +2565,8 @@ internal class Mark(
     private companion object {
         const val GRID = 24f
         const val STROKE = 1.7f
+        const val GLOW_STEPS = 3
+        const val GLOW_SWELL = 2.1f
         val CLEARING = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
     }
 
@@ -2580,27 +2582,29 @@ internal class Mark(
     override fun draw(canvas: Canvas) {
         val edge = min(bounds.width(), bounds.height()).toFloat()
         if (edge <= 0f) return
-        val unit = edge / GRID
+        val widest = STROKE * heft + if (glow) GLOW_STEPS * GLOW_SWELL else 0f
+        val room = GRID + widest
+        val unit = edge / room
         if (glow) {
-            var step = 3
+            var step = GLOW_STEPS
             while (step >= 1) {
-                swell = step * 2.1f
+                swell = step * GLOW_SWELL
                 bleed = 30 - step * 7
-                stamp(canvas, unit)
+                stamp(canvas, unit, widest)
                 step -= 1
             }
             swell = 0f
             bleed = 255
         }
-        stamp(canvas, unit)
+        stamp(canvas, unit, widest)
     }
 
-    private fun stamp(canvas: Canvas, unit: Float) {
-        val edge = unit * GRID
+    private fun stamp(canvas: Canvas, unit: Float, widest: Float) {
+        val edge = unit * (GRID + widest)
         canvas.save()
         canvas.translate(
-            bounds.left + (bounds.width() - edge) / 2f,
-            bounds.top + (bounds.height() - edge) / 2f,
+            bounds.left + (bounds.width() - edge) / 2f + unit * widest / 2f,
+            bounds.top + (bounds.height() - edge) / 2f + unit * widest / 2f,
         )
         canvas.scale(unit, unit)
         paint.color = colour
@@ -3996,7 +4000,7 @@ class BuilderActivity : Activity() {
             R.string.omni_help_band_trouble,
         )
 
-        val HELP_BANDS = listOf(4, 1, 1, 2, 2, 6, 2, 2, 5, 3)
+        val HELP_BANDS = listOf(3, 4, 1, 1, 2, 2, 6, 2, 2, 5, 3)
 
         val DOC_BAND_NAMES = listOf(
             R.string.omni_help_band_all,
@@ -4021,6 +4025,36 @@ class BuilderActivity : Activity() {
             R.string.omni_talk_step_tips to R.string.omni_talk_step_tips_note,
         )
 
+        val OS_TABS = listOf(
+            R.string.omni_os_windows to R.drawable.omni_logo_windows,
+            R.string.omni_os_mac to R.drawable.omni_logo_apple,
+            R.string.omni_os_linux to R.drawable.omni_logo_linux,
+        )
+
+        val OS_STEPS = listOf(
+            listOf(
+                R.string.omni_os_win_one,
+                R.string.omni_os_win_two,
+                R.string.omni_os_win_three,
+            ),
+            listOf(
+                R.string.omni_os_mac_one,
+                R.string.omni_os_mac_two,
+                R.string.omni_os_mac_three,
+            ),
+            listOf(
+                R.string.omni_os_linux_one,
+                R.string.omni_os_linux_two,
+                R.string.omni_os_linux_three,
+            ),
+        )
+
+        val OS_FILES = listOf(
+            listOf("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "fastboot.exe"),
+            listOf("adb", "fastboot", "etc1tool", "sqlite3"),
+            listOf("adb", "fastboot", "etc1tool", "sqlite3"),
+        )
+
         val ADB_OPEN = listOf(
             R.string.omni_adb_o_one to R.string.omni_adb_o_one_note,
             R.string.omni_adb_o_two to R.string.omni_adb_o_two_note,
@@ -4035,6 +4069,7 @@ class BuilderActivity : Activity() {
 
         val ADB_DESK = listOf(
             R.string.omni_adb_d_one to R.string.omni_adb_d_one_note,
+            R.string.omni_adb_d_setup to R.string.omni_adb_d_setup_note,
             R.string.omni_adb_d_two to R.string.omni_adb_d_two_note,
             R.string.omni_adb_d_three to R.string.omni_adb_d_three_note,
         )
@@ -4046,12 +4081,18 @@ class BuilderActivity : Activity() {
         )
 
         val ADB_DESK_ART = listOf(
-            R.drawable.omni_adb_usb_one,
+            0,
+            0,
             R.drawable.omni_adb_usb_two,
             R.drawable.omni_adb_usb_three,
         )
 
         val HELP_TOPICS = listOf(
+            Triple(
+                R.string.omni_ask_tree,
+                R.string.omni_ask_tree_note,
+                R.string.omni_ask_tree_body,
+            ),
             Triple(
                 R.string.omni_help_first,
                 R.string.omni_help_first_note,
@@ -4302,6 +4343,7 @@ class BuilderActivity : Activity() {
     private var docBand = 0
     private var helpOpen = -1
     private var adbTab = 0
+    private var osTab = 0
 
     private val talkHeld = mutableListOf<Pair<Boolean, String>>()
     private var talkDraft = ""
@@ -8464,7 +8506,7 @@ class BuilderActivity : Activity() {
             if (!mine) {
                 addView(
                     ImageView(context).apply {
-                        setImageResource(R.drawable.omni_mascot)
+                        setImageResource(R.drawable.omni_art_talk_head)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
@@ -9844,7 +9886,7 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     ImageView(context).apply {
-                        setImageResource(R.drawable.omni_mascot_reading)
+                        setImageResource(R.drawable.omni_art_kinds_wave)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
@@ -10398,7 +10440,13 @@ class BuilderActivity : Activity() {
             )
         }
 
-    private fun guideHead(mark: Mark.Shape, tint: Int, title: String, detail: String): View =
+    private fun guideHead(
+        mark: Mark.Shape,
+        tint: Int,
+        title: String,
+        detail: String,
+        art: Int = R.drawable.omni_art_help_ask,
+    ): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, gap(4), 0, gap(2))
@@ -10434,7 +10482,7 @@ class BuilderActivity : Activity() {
             )
             addView(
                 ImageView(context).apply {
-                    setImageResource(R.drawable.omni_mascot_reading)
+                    setImageResource(art)
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
@@ -10789,12 +10837,13 @@ class BuilderActivity : Activity() {
     }
 
     private fun helpMark(topic: Int): Pair<Mark.Shape, Int> = when (topic) {
-        0 -> Mark.Shape.HOME to palette.accent
-        1 -> Mark.Shape.ADD to palette.ok
-        2 -> Mark.Shape.CODE to palette.warning
-        3 -> Mark.Shape.PACKAGE to palette.error
-        4 -> Mark.Shape.SHIELD to palette.ok
-        else -> Mark.Shape.HELP to palette.accent
+        0 -> Mark.Shape.FOLDER to 0xFF2C7BE5.toInt()
+        1 -> Mark.Shape.HOME to 0xFF8B5CF6.toInt()
+        2 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
+        3 -> Mark.Shape.CODE to 0xFFF08A24.toInt()
+        4 -> Mark.Shape.PACKAGE to 0xFFEC4899.toInt()
+        5 -> Mark.Shape.SHIELD to 0xFF06B6D4.toInt()
+        else -> Mark.Shape.HELP to 0xFF2C7BE5.toInt()
     }
 
     private fun showNote(title: String, said: String) {
@@ -11842,8 +11891,9 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     ImageView(context).apply {
-                        setImageResource(R.drawable.omni_mascot_reading)
+                        setImageResource(R.drawable.omni_art_help_ask)
                         scaleType = ImageView.ScaleType.FIT_CENTER
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
                     LinearLayout.LayoutParams(gap(34), gap(26)).apply { marginStart = gap(2) },
                 )
@@ -12056,6 +12106,7 @@ class BuilderActivity : Activity() {
                 0xFF8B5CF6.toInt(),
                 getString(R.string.omni_help_docs),
                 getString(R.string.omni_help_docs_body),
+                R.drawable.omni_art_docs_read,
             )
         )
         content.addView(
@@ -12163,17 +12214,73 @@ class BuilderActivity : Activity() {
                 }
             )
             if (open) {
+                if (at == 0) {
+                    addView(
+                        codePanel(projectTree()),
+                        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                            topMargin = gap(2)
+                        },
+                    )
+                }
                 addView(
                     TextView(context).apply {
                         text = answer
-                        setTextColor(palette.muted)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        setLineSpacing(gap(1).toFloat(), 1f)
-                        setPadding(gap(10), gap(2), 0, gap(1))
+                        setTextColor(Ink.hot(palette.muted, 0.3f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        setLineSpacing(gap(1) / 2f, 1f)
+                        setPadding(0, gap(2), 0, gap(1))
                     }
                 )
             }
         }
+    }
+
+    private fun projectTree(): String {
+        val root = openProject ?: "/storage/emulated/0/Projects/My App"
+        return buildString {
+            append(root).append('/').append('\n')
+            append("\u251C\u2500\u2500 AndroidManifest.xml\n")
+            append("\u251C\u2500\u2500 ").append(PROJECT_FILE).append('\n')
+            append("\u251C\u2500\u2500 Java\n")
+            append("\u2502   \u2514\u2500\u2500 App.java\n")
+            append("\u2514\u2500\u2500 Res\n")
+            append("    \u251C\u2500\u2500 mipmap-xxxhdpi\n")
+            append("    \u251C\u2500\u2500 layout\n")
+            append("    \u251C\u2500\u2500 values\n")
+            append("    \u2514\u2500\u2500 \u2026")
+        }
+    }
+
+    private fun codePanel(body: String): View = android.widget.HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = false
+        setPadding(gap(3), gap(2), gap(3), gap(2))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = gap(2).toFloat()
+            setColor(palette.background)
+            setStroke(1, palette.divider)
+        }
+        addView(
+            TextView(context).apply {
+                val cut = body.indexOf('\n')
+                text = SpannableStringBuilder(body).apply {
+                    if (cut > 0) {
+                        setSpan(
+                            ForegroundColorSpan(palette.marker),
+                            0,
+                            cut,
+                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                    }
+                }
+                setTextColor(Ink.hot(palette.muted, 0.35f))
+                typeface = Type.data
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setLineSpacing(gap(1) / 2f, 1f)
+            },
+            WRAP_CONTENT,
+            WRAP_CONTENT,
+        )
     }
 
     private fun renderHelpFaq() {
@@ -12244,7 +12351,7 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     ImageView(context).apply {
-                        setImageResource(R.drawable.omni_mascot_reading)
+                        setImageResource(R.drawable.omni_art_help_ask)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                     },
                     LinearLayout.LayoutParams(gap(22), gap(18)).apply { marginStart = gap(2) },
@@ -12304,6 +12411,14 @@ class BuilderActivity : Activity() {
                                 setPadding(0, gap(2), 0, 0)
                             }
                         )
+                        talkMock(index)?.let { mock ->
+                            addView(
+                                mock,
+                                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                                    topMargin = gap(2)
+                                },
+                            )
+                        }
                     }
                 },
             )
@@ -12493,7 +12608,13 @@ class BuilderActivity : Activity() {
             .joinToString("\n") { "\u2022 " + it.trim() }
     }
 
-    private fun guideHero(mark: Mark.Shape, tint: Int, title: String, note: String): View =
+    private fun guideHero(
+        mark: Mark.Shape,
+        tint: Int,
+        title: String,
+        note: String,
+        art: Int,
+    ): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, gap(1), 0, gap(1))
@@ -12526,7 +12647,7 @@ class BuilderActivity : Activity() {
             )
             addView(
                 ImageView(context).apply {
-                    setImageResource(R.drawable.omni_mascot_reading)
+                    setImageResource(art)
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
@@ -12550,6 +12671,376 @@ class BuilderActivity : Activity() {
             setColor(Ink.fade(palette.accent, 0.1f))
             setStroke(1, Ink.fade(palette.accent, 0.35f))
         }
+    }
+
+    private fun mockLine(mark: Mark.Shape, tint: Int, named: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(gap(2), gap(1), gap(2), gap(1))
+            addView(
+                View(context).apply { foreground = Mark(mark, tint) },
+                LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                TextView(context).apply {
+                    text = named
+                    setTextColor(Ink.hot(palette.muted, 0.3f))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
+            )
+        }
+
+    private fun mockPanel(rows: List<View>): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(gap(1), gap(1), gap(1), gap(1))
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = gap(2).toFloat()
+            setColor(palette.background)
+            setStroke(1, palette.divider)
+        }
+        rows.forEach { addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) }
+    }
+
+    private fun mockAsk(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        addView(
+            TextView(context).apply {
+                text = getString(R.string.omni_talk_hint)
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(gap(3), gap(2), gap(3), gap(2))
+                background = pill(palette.background, gap(4).toFloat())
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(2) },
+        )
+        addView(
+            View(context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(palette.accent)
+                }
+                foreground = Mark(Mark.Shape.SEND, Color.WHITE)
+            },
+            LinearLayout.LayoutParams(gap(7), gap(7)),
+        )
+    }
+
+    private fun mockJudged(good: Boolean, head: String, said: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(2), gap(2), gap(2), gap(2))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            val tint = if (good) palette.ok else palette.error
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(2).toFloat()
+                setColor(Ink.fade(tint, 0.1f))
+                setStroke(1, Ink.fade(tint, 0.4f))
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(
+                                if (good) Mark.Shape.TICK else Mark.Shape.CLOSE,
+                                tint,
+                            )
+                        },
+                        LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = head
+                            setTextColor(tint)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                        }
+                    )
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = said
+                    setTextColor(Ink.hot(palette.muted, 0.3f))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                    setLineSpacing(gap(1) / 2f, 1f)
+                    setPadding(0, gap(1), 0, 0)
+                }
+            )
+        }
+
+    private fun talkMock(at: Int): View? = when (at) {
+        0 -> mockAsk()
+        1 -> mockPanel(
+            listOf(
+                mockLine(Mark.Shape.FOLDER, palette.marker, getString(R.string.omni_talk_folder)),
+                mockLine(
+                    Mark.Shape.DROID,
+                    palette.ok,
+                    openProject?.let { File(it).name }
+                        ?: getString(R.string.omni_projects_none),
+                ),
+            )
+        )
+        2 -> mockPanel(
+            listOf(
+                mockLine(
+                    Mark.Shape.NOTE,
+                    palette.accent,
+                    getString(R.string.omni_talk_add_file),
+                ),
+                mockLine(
+                    Mark.Shape.IMAGE,
+                    palette.warning,
+                    getString(R.string.omni_talk_add_picture),
+                ),
+                mockLine(
+                    Mark.Shape.LINK,
+                    palette.ok,
+                    getString(R.string.omni_talk_add_link),
+                ),
+            )
+        )
+        3 -> mockPanel(
+            listOf(
+                mockLine(
+                    Mark.Shape.ROBOT,
+                    palette.accent,
+                    getString(R.string.omni_talk_switch),
+                ),
+                mockLine(
+                    Mark.Shape.HELP,
+                    palette.muted,
+                    getString(R.string.omni_help_title),
+                ),
+            )
+        )
+        4 -> mockPanel(
+            listOf(
+                mockLine(
+                    Mark.Shape.BROOM,
+                    palette.error,
+                    getString(R.string.omni_talk_clear),
+                ),
+                mockLine(
+                    Mark.Shape.SHARE,
+                    palette.accent,
+                    getString(R.string.omni_talk_export),
+                ),
+            )
+        )
+        5 -> LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(
+                mockJudged(
+                    false,
+                    getString(R.string.omni_talk_vague),
+                    getString(R.string.omni_talk_vague_case),
+                ),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+            addView(
+                mockJudged(
+                    true,
+                    getString(R.string.omni_talk_sharp),
+                    getString(R.string.omni_talk_sharp_case),
+                ),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    topMargin = gap(2)
+                },
+            )
+        }
+        else -> null
+    }
+
+    private fun osRow(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        OS_TABS.forEachIndexed { at, one ->
+            val on = at == osTab
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    minimumHeight = gap(9)
+                    setPadding(gap(2), gap(2), gap(2), gap(2))
+                    isClickable = true
+                    isFocusable = true
+                    isSelected = on
+                    contentDescription = getString(one.first)
+                    readAs(Button::class.java.name)
+                    background = touchable(
+                        GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(5).toFloat()
+                            setColor(if (on) palette.accent else Ink.fade(palette.accent, 0.08f))
+                            setStroke(1, if (on) palette.accent else Ink.fade(palette.accent, 0.3f))
+                        },
+                        palette.accent,
+                    )
+                    setOnClickListener {
+                        osTab = at
+                        render(false)
+                    }
+                    addView(
+                        ImageView(context).apply {
+                            setImageResource(one.second)
+                            scaleType = ImageView.ScaleType.FIT_CENTER
+                            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                        },
+                        LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(one.first)
+                            setTextColor(if (on) Color.WHITE else Ink.hot(palette.muted, 0.3f))
+                            typeface = if (on) Type.strong else Type.body
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    marginStart = if (at == 0) 0 else gap(1)
+                },
+            )
+        }
+    }
+
+    private fun countedLines(lines: List<String>): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        lines.forEachIndexed { at, line ->
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, gap(1), 0, gap(1))
+                    addView(
+                        TextView(context).apply {
+                            text = (at + 1).toString()
+                            setTextColor(Color.WHITE)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                            gravity = Gravity.CENTER
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(Ink.fade(palette.accent, 0.9f))
+                            }
+                        },
+                        LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = line
+                            setTextColor(Ink.hot(palette.muted, 0.3f))
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            setLineSpacing(gap(1) / 2f, 1f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+    }
+
+    private fun filePanel(named: String, names: List<String>): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(2), gap(2), gap(2), gap(2))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(2).toFloat()
+                setColor(palette.background)
+                setStroke(1, palette.divider)
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, 0, 0, gap(1))
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(Mark.Shape.BACK, palette.muted)
+                        },
+                        LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
+                    )
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(Mark.Shape.FOLDER, palette.marker)
+                        },
+                        LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = named
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            maxLines = 1
+                        }
+                    )
+                }
+            )
+            names.forEach { one ->
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(gap(3), gap(1) / 2, 0, gap(1) / 2)
+                        addView(
+                            View(context).apply {
+                                foreground = Mark(
+                                    if (one.endsWith(".exe")) Mark.Shape.BINARY
+                                    else Mark.Shape.FILE,
+                                    palette.muted,
+                                )
+                            },
+                            LinearLayout.LayoutParams(gap(4), gap(4)).apply {
+                                marginEnd = gap(2)
+                            },
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = one
+                                setTextColor(Ink.hot(palette.muted, 0.2f))
+                                typeface = Type.data
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                                maxLines = 1
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+            }
+        }
+
+    private fun osSteps(): List<View> {
+        val lines = OS_STEPS[osTab].map { getString(it) }
+        val files = OS_FILES[osTab]
+        return listOf(
+            osRow(),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    countedLines(lines),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    filePanel("platform-tools", files),
+                    LinearLayout.LayoutParams(gap(36), WRAP_CONTENT),
+                )
+            },
+        )
     }
 
     private fun bulletCard(title: String, body: String): View =
@@ -12635,6 +13126,8 @@ class BuilderActivity : Activity() {
                         else -> R.string.omni_adb_desk_note
                     }
                 ),
+                if (adbTab == 2) R.drawable.omni_art_adb_desk
+                else R.drawable.omni_art_help_ask,
             )
         )
         content.addView(
@@ -12660,16 +13153,16 @@ class BuilderActivity : Activity() {
             else -> emptyList()
         }
         steps.forEachIndexed { index, step ->
-            val extra = if (adbTab == 2 && index == 0) {
-                listOf(
+            val extra = when {
+                adbTab == 2 && index == 0 -> listOf(
                     linkPanel(
                         getString(R.string.omni_adb_tools_link),
                         getString(R.string.omni_adb_tools_url),
                     ),
                     noteStrip(getString(R.string.omni_adb_tools_only)),
                 )
-            } else {
-                emptyList()
+                adbTab == 2 && index == 1 -> osSteps()
+                else -> emptyList()
             }
             content.addView(
                 guideStep(
