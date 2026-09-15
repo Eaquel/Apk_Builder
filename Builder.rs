@@ -381,7 +381,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "AES-256 in CBC with PKCS#7 padding, HMAC-SHA256 and HMAC-SHA512, and PBKDF2-HMAC-SHA256, each checked against the published vectors of FIPS-197, NIST SP 800-38A, RFC 4231 and RFC 6070. The substitution is computed in the field rather than read from a table, the reduction and the padding check are carried in masks rather than branches, and tags are compared to the last byte whatever the first one said, so what a key is changes what comes out and not how long it took or which memory was touched. All 256 bytes are held to the table the standard describes.",
         missing: &[
             "Constant-time by construction and by reading, not by measurement: nothing here times the compiled code on a real device to confirm the compiler did not put a branch back.",
-            "CBC only, with authentication laid over it rather than built in. No GCM, and no single primitive that encrypts and authenticates in one pass.",
+            "GCM is here, and CBC with authentication laid over it is still what the keystore uses. GCM takes a ninety-six-bit nonce alone, because the other lengths need a second hashing pass this does not have, and nothing here chooses a nonce for a caller or refuses one it has seen before.",
             "No key derivation other than PBKDF2, and no memory-hard function such as scrypt or Argon2.",
         ],
     },
@@ -1875,6 +1875,7 @@ pub mod speech {
         ("Making something new wants a class.", "Yeni bir şey oluşturmak bir sınıf ister."),
         ("Merging what the libraries ask for needs it read first.", "Kütüphanelerin istediklerini birleştirmek, önce bunun okunmasını gerektirir."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk, Target_sdk'dan yüksek."),
+        ("More is being sealed under one nonce than the mode allows.", "Tek bir tek-kullanımlık sayı altında, kipin izin verdiğinden fazlası mühürleniyor."),
         ("Mount names are unique so a path means one thing.", "Bağlama adları benzersizdir; böylece bir yol tek bir anlama gelir."),
         ("Mount the directory before reading from it.", "Okumadan önce dizini bağlayın."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Kenara alın. Üzerine yazmak taşıdığı her şeyi atardı ve değiştirdiği anahtarla imzalanmış her uygulama artık güncellenemezdi."),
@@ -1892,6 +1893,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Burada hiçbir şey ad tahmin etmez. Bir yerel değişken, bir parametre, bu sınıfın ya da üstündeki bir sınıfın alanı: bunların dışındaki her şey, sınıf dosyasına yazılmak yerine reddedilir."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Bu yapıda hiçbir şey kayıp bir paroladan imza anahtarını kurtaramaz ve hiçbir şey parolayı hiçbir yere kaydetmez."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Bu yapıda hiçbir şey kayıp bir paroladan imza anahtarını kurtaramaz ve hiçbir şey parolayı hiçbir yere kaydetmez. Paroladan eminseniz, dosya yazıldığı dosya değildir. Her iki durumda da hiçbir şey çözülmez."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Hiçbir şey geri verilmez. Eşleşmeyen bir etiket, baytların, ek verinin ya da anahtarın mühürlenirken kullanılan olmadığı anlamına gelir."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Dolgusu doğrulanmayan bir çözmeden hiçbir şey döndürülmez."),
         ("Nothing is returned from a key whose contents do not read back.", "İçeriği geri okunamayan bir anahtardan hiçbir şey döndürülmez."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Hiçbir şey körlemesiz imzalanmaz. Doğrudan iletiden hesaplanan bir imza, süresini ölçebilen herkese anahtar hakkında bilgi verirdi."),
@@ -2239,6 +2241,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Cihazdaki çalışma ortamında modül sistemi yoktur: her sınıf, kendisine verilen sınıf yükleyicisi tarafından bulunur. Burada bütün işi paketler ve içe aktarmalar yapar."),
         ("The same case is written twice in one switch.", "Aynı case bir switch içinde iki kez yazılmış."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "Aynı sayının daha kısa bir kodlaması var. Tek bir değerin iki yazılışı biçimi belirsizleştirir."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Mühürlenmiş baytlar, mühürlendikleri etiketi taşımıyor."),
         ("The signing block carries no scheme this build reads.", "İmza bloğu, bu yapının okuduğu hiçbir şemayı taşımıyor."),
         ("The signing block carries one identifier twice.", "İmza bloğu bir tanımlayıcıyı iki kez taşıyor."),
         ("The signing block is larger than the accepted limit.", "İmza bloğu kabul edilen sınırdan büyük."),
@@ -3095,6 +3098,7 @@ pub mod speech {
         ("Making something new wants a class.", "Etwas Neues zu erzeugen will eine Klasse."),
         ("Merging what the libraries ask for needs it read first.", "Um zusammenzuführen, was die Bibliotheken verlangen, muss es zuerst gelesen werden."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk ist höher als Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Unter einer einzigen Nonce wird mehr versiegelt, als der Modus erlaubt."),
         ("Mount names are unique so a path means one thing.", "Namen von Einhängepunkten sind eindeutig, damit ein Pfad eine Bedeutung hat."),
         ("Mount the directory before reading from it.", "Hängen Sie das Verzeichnis ein, bevor Sie daraus lesen."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Legen Sie es beiseite. Es zu überschreiben verwürfe alles, was es enthält, und jede mit dem ersetzten Schlüssel signierte Anwendung ließe sich nicht mehr aktualisieren."),
@@ -3112,6 +3116,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Hier rät nichts einen Namen. Eine lokale Variable, ein Parameter, ein Feld dieser Klasse oder einer darüber: alles andere wird abgelehnt, statt in eine Klassendatei geschrieben zu werden."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Nichts in diesem Build kann einen Signaturschlüssel aus einem verlorenen Kennwort wiederherstellen, und nichts darin hält das Kennwort irgendwo fest."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Nichts in diesem Build kann einen Signaturschlüssel aus einem verlorenen Kennwort wiederherstellen, und nichts darin hält das Kennwort irgendwo fest. Wenn Sie sich beim Kennwort sicher sind, ist die Datei nicht die, als die sie geschrieben wurde. So oder so wird nichts entschlüsselt."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Es wird nichts zurückgegeben. Ein Siegel, das nicht passt, heißt, dass die Bytes, die Zusatzdaten oder der Schlüssel nicht die sind, mit denen versiegelt wurde."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Aus einer Entschlüsselung, deren Auffüllung nicht stimmt, wird nichts zurückgegeben."),
         ("Nothing is returned from a key whose contents do not read back.", "Aus einem Schlüssel, dessen Inhalt sich nicht zurücklesen lässt, wird nichts zurückgegeben."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Nichts wird ungeblendet signiert. Eine direkt aus der Nachricht berechnete Signatur ließe jeden, der sie zeitlich messen kann, etwas über den Schlüssel erfahren."),
@@ -3459,6 +3464,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Die Laufzeit auf einem Gerät hat kein Modulsystem: jede Klasse wird von dem Klassenlader gefunden, dem sie gegeben wurde. Die ganze Arbeit machen hier Pakete und Importe."),
         ("The same case is written twice in one switch.", "Derselbe case steht zweimal in einem switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "Dieselbe Zahl hat eine kürzere Kodierung. Zwei Schreibweisen für einen Wert machen ein Format mehrdeutig."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Die versiegelten Bytes tragen nicht das Siegel, mit dem sie versiegelt wurden."),
         ("The signing block carries no scheme this build reads.", "Der Signaturblock führt kein Schema mit, das dieser Build liest."),
         ("The signing block carries one identifier twice.", "Der Signaturblock führt eine Kennung zweimal mit."),
         ("The signing block is larger than the accepted limit.", "Der Signaturblock ist größer als die zulässige Grenze."),
@@ -4315,6 +4321,7 @@ pub mod speech {
         ("Making something new wants a class.", "Crear algo nuevo quiere una clase."),
         ("Merging what the libraries ask for needs it read first.", "Para combinar lo que piden las bibliotecas hay que leerlo antes."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk es mayor que Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Se sella bajo un mismo número de un solo uso más de lo que el modo permite."),
         ("Mount names are unique so a path means one thing.", "Los nombres de los puntos de montaje son únicos para que una ruta signifique una sola cosa."),
         ("Mount the directory before reading from it.", "Monte el directorio antes de leer de él."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Apártelo. Sobrescribirlo tiraría todo lo que contiene, y cada aplicación firmada con la clave sustituida ya no se podría actualizar."),
@@ -4332,6 +4339,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Aquí nada adivina un nombre. Una variable local, un parámetro, un campo de esta clase o de una superior: todo lo demás se rechaza en lugar de escribirse en un archivo de clase."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Nada en esta compilación puede recuperar una clave de firma a partir de una contraseña perdida, y nada en ella guarda la contraseña en ninguna parte."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Nada en esta compilación puede recuperar una clave de firma a partir de una contraseña perdida, y nada en ella guarda la contraseña en ninguna parte. Si está seguro de la contraseña, entonces el archivo no es el que se escribió. En cualquier caso no se descifra nada."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "No se devuelve nada. Una etiqueta que no coincide significa que los bytes, los datos añadidos o la clave no son aquellos con los que se selló."),
         ("Nothing is returned from a decryption whose padding does not check out.", "No se devuelve nada de un descifrado cuyo relleno no cuadra."),
         ("Nothing is returned from a key whose contents do not read back.", "No se devuelve nada de una clave cuyo contenido no se puede volver a leer."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Nada se firma sin cegado. Una firma calculada directamente a partir del mensaje permitiría a cualquiera que pueda cronometrarla aprender algo sobre la clave."),
@@ -4679,6 +4687,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "El entorno de ejecución de un dispositivo no tiene sistema de módulos: cada clase la encuentra el cargador de clases que la recibió. Aquí todo el trabajo lo hacen los paquetes y las importaciones."),
         ("The same case is written twice in one switch.", "El mismo case está escrito dos veces en un switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "El mismo número tiene una codificación más corta. Dos escrituras de un valor hacen ambiguo un formato."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Los bytes sellados no llevan la etiqueta con la que fueron sellados."),
         ("The signing block carries no scheme this build reads.", "El bloque de firma no lleva ningún esquema que esta compilación lea."),
         ("The signing block carries one identifier twice.", "El bloque de firma lleva un identificador dos veces."),
         ("The signing block is larger than the accepted limit.", "El bloque de firma es mayor que el límite admitido."),
@@ -5535,6 +5544,7 @@ pub mod speech {
         ("Making something new wants a class.", "Créer quelque chose de nouveau demande une classe."),
         ("Merging what the libraries ask for needs it read first.", "Fusionner ce que les bibliothèques demandent exige de le lire d'abord."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk est supérieur à Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "On scelle sous un même nombre à usage unique plus que le mode ne permet."),
         ("Mount names are unique so a path means one thing.", "Les noms de points de montage sont uniques pour qu'un chemin ne signifie qu'une seule chose."),
         ("Mount the directory before reading from it.", "Montez le répertoire avant d'y lire."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Mettez-le de côté. L'écraser jetterait tout ce qu'il contient, et toute application signée avec la clé remplacée ne pourrait plus être mise à jour."),
@@ -5552,6 +5562,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Rien ici ne devine un nom. Une variable locale, un paramètre, un champ de cette classe ou d'une classe au-dessus : tout le reste est refusé plutôt qu'écrit dans un fichier class."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Rien dans cette compilation ne peut récupérer une clé de signature à partir d'un mot de passe perdu, et rien n'y enregistre le mot de passe où que ce soit."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Rien dans cette compilation ne peut récupérer une clé de signature à partir d'un mot de passe perdu, et rien n'y enregistre le mot de passe où que ce soit. Si c'est un mot de passe dont vous êtes sûr, alors le fichier n'est pas celui sous lequel il a été écrit. Rien n'est déchiffré dans un cas comme dans l'autre."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Rien n est rendu. Une étiquette qui ne correspond pas signifie que les octets, les données ajoutées ou la clé ne sont pas ceux avec lesquels on a scellé."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Rien n'est renvoyé d'un déchiffrement dont le remplissage ne se vérifie pas."),
         ("Nothing is returned from a key whose contents do not read back.", "Rien n'est renvoyé d'une clé dont le contenu ne se relit pas."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Rien n'est signé sans aveuglement. Une signature calculée directement à partir du message permettrait à quiconque peut la chronométrer d'apprendre quelque chose sur la clé."),
@@ -5899,6 +5910,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "L'exécution sur un appareil n'a pas de système de modules : chaque classe est trouvée par le chargeur de classes auquel elle a été confiée. Les paquets et les imports font ici tout le travail."),
         ("The same case is written twice in one switch.", "Le même case est écrit deux fois dans un switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "Le même nombre a un encodage plus court. Deux écritures d'une même valeur rendent un format ambigu."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Les octets scellés ne portent pas l étiquette avec laquelle ils ont été scellés."),
         ("The signing block carries no scheme this build reads.", "Le bloc de signature ne porte aucun schéma que cette compilation lit."),
         ("The signing block carries one identifier twice.", "Le bloc de signature porte deux fois un même identifiant."),
         ("The signing block is larger than the accepted limit.", "Le bloc de signature est plus grand que la limite acceptée."),
@@ -6758,6 +6770,7 @@ pub mod speech {
         ("Making something new wants a class.", "Creare qualcosa di nuovo vuole una classe."),
         ("Merging what the libraries ask for needs it read first.", "Unire ciò che le librerie chiedono richiede di leggerlo prima."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk è più alto di Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Sotto un solo numero usato una volta si sigilla più di quanto la modalità permetta."),
         ("Mount names are unique so a path means one thing.", "I nomi dei punti di montaggio sono unici perché un percorso significhi una cosa sola."),
         ("Mount the directory before reading from it.", "Montate la directory prima di leggerci."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Spostatelo da parte. Sovrascriverlo butterebbe via tutto ciò che contiene, e ogni applicazione firmata con la chiave sostituita non potrebbe più essere aggiornata."),
@@ -6775,6 +6788,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Nulla qui indovina un nome. Una variabile locale, un parametro, un campo di questa classe o di una superiore: tutto il resto è rifiutato invece di essere scritto in un file class."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Nulla in questa compilazione può recuperare una chiave di firma da una password perduta, e nulla al suo interno registra la password da qualche parte."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Nulla in questa compilazione può recuperare una chiave di firma da una password perduta, e nulla al suo interno registra la password da qualche parte. Se questa è una password di cui siete sicuri, allora il file non è quello con cui è stata scritta. In entrambi i casi non viene decifrato nulla."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Non viene restituito nulla. Un etichetta che non corrisponde significa che i byte, i dati aggiunti o la chiave non sono quelli con cui si è sigillato."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Nulla viene restituito da una decifratura il cui riempimento non torna."),
         ("Nothing is returned from a key whose contents do not read back.", "Nulla viene restituito da una chiave il cui contenuto non si rilegge."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Nulla viene firmato senza accecamento. Una firma calcolata direttamente dal messaggio permetterebbe a chiunque possa cronometrarla di imparare qualcosa sulla chiave."),
@@ -7122,6 +7136,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "L'esecuzione su un dispositivo non ha un sistema di moduli: ogni classe è trovata dal caricatore di classi a cui è stata affidata. Qui i pacchetti e le importazioni fanno tutto il lavoro."),
         ("The same case is written twice in one switch.", "Lo stesso case è scritto due volte in uno switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "Lo stesso numero ha una codifica più corta. Due scritture di un solo valore rendono un formato ambiguo."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "I byte sigillati non portano l etichetta con cui sono stati sigillati."),
         ("The signing block carries no scheme this build reads.", "Il blocco di firma non porta alcuno schema che questa compilazione legga."),
         ("The signing block carries one identifier twice.", "Il blocco di firma porta due volte lo stesso identificatore."),
         ("The signing block is larger than the accepted limit.", "Il blocco di firma è più grande del limite accettato."),
@@ -7981,6 +7996,7 @@ pub mod speech {
         ("Making something new wants a class.", "Criar algo novo quer uma classe."),
         ("Merging what the libraries ask for needs it read first.", "Juntar o que as bibliotecas pedem exige lê-lo primeiro."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk é maior que Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Sob um mesmo número de uso único sela-se mais do que o modo permite."),
         ("Mount names are unique so a path means one thing.", "Nomes de ponto de montagem são únicos para que um caminho signifique uma coisa só."),
         ("Mount the directory before reading from it.", "Monte o diretório antes de ler dele."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Ponha-o de lado. Sobrescrevê-lo jogaria fora tudo o que ele guarda, e todo aplicativo assinado com a chave substituída não poderia mais ser atualizado."),
@@ -7998,6 +8014,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Nada aqui adivinha um nome. Uma variável local, um parâmetro, um campo desta classe ou de uma acima: qualquer outra coisa é recusada em vez de escrita num arquivo class."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Nada nesta compilação consegue recuperar uma chave de assinatura de uma senha perdida, e nada nela registra a senha em lugar algum."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Nada nesta compilação consegue recuperar uma chave de assinatura de uma senha perdida, e nada nela registra a senha em lugar algum. Se esta é uma senha de que você tem certeza, então o arquivo não é aquele com que ela foi escrita. De um jeito ou de outro nada é decifrado."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Nada é devolvido. Uma etiqueta que não corresponde significa que os bytes, os dados acrescentados ou a chave não são aqueles com que se selou."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Nada é devolvido de uma decifração cujo preenchimento não confere."),
         ("Nothing is returned from a key whose contents do not read back.", "Nada é devolvido de uma chave cujo conteúdo não se relê."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Nada é assinado sem cegamento. Uma assinatura calculada direto da mensagem deixaria qualquer um que consiga cronometrá-la aprender algo sobre a chave."),
@@ -8345,6 +8362,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "A execução num dispositivo não tem sistema de módulos: cada classe é encontrada pelo carregador de classes a que foi entregue. Aqui os pacotes e as importações fazem todo o trabalho."),
         ("The same case is written twice in one switch.", "O mesmo case está escrito duas vezes num switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "O mesmo número tem uma codificação mais curta. Duas grafias de um valor tornam um formato ambíguo."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Os bytes selados não levam a etiqueta com que foram selados."),
         ("The signing block carries no scheme this build reads.", "O bloco de assinatura não traz esquema algum que esta compilação leia."),
         ("The signing block carries one identifier twice.", "O bloco de assinatura traz um identificador duas vezes."),
         ("The signing block is larger than the accepted limit.", "O bloco de assinatura é maior que o limite aceito."),
@@ -9201,6 +9219,7 @@ pub mod speech {
         ("Making something new wants a class.", "Создание нового требует класса."),
         ("Merging what the libraries ask for needs it read first.", "Чтобы слить то, что просят библиотеки, это нужно сначала прочитать."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk выше, чем Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Под одним одноразовым числом запечатывается больше, чем позволяет режим."),
         ("Mount names are unique so a path means one thing.", "Имена точек монтирования уникальны, чтобы путь означал одно."),
         ("Mount the directory before reading from it.", "Смонтируйте каталог, прежде чем читать из него."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Отодвиньте его. Запись поверх выбросила бы всё, что он хранит, и каждое приложение, подписанное заменяемым ключом, больше нельзя было бы обновить."),
@@ -9218,6 +9237,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Ничто здесь не угадывает имя. Локальная переменная, параметр, поле этого класса или класса выше: всё остальное отклоняется, а не пишется в файл class."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Ничто в этой сборке не может восстановить ключ подписи по утраченному паролю, и ничто в ней нигде не записывает пароль."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Ничто в этой сборке не может восстановить ключ подписи по утраченному паролю, и ничто в ней нигде не записывает пароль. Если это пароль, в котором вы уверены, значит файл не тот, каким он был написан. В любом случае ничего не расшифровывается."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Ничего не возвращается. Несовпавшая метка означает, что байты, добавочные данные или ключ не те, которыми запечатывали."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Из расшифровки, у которой не сходится заполнение, ничего не возвращается."),
         ("Nothing is returned from a key whose contents do not read back.", "Из ключа, содержимое которого не перечитывается, ничего не возвращается."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Ничто не подписывается без ослепления. Подпись, вычисленная прямо из сообщения, позволила бы любому, кто может её измерить по времени, узнать что-то о ключе."),
@@ -9565,6 +9585,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "У среды выполнения на устройстве нет системы модулей: каждый класс находит тот загрузчик классов, которому его дали. Здесь всю работу делают пакеты и импорты."),
         ("The same case is written twice in one switch.", "Один и тот же case записан дважды в одном switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "У того же числа есть более короткая кодировка. Два написания одного значения делают формат неоднозначным."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Запечатанные байты не несут метки, которой их запечатали."),
         ("The signing block carries no scheme this build reads.", "Блок подписи не несёт схемы, которую читает эта сборка."),
         ("The signing block carries one identifier twice.", "Блок подписи несёт один идентификатор дважды."),
         ("The signing block is larger than the accepted limit.", "Блок подписи больше принимаемого предела."),
@@ -10421,6 +10442,7 @@ pub mod speech {
         ("Making something new wants a class.", "إنشاء شيء جديد يريد صنفًا."),
         ("Merging what the libraries ask for needs it read first.", "دمج ما تطلبه المكتبات يستلزم قراءته أولًا."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk أعلى من Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "يختم تحت رقم استعمال واحد أكثر مما يسمح به النمط."),
         ("Mount names are unique so a path means one thing.", "أسماء نقاط الوصل فريدة كي يعني المسار شيئًا واحدًا."),
         ("Mount the directory before reading from it.", "صِل الدليل قبل القراءة منه."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "أزحه جانبًا. الكتابة فوقه ستطرح كل ما يحمله، وكل تطبيق وُقّع بالمفتاح الذي يحل محله لن يمكن تحديثه بعد ذلك."),
@@ -10438,6 +10460,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "لا شيء هنا يخمّن اسمًا. متغير محلي، أو معامل، أو حقل في هذا الصنف أو في صنف أعلاه: وما عدا ذلك يُرفض بدل أن يُكتب في ملف class."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "لا شيء في هذا البناء يستطيع استعادة مفتاح توقيع من كلمة مرور ضائعة، ولا شيء فيه يسجّل كلمة المرور في أي مكان."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "لا شيء في هذا البناء يستطيع استعادة مفتاح توقيع من كلمة مرور ضائعة، ولا شيء فيه يسجّل كلمة المرور في أي مكان. فإن كنت واثقًا من كلمة المرور هذه، فالملف ليس الملف الذي كُتب بها. ولا يُفك التشفير في الحالتين."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "لا يعاد شيء. عدم تطابق الوسم يعني أن البايتات أو البيانات المضافة أو المفتاح ليست تلك التي ختم بها."),
         ("Nothing is returned from a decryption whose padding does not check out.", "لا يُعاد شيء من فك تشفير لا يستقيم حشوه."),
         ("Nothing is returned from a key whose contents do not read back.", "لا يُعاد شيء من مفتاح لا تُقرأ محتوياته من جديد."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "لا يُوقّع شيء بلا تعمية. فالتوقيع المحسوب من الرسالة مباشرة سيتيح لكل من يستطيع قياس زمنه أن يعرف شيئًا عن المفتاح."),
@@ -10785,6 +10808,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "ليس لوقت التشغيل على جهاز نظام وحدات: كل صنف يجده محمّل الأصناف الذي أُعطي له. والحزم والاستيرادات تقوم هنا بالعمل كله."),
         ("The same case is written twice in one switch.", "كُتب case نفسه مرتين في switch واحد."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "للعدد نفسه ترميز أقصر. وكتابة قيمة واحدة بصورتين تجعل التنسيق ملتبسًا."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "البايتات المختومة لا تحمل الوسم الذي ختمت به."),
         ("The signing block carries no scheme this build reads.", "كتلة التوقيع لا تحمل أي مخطط يقرأه هذا البناء."),
         ("The signing block carries one identifier twice.", "كتلة التوقيع تحمل معرّفًا واحدًا مرتين."),
         ("The signing block is larger than the accepted limit.", "كتلة التوقيع أكبر من الحد المقبول."),
@@ -11641,6 +11665,7 @@ pub mod speech {
         ("Making something new wants a class.", "创建新对象需要一个类。"),
         ("Merging what the libraries ask for needs it read first.", "要合并各个库所要求的内容，得先把它读进来。"),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk 高于 Target_sdk。"),
+        ("More is being sealed under one nonce than the mode allows.", "在同一个一次性数下封装的内容超过该模式所允许的量。"),
         ("Mount names are unique so a path means one thing.", "挂载点名称唯一，路径才只指一件事。"),
         ("Mount the directory before reading from it.", "请先挂载该目录，再从中读取。"),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "请把它挪到一边。覆写它会把它所持有的一切都丢掉，而凡是用被替换的密钥签过名的应用都将无法再更新。"),
@@ -11658,6 +11683,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "此处不猜测名称。局部变量、参数、本类或其上层类的字段：除此之外一律拒绝，而不是写进 class 文件。"),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "此构建中没有任何东西能凭丢失的口令找回签名密钥，其中也没有任何地方记录口令。"),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "此构建中没有任何东西能凭丢失的口令找回签名密钥，其中也没有任何地方记录口令。如果你确信这个口令没错，那么这个文件就不是当初用它写出的文件。无论哪种情形都不会解密。"),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "不会交还任何东西。标签不符意味着这些字节、附加数据或密钥并非当初封装时所用的那一份。"),
         ("Nothing is returned from a decryption whose padding does not check out.", "填充对不上的解密不会返回任何东西。"),
         ("Nothing is returned from a key whose contents do not read back.", "内容读不回来的密钥不会返回任何东西。"),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "此处不做无盲化的签名。直接从消息算出的签名，会让任何能对它计时的人了解到密钥的信息。"),
@@ -12005,6 +12031,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "设备上的运行时没有模块系统：每个类都由拿到它的类加载器找到。这里的活全由包和导入来做。"),
         ("The same case is written twice in one switch.", "同一个 case 在一个 switch 里写了两次。"),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "同一个数还有更短的编码。同一个值有两种写法，会让格式产生歧义。"),
+        ("The sealed bytes do not carry the tag they were sealed with.", "封装的字节没有带着它们被封装时的标签。"),
         ("The signing block carries no scheme this build reads.", "签名块不带任何此构建会读的方案。"),
         ("The signing block carries one identifier twice.", "签名块把同一个标识带了两次。"),
         ("The signing block is larger than the accepted limit.", "签名块大于所接受的上限。"),
@@ -12861,6 +12888,7 @@ pub mod speech {
         ("Making something new wants a class.", "新しく何かを作るにはクラスが要ります。"),
         ("Merging what the libraries ask for needs it read first.", "ライブラリの求めるものを併せるには、まずそれを読む必要があります。"),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk が Target_sdk より高いです。"),
+        ("More is being sealed under one nonce than the mode allows.", "一つの使い捨ての数の下で、この方式の許す量を超えて封じられています。"),
         ("Mount names are unique so a path means one thing.", "マウント名は一意です。ですから経路はひとつの意味を持ちます。"),
         ("Mount the directory before reading from it.", "読む前にディレクトリをマウントしてください。"),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "それをどけてください。上書きすると、そこにあるものが何であれ捨てられ、置き換えられた鍵で署名したすべてのアプリケーションが、以後更新できなくなります。"),
@@ -12878,6 +12906,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "ここでは名前を推測しません。ローカル変数、引数、このクラスかその上のクラスのフィールド――それ以外は、クラスファイルに書き込むのではなく拒みます。"),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "このビルドの何も、失われたパスワードから署名鍵を取り戻せません。またそのどこにもパスワードを記録しません。"),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "このビルドの何も、失われたパスワードから署名鍵を取り戻せません。またそのどこにもパスワードを記録しません。これが確かなパスワードなら、そのファイルは書かれたときのものではありません。どちらにせよ復号はしません。"),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "何も返しません。合わない印は、そのバイト、添えの情報、あるいは鍵が、封じたときのものではないという意味です。"),
         ("Nothing is returned from a decryption whose padding does not check out.", "詰め物の検査が通らない復号からは何も返しません。"),
         ("Nothing is returned from a key whose contents do not read back.", "中身が読み返せない鍵からは何も返しません。"),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "目隠しなしには何も署名しません。メッセージからそのまま計算した署名は、時間を測れる者に鍵のことを知らせてしまいます。"),
@@ -13225,6 +13254,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "端末上の実行環境にモジュールの仕組みはありません。どのクラスも、それを渡されたクラスローダーが見つけます。ここではパッケージと import がすべての仕事をします。"),
         ("The same case is written twice in one switch.", "同じ case がひとつの switch に二度書かれています。"),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "同じ数にもっと短い符号化があります。ひとつの値に二通りの綴りがあると、形式は曖昧になります。"),
+        ("The sealed bytes do not carry the tag they were sealed with.", "封じられたバイトが、封じられたときの印を帯びていません。"),
         ("The signing block carries no scheme this build reads.", "署名ブロックが、このビルドの読む方式をひとつも運んでいません。"),
         ("The signing block carries one identifier twice.", "署名ブロックが同じ識別子を二度運んでいます。"),
         ("The signing block is larger than the accepted limit.", "署名ブロックが、受け付ける上限を超えています。"),
@@ -14081,6 +14111,7 @@ pub mod speech {
         ("Making something new wants a class.", "새로 무엇을 만들려면 클래스가 있어야 합니다."),
         ("Merging what the libraries ask for needs it read first.", "라이브러리가 요구하는 것을 합치려면 먼저 그것을 읽어야 합니다."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk가 Target_sdk보다 높습니다."),
+        ("More is being sealed under one nonce than the mode allows.", "한 번 쓰는 수 하나 아래에서 이 방식이 허락하는 것보다 많이 봉인되고 있습니다."),
         ("Mount names are unique so a path means one thing.", "마운트 이름은 하나뿐이므로 경로는 하나를 뜻합니다."),
         ("Mount the directory before reading from it.", "읽기 전에 디렉터리를 마운트하십시오."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "그것을 옆으로 옮기십시오. 덮어쓰면 그 안에 든 무엇이든 버려지고, 갈아 치운 열쇠로 서명한 모든 앱이 다시는 갱신될 수 없습니다."),
@@ -14098,6 +14129,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "여기서는 이름을 짐작하지 않습니다. 지역 변수, 매개변수, 이 클래스나 그 위 클래스의 필드입니다. 그 밖의 것은 클래스 파일에 적는 대신 물리칩니다."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "이 빌드의 무엇도 잃어버린 암호에서 서명 열쇠를 되찾지 못하며, 그 무엇도 암호를 어디에도 적어 두지 않습니다."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "이 빌드의 무엇도 잃어버린 암호에서 서명 열쇠를 되찾지 못하며, 그 무엇도 암호를 어디에도 적어 두지 않습니다. 이것이 확실한 암호라면 그 파일은 적힐 때의 그 파일이 아닙니다. 어느 쪽이든 풀지 않습니다."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "아무것도 돌려주지 않습니다. 맞지 않는 표는 그 바이트나 덧붙인 자료나 열쇠가 봉인할 때의 것이 아니라는 뜻입니다."),
         ("Nothing is returned from a decryption whose padding does not check out.", "채움이 맞지 않는 풀기에서는 아무것도 돌려주지 않습니다."),
         ("Nothing is returned from a key whose contents do not read back.", "알맹이가 되읽히지 않는 열쇠에서는 아무것도 돌려주지 않습니다."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "가림 없이는 아무것도 서명하지 않습니다. 글에서 곧바로 셈한 서명은 시간을 잴 수 있는 누구에게나 열쇠에 대해 알려 줍니다."),
@@ -14445,6 +14477,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "기기 위의 실행 환경에는 모듈 얼개가 없습니다. 클래스는 저마다 그것을 받은 클래스 로더가 찾습니다. 여기서는 패키지와 import가 모든 일을 합니다."),
         ("The same case is written twice in one switch.", "같은 case가 한 switch에 두 번 적혔습니다."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "같은 수에 더 짧은 부호화가 있습니다. 한 값에 두 가지 철자가 있으면 형식이 헷갈리게 됩니다."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "봉인된 바이트가 봉인될 때의 표를 지니고 있지 않습니다."),
         ("The signing block carries no scheme this build reads.", "서명 덩이가 이 빌드가 읽는 방식을 하나도 지니지 않았습니다."),
         ("The signing block carries one identifier twice.", "서명 덩이가 같은 식별자를 두 번 지니고 있습니다."),
         ("The signing block is larger than the accepted limit.", "서명 덩이가 받아들이는 한도보다 큽니다."),
@@ -15301,6 +15334,7 @@ pub mod speech {
         ("Making something new wants a class.", "कुछ नया बनाने के लिए एक वर्ग चाहिए।"),
         ("Merging what the libraries ask for needs it read first.", "पुस्तकालय जो माँगते हैं उसे मिलाने के लिए पहले उसे पढ़ना पड़ता है।"),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk, Target_sdk से ऊँचा है।"),
+        ("More is being sealed under one nonce than the mode allows.", "एक ही एकबारगी संख्या के अंतर्गत उससे अधिक मुहरबंद किया जा रहा है जितना यह विधि अनुमति देती है।"),
         ("Mount names are unique so a path means one thing.", "आरोहण-नाम अद्वितीय होते हैं ताकि पथ का एक ही अर्थ हो।"),
         ("Mount the directory before reading from it.", "उससे पढ़ने से पहले निर्देशिका आरोहित कीजिए।"),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "उसे एक ओर हटाइए। उस पर लिखने से उसमें जो कुछ है वह फेंक दिया जाएगा, और जिस कुंजी की जगह वह लेती, उससे हस्ताक्षरित हर ऐप्लिकेशन फिर कभी अद्यतन नहीं हो पाता।"),
@@ -15318,6 +15352,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "यहाँ कुछ भी नाम का अनुमान नहीं लगाता। एक स्थानीय चर, एक प्राचल, इस वर्ग या इसके ऊपर के किसी वर्ग का क्षेत्र: और कुछ भी वर्ग-फ़ाइल में लिखने के बजाय मना कर दिया जाता है।"),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "इस बनावट का कुछ भी खोए हुए पासवर्ड से हस्ताक्षर कुंजी वापस नहीं ला सकता, और इसका कुछ भी पासवर्ड को कहीं दर्ज नहीं करता।"),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "इस बनावट का कुछ भी खोए हुए पासवर्ड से हस्ताक्षर कुंजी वापस नहीं ला सकता, और इसका कुछ भी पासवर्ड को कहीं दर्ज नहीं करता। यदि यह वही पासवर्ड है जिस पर आपको भरोसा है, तो फ़ाइल वह नहीं जिस रूप में वह लिखी गई थी। दोनों ही हाल में कुछ खोला नहीं जाता।"),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "कुछ भी वापस नहीं दिया जाता। मेल न खाता चिह्न का अर्थ है कि वे बाइट, जोड़ा गया डेटा या कुंजी वही नहीं जिनसे मुहर लगी थी।"),
         ("Nothing is returned from a decryption whose padding does not check out.", "जिस विगूढ़न का भराव सही न उतरे उससे कुछ भी नहीं लौटाया जाता।"),
         ("Nothing is returned from a key whose contents do not read back.", "जिस कुंजी की सामग्री वापस न पढ़ी जाए उससे कुछ भी नहीं लौटाया जाता।"),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "कुछ भी बिना ओट के हस्ताक्षरित नहीं होता। संदेश से सीधे गिना गया हस्ताक्षर हर उस व्यक्ति को कुंजी के बारे में जानकारी दे देता जो उसका समय माप सके।"),
@@ -15665,6 +15700,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "किसी उपकरण के क्रियाकाल में कोई मॉड्यूल-तंत्र नहीं होता: हर वर्ग को वही वर्ग-लादक ढूँढ़ता है जिसे वह दिया गया था। यहाँ सारा काम पैकेज और आयात करते हैं।"),
         ("The same case is written twice in one switch.", "एक ही switch में एक ही case दो बार लिखा गया है।"),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "उसी संख्या का एक छोटा कूटन भी है। एक मान की दो वर्तनियाँ प्रारूप को अस्पष्ट बना देती हैं।"),
+        ("The sealed bytes do not carry the tag they were sealed with.", "मुहरबंद बाइट वह चिह्न नहीं रखते जिससे उन पर मुहर लगी थी।"),
         ("The signing block carries no scheme this build reads.", "हस्ताक्षर-खंड ऐसी कोई योजना नहीं ले जाता जिसे यह बनावट पढ़ती हो।"),
         ("The signing block carries one identifier twice.", "हस्ताक्षर-खंड एक ही पहचान दो बार ले जाता है।"),
         ("The signing block is larger than the accepted limit.", "हस्ताक्षर-खंड स्वीकृत सीमा से बड़ा है।"),
@@ -16521,6 +16557,7 @@ pub mod speech {
         ("Making something new wants a class.", "Membuat sesuatu yang baru butuh sebuah kelas."),
         ("Merging what the libraries ask for needs it read first.", "Menggabungkan apa yang diminta pustaka-pustaka itu butuh ia dibaca lebih dulu."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk lebih tinggi daripada Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Di bawah satu bilangan sekali pakai disegel lebih banyak daripada yang diizinkan moda ini."),
         ("Mount names are unique so a path means one thing.", "Nama kaitan bersifat unik supaya sebuah jalur berarti satu hal."),
         ("Mount the directory before reading from it.", "Kaitkan direktorinya sebelum membaca darinya."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Pindahkan ke samping. Menimpanya akan membuang apa pun isinya, dan setiap aplikasi yang ditandatangani kunci yang digantikannya tidak akan bisa diperbarui lagi."),
@@ -16538,6 +16575,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Tidak ada di sini yang menebak sebuah nama. Sebuah variabel lokal, sebuah parameter, sebuah ruas kelas ini atau kelas di atasnya: selain itu ditolak alih-alih ditulis ke dalam berkas kelas."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Tidak ada di bangunan ini yang bisa memulihkan kunci penanda tangan dari kata sandi yang hilang, dan tidak ada di dalamnya yang mencatat kata sandi di mana pun."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Tidak ada di bangunan ini yang bisa memulihkan kunci penanda tangan dari kata sandi yang hilang, dan tidak ada di dalamnya yang mencatat kata sandi di mana pun. Kalau kata sandi ini yang kamu yakini, maka berkas itu bukan berkas seperti saat ditulis. Bagaimanapun tidak ada yang diuraikan sandinya."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Tidak ada yang dikembalikan. Tanda yang tidak cocok berarti bita, data tambahan, atau kuncinya bukan yang dipakai saat menyegel."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Tidak ada yang dikembalikan dari penguraian sandi yang ganjalnya tidak cocok."),
         ("Nothing is returned from a key whose contents do not read back.", "Tidak ada yang dikembalikan dari kunci yang isinya tidak terbaca kembali."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Tidak ada yang ditandatangani tanpa penyamaran. Tanda tangan yang dihitung langsung dari pesannya akan membuat siapa pun yang bisa mengukur waktunya belajar tentang kuncinya."),
@@ -16885,6 +16923,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Runtime di sebuah perangkat tidak punya sistem modul: setiap kelas ditemukan oleh pemuat kelas yang diberi kelas itu. Paket dan impor melakukan semua pekerjaannya di sini."),
         ("The same case is written twice in one switch.", "Case yang sama ditulis dua kali dalam satu switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "Bilangan yang sama punya penyandian yang lebih pendek. Dua ejaan untuk satu nilai membuat format menjadi mendua."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Bita yang disegel tidak membawa tanda yang dipakai saat menyegelnya."),
         ("The signing block carries no scheme this build reads.", "Bongkah tanda tangan tidak membawa skema apa pun yang dibaca bangunan ini."),
         ("The signing block carries one identifier twice.", "Bongkah tanda tangan membawa satu pengenal dua kali."),
         ("The signing block is larger than the accepted limit.", "Bongkah tanda tangan lebih besar daripada batas yang diterima."),
@@ -17741,6 +17780,7 @@ pub mod speech {
         ("Making something new wants a class.", "Fazer algo novo quer uma classe."),
         ("Merging what the libraries ask for needs it read first.", "Juntar o que as bibliotecas pedem exige que isto seja lido primeiro."),
         ("Min_sdk is higher than Target_sdk.", "Min_sdk é maior que Target_sdk."),
+        ("More is being sealed under one nonce than the mode allows.", "Sob um mesmo número de uso único está se selando mais do que o modo permite."),
         ("Mount names are unique so a path means one thing.", "Nomes de montagem são únicos para que um caminho signifique uma coisa só."),
         ("Mount the directory before reading from it.", "Monte o diretório antes de ler dele."),
         ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Tire do caminho. Sobrescrever jogaria fora o que quer que esteja ali, e todo aplicativo assinado com a chave substituída deixaria de poder ser atualizado."),
@@ -17758,6 +17798,7 @@ pub mod speech {
         ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Nada aqui adivinha um nome. Uma variável local, um parâmetro, um campo desta classe ou de uma acima dela: qualquer outra coisa é recusada em vez de escrita num arquivo de classe."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Nada nesta compilação recupera uma chave de assinatura a partir de uma senha perdida, e nada nela registra a senha em lugar nenhum."),
         ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Nada nesta compilação recupera uma chave de assinatura a partir de uma senha perdida, e nada nela registra a senha em lugar nenhum. Se esta é uma senha de que você tem certeza, então o arquivo não é aquele com que foi escrito. De um jeito ou de outro, nada é decifrado."),
+        ("Nothing is handed back. A tag that does not match means the bytes, the extra data or the key is not the one they were sealed with.", "Nada é devolvido. Uma etiqueta que não corresponde significa que os bytes, os dados acrescentados ou a chave não são aqueles com que se selou."),
         ("Nothing is returned from a decryption whose padding does not check out.", "Nada é devolvido de uma decifragem cujo preenchimento não confere."),
         ("Nothing is returned from a key whose contents do not read back.", "Nada é devolvido de uma chave cujo conteúdo não é relido."),
         ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Nada é assinado sem ocultação. Uma assinatura calculada direto da mensagem deixaria qualquer um que consiga cronometrá-la aprender sobre a chave."),
@@ -18105,6 +18146,7 @@ pub mod speech {
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "O runtime num aparelho não tem sistema de módulos: toda classe é achada pelo class loader a que ela foi entregue. Pacotes e imports fazem todo o trabalho aqui."),
         ("The same case is written twice in one switch.", "O mesmo case está escrito duas vezes num switch."),
         ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "O mesmo número tem uma codificação mais curta. Duas grafias de um valor tornam um formato ambíguo."),
+        ("The sealed bytes do not carry the tag they were sealed with.", "Os bytes selados não carregam a etiqueta com que foram selados."),
         ("The signing block carries no scheme this build reads.", "O bloco de assinatura não carrega nenhum esquema que esta compilação leia."),
         ("The signing block carries one identifier twice.", "O bloco de assinatura carrega um identificador duas vezes."),
         ("The signing block is larger than the accepted limit.", "O bloco de assinatura é maior que o limite aceito."),
@@ -34079,6 +34121,150 @@ pub mod cipher {
             "core.cipher",
             message,
         )
+    }
+
+    pub const NONCE_BYTES: usize = 12;
+
+    pub const TAG_BYTES: usize = 16;
+
+    pub const MAX_SEALED_BYTES: u64 = (1u64 << 36) - 32;
+
+    fn gf_double(value: &mut [u8; 16]) {
+        let carried = value[15] & 1;
+        for at in (1..16).rev() {
+            value[at] = (value[at] >> 1) | ((value[at - 1] & 1) << 7);
+        }
+        value[0] >>= 1;
+        value[0] ^= 0xe1 & 0u8.wrapping_sub(carried);
+    }
+
+    fn gf_mul(left: &[u8; 16], right: &[u8; 16]) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        let mut running = *right;
+        for bit in 0..128usize {
+            let taken = (left[bit / 8] >> (7 - (bit % 8))) & 1;
+            let mask = 0u8.wrapping_sub(taken);
+            for at in 0..16 {
+                out[at] ^= running[at] & mask;
+            }
+            gf_double(&mut running);
+        }
+        out
+    }
+
+    fn ghash_in(running: &mut [u8; 16], key: &[u8; 16], block: &[u8]) {
+        let mut padded = [0u8; 16];
+        padded[..block.len()].copy_from_slice(block);
+        for at in 0..16 {
+            running[at] ^= padded[at];
+        }
+        *running = gf_mul(running, key);
+    }
+
+    fn ghash(key: &[u8; 16], aad: &[u8], sealed: &[u8]) -> [u8; 16] {
+        let mut running = [0u8; 16];
+        for block in aad.chunks(16) {
+            ghash_in(&mut running, key, block);
+        }
+        for block in sealed.chunks(16) {
+            ghash_in(&mut running, key, block);
+        }
+        let mut lengths = [0u8; 16];
+        lengths[..8].copy_from_slice(&((aad.len() as u64) * 8).to_be_bytes());
+        lengths[8..].copy_from_slice(&((sealed.len() as u64) * 8).to_be_bytes());
+        ghash_in(&mut running, key, &lengths);
+        running
+    }
+
+    fn counter_of(nonce: &[u8; NONCE_BYTES], at: u32) -> [u8; 16] {
+        let mut block = [0u8; 16];
+        block[..NONCE_BYTES].copy_from_slice(nonce);
+        block[NONCE_BYTES..].copy_from_slice(&at.to_be_bytes());
+        block
+    }
+
+    fn gctr(words: &[[u8; 4]], nonce: &[u8; NONCE_BYTES], from: u32, data: &mut [u8]) {
+        for (index, chunk) in data.chunks_mut(16).enumerate() {
+            let mut stream = counter_of(nonce, from.wrapping_add(index as u32));
+            encrypt_block(&mut stream, words);
+            for (slot, mask) in chunk.iter_mut().zip(stream.iter()) {
+                *slot ^= *mask;
+            }
+        }
+    }
+
+    pub fn seal_gcm(
+        key: &[u8; KEY_BYTES],
+        nonce: &[u8; NONCE_BYTES],
+        plain: &[u8],
+        aad: &[u8],
+    ) -> Result<(Vec<u8>, [u8; TAG_BYTES]), Diagnostic> {
+        if plain.len() as u64 > MAX_SEALED_BYTES {
+            return Err(fail(
+                "EX040",
+                "More is being sealed under one nonce than the mode allows.",
+            )
+            .with_context(format!("Size: {} bytes", plain.len()))
+            .with_context(format!("Limit: {MAX_SEALED_BYTES} bytes")));
+        }
+
+        let words = expand(key);
+        let mut hash_key = [0u8; 16];
+        encrypt_block(&mut hash_key, &words);
+
+        let mut sealed = plain.to_vec();
+        gctr(&words, nonce, 2, &mut sealed);
+
+        let mut tag = ghash(&hash_key, aad, &sealed);
+        let mut first = counter_of(nonce, 1);
+        encrypt_block(&mut first, &words);
+        for at in 0..TAG_BYTES {
+            tag[at] ^= first[at];
+        }
+        Ok((sealed, tag))
+    }
+
+    pub fn open_gcm(
+        key: &[u8; KEY_BYTES],
+        nonce: &[u8; NONCE_BYTES],
+        sealed: &[u8],
+        aad: &[u8],
+        tag: &[u8; TAG_BYTES],
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if sealed.len() as u64 > MAX_SEALED_BYTES {
+            return Err(fail(
+                "EX040",
+                "More is being sealed under one nonce than the mode allows.",
+            )
+            .with_context(format!("Size: {} bytes", sealed.len()))
+            .with_context(format!("Limit: {MAX_SEALED_BYTES} bytes")));
+        }
+
+        let words = expand(key);
+        let mut hash_key = [0u8; 16];
+        encrypt_block(&mut hash_key, &words);
+
+        let mut expected = ghash(&hash_key, aad, sealed);
+        let mut first = counter_of(nonce, 1);
+        encrypt_block(&mut first, &words);
+        for at in 0..TAG_BYTES {
+            expected[at] ^= first[at];
+        }
+
+        if !same_bytes(&expected, tag) {
+            return Err(fail(
+                "EX041",
+                "The sealed bytes do not carry the tag they were sealed with.",
+            )
+            .with_suggestion(
+                "Nothing is handed back. A tag that does not match means the bytes, \
+                 the extra data or the key is not the one they were sealed with.",
+            ));
+        }
+
+        let mut plain = sealed.to_vec();
+        gctr(&words, nonce, 2, &mut plain);
+        Ok(plain)
     }
 
     pub fn encrypt_cbc(key: &[u8; KEY_BYTES], iv: &[u8; 16], plain: &[u8]) -> Vec<u8> {
@@ -55650,6 +55836,7 @@ mod tests {
     };
     use super::cache::{Index as CacheIndex, Inputs as CacheInputs, Lookup as CacheLookup};
     use super::caps::{Capability, Decision, Policy};
+    use super::cipher;
     use super::dex;
     use super::diag::{Diagnostic, Location, Severity, Sink};
     use super::git;
@@ -75402,6 +75589,205 @@ Viewbinding   = false
 
         assert!(Natural::zero().mul(&ones).is_zero());
         assert_eq!(ones.mul(&one), ones);
+    }
+
+    fn hex_bytes(text: &str) -> Vec<u8> {
+        let raw = text.as_bytes();
+        (0..raw.len() / 2)
+            .map(|at| {
+                let high = (raw[at * 2] as char).to_digit(16).expect("hex");
+                let low = (raw[at * 2 + 1] as char).to_digit(16).expect("hex");
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn key_of(text: &str) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&hex_bytes(text));
+        key
+    }
+
+    fn nonce_of(text: &str) -> [u8; 12] {
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&hex_bytes(text));
+        nonce
+    }
+
+    #[test]
+    fn gcm_matches_the_vectors_the_specification_publishes() {
+        let cases: &[(&str, &str, &str, &str, &str, &str)] = &[
+            (
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "000000000000000000000000",
+                "",
+                "",
+                "",
+                "530f8afbc74536b9a963b4f1c4cb738b",
+            ),
+            (
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "000000000000000000000000",
+                "00000000000000000000000000000000",
+                "",
+                "cea7403d4d606b6e074ec5d3baf39d18",
+                "d0d1c8a799996bf0265b98b5d48ab919",
+            ),
+            (
+                "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
+                "cafebabefacedbaddecaf888",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+                "",
+                "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad",
+                "b094dac5d93471bdec1a502270e3cc6c",
+            ),
+            (
+                "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
+                "cafebabefacedbaddecaf888",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+                "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+                "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
+                "76fc6ece0f4e1768cddf8853bb2d551b",
+            ),
+        ];
+
+        for (key, nonce, plain, aad, sealed, tag) in cases {
+            let (made, made_tag) = cipher::seal_gcm(
+                &key_of(key),
+                &nonce_of(nonce),
+                &hex_bytes(plain),
+                &hex_bytes(aad),
+            )
+            .expect("it seals");
+            assert_eq!(to_hex(&made), *sealed, "the sealed bytes differ");
+            assert_eq!(to_hex(&made_tag), *tag, "the tag differs");
+
+            let opened = cipher::open_gcm(
+                &key_of(key),
+                &nonce_of(nonce),
+                &made,
+                &hex_bytes(aad),
+                &made_tag,
+            )
+            .expect("it opens");
+            assert_eq!(
+                to_hex(&opened),
+                *plain,
+                "what came back is not what went in"
+            );
+        }
+    }
+
+    #[test]
+    fn gcm_refuses_anything_that_was_altered() {
+        let key = key_of("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+        let nonce = nonce_of("cafebabefacedbaddecaf888");
+        let plain = b"the bytes that were sealed".to_vec();
+        let aad = b"the extra data".to_vec();
+        let (sealed, tag) = cipher::seal_gcm(&key, &nonce, &plain, &aad).expect("it seals");
+
+        assert_eq!(
+            cipher::open_gcm(&key, &nonce, &sealed, &aad, &tag).expect("it opens"),
+            plain
+        );
+
+        let mut bent = sealed.clone();
+        bent[0] ^= 1;
+        assert_eq!(
+            cipher::open_gcm(&key, &nonce, &bent, &aad, &tag)
+                .unwrap_err()
+                .code,
+            "EX041"
+        );
+
+        let mut bent_tag = tag;
+        bent_tag[15] ^= 1;
+        assert!(cipher::open_gcm(&key, &nonce, &sealed, &aad, &bent_tag).is_err());
+
+        let mut other_aad = aad.clone();
+        other_aad[0] ^= 1;
+        assert!(cipher::open_gcm(&key, &nonce, &sealed, &other_aad, &tag).is_err());
+
+        let mut other_key = key;
+        other_key[0] ^= 1;
+        assert!(cipher::open_gcm(&other_key, &nonce, &sealed, &aad, &tag).is_err());
+
+        let mut other_nonce = nonce;
+        other_nonce[0] ^= 1;
+        assert!(cipher::open_gcm(&key, &other_nonce, &sealed, &aad, &tag).is_err());
+    }
+
+    #[test]
+    fn gcm_agrees_with_an_independent_implementation() {
+        if !python_gcm_available() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_GCM_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_GCM_CONFORMANCE is set but no independent cipher is here"
+            );
+            eprintln!("gcm: no independent implementation is available here");
+            return;
+        }
+
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        };
+
+        for round in 0..24usize {
+            let mut key = [0u8; 32];
+            let mut nonce = [0u8; 12];
+            for slot in key.iter_mut() {
+                *slot = next();
+            }
+            for slot in nonce.iter_mut() {
+                *slot = next();
+            }
+            let plain: Vec<u8> = (0..round * 7).map(|_| next()).collect();
+            let aad: Vec<u8> = (0..round % 5 * 9).map(|_| next()).collect();
+
+            let (sealed, tag) = cipher::seal_gcm(&key, &nonce, &plain, &aad).expect("it seals");
+            let said = python_gcm(&key, &nonce, &plain, &aad).expect("python seals");
+            assert_eq!(
+                format!("{}{}", to_hex(&sealed), to_hex(&tag)),
+                said,
+                "round {round} does not agree with the reference"
+            );
+        }
+    }
+
+    fn python_gcm_available() -> bool {
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("from cryptography.hazmat.primitives.ciphers.aead import AESGCM")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    fn python_gcm(key: &[u8; 32], nonce: &[u8; 12], plain: &[u8], aad: &[u8]) -> Option<String> {
+        let program = format!(
+            "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\nprint(AESGCM(bytes.fromhex('{}')).encrypt(bytes.fromhex('{}'), bytes.fromhex('{}'), bytes.fromhex('{}') or None).hex())\n",
+            to_hex(key),
+            to_hex(nonce),
+            to_hex(plain),
+            to_hex(aad),
+        );
+        let done = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&program)
+            .output()
+            .ok()?;
+        if !done.status.success() {
+            return None;
+        }
+        Some(String::from_utf8(done.stdout).ok()?.trim().to_string())
     }
 
     fn a_project() -> super::project::Project {
