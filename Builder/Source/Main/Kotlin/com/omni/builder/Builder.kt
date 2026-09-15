@@ -271,6 +271,7 @@ object OmniLog {
 class BuilderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        Glyphs.open(this)
         OmniLog.install(this)
         bindTheSharedKeyToThisDevice()
         Sentry.arm(this)
@@ -2483,6 +2484,34 @@ internal class TerminalView(
     }
 }
 
+internal object Glyphs {
+
+    private val held = HashMap<Mark.Shape, Bitmap>()
+
+    private var source: Resources? = null
+
+    fun open(context: Context) {
+        source = context.applicationContext.resources
+    }
+
+    fun of(shape: Mark.Shape): Bitmap? {
+        if (shape.art == 0) {
+            return null
+        }
+        held[shape]?.let { return it }
+        val from = source ?: return null
+        val painted = runCatching { BitmapFactory.decodeResource(from, shape.art) }
+            .getOrNull() ?: return null
+        val mask = runCatching { painted.extractAlpha() }.getOrNull()
+        painted.recycle()
+        if (mask == null) {
+            return null
+        }
+        held[shape] = mask
+        return mask
+    }
+}
+
 internal class Mark(
     private val shape: Shape,
     private val colour: Int,
@@ -2490,92 +2519,86 @@ internal class Mark(
     private val glow: Boolean = false,
 ) : Drawable() {
 
-    enum class Shape {
-        FOLDER,
-        FILE,
-        MORE,
-        CLOSE,
-        AWAY,
-        BACK,
-        GEAR,
-        UNDO,
-        REDO,
-        SAVE,
-        FIND,
-        LINE,
-        FORMAT,
-        CODE,
-        IMAGE,
-        MARKUP,
-        NOTE,
-        PACKAGE,
-        SPLIT,
-        ARCHIVE,
-        SOUND,
-        FILM,
-        BINARY,
-        FONT,
-        TABLE,
-        BRACES,
-        CUP,
-        SORT,
-        SORTED_UP,
-        SORTED_DOWN,
-        CHART,
-        TICK,
-        MENU,
-        HOME,
-        ROBOT,
-        LOG,
-        BRUSH,
-        GLOBE,
-        SPEECH,
-        STAR,
-        INFO,
-        HELP,
-        WEB,
-        BRANCH,
-        PLAY,
-        STOP,
-        SEND,
-        LINK,
-        ADD,
-        SHIELD,
-        MAIL,
-        BOLT,
-        FORWARD,
-        UP,
-        SWAP,
-        HEART,
-        CLOCK,
-        TRASH,
-        CLIP,
-        DOWN,
-        PHONE,
-        BOOK,
-        WIDEN,
-        PEN,
-        DROID,
-        BROOM,
-        SHARE,
-        COPY,
-        EXPORT,
-        INFO_FILL,
-        HELP_FILL,
-        PAGE_ADD,
-        FOLDER_OPEN,
-        PEOPLE,
-        BUG,
-        BULB,
-        STAR_LINE,
-        BRAIN,
-        SCREEN,
-        SHIELD_FILL,
-        NOTE_FILL,
-        MAIL_FILL,
-        PERSON_FILL,
-        HEART_FILL,
-        COPYRIGHT,
+    enum class Shape(val art: Int) {
+        FOLDER(R.drawable.omni_icon_folder),
+        FILE(R.drawable.omni_icon_file),
+        MORE(R.drawable.omni_icon_more),
+        CLOSE(R.drawable.omni_icon_close),
+        AWAY(0),
+        BACK(0),
+        GEAR(0),
+        SAVE(R.drawable.omni_icon_save),
+        FIND(R.drawable.omni_icon_find),
+        CODE(R.drawable.omni_icon_code),
+        IMAGE(R.drawable.omni_icon_image),
+        MARKUP(0),
+        NOTE(R.drawable.omni_icon_note),
+        PACKAGE(R.drawable.omni_icon_package),
+        ARCHIVE(R.drawable.omni_icon_archive),
+        SOUND(R.drawable.omni_icon_sound),
+        FILM(0),
+        BINARY(0),
+        FONT(R.drawable.omni_icon_font),
+        TABLE(0),
+        BRACES(R.drawable.omni_icon_braces),
+        CUP(0),
+        SORT(0),
+        SORTED_UP(R.drawable.omni_icon_sorted_up),
+        SORTED_DOWN(R.drawable.omni_icon_sorted_down),
+        CHART(R.drawable.omni_icon_chart),
+        TICK(0),
+        MENU(R.drawable.omni_icon_menu),
+        HOME(R.drawable.omni_icon_home),
+        ROBOT(R.drawable.omni_icon_robot),
+        LOG(R.drawable.omni_icon_log),
+        BRUSH(R.drawable.omni_icon_brush),
+        GLOBE(R.drawable.omni_icon_globe),
+        SPEECH(R.drawable.omni_icon_speech),
+        STAR(R.drawable.omni_icon_star),
+        INFO(R.drawable.omni_icon_info),
+        HELP(R.drawable.omni_icon_help),
+        WEB(R.drawable.omni_icon_web),
+        BRANCH(R.drawable.omni_icon_branch),
+        PLAY(R.drawable.omni_icon_play),
+        STOP(R.drawable.omni_icon_stop),
+        SEND(R.drawable.omni_icon_send),
+        LINK(R.drawable.omni_icon_link),
+        ADD(R.drawable.omni_icon_add),
+        SHIELD(R.drawable.omni_icon_shield),
+        MAIL(0),
+        BOLT(0),
+        FORWARD(0),
+        SWAP(0),
+        HEART(R.drawable.omni_icon_heart),
+        CLOCK(R.drawable.omni_icon_clock),
+        TRASH(R.drawable.omni_icon_trash),
+        CLIP(R.drawable.omni_icon_clip),
+        DOWN(R.drawable.omni_icon_down),
+        PHONE(R.drawable.omni_icon_phone),
+        BOOK(R.drawable.omni_icon_book),
+        WIDEN(R.drawable.omni_icon_widen),
+        PEN(R.drawable.omni_icon_pen),
+        DROID(R.drawable.omni_icon_droid),
+        BROOM(R.drawable.omni_icon_broom),
+        SHARE(R.drawable.omni_icon_share),
+        COPY(R.drawable.omni_icon_copy),
+        EXPORT(R.drawable.omni_icon_export),
+        INFO_FILL(R.drawable.omni_icon_info_fill),
+        HELP_FILL(0),
+        PAGE_ADD(R.drawable.omni_icon_page_add),
+        FOLDER_OPEN(R.drawable.omni_icon_folder_open),
+        PEOPLE(R.drawable.omni_icon_people),
+        BUG(0),
+        BULB(0),
+        STAR_LINE(R.drawable.omni_icon_star_line),
+        BRAIN(R.drawable.omni_icon_brain),
+        SCREEN(R.drawable.omni_icon_screen),
+        SHIELD_FILL(0),
+        NOTE_FILL(R.drawable.omni_icon_note_fill),
+        MAIL_FILL(R.drawable.omni_icon_mail_fill),
+        PERSON_FILL(R.drawable.omni_icon_person_fill),
+        HEART_FILL(0),
+        COPYRIGHT(R.drawable.omni_icon_copyright),
     }
 
     private companion object {
@@ -2583,21 +2606,31 @@ internal class Mark(
         const val STROKE = 1.7f
         const val GLOW_STEPS = 3
         const val GLOW_SWELL = 2.1f
+        const val ART_SHARE = 0.59f
+        const val ART_HEFT = 0.04f
         val CLEARING = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
+        isFilterBitmap = true
     }
     private val path = Path()
+    private val spread = RectF()
 
     private var swell = 0f
     private var bleed = 255
+    private var given: ColorFilter? = null
 
     override fun draw(canvas: Canvas) {
         val edge = min(bounds.width(), bounds.height()).toFloat()
         if (edge <= 0f) return
+        val drawn = Glyphs.of(shape)
+        if (drawn != null) {
+            paintTheArt(canvas, drawn, edge)
+            return
+        }
         val widest = STROKE * heft + if (glow) GLOW_STEPS * GLOW_SWELL else 0f
         val room = GRID + widest
         val unit = edge / room
@@ -2615,6 +2648,30 @@ internal class Mark(
         stamp(canvas, unit, widest)
     }
 
+    private fun paintTheArt(canvas: Canvas, drawn: Bitmap, edge: Float) {
+        val side = edge * (ART_SHARE + ART_HEFT * heft)
+        paint.style = Paint.Style.FILL
+        paint.color = colour
+        paint.colorFilter = given
+        if (glow) {
+            var step = GLOW_STEPS
+            while (step >= 1) {
+                paint.alpha = 44 - step * 10
+                stampTheArt(canvas, drawn, side + side * step * GLOW_SWELL / GRID)
+                step -= 1
+            }
+        }
+        paint.alpha = bleed
+        stampTheArt(canvas, drawn, side)
+    }
+
+    private fun stampTheArt(canvas: Canvas, drawn: Bitmap, side: Float) {
+        val midX = bounds.exactCenterX()
+        val midY = bounds.exactCenterY()
+        spread.set(midX - side / 2f, midY - side / 2f, midX + side / 2f, midY + side / 2f)
+        canvas.drawBitmap(drawn, null, spread, paint)
+    }
+
     private fun stamp(canvas: Canvas, unit: Float, widest: Float) {
         val edge = unit * (GRID + widest)
         canvas.save()
@@ -2628,47 +2685,6 @@ internal class Mark(
         paint.strokeWidth = STROKE * heft + swell
         path.rewind()
         when (shape) {
-            Shape.FOLDER -> {
-                paint.style = Paint.Style.FILL_AND_STROKE
-                paint.strokeWidth = 1.6f
-                path.moveTo(3.4f, 6.6f)
-                path.lineTo(9.4f, 6.6f)
-                path.lineTo(11.4f, 9.4f)
-                path.lineTo(20.6f, 9.4f)
-                path.lineTo(20.6f, 18.6f)
-                path.lineTo(3.4f, 18.6f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.FILE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(6.5f, 3.5f)
-                path.lineTo(14f, 3.5f)
-                path.lineTo(17.5f, 7.5f)
-                path.lineTo(17.5f, 20.5f)
-                path.lineTo(6.5f, 20.5f)
-                path.close()
-                path.moveTo(14f, 3.5f)
-                path.lineTo(14f, 7.5f)
-                path.lineTo(17.5f, 7.5f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.MORE -> {
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 6f, 1.6f, paint)
-                canvas.drawCircle(12f, 12f, 1.6f, paint)
-                canvas.drawCircle(12f, 18f, 1.6f, paint)
-            }
-            Shape.BRACES -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(10f, 4.5f)
-                path.cubicTo(7.4f, 4.5f, 8.6f, 10.4f, 5.6f, 12f)
-                path.cubicTo(8.6f, 13.6f, 7.4f, 19.5f, 10f, 19.5f)
-                path.moveTo(14f, 4.5f)
-                path.cubicTo(16.6f, 4.5f, 15.4f, 10.4f, 18.4f, 12f)
-                path.cubicTo(15.4f, 13.6f, 16.6f, 19.5f, 14f, 19.5f)
-                canvas.drawPath(path, paint)
-            }
             Shape.CUP -> {
                 paint.style = Paint.Style.STROKE
                 path.moveTo(6f, 11f)
@@ -2686,44 +2702,6 @@ internal class Mark(
                 canvas.drawPath(path, paint)
                 paint.style = Paint.Style.STROKE
                 canvas.drawLine(5f, 20.6f, 17f, 20.6f, paint)
-            }
-            Shape.SORTED_UP, Shape.SORTED_DOWN -> {
-                paint.style = Paint.Style.STROKE
-                val rows = listOf(5f, 9f, 13f)
-                val widths = if (shape == Shape.SORTED_UP) {
-                    listOf(5f, 8f, 11f)
-                } else {
-                    listOf(11f, 8f, 5f)
-                }
-                rows.forEachIndexed { index, y ->
-                    canvas.drawLine(4f, y, 4f + widths[index], y, paint)
-                }
-                canvas.drawLine(18f, 5f, 18f, 19f, paint)
-                path.reset()
-                if (shape == Shape.SORTED_UP) {
-                    path.moveTo(15f, 8f)
-                    path.lineTo(18f, 5f)
-                    path.lineTo(21f, 8f)
-                } else {
-                    path.moveTo(15f, 16f)
-                    path.lineTo(18f, 19f)
-                    path.lineTo(21f, 16f)
-                }
-                canvas.drawPath(path, paint)
-            }
-            Shape.CHART -> {
-                paint.style = Paint.Style.FILL
-                canvas.drawRect(5f, 13f, 9f, 19f, paint)
-                canvas.drawRect(10f, 9f, 14f, 19f, paint)
-                canvas.drawRect(15f, 5f, 19f, 19f, paint)
-            }
-            Shape.CLOSE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(7f, 7f)
-                path.lineTo(17f, 17f)
-                path.moveTo(17f, 7f)
-                path.lineTo(7f, 17f)
-                canvas.drawPath(path, paint)
             }
             Shape.AWAY -> {
                 paint.style = Paint.Style.STROKE
@@ -2767,98 +2745,6 @@ internal class Mark(
                 canvas.drawPath(path, paint)
                 canvas.drawCircle(12f, 12f, 3.0f, paint)
             }
-            Shape.UNDO -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(9f, 6f)
-                path.lineTo(4.6f, 10.2f)
-                path.lineTo(9f, 14.4f)
-                path.moveTo(4.6f, 10.2f)
-                path.lineTo(14f, 10.2f)
-                path.cubicTo(19f, 10.2f, 19f, 18f, 13.5f, 18f)
-                path.lineTo(9.5f, 18f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.REDO -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(15f, 6f)
-                path.lineTo(19.4f, 10.2f)
-                path.lineTo(15f, 14.4f)
-                path.moveTo(19.4f, 10.2f)
-                path.lineTo(10f, 10.2f)
-                path.cubicTo(5f, 10.2f, 5f, 18f, 10.5f, 18f)
-                path.lineTo(14.5f, 18f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.SAVE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(5f, 5f)
-                path.lineTo(15.5f, 5f)
-                path.lineTo(19f, 8.5f)
-                path.lineTo(19f, 19f)
-                path.lineTo(5f, 19f)
-                path.close()
-                path.addRect(8.6f, 5f, 15f, 9.6f, Path.Direction.CW)
-                path.addRect(8f, 13.4f, 16f, 19f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-            }
-            Shape.FIND -> {
-                paint.style = Paint.Style.STROKE
-                canvas.drawCircle(10.6f, 10.6f, 5.2f, paint)
-                path.moveTo(14.6f, 14.6f)
-                path.lineTo(19.2f, 19.2f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.LINE -> {
-                paint.style = Paint.Style.STROKE
-                var row = 0
-                while (row < 3) {
-                    val y = 7f + row * 5f
-                    path.moveTo(4.2f, y)
-                    path.lineTo(5.4f, y)
-                    path.moveTo(8.4f, y)
-                    path.lineTo(19.4f, y)
-                    row += 1
-                }
-                canvas.drawPath(path, paint)
-            }
-            Shape.FORMAT -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(4.6f, 6.4f)
-                path.lineTo(19.4f, 6.4f)
-                path.moveTo(9f, 12f)
-                path.lineTo(19.4f, 12f)
-                path.moveTo(9f, 17.6f)
-                path.lineTo(15.4f, 17.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.CODE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(9f, 8f)
-                path.lineTo(4.6f, 12f)
-                path.lineTo(9f, 16f)
-                path.moveTo(15f, 8f)
-                path.lineTo(19.4f, 12f)
-                path.lineTo(15f, 16f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.IMAGE -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                path.addRoundRect(3.6f, 4.6f, 20.4f, 19.4f, 2.4f, 2.4f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                paint.xfermode = CLEARING
-                path.moveTo(5.4f, 17.6f)
-                path.lineTo(10.4f, 11.2f)
-                path.lineTo(14.2f, 15.4f)
-                path.lineTo(16.4f, 13f)
-                path.lineTo(19.6f, 17.6f)
-                path.close()
-                canvas.drawPath(path, paint)
-                canvas.drawCircle(8.4f, 8.8f, 1.7f, paint)
-                paint.xfermode = null
-                canvas.restore()
-            }
             Shape.MARKUP -> {
                 paint.style = Paint.Style.STROKE
                 path.moveTo(8.4f, 6.4f)
@@ -2870,72 +2756,6 @@ internal class Mark(
                 path.moveTo(13.4f, 5.6f)
                 path.lineTo(10.6f, 18.4f)
                 canvas.drawPath(path, paint)
-            }
-            Shape.NOTE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(6.5f, 4.6f)
-                path.lineTo(17.5f, 4.6f)
-                path.lineTo(17.5f, 19.4f)
-                path.lineTo(6.5f, 19.4f)
-                path.close()
-                var row = 0
-                while (row < 3) {
-                    val y = 9f + row * 3.6f
-                    path.moveTo(9f, y)
-                    path.lineTo(15f, y)
-                    row += 1
-                }
-                canvas.drawPath(path, paint)
-            }
-            Shape.PACKAGE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(12f, 3.8f)
-                path.lineTo(19.6f, 8.2f)
-                path.lineTo(19.6f, 15.8f)
-                path.lineTo(12f, 20.2f)
-                path.lineTo(4.4f, 15.8f)
-                path.lineTo(4.4f, 8.2f)
-                path.close()
-                path.moveTo(4.4f, 8.2f)
-                path.lineTo(12f, 12.4f)
-                path.lineTo(19.6f, 8.2f)
-                path.moveTo(12f, 12.4f)
-                path.lineTo(12f, 20.2f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.SPLIT -> {
-                paint.style = Paint.Style.STROKE
-                path.addRect(4.4f, 5.4f, 19.6f, 18.6f, Path.Direction.CW)
-                path.moveTo(12f, 5.4f)
-                path.lineTo(12f, 18.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.ARCHIVE -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(4.5f, 5.5f, 19.5f, 18.5f, 1.6f, 1.6f, Path.Direction.CW)
-                path.moveTo(4.5f, 9.5f)
-                path.lineTo(19.5f, 9.5f)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.moveTo(11f, 5.5f)
-                path.lineTo(13f, 5.5f)
-                path.lineTo(13f, 9.5f)
-                path.lineTo(11f, 9.5f)
-                path.close()
-                path.addRect(11.2f, 11.5f, 12.8f, 14.5f, Path.Direction.CW)
-                paint.style = Paint.Style.FILL
-                canvas.drawPath(path, paint)
-            }
-            Shape.SOUND -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(9f, 17f)
-                path.lineTo(9f, 6.5f)
-                path.lineTo(18f, 4.8f)
-                path.lineTo(18f, 15f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(7f, 17.4f, 2.4f, paint)
-                canvas.drawCircle(16f, 15.4f, 2.4f, paint)
             }
             Shape.FILM -> {
                 paint.style = Paint.Style.STROKE
@@ -2974,16 +2794,6 @@ internal class Mark(
                 }
                 canvas.drawPath(path, paint)
             }
-            Shape.FONT -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(6f, 18.5f)
-                path.lineTo(11.6f, 5.5f)
-                path.lineTo(13.4f, 5.5f)
-                path.lineTo(19f, 18.5f)
-                path.moveTo(8.4f, 14f)
-                path.lineTo(16.6f, 14f)
-                canvas.drawPath(path, paint)
-            }
             Shape.TABLE -> {
                 paint.style = Paint.Style.STROKE
                 path.addRoundRect(4.5f, 5.5f, 19.5f, 18.5f, 1.4f, 1.4f, Path.Direction.CW)
@@ -3017,145 +2827,6 @@ internal class Mark(
                 path.lineTo(20f, 16f)
                 canvas.drawPath(path, paint)
             }
-            Shape.MENU -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(4.5f, 7f)
-                path.lineTo(19.5f, 7f)
-                path.moveTo(4.5f, 12f)
-                path.lineTo(19.5f, 12f)
-                path.moveTo(4.5f, 17f)
-                path.lineTo(19.5f, 17f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.HOME -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(3.8f, 11.6f)
-                path.lineTo(12f, 4.4f)
-                path.lineTo(20.2f, 11.6f)
-                path.moveTo(6.4f, 10.2f)
-                path.lineTo(6.4f, 19.6f)
-                path.lineTo(17.6f, 19.6f)
-                path.lineTo(17.6f, 10.2f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.ROBOT -> {
-                paint.style = Paint.Style.FILL
-                path.moveTo(9f, 4.4f)
-                path.cubicTo(9.6f, 9.2f, 11.4f, 11f, 16.2f, 11.6f)
-                path.cubicTo(11.4f, 12.2f, 9.6f, 14f, 9f, 18.8f)
-                path.cubicTo(8.4f, 14f, 6.6f, 12.2f, 1.8f, 11.6f)
-                path.cubicTo(6.6f, 11f, 8.4f, 9.2f, 9f, 4.4f)
-                path.close()
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2.2f
-                path.rewind()
-                path.moveTo(18.6f, 3.4f)
-                path.lineTo(18.6f, 9f)
-                path.moveTo(15.8f, 6.2f)
-                path.lineTo(21.4f, 6.2f)
-                path.moveTo(18.6f, 14.6f)
-                path.lineTo(18.6f, 20.2f)
-                path.moveTo(15.8f, 17.4f)
-                path.lineTo(21.4f, 17.4f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.LOG -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(3.5f, 5.5f, 20.5f, 18.5f, 1.6f, 1.6f, Path.Direction.CW)
-                path.moveTo(7f, 10f)
-                path.lineTo(9.6f, 12.4f)
-                path.lineTo(7f, 14.8f)
-                path.moveTo(12.4f, 14.8f)
-                path.lineTo(17.4f, 14.8f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.BRUSH -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(15.6f, 20.4f)
-                path.cubicTo(9.2f, 21.6f, 3.4f, 17.2f, 3.4f, 11.6f)
-                path.cubicTo(3.4f, 6.6f, 7.6f, 3f, 12.6f, 3f)
-                path.cubicTo(17.6f, 3f, 20.8f, 6.2f, 20.8f, 10.4f)
-                path.cubicTo(20.8f, 13.4f, 18.6f, 14.6f, 16.4f, 14.6f)
-                path.lineTo(14.8f, 14.6f)
-                path.cubicTo(13.4f, 14.6f, 12.8f, 15.6f, 13.4f, 16.8f)
-                path.cubicTo(14f, 18f, 17f, 20.2f, 15.6f, 20.4f)
-                path.close()
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(8.2f, 9f, 1.3f, paint)
-                canvas.drawCircle(12.4f, 7f, 1.3f, paint)
-                canvas.drawCircle(16.6f, 9.4f, 1.3f, paint)
-                canvas.drawCircle(7.6f, 14f, 1.3f, paint)
-            }
-            Shape.GLOBE -> {
-                paint.style = Paint.Style.STROKE
-                canvas.drawCircle(12f, 12f, 8f, paint)
-                path.moveTo(4f, 12f)
-                path.lineTo(20f, 12f)
-                path.addOval(7.6f, 4f, 16.4f, 20f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-            }
-            Shape.SPEECH -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(3.8f, 5.4f, 20.2f, 16.4f, 2.6f, 2.6f, Path.Direction.CW)
-                path.moveTo(8.6f, 16.4f)
-                path.lineTo(8.6f, 20.6f)
-                path.lineTo(13.2f, 16.4f)
-                path.moveTo(7.6f, 11f)
-                path.lineTo(14.4f, 11f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(16.6f, 11f, 1f, paint)
-            }
-            Shape.STAR -> {
-                paint.style = Paint.Style.FILL
-                var point = 0
-                while (point < 10) {
-                    val reach = if (point % 2 == 0) 8.4f else 3.7f
-                    val turn = -PI.toFloat() / 2f + point * PI.toFloat() / 5f
-                    val across = 12f + cos(turn) * reach
-                    val down = 12f + sin(turn) * reach
-                    if (point == 0) path.moveTo(across, down) else path.lineTo(across, down)
-                    point += 1
-                }
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.INFO -> {
-                paint.style = Paint.Style.STROKE
-                canvas.drawCircle(12f, 12f, 8.6f, paint)
-                path.moveTo(12f, 11.2f)
-                path.lineTo(12f, 16.8f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 7.6f, 1.1f, paint)
-            }
-            Shape.INFO_FILL -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 12f, 9f, paint)
-                paint.xfermode = CLEARING
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2.2f
-                path.moveTo(12f, 11f)
-                path.lineTo(12f, 17f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 7.4f, 1.3f, paint)
-                paint.xfermode = null
-                canvas.restore()
-            }
-            Shape.HELP -> {
-                paint.style = Paint.Style.STROKE
-                canvas.drawCircle(12f, 12f, 8.6f, paint)
-                path.moveTo(9.4f, 9.6f)
-                path.cubicTo(9.4f, 6.8f, 14.8f, 6.8f, 14.8f, 9.9f)
-                path.cubicTo(14.8f, 12.3f, 12f, 12.4f, 12f, 14.8f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 17.6f, 1.1f, paint)
-            }
             Shape.HELP_FILL -> {
                 canvas.saveLayer(0f, 0f, GRID, GRID, null)
                 paint.style = Paint.Style.FILL
@@ -3172,114 +2843,12 @@ internal class Mark(
                 paint.xfermode = null
                 canvas.restore()
             }
-            Shape.WEB -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(3.5f, 5.5f, 20.5f, 18.5f, 1.6f, 1.6f, Path.Direction.CW)
-                path.moveTo(3.5f, 9.6f)
-                path.lineTo(20.5f, 9.6f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(6.4f, 7.6f, 0.8f, paint)
-                canvas.drawCircle(9f, 7.6f, 0.8f, paint)
-                canvas.drawCircle(11.6f, 7.6f, 0.8f, paint)
-            }
-            Shape.BRANCH -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(7.4f, 8f)
-                path.lineTo(7.4f, 16f)
-                path.moveTo(7.4f, 13.4f)
-                path.cubicTo(7.4f, 10.4f, 16.6f, 12.4f, 16.6f, 9.6f)
-                canvas.drawPath(path, paint)
-                canvas.drawCircle(7.4f, 5.9f, 2.1f, paint)
-                canvas.drawCircle(7.4f, 18.1f, 2.1f, paint)
-                canvas.drawCircle(16.6f, 7.5f, 2.1f, paint)
-            }
-            Shape.PLAY -> {
-                paint.style = Paint.Style.FILL
-                path.moveTo(8.4f, 5.6f)
-                path.lineTo(18.4f, 12f)
-                path.lineTo(8.4f, 18.4f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.STOP -> {
-                paint.style = Paint.Style.FILL
-                path.addRoundRect(7.4f, 7.4f, 16.6f, 16.6f, 1.3f, 1.3f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-            }
-            Shape.SEND -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(20.4f, 4.2f)
-                path.lineTo(3.6f, 11.4f)
-                path.lineTo(10.8f, 13.6f)
-                path.lineTo(13f, 20.4f)
-                path.close()
-                path.moveTo(10.8f, 13.6f)
-                path.lineTo(20.4f, 4.2f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.LINK -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(9.8f, 14.2f)
-                path.lineTo(14.2f, 9.8f)
-                path.moveTo(9.4f, 10.6f)
-                path.lineTo(7.4f, 12.6f)
-                path.cubicTo(5.8f, 14.2f, 5.8f, 16.8f, 7.4f, 18.4f)
-                path.cubicTo(9f, 20f, 11.6f, 20f, 13.2f, 18.4f)
-                path.lineTo(15.2f, 16.4f)
-                path.moveTo(14.6f, 13.4f)
-                path.lineTo(16.6f, 11.4f)
-                path.cubicTo(18.2f, 9.8f, 18.2f, 7.2f, 16.6f, 5.6f)
-                path.cubicTo(15f, 4f, 12.4f, 4f, 10.8f, 5.6f)
-                path.lineTo(8.8f, 7.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.ADD -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(12f, 5.4f)
-                path.lineTo(12f, 18.6f)
-                path.moveTo(5.4f, 12f)
-                path.lineTo(18.6f, 12f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.SHIELD -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(12f, 3.6f)
-                path.lineTo(19.4f, 6.8f)
-                path.lineTo(19.4f, 12.2f)
-                path.cubicTo(19.4f, 16.6f, 16f, 19.2f, 12f, 20.6f)
-                path.cubicTo(8f, 19.2f, 4.6f, 16.6f, 4.6f, 12.2f)
-                path.lineTo(4.6f, 6.8f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
             Shape.MAIL -> {
                 paint.style = Paint.Style.STROKE
                 path.addRoundRect(3.5f, 5.8f, 20.5f, 18.2f, 1.6f, 1.6f, Path.Direction.CW)
                 path.moveTo(3.5f, 7.4f)
                 path.lineTo(12f, 13.6f)
                 path.lineTo(20.5f, 7.4f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.PHONE -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(6.5f, 3.4f, 17.5f, 20.6f, 2.2f, 2.2f, Path.Direction.CW)
-                path.moveTo(10.4f, 6.2f)
-                path.lineTo(13.6f, 6.2f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.BOOK -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(12f, 7f)
-                path.cubicTo(9.6f, 4.8f, 6.4f, 5.2f, 4.4f, 5.8f)
-                path.lineTo(4.4f, 18.2f)
-                path.cubicTo(6.4f, 17.6f, 9.6f, 17.2f, 12f, 19.4f)
-                path.cubicTo(14.4f, 17.2f, 17.6f, 17.6f, 19.6f, 18.2f)
-                path.lineTo(19.6f, 5.8f)
-                path.cubicTo(17.6f, 5.2f, 14.4f, 4.8f, 12f, 7f)
-                path.close()
-                path.moveTo(12f, 7f)
-                path.lineTo(12f, 19.4f)
                 canvas.drawPath(path, paint)
             }
             Shape.BUG -> {
@@ -3321,41 +2890,6 @@ internal class Mark(
                 path.lineTo(13.6f, 21f)
                 canvas.drawPath(path, paint)
             }
-            Shape.STAR_LINE -> {
-                paint.style = Paint.Style.STROKE
-                var point = 0
-                while (point < 10) {
-                    val reach = if (point % 2 == 0) 8.6f else 3.9f
-                    val turn = (-90f + point * 36f) * Math.PI.toFloat() / 180f
-                    val x = 12f + reach * cos(turn)
-                    val y = 12.4f + reach * sin(turn)
-                    if (point == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                    point += 1
-                }
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.SCREEN -> {
-                paint.style = Paint.Style.STROKE
-                path.addRoundRect(2.6f, 4.4f, 21.4f, 16.6f, 1.8f, 1.8f, Path.Direction.CW)
-                path.moveTo(9f, 20.4f)
-                path.lineTo(15f, 20.4f)
-                path.moveTo(12f, 16.6f)
-                path.lineTo(12f, 20.4f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.BRAIN -> {
-                paint.style = Paint.Style.STROKE
-                canvas.drawCircle(8.8f, 7.6f, 3.1f, paint)
-                canvas.drawCircle(7.2f, 12.2f, 3.1f, paint)
-                canvas.drawCircle(9.0f, 16.6f, 3.1f, paint)
-                canvas.drawCircle(15.2f, 7.6f, 3.1f, paint)
-                canvas.drawCircle(16.8f, 12.2f, 3.1f, paint)
-                canvas.drawCircle(15.0f, 16.6f, 3.1f, paint)
-                path.moveTo(12f, 5.2f)
-                path.lineTo(12f, 19f)
-                canvas.drawPath(path, paint)
-            }
             Shape.SHIELD_FILL -> {
                 canvas.saveLayer(0f, 0f, GRID, GRID, null)
                 paint.style = Paint.Style.FILL
@@ -3378,56 +2912,6 @@ internal class Mark(
                 paint.xfermode = null
                 canvas.restore()
             }
-            Shape.NOTE_FILL -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                path.moveTo(5.6f, 3.4f)
-                path.lineTo(14.4f, 3.4f)
-                path.lineTo(18.4f, 7.8f)
-                path.lineTo(18.4f, 20.6f)
-                path.lineTo(5.6f, 20.6f)
-                path.close()
-                canvas.drawPath(path, paint)
-                paint.xfermode = CLEARING
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.8f
-                path.rewind()
-                var line = 0
-                while (line < 3) {
-                    val y = 11.4f + line * 3.4f
-                    path.moveTo(8.4f, y)
-                    path.lineTo(if (line == 2) 12.6f else 15.6f, y)
-                    line += 1
-                }
-                canvas.drawPath(path, paint)
-                paint.xfermode = null
-                canvas.restore()
-            }
-            Shape.MAIL_FILL -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                path.addRoundRect(2.8f, 5f, 21.2f, 19f, 2.4f, 2.4f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-                paint.xfermode = CLEARING
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2f
-                path.rewind()
-                path.moveTo(5.6f, 8f)
-                path.lineTo(12f, 13.4f)
-                path.lineTo(18.4f, 8f)
-                canvas.drawPath(path, paint)
-                paint.xfermode = null
-                canvas.restore()
-            }
-            Shape.PERSON_FILL -> {
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 7.6f, 4.2f, paint)
-                path.moveTo(3.8f, 21f)
-                path.cubicTo(3.8f, 15.4f, 7.4f, 13.2f, 12f, 13.2f)
-                path.cubicTo(16.6f, 13.2f, 20.2f, 15.4f, 20.2f, 21f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
             Shape.HEART_FILL -> {
                 paint.style = Paint.Style.FILL
                 path.moveTo(12f, 20.8f)
@@ -3438,274 +2922,11 @@ internal class Mark(
                 path.close()
                 canvas.drawPath(path, paint)
             }
-            Shape.COPYRIGHT -> {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2f
-                canvas.drawCircle(12f, 12f, 8.6f, paint)
-                path.moveTo(15f, 8.9f)
-                path.cubicTo(13.2f, 7.3f, 8.6f, 7.9f, 8.6f, 12f)
-                path.cubicTo(8.6f, 16.1f, 13.2f, 16.7f, 15f, 15.1f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.PEOPLE -> {
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(9f, 8.4f, 3.4f, paint)
-                path.moveTo(2.6f, 20.2f)
-                path.cubicTo(2.6f, 15.4f, 5.4f, 13.2f, 9f, 13.2f)
-                path.cubicTo(12.6f, 13.2f, 15.4f, 15.4f, 15.4f, 20.2f)
-                path.close()
-                canvas.drawPath(path, paint)
-                path.rewind()
-                canvas.drawCircle(16.8f, 9.4f, 2.7f, paint)
-                path.moveTo(13.4f, 20.2f)
-                path.cubicTo(13.4f, 16.4f, 15.2f, 14f, 16.8f, 14f)
-                path.cubicTo(19.4f, 14f, 21.4f, 16.2f, 21.4f, 20.2f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.PAGE_ADD -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(13.4f, 3.5f)
-                path.lineTo(6.5f, 3.5f)
-                path.lineTo(6.5f, 20.5f)
-                path.lineTo(17.5f, 20.5f)
-                path.lineTo(17.5f, 7.6f)
-                path.close()
-                path.moveTo(13.4f, 3.5f)
-                path.lineTo(13.4f, 7.6f)
-                path.lineTo(17.5f, 7.6f)
-                path.moveTo(12f, 11.4f)
-                path.lineTo(12f, 17.4f)
-                path.moveTo(9f, 14.4f)
-                path.lineTo(15f, 14.4f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.FOLDER_OPEN -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(3.4f, 18.6f)
-                path.lineTo(3.4f, 6.6f)
-                path.lineTo(9.4f, 6.6f)
-                path.lineTo(11.4f, 9.4f)
-                path.lineTo(18.6f, 9.4f)
-                path.lineTo(18.6f, 12f)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.moveTo(3.4f, 18.6f)
-                path.lineTo(6.6f, 12f)
-                path.lineTo(21.4f, 12f)
-                path.lineTo(18.2f, 18.6f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.EXPORT -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(15.6f, 3.5f)
-                path.lineTo(6.5f, 3.5f)
-                path.lineTo(6.5f, 20.5f)
-                path.lineTo(17.5f, 20.5f)
-                path.lineTo(17.5f, 5.4f)
-                path.close()
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.moveTo(15.6f, 3.5f)
-                path.lineTo(15.6f, 5.4f)
-                path.lineTo(17.5f, 5.4f)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.moveTo(12f, 9.4f)
-                path.lineTo(12f, 16.4f)
-                path.moveTo(9.2f, 13.6f)
-                path.lineTo(12f, 16.4f)
-                path.lineTo(14.8f, 13.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.COPY -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(8.5f, 3.5f)
-                path.lineTo(20.5f, 3.5f)
-                path.lineTo(20.5f, 15.5f)
-                path.lineTo(8.5f, 15.5f)
-                path.close()
-                path.moveTo(15.5f, 20.5f)
-                path.lineTo(3.5f, 20.5f)
-                path.lineTo(3.5f, 8.5f)
-                path.lineTo(15.5f, 8.5f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.PEN -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(4.5f, 19.5f)
-                path.lineTo(5.6f, 15.2f)
-                path.lineTo(16.2f, 4.6f)
-                path.lineTo(19.4f, 7.8f)
-                path.lineTo(8.8f, 18.4f)
-                path.close()
-                path.moveTo(13.8f, 7f)
-                path.lineTo(17f, 10.2f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.DROID -> {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.5f
-                path.moveTo(8.6f, 3.6f)
-                path.lineTo(9.8f, 5.8f)
-                path.moveTo(15.4f, 3.6f)
-                path.lineTo(14.2f, 5.8f)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                path.moveTo(6.4f, 11.4f)
-                path.cubicTo(6.4f, 7.4f, 8.9f, 4.8f, 12f, 4.8f)
-                path.cubicTo(15.1f, 4.8f, 17.6f, 7.4f, 17.6f, 11.4f)
-                path.close()
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.addRoundRect(6.4f, 12.6f, 17.6f, 19.8f, 1.6f, 1.6f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.addRoundRect(3f, 12.2f, 5.2f, 18f, 1.1f, 1.1f, Path.Direction.CW)
-                path.addRoundRect(18.8f, 12.2f, 21f, 18f, 1.1f, 1.1f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-                paint.xfermode = CLEARING
-                canvas.drawCircle(9.6f, 8.6f, 1f, paint)
-                canvas.drawCircle(14.4f, 8.6f, 1f, paint)
-                paint.xfermode = null
-                canvas.restore()
-            }
-            Shape.BROOM -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                path.moveTo(8.6f, 13.6f)
-                path.lineTo(15.4f, 13.6f)
-                path.lineTo(19.4f, 20.6f)
-                path.lineTo(4.6f, 20.6f)
-                path.close()
-                canvas.drawPath(path, paint)
-                path.rewind()
-                path.addRoundRect(9.2f, 10.6f, 14.8f, 13.6f, 0.9f, 0.9f, Path.Direction.CW)
-                canvas.drawPath(path, paint)
-                paint.xfermode = CLEARING
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.1f
-                path.rewind()
-                path.moveTo(9.6f, 15.6f)
-                path.lineTo(8.6f, 20.6f)
-                path.moveTo(12f, 15.6f)
-                path.lineTo(12f, 20.6f)
-                path.moveTo(14.4f, 15.6f)
-                path.lineTo(15.4f, 20.6f)
-                canvas.drawPath(path, paint)
-                paint.xfermode = null
-                canvas.restore()
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.7f
-                path.rewind()
-                path.moveTo(12f, 10.6f)
-                path.lineTo(12f, 3.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.SHARE -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(9f, 10.8f)
-                path.lineTo(16f, 6.6f)
-                path.moveTo(9f, 13.2f)
-                path.lineTo(16f, 17.4f)
-                canvas.drawPath(path, paint)
-                path.rewind()
-                canvas.drawCircle(6.4f, 12f, 2.6f, paint)
-                canvas.drawCircle(17.6f, 5.4f, 2.6f, paint)
-                canvas.drawCircle(17.6f, 18.6f, 2.6f, paint)
-            }
-            Shape.WIDEN -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(4.5f, 9f)
-                path.lineTo(4.5f, 4.5f)
-                path.lineTo(9f, 4.5f)
-                path.moveTo(15f, 4.5f)
-                path.lineTo(19.5f, 4.5f)
-                path.lineTo(19.5f, 9f)
-                path.moveTo(19.5f, 15f)
-                path.lineTo(19.5f, 19.5f)
-                path.lineTo(15f, 19.5f)
-                path.moveTo(9f, 19.5f)
-                path.lineTo(4.5f, 19.5f)
-                path.lineTo(4.5f, 15f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.CLOCK -> {
-                paint.style = Paint.Style.STROKE
-                canvas.drawCircle(12f, 12f, 8f, paint)
-                path.moveTo(12f, 7f)
-                path.lineTo(12f, 12.4f)
-                path.lineTo(15.8f, 14.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.TRASH -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(4.5f, 7f)
-                path.lineTo(19.5f, 7f)
-                path.moveTo(9.5f, 7f)
-                path.lineTo(9.5f, 4.8f)
-                path.lineTo(14.5f, 4.8f)
-                path.lineTo(14.5f, 7f)
-                path.moveTo(6.6f, 7f)
-                path.lineTo(7.6f, 19.6f)
-                path.lineTo(16.4f, 19.6f)
-                path.lineTo(17.4f, 7f)
-                path.moveTo(10.4f, 10.4f)
-                path.lineTo(10.8f, 16.4f)
-                path.moveTo(13.6f, 10.4f)
-                path.lineTo(13.2f, 16.4f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.CLIP -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(16.6f, 6.4f)
-                path.lineTo(16.6f, 16.8f)
-                path.cubicTo(16.6f, 19.6f, 14.4f, 21.2f, 12f, 21.2f)
-                path.cubicTo(9.6f, 21.2f, 7.4f, 19.6f, 7.4f, 16.8f)
-                path.lineTo(7.4f, 5.9f)
-                path.cubicTo(7.4f, 4f, 8.9f, 2.8f, 10.6f, 2.8f)
-                path.cubicTo(12.3f, 2.8f, 13.8f, 4f, 13.8f, 5.9f)
-                path.lineTo(13.8f, 16.4f)
-                path.cubicTo(13.8f, 17.4f, 13f, 18.1f, 12f, 18.1f)
-                path.cubicTo(11f, 18.1f, 10.2f, 17.4f, 10.2f, 16.4f)
-                path.lineTo(10.2f, 6.6f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.DOWN -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(6.5f, 9.5f)
-                path.lineTo(12f, 15f)
-                path.lineTo(17.5f, 9.5f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.HEART -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(12f, 20.2f)
-                path.cubicTo(2.4f, 13.8f, 4.4f, 5.2f, 9.4f, 5.2f)
-                path.cubicTo(11f, 5.2f, 12f, 6.4f, 12f, 7.6f)
-                path.cubicTo(12f, 6.4f, 13f, 5.2f, 14.6f, 5.2f)
-                path.cubicTo(19.6f, 5.2f, 21.6f, 13.8f, 12f, 20.2f)
-                path.close()
-                canvas.drawPath(path, paint)
-            }
             Shape.FORWARD -> {
                 paint.style = Paint.Style.STROKE
                 path.moveTo(9f, 5f)
                 path.lineTo(16f, 12f)
                 path.lineTo(9f, 19f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.UP -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(12f, 19.5f)
-                path.lineTo(12f, 4.5f)
-                path.moveTo(5.5f, 11f)
-                path.lineTo(12f, 4.5f)
-                path.lineTo(18.5f, 11f)
                 canvas.drawPath(path, paint)
             }
             Shape.SWAP -> {
@@ -3733,6 +2954,7 @@ internal class Mark(
                 path.close()
                 canvas.drawPath(path, paint)
             }
+            else -> Unit
         }
         canvas.restore()
     }
@@ -3742,6 +2964,7 @@ internal class Mark(
     }
 
     override fun setColorFilter(filter: ColorFilter?) {
+        given = filter
         paint.colorFilter = filter
     }
 
