@@ -584,7 +584,8 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
 
     for path in [CORE, GUARD, ANDROID] + sorted(COMPILERS.glob("*.rs")) + sorted((COMPILERS / "Java").glob("*.rs")):
         text = path.read_text(encoding="utf-8")
-        for found in re.finditer(r'"(E[A-Z]\d{3})"', text):
+        text = text.split("\n#[cfg(test)]\n", 1)[0]
+        for found in re.finditer(r'"(E(?:[A-Z]\d{3}|\d{4}))"', text):
             opened = text.rfind("(", max(0, found.start() - 400), found.start())
             if opened < 0:
                 continue
