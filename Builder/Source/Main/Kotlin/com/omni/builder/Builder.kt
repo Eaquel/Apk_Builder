@@ -100,6 +100,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -115,6 +116,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
+import org.json.JSONArray
 import org.json.JSONObject
 
 enum class LogLevel {
@@ -3102,6 +3104,8 @@ private sealed interface Screen {
 
     data class Build(val root: String) : Screen
 
+    data object Repos : Screen
+
     data object Trash : Screen
 
     data object Settings : Screen
@@ -3605,6 +3609,10 @@ class BuilderActivity : Activity() {
 
     private var cloning = false
 
+    private var reposQuery = ""
+
+    private var reposFound: List<Forge.Repository> = emptyList()
+
     private var raised = false
     private val opened = mutableSetOf<String>()
     private val wentBefore = mutableListOf<String>()
@@ -4060,6 +4068,7 @@ class BuilderActivity : Activity() {
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
+            is Screen.Repos -> renderRepos()
             is Screen.Trash -> renderTrash()
             is Screen.Settings -> renderSettings()
             is Screen.Keys -> renderKeys()
@@ -4239,6 +4248,7 @@ class BuilderActivity : Activity() {
             is Screen.Settings -> R.string.omni_tab_settings
             is Screen.Keys -> R.string.omni_keys_title
             is Screen.NewKey -> R.string.omni_keys_new
+            is Screen.Repos -> R.string.omni_repos_title
             is Screen.Trash -> R.string.omni_trash_title
             is Screen.Build -> R.string.omni_tab_build
             is Screen.Legal ->
@@ -5247,6 +5257,11 @@ class BuilderActivity : Activity() {
         list.addView(
             drawerRow(Mark.Shape.LOG, R.string.omni_tab_shell, here is Screen.Terminal) {
                 leaveFor(Screen.Terminal)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.BRANCH, R.string.omni_repos_title, here is Screen.Repos) {
+                leaveFor(Screen.Repos)
             }
         )
         list.addView(
@@ -7559,6 +7574,112 @@ class BuilderActivity : Activity() {
         }
         content.addView(shelf)
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    private fun renderRepos() {
+        content.addView(
+            screenHead(
+                Mark.Shape.BRANCH,
+                getString(R.string.omni_repos_title),
+                getString(R.string.omni_repos_detail),
+            )
+        )
+        val asking = card()
+        val (queryHolder, queryField) = input(
+            getString(R.string.omni_repos_query),
+            reposQuery,
+        )
+        queryField.hint = getString(R.string.omni_repos_hint)
+        asking.addView(queryHolder)
+        val (tokenHolder, tokenField) = input(
+            getString(R.string.omni_clone_auth_token),
+            cloneToken,
+        )
+        asking.addView(tokenHolder)
+        asking.addView(
+            primary(getString(R.string.omni_repos_search)) {
+                reposQuery = queryField.text?.toString().orEmpty().trim()
+                cloneToken = tokenField.text?.toString().orEmpty().trim()
+                lookForRepos(false)
+            }
+        )
+        asking.addView(
+            subtle(getString(R.string.omni_repos_mine), palette.accent) {
+                cloneToken = tokenField.text?.toString().orEmpty().trim()
+                lookForRepos(true)
+            }
+        )
+        content.addView(asking)
+        content.addView(quiet(getString(R.string.omni_repos_how)))
+        if (reposFound.isNotEmpty()) {
+            showRepos()
+        }
+    }
+
+    private fun lookForRepos(mine: Boolean) {
+        results.removeAllViews()
+        results.addView(quiet(getString(R.string.omni_repos_looking)))
+        val token = cloneToken
+        val asked = reposQuery
+        val thread = Thread {
+            val answer = runCatching {
+                if (mine) Forge.mine(token) else Forge.search(asked, token)
+            }
+            runOnUiThread {
+                if (screen !is Screen.Repos) {
+                    return@runOnUiThread
+                }
+                results.removeAllViews()
+                val found = answer.getOrElse { why ->
+                    results.addView(notice(refusalOf(why), palette.error))
+                    return@runOnUiThread
+                }
+                reposFound = found
+                showRepos()
+            }
+        }
+        thread.isDaemon = true
+        thread.start()
+    }
+
+    private fun showRepos() {
+        if (reposFound.isEmpty()) {
+            results.addView(quiet(getString(R.string.omni_repos_none)))
+            return
+        }
+        val listed = card()
+        reposFound.forEachIndexed { index, one ->
+            if (index > 0) {
+                listed.addView(rule(), MATCH_PARENT, 1)
+            }
+            val about = StringBuilder()
+            if (one.about.isNotEmpty()) {
+                about.append(one.about)
+            }
+            val facts = ArrayList<String>()
+            if (one.language.isNotEmpty()) {
+                facts.add(one.language)
+            }
+            facts.add(getString(R.string.omni_repos_stars, one.stars))
+            if (one.shut) {
+                facts.add(getString(R.string.omni_repos_private))
+            }
+            if (about.isNotEmpty()) {
+                about.append('\n')
+            }
+            about.append(facts.joinToString(" · "))
+            listed.addView(
+                row(
+                    one.full,
+                    about.toString(),
+                    getString(R.string.omni_clone_go),
+                    palette.accent,
+                ) {
+                    cloneFrom(one.address, cloneToken, projectsFolder().absolutePath, true)
+                }
+            )
+        }
+        results.addView(listed)
     }
 
     private fun renderTrash() {
@@ -16930,6 +17051,120 @@ internal object Remote {
             throw Refused(R.string.omni_clone_empty)
         }
         return carried
+    }
+}
+
+internal object Forge {
+
+    private const val HOST = "https://api.github.com"
+
+    private const val KIND = "application/vnd.github+json"
+
+    private const val DATED = "2022-11-28"
+
+    private const val MOST = 40
+
+    private const val REPLY_BYTES = 4 * 1024 * 1024
+
+    class Repository(
+        val full: String,
+        val about: String,
+        val stars: Int,
+        val language: String,
+        val address: String,
+        val shut: Boolean,
+    )
+
+    private fun ask(where: String, token: String): String {
+        val link = runCatching { URL(where).openConnection() }.getOrNull() as? HttpURLConnection
+            ?: throw Remote.Refused(R.string.omni_repos_refused)
+        link.connectTimeout = 20_000
+        link.readTimeout = 30_000
+        link.setRequestProperty("Accept", KIND)
+        link.setRequestProperty("X-GitHub-Api-Version", DATED)
+        link.setRequestProperty("User-Agent", "omni-builder")
+        if (token.isNotEmpty()) {
+            link.setRequestProperty("Authorization", "Bearer $token")
+        }
+        val code = runCatching { link.responseCode }.getOrElse {
+            throw Remote.Refused(R.string.omni_clone_unreachable)
+        }
+        if (code == 401 || code == 403) {
+            link.disconnect()
+            throw Remote.Refused(R.string.omni_repos_needs_token)
+        }
+        if (code != 200) {
+            link.disconnect()
+            throw Remote.Refused(R.string.omni_repos_refused, code.toString())
+        }
+        val said = runCatching {
+            link.inputStream.use { from ->
+                val room = ByteArrayOutputStream()
+                val slab = ByteArray(32 * 1024)
+                while (room.size() < REPLY_BYTES) {
+                    val got = from.read(slab)
+                    if (got < 0) {
+                        break
+                    }
+                    room.write(slab, 0, got)
+                }
+                room.toString(Charsets.UTF_8.name())
+            }
+        }.getOrElse { throw Remote.Refused(R.string.omni_clone_unreachable) }
+        link.disconnect()
+        return said
+    }
+
+    private fun said(from: JSONObject, key: String): String =
+        if (from.isNull(key)) "" else from.optString(key)
+
+    private fun readOne(from: JSONObject): Repository? {
+        val full = said(from, "full_name")
+        val address = said(from, "clone_url")
+        if (full.isEmpty() || !address.startsWith("https://")) {
+            return null
+        }
+        return Repository(
+            full = full,
+            about = said(from, "description"),
+            stars = from.optInt("stargazers_count"),
+            language = said(from, "language"),
+            address = address,
+            shut = from.optBoolean("private"),
+        )
+    }
+
+    private fun readMany(said: JSONArray): List<Repository> {
+        val found = ArrayList<Repository>(said.length())
+        for (index in 0 until said.length()) {
+            val one = said.optJSONObject(index) ?: continue
+            readOne(one)?.let { found.add(it) }
+        }
+        return found
+    }
+
+    fun search(said: String, token: String): List<Repository> {
+        val asked = said.trim()
+        if (asked.isEmpty()) {
+            return emptyList()
+        }
+        val quoted = URLEncoder.encode(asked, Charsets.UTF_8.name())
+        val body = ask("$HOST/search/repositories?q=$quoted&per_page=$MOST", token)
+        val held = runCatching { JSONObject(body) }.getOrElse {
+            throw Remote.Refused(R.string.omni_repos_refused)
+        }
+        return readMany(held.optJSONArray("items") ?: JSONArray())
+    }
+
+    fun mine(token: String): List<Repository> {
+        if (token.isEmpty()) {
+            throw Remote.Refused(R.string.omni_repos_needs_token)
+        }
+        val body = ask("$HOST/user/repos?per_page=$MOST&sort=updated&affiliation=owner", token)
+        val held = runCatching { JSONArray(body) }.getOrElse {
+            throw Remote.Refused(R.string.omni_repos_refused)
+        }
+        return readMany(held)
     }
 }
 
