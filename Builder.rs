@@ -191,7 +191,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Cache keys over every input directive section 11 names, taken over a canonical encoding so that an environment variable holding a separator cannot be written to look like two, and four distinguishable lookup outcomes. The index is written down and read back, beside itself and then moved over itself, and it says what each key stands for so a hit hands back the bytes rather than only the news that a key was seen. An index that outlives what it indexes is reconciled against the store; one that cannot be read is an empty one, because refusing to start over a damaged cache file would turn something harmless into something fatal.",
         missing: &[
             "The index is read whole and written whole, so a very large one costs a read and a write on every build rather than a seek.",
-            "Nothing decides when to sweep. The budget and the moment are the caller's, and no caller passes one yet.",
+            "A sweep is asked for, never scheduled. The budget names what to keep --- bytes, entries and an age --- and the sweep drops the unusable first, then the stale, then the least recently used until it fits, but nothing calls it on a timer, and the build engine does not yet consult the cache at all, so in this build nothing calls it.",
         ],
     },
     Subsystem {
@@ -23341,6 +23341,29 @@ pub mod cache {
         pub corrupted: u64,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Budget {
+        pub keep_bytes: u64,
+        pub keep_entries: usize,
+        pub stale_after_seconds: i64,
+    }
+
+    impl Default for Budget {
+        fn default() -> Self {
+            Budget {
+                keep_bytes: 512 * 1024 * 1024,
+                keep_entries: 4096,
+                stale_after_seconds: 30 * 24 * 60 * 60,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Swept {
+        pub dropped: usize,
+        pub freed: u64,
+    }
+
     #[derive(Clone, Debug, Default)]
     pub struct Index {
         entries: Vec<Entry>,
@@ -23387,6 +23410,73 @@ pub mod cache {
                 .filter(|entry| entry.valid)
                 .map(|entry| entry.content)
                 .collect()
+        }
+
+        pub fn bytes(&self) -> u64 {
+            self.entries
+                .iter()
+                .filter(|entry| entry.valid)
+                .map(|entry| entry.bytes)
+                .sum()
+        }
+
+        pub fn oldest_use(&self) -> Option<i64> {
+            self.entries.iter().map(|entry| entry.used).min()
+        }
+
+        pub fn sweep(&mut self, budget: Budget, now: i64) -> Swept {
+            let mut swept = Swept::default();
+            let freed = |entry: &Entry, swept: &mut Swept| {
+                swept.dropped += 1;
+                if entry.valid {
+                    swept.freed += entry.bytes;
+                }
+            };
+
+            self.entries.retain(|entry| {
+                if entry.valid {
+                    return true;
+                }
+                freed(entry, &mut swept);
+                false
+            });
+
+            if budget.stale_after_seconds > 0 {
+                let cutoff = now.saturating_sub(budget.stale_after_seconds);
+                self.entries.retain(|entry| {
+                    if entry.used > cutoff {
+                        return true;
+                    }
+                    freed(entry, &mut swept);
+                    false
+                });
+            }
+
+            self.entries.sort_by(|left, right| {
+                right
+                    .used
+                    .cmp(&left.used)
+                    .then_with(|| left.key.to_hex().cmp(&right.key.to_hex()))
+            });
+
+            let mut kept_bytes = 0u64;
+            let mut kept = 0usize;
+            let mut over = Vec::new();
+            for (at, entry) in self.entries.iter().enumerate() {
+                let next = kept_bytes.saturating_add(entry.bytes);
+                let room = next <= budget.keep_bytes && kept < budget.keep_entries;
+                if room {
+                    kept_bytes = next;
+                    kept += 1;
+                } else {
+                    over.push(at);
+                }
+            }
+            for at in over.iter().rev() {
+                let entry = self.entries.remove(*at);
+                freed(&entry, &mut swept);
+            }
+            swept
         }
 
         pub fn reconcile(&mut self, store: &crate::store::Store) -> usize {
@@ -74794,6 +74884,107 @@ Viewbinding   = false
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    fn cache_key(named: &str) -> super::cache::Key {
+        super::cache::Key::from_digest(super::hash::sha256(named.as_bytes()))
+    }
+
+    fn filled(rows: &[(&str, u64, i64)]) -> CacheIndex {
+        let mut index = CacheIndex::new();
+        for (named, bytes, used) in rows {
+            index.record(
+                cache_key(named),
+                super::hash::sha256(named.as_bytes()),
+                *bytes,
+                *used,
+            );
+        }
+        index
+    }
+
+    #[test]
+    fn a_sweep_inside_the_budget_drops_nothing() {
+        let mut index = filled(&[("a", 10, 100), ("b", 20, 200), ("c", 30, 300)]);
+        assert_eq!(index.bytes(), 60);
+        assert_eq!(index.oldest_use(), Some(100));
+
+        let budget = super::cache::Budget {
+            keep_bytes: 1000,
+            keep_entries: 10,
+            stale_after_seconds: 0,
+        };
+        assert_eq!(index.sweep(budget, 300), super::cache::Swept::default());
+        assert_eq!(index.len(), 3);
+        assert_eq!(index.bytes(), 60);
+    }
+
+    #[test]
+    fn a_sweep_keeps_the_most_recently_used_within_the_budget() {
+        let mut index = filled(&[("old", 40, 100), ("middle", 40, 200), ("fresh", 40, 300)]);
+        let budget = super::cache::Budget {
+            keep_bytes: 90,
+            keep_entries: 10,
+            stale_after_seconds: 0,
+        };
+        let swept = index.sweep(budget, 300);
+        assert_eq!(swept.dropped, 1);
+        assert_eq!(swept.freed, 40);
+        assert_eq!(index.len(), 2);
+        assert!(index.content_for(cache_key("fresh")).is_some());
+        assert!(index.content_for(cache_key("middle")).is_some());
+        assert!(index.content_for(cache_key("old")).is_none());
+
+        let mut counted = filled(&[("a", 1, 100), ("b", 1, 200), ("c", 1, 300)]);
+        let by_count = super::cache::Budget {
+            keep_bytes: 1000,
+            keep_entries: 1,
+            stale_after_seconds: 0,
+        };
+        assert_eq!(counted.sweep(by_count, 300).dropped, 2);
+        assert!(counted.content_for(cache_key("c")).is_some());
+    }
+
+    #[test]
+    fn a_sweep_drops_what_is_stale_and_what_nothing_can_use() {
+        let mut index = filled(&[("kept", 10, 900), ("stale", 10, 100)]);
+        index.invalidate(cache_key("kept"));
+        index.record(cache_key("kept"), super::hash::sha256(b"kept"), 10, 900);
+        index.record(cache_key("gone"), super::hash::sha256(b"gone"), 70, 950);
+        index.invalidate(cache_key("gone"));
+
+        let budget = super::cache::Budget {
+            keep_bytes: 1000,
+            keep_entries: 10,
+            stale_after_seconds: 500,
+        };
+        let swept = index.sweep(budget, 1000);
+        assert_eq!(
+            swept.dropped, 2,
+            "the invalid one and the stale one both go"
+        );
+        assert_eq!(swept.freed, 10, "an invalid entry holds no bytes to free");
+        assert_eq!(index.len(), 1);
+        assert!(index.content_for(cache_key("kept")).is_some());
+        assert!(index.content_for(cache_key("stale")).is_none());
+        assert!(index.content_for(cache_key("gone")).is_none());
+    }
+
+    #[test]
+    fn a_swept_index_survives_the_round_trip_it_is_written_through() {
+        let mut index = filled(&[("a", 10, 100), ("b", 20, 200), ("c", 30, 300)]);
+        index.sweep(
+            super::cache::Budget {
+                keep_bytes: 50,
+                keep_entries: 10,
+                stale_after_seconds: 0,
+            },
+            300,
+        );
+        let again = CacheIndex::decode(&index.encode());
+        assert_eq!(again.len(), 2);
+        assert_eq!(again.bytes(), 50);
+        assert!(again.content_for(cache_key("a")).is_none());
     }
 
     #[test]
