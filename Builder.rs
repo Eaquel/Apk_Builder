@@ -52125,6 +52125,60 @@ pub mod ffi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn omni_git_checkout(
+        pack_path: *const c_char,
+        head: *const c_char,
+        into: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(pack_path), Some(head), Some(into)) =
+                (text_from(pack_path), text_from(head), text_from(into))
+            else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::git::of_hex(head.trim()) {
+                None => {
+                    w.field_bool("cloned", false);
+                    w.field_str(
+                        "reason",
+                        "The commit a clone starts from is not a name Git writes.",
+                    );
+                }
+                Some(named) => match std::fs::read(&pack_path) {
+                    Err(error) => {
+                        w.field_bool("cloned", false);
+                        w.field_str("reason", &error.to_string());
+                    }
+                    Ok(bytes) => {
+                        let carried = bytes.len() as u64;
+                        match crate::git::unpack(&bytes).and_then(|pack| {
+                            let written =
+                                crate::git::checkout(&pack, &named, std::path::Path::new(&into))?;
+                            Ok((pack.len(), written))
+                        }) {
+                            Ok((objects, written)) => {
+                                w.field_bool("cloned", true);
+                                w.field_str("head", &crate::git::to_hex(&named));
+                                w.field_u64("objects", objects as u64);
+                                w.field_u64("files", written.files);
+                                w.field_u64("folders", written.folders);
+                                w.field_u64("bytes", written.bytes);
+                                w.field_u64("packed", carried);
+                            }
+                            Err(error) => write_failure(&mut w, "cloned", &error),
+                        }
+                    }
+                },
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn omni_new_folder(
         root: *const c_char,
         relative: *const c_char,

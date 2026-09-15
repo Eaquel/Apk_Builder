@@ -31,10 +31,10 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PathMeasure
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
-import android.graphics.PathMeasure
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
@@ -47,14 +47,14 @@ import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyInfo
-import android.security.keystore.KeyProperties
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
+import android.security.keystore.KeyProperties
 import android.text.Editable
 import android.text.InputType
 import android.text.Spannable
@@ -62,6 +62,7 @@ import android.text.SpannableStringBuilder
 import android.text.TextWatcher
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
+import android.util.Base64
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -90,9 +91,15 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
+import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -571,6 +578,8 @@ object Builder {
     external fun nativeReadFile(root: String, relative: String): String
 
     external fun nativeWriteFile(root: String, relative: String, contents: String): String
+
+    external fun nativeGitCheckout(packPath: String, head: String, into: String): String
 
     external fun nativeNewFolder(root: String, relative: String): String
 
@@ -3183,6 +3192,8 @@ class BuilderActivity : Activity() {
 
         val CLONE_KINDS = listOf("Git")
 
+        const val CLONE_TELL_MILLIS = 250L
+
         val WEB_PART_NAMES = listOf(
             R.string.omni_web_script,
             R.string.omni_web_storage,
@@ -3589,6 +3600,10 @@ class BuilderActivity : Activity() {
     private val talkHeld = mutableListOf<Pair<Boolean, String>>()
     private var talkDraft = ""
     private var cloneAddress = ""
+
+    private var cloneToken = ""
+
+    private var cloning = false
 
     private var raised = false
     private val opened = mutableSetOf<String>()
@@ -8606,6 +8621,12 @@ class BuilderActivity : Activity() {
         )
         whereField.hint = "https://github.com/user/repo.git"
         sheet.addView(whereHolder)
+
+        val (tokenHolder, tokenField) = input(
+            getString(R.string.omni_clone_auth_token),
+            cloneToken,
+        )
+        tokenHolder.visibility = View.GONE
         sheet.addView(
             dropRow(
                 getString(R.string.omni_clone_auth),
@@ -8614,8 +8635,22 @@ class BuilderActivity : Activity() {
                     getString(R.string.omni_clone_auth_none),
                     getString(R.string.omni_clone_auth_token),
                 ),
-            ) {}
+            ) { picked -> tokenHolder.visibility = if (picked == 1) View.VISIBLE else View.GONE }
         )
+        sheet.addView(tokenHolder)
+
+        var whole = false
+        sheet.addView(
+            dropRow(
+                getString(R.string.omni_clone_history),
+                getString(R.string.omni_clone_history_last),
+                listOf(
+                    getString(R.string.omni_clone_history_last),
+                    getString(R.string.omni_clone_history_all),
+                ),
+            ) { picked -> whole = picked == 1 }
+        )
+
         val (intoHolder, intoField) = input(
             getString(R.string.omni_clone_into),
             projectsFolder().absolutePath,
@@ -8629,14 +8664,121 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
                 getString(R.string.omni_clone_go) to { it: AlertDialog ->
                     cloneAddress = whereField.text?.toString().orEmpty().trim()
-                    results.removeAllViews()
-                    results.addView(
-                        notice(getString(R.string.omni_clone_unwired), palette.warning)
-                    )
+                    cloneToken = tokenField.text?.toString().orEmpty().trim()
+                    val into = intoField.text?.toString().orEmpty().trim()
                     it.dismiss()
+                    cloneFrom(cloneAddress, cloneToken, into, !whole)
                 },
             ),
         )
+    }
+
+    private fun refusalOf(why: Throwable): String = when (why) {
+        is Remote.Refused ->
+            if (why.detail.isEmpty()) {
+                getString(why.said)
+            } else {
+                getString(why.said) + " " + why.detail
+            }
+        else -> getString(R.string.omni_clone_unreachable)
+    }
+
+    private fun cloneFrom(said: String, token: String, into: String, shallow: Boolean) {
+        results.removeAllViews()
+        val address = try {
+            Remote.address(said)
+        } catch (why: Remote.Refused) {
+            results.addView(notice(refusalOf(why), palette.error))
+            return
+        }
+        val name = Remote.named(address)
+        val where = if (into.isEmpty()) projectsFolder() else File(into)
+        val target = File(where, name)
+        if (target.isDirectory && target.list()?.isNotEmpty() == true) {
+            results.addView(notice(getString(R.string.omni_clone_here), palette.warning))
+            return
+        }
+
+        val told = card()
+        told.addView(label(getString(R.string.omni_clone_title)))
+        val telling = body(getString(R.string.omni_clone_reaching))
+        told.addView(telling)
+        told.addView(
+            subtle(getString(R.string.omni_action_cancel), palette.error) { cloning = false }
+        )
+        results.addView(told)
+
+        cloning = true
+        val pack = File(cacheDir, "omni-clone.pack")
+        val thread = Thread {
+            var spoke = 0L
+            val answer = runCatching {
+                val found = Remote.advertise(address, token)
+                runOnUiThread {
+                    telling.text = getString(R.string.omni_clone_fetching, found.branch)
+                }
+                val carried = Remote.fetch(
+                    address,
+                    token,
+                    found.head,
+                    shallow && found.shallow,
+                    pack,
+                ) { bytes ->
+                    val now = System.currentTimeMillis()
+                    if (now - spoke > CLONE_TELL_MILLIS) {
+                        spoke = now
+                        runOnUiThread {
+                            telling.text = getString(R.string.omni_clone_carried, size(bytes))
+                        }
+                    }
+                    cloning
+                }
+                runOnUiThread { telling.text = getString(R.string.omni_clone_writing) }
+                val report = Builder.nativeGitCheckout(
+                    pack.absolutePath,
+                    found.head,
+                    target.absolutePath,
+                )
+                carried to JSONObject(report)
+            }
+            pack.delete()
+            runOnUiThread { cloneEnded(name, target, answer) }
+        }
+        thread.isDaemon = true
+        thread.start()
+    }
+
+    private fun cloneEnded(
+        name: String,
+        target: File,
+        answer: Result<Pair<Long, JSONObject>>,
+    ) {
+        cloning = false
+        results.removeAllViews()
+        val got = answer.getOrElse { why ->
+            target.deleteRecursively()
+            OmniLog.event(LogLevel.WARN, "clone", "A clone did not finish.")
+            results.addView(notice(refusalOf(why), palette.error))
+            return
+        }
+        val report = got.second
+        if (!report.optBoolean("cloned")) {
+            target.deleteRecursively()
+            val why = report.optString("reason").ifEmpty {
+                getString(R.string.omni_clone_not_git)
+            }
+            results.addView(notice(why, palette.error))
+            return
+        }
+        val files = report.optLong("files")
+        val folders = report.optLong("folders")
+        OmniLog.event(LogLevel.INFO, "clone", "A repository was cloned.")
+        flash(
+            getString(R.string.omni_clone_done, name, files, folders),
+            palette.ok,
+            Mark.Shape.BRANCH,
+        )
+        go(Screen.Files(target.absolutePath, ""))
     }
 
     private fun factRow(
@@ -16530,6 +16672,264 @@ internal object DeviceKey {
             out[index] = held.toByte()
         }
         return out
+    }
+}
+
+internal object Remote {
+
+    private const val SERVICE = "git-upload-pack"
+
+    private const val AGENT = "omni-builder"
+
+    private const val OPEN_MILLIS = 20_000
+
+    private const val READ_MILLIS = 60_000
+
+    private const val ROOM = 64 * 1024
+
+    private const val NOTHING = '\u0000'
+
+    const val MOST_BYTES = 512L * 1024L * 1024L
+
+    class Refused(val said: Int, val detail: String = "") : Exception()
+
+    class Found(
+        val head: String,
+        val branch: String,
+        val shallow: Boolean,
+    )
+
+    fun address(said: String): String {
+        var text = said.trim()
+        if (text.isEmpty()) {
+            throw Refused(R.string.omni_clone_address_bad)
+        }
+        if (text.startsWith("git@")) {
+            text = "https://" + text.removePrefix("git@").replaceFirst(':', '/')
+        }
+        if (text.startsWith("http://")) {
+            throw Refused(R.string.omni_clone_needs_https)
+        }
+        if (!text.startsWith("https://")) {
+            text = "https://$text"
+        }
+        text = text.trimEnd('/')
+        if (!text.endsWith(".git")) {
+            text = "$text.git"
+        }
+        val opened = runCatching { URL(text) }.getOrNull()
+            ?: throw Refused(R.string.omni_clone_address_bad)
+        if (opened.host.isNullOrEmpty() || opened.path.trim('/').count { it == '/' } < 1) {
+            throw Refused(R.string.omni_clone_address_bad)
+        }
+        return text
+    }
+
+    fun named(address: String): String =
+        address.trimEnd('/').substringAfterLast('/').removeSuffix(".git")
+
+    private fun reach(
+        where: String,
+        token: String,
+        sending: String?,
+    ): HttpURLConnection {
+        val link = runCatching { URL(where).openConnection() }.getOrNull() as? HttpURLConnection
+            ?: throw Refused(R.string.omni_clone_address_bad)
+        link.connectTimeout = OPEN_MILLIS
+        link.readTimeout = READ_MILLIS
+        link.instanceFollowRedirects = true
+        link.setRequestProperty("User-Agent", AGENT)
+        link.setRequestProperty("Accept-Encoding", "identity")
+        if (token.isNotEmpty()) {
+            val pair = "x-access-token:$token".toByteArray(Charsets.UTF_8)
+            val coded = Base64.encodeToString(pair, Base64.NO_WRAP)
+            link.setRequestProperty("Authorization", "Basic $coded")
+        }
+        if (sending != null) {
+            link.requestMethod = "POST"
+            link.doOutput = true
+            link.setRequestProperty("Content-Type", sending)
+        }
+        return link
+    }
+
+    private fun answered(link: HttpURLConnection) {
+        val code = runCatching { link.responseCode }.getOrElse {
+            throw Refused(R.string.omni_clone_unreachable)
+        }
+        when (code) {
+            200 -> return
+            401, 403 -> throw Refused(R.string.omni_clone_needs_token)
+            404 -> throw Refused(R.string.omni_clone_not_found)
+            else -> throw Refused(R.string.omni_clone_server_refused, code.toString())
+        }
+    }
+
+    private fun packet(said: String): ByteArray {
+        val body = said.toByteArray(Charsets.UTF_8)
+        val size = body.size + 4
+        return String.format(Locale.US, "%04x", size).toByteArray(Charsets.US_ASCII) + body
+    }
+
+    private fun fill(from: InputStream, into: ByteArray): Boolean {
+        var at = 0
+        while (at < into.size) {
+            val got = from.read(into, at, into.size - at)
+            if (got < 0) {
+                return false
+            }
+            at += got
+        }
+        return true
+    }
+
+    private fun packetLength(from: InputStream): Int {
+        val head = ByteArray(4)
+        if (!fill(from, head)) {
+            return -1
+        }
+        val said = String(head, Charsets.US_ASCII)
+        return said.toIntOrNull(16) ?: throw Refused(R.string.omni_clone_not_git)
+    }
+
+    private fun packetBody(from: InputStream, size: Int): ByteArray? {
+        if (size < 4) {
+            throw Refused(R.string.omni_clone_not_git)
+        }
+        val room = ByteArray(size - 4)
+        return if (fill(from, room)) room else null
+    }
+
+    fun advertise(address: String, token: String): Found {
+        val link = reach("$address/info/refs?service=$SERVICE", token, null)
+        answered(link)
+        val body = runCatching { link.inputStream.use { it.readBytes() } }.getOrElse {
+            throw Refused(R.string.omni_clone_unreachable)
+        }
+        link.disconnect()
+
+        val from = ByteArrayInputStream(body)
+        val names = ArrayList<Pair<String, String>>()
+        var capable = ""
+        while (true) {
+            val size = packetLength(from)
+            if (size < 0) {
+                break
+            }
+            if (size == 0) {
+                continue
+            }
+            val room = packetBody(from, size) ?: break
+            val said = String(room, Charsets.UTF_8)
+            if (said.startsWith("#")) {
+                continue
+            }
+            val split = said.indexOf(NOTHING)
+            val plain = if (split < 0) said else said.substring(0, split)
+            if (split >= 0 && capable.isEmpty()) {
+                capable = said.substring(split + 1)
+            }
+            val parts = plain.trim().split(' ', limit = 2)
+            if (parts.size == 2 && parts[0].length == 40) {
+                names.add(parts[0] to parts[1])
+            }
+        }
+        if (names.isEmpty()) {
+            throw Refused(R.string.omni_clone_empty)
+        }
+
+        val pointed = capable.split(' ')
+            .firstOrNull { it.startsWith("symref=HEAD:") }
+            ?.removePrefix("symref=HEAD:")
+            .orEmpty()
+        val head = names.firstOrNull { it.second == "HEAD" }?.first
+            ?: names.firstOrNull { it.second == pointed }?.first
+            ?: names.firstOrNull { it.second.startsWith("refs/heads/") }?.first
+            ?: throw Refused(R.string.omni_clone_empty)
+        val branch = pointed.ifEmpty {
+            names.firstOrNull { it.first == head && it.second.startsWith("refs/heads/") }
+                ?.second.orEmpty()
+        }
+        return Found(head, branch.removePrefix("refs/heads/"), capable.contains("shallow"))
+    }
+
+    fun fetch(
+        address: String,
+        token: String,
+        want: String,
+        shallow: Boolean,
+        into: File,
+        watching: (Long) -> Boolean,
+    ): Long {
+        val asked = ByteArrayOutputStream()
+        val first = StringBuilder("want ").append(want).append(" ofs-delta")
+        if (shallow) {
+            first.append(" shallow")
+        }
+        first.append('\n')
+        asked.write(packet(first.toString()))
+        if (shallow) {
+            asked.write(packet("deepen 1\n"))
+        }
+        asked.write("0000".toByteArray(Charsets.US_ASCII))
+        asked.write(packet("done\n"))
+
+        val link = reach("$address/$SERVICE", token, "application/x-git-upload-pack-request")
+        runCatching { link.outputStream.use { it.write(asked.toByteArray()) } }.getOrElse {
+            throw Refused(R.string.omni_clone_unreachable)
+        }
+        answered(link)
+
+        val from = runCatching { BufferedInputStream(link.inputStream, ROOM) }.getOrElse {
+            throw Refused(R.string.omni_clone_unreachable)
+        }
+        var carried = 0L
+        try {
+            while (true) {
+                val size = packetLength(from)
+                if (size < 0) {
+                    throw Refused(R.string.omni_clone_empty)
+                }
+                if (size == 0) {
+                    continue
+                }
+                val room = packetBody(from, size) ?: throw Refused(R.string.omni_clone_empty)
+                val said = String(room, Charsets.UTF_8)
+                if (said.startsWith("NAK") || said.startsWith("ACK")) {
+                    break
+                }
+                if (said.startsWith("ERR")) {
+                    throw Refused(
+                        R.string.omni_clone_server_refused,
+                        said.removePrefix("ERR").trim(),
+                    )
+                }
+            }
+            FileOutputStream(into).use { out ->
+                val room = ByteArray(ROOM)
+                while (true) {
+                    val got = from.read(room)
+                    if (got < 0) {
+                        break
+                    }
+                    carried += got
+                    if (carried > MOST_BYTES) {
+                        throw Refused(R.string.omni_clone_too_large)
+                    }
+                    out.write(room, 0, got)
+                    if (!watching(carried)) {
+                        throw Refused(R.string.omni_clone_stopped)
+                    }
+                }
+            }
+        } finally {
+            runCatching { from.close() }
+            link.disconnect()
+        }
+        if (carried < 32) {
+            throw Refused(R.string.omni_clone_empty)
+        }
+        return carried
     }
 }
 

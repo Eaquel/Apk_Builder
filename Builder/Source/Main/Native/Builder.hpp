@@ -73,6 +73,8 @@ char *omni_read_file(const char *root, const char *relative);
 
 char *omni_write_file(const char *root, const char *relative, const char *contents);
 
+char *omni_git_checkout(const char *pack_path, const char *head, const char *into);
+
 char *omni_new_folder(const char *root, const char *relative);
 
 char *omni_remove_path(const char *root, const char *relative,

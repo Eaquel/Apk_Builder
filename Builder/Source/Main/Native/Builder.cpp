@@ -551,6 +551,23 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWriteFile(
                                        contents_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
+    JNIEnv *env, jobject , jstring pack_path, jstring head, jstring into) {
+  std::string pack_text;
+  std::string head_text;
+  std::string into_text;
+  if (pack_path == nullptr || head == nullptr || into == nullptr ||
+      !JavaStringToUtf8(env, pack_path, &pack_text) ||
+      !JavaStringToUtf8(env, head, &head_text) ||
+      !JavaStringToUtf8(env, into, &into_text)) {
+    ThrowJava(env, kIllegalState,
+              "A clone needs a pack, a commit and a folder to write into.");
+    return nullptr;
+  }
+  return HandBack(env, omni_git_checkout(pack_text.c_str(), head_text.c_str(),
+                                         into_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
     JNIEnv *env, jobject , jstring root, jstring relative) {
   std::string root_text;
