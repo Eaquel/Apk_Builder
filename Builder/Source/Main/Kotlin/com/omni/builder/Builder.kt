@@ -1231,6 +1231,8 @@ internal class Screenful(var rows: Int, var columns: Int) {
         const val FAINT = 2
         const val UNDERLINE = 4
         const val REVERSE = 8
+        const val ITALIC = 16
+        const val STRIKE = 32
         const val SCROLLBACK = 4000
     }
 
@@ -1249,8 +1251,35 @@ internal class Screenful(var rows: Int, var columns: Int) {
     }
 
     var lines: Array<Array<Cell>> = Array(rows) { Array(columns) { Cell() } }
+
+    fun asText(): String {
+        val out = StringBuilder()
+        val room = CharArray(columns)
+        fun take(line: Array<Cell>) {
+            var wide = 0
+            for (at in line.indices) {
+                if (at >= room.size) {
+                    break
+                }
+                room[at] = line[at].letter
+                if (line[at].letter != ' ') {
+                    wide = at + 1
+                }
+            }
+            out.append(room, 0, wide.coerceAtMost(room.size))
+            out.append('\n')
+        }
+        for (line in history) {
+            take(line)
+        }
+        for (line in lines) {
+            take(line)
+        }
+        return out.toString().trimEnd('\n')
+    }
     val history = ArrayDeque<Array<Cell>>()
     var onAlternate = false
+    var bracketed = false
     var applicationKeys = false
     private var kept: Array<Array<Cell>>? = null
     private var keptRow = 0
@@ -1671,6 +1700,7 @@ internal class Sequences(private val screen: Screenful, private val reply: (Stri
                 1 -> screen.applicationKeys = on
                 7 -> screen.wrapping = on
                 25 -> screen.showCursor = on
+                2004 -> screen.bracketed = on
                 1049 -> {
                     if (on) {
                         screen.save()
@@ -1699,11 +1729,15 @@ internal class Sequences(private val screen: Screenful, private val reply: (Stri
                 }
                 1 -> screen.style = screen.style or Screenful.BOLD
                 2 -> screen.style = screen.style or Screenful.FAINT
+                3 -> screen.style = screen.style or Screenful.ITALIC
                 4 -> screen.style = screen.style or Screenful.UNDERLINE
                 7 -> screen.style = screen.style or Screenful.REVERSE
+                9 -> screen.style = screen.style or Screenful.STRIKE
                 22 -> screen.style = screen.style and (Screenful.BOLD or Screenful.FAINT).inv()
+                23 -> screen.style = screen.style and Screenful.ITALIC.inv()
                 24 -> screen.style = screen.style and Screenful.UNDERLINE.inv()
                 27 -> screen.style = screen.style and Screenful.REVERSE.inv()
+                29 -> screen.style = screen.style and Screenful.STRIKE.inv()
                 39 -> screen.ink = Screenful.DEFAULT_INK
                 49 -> screen.ground = Screenful.DEFAULT_GROUND
                 in 30..37 -> screen.ink = code - 30
@@ -2396,8 +2430,10 @@ internal class TerminalView(
                     ink
                 }
                 paint.isFakeBoldText = (cell.style and Screenful.BOLD) != 0
+                paint.textSkewX = if ((cell.style and Screenful.ITALIC) != 0) -0.25f else 0f
                 paint.style = Paint.Style.FILL
                 canvas.drawText(word.toString(), left, top + baseline, paint)
+                paint.textSkewX = 0f
                 if ((cell.style and Screenful.UNDERLINE) != 0) {
                     paint.strokeWidth = 1f
                     canvas.drawLine(
@@ -2405,6 +2441,16 @@ internal class TerminalView(
                         top + cellHeight - 2f,
                         run * cellWidth,
                         top + cellHeight - 2f,
+                        paint,
+                    )
+                }
+                if ((cell.style and Screenful.STRIKE) != 0) {
+                    paint.strokeWidth = 1f
+                    canvas.drawLine(
+                        left,
+                        top + cellHeight / 2f,
+                        run * cellWidth,
+                        top + cellHeight / 2f,
                         paint,
                     )
                 }
@@ -3169,6 +3215,10 @@ class BuilderActivity : Activity() {
         val LABEL_PILL = 0xFF33363A.toInt()
 
         const val CHARSET_SHOWN = "UTF-8"
+
+        const val PASTE_OPENS = "\u001B[200~"
+
+        const val PASTE_CLOSES = "\u001B[201~"
 
         val EDITOR_SYMBOLS = listOf(
             "{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "->", "\u03bb",
@@ -8048,6 +8098,19 @@ class BuilderActivity : Activity() {
         logProcess = null
     }
 
+    private fun shellControl(shape: Mark.Shape, named: Int, press: () -> Unit): View =
+        View(this).apply {
+            foreground = Mark(shape, Color.WHITE)
+            val squeeze = gap(3) / 2
+            setPadding(squeeze, squeeze, squeeze, squeeze)
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(named)
+            readAs(Button::class.java.name)
+            background = reacting(Color.TRANSPARENT, gap(6).toFloat(), palette.accent)
+            setOnClickListener { press() }
+        }
+
     private fun renderTerminal() {
         val home = filesDir.absolutePath
         val folder = openProject ?: home
@@ -8092,6 +8155,16 @@ class BuilderActivity : Activity() {
                         setPadding(gap(1), 0, 0, 0)
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                addView(
+                    shellControl(Mark.Shape.COPY, R.string.omni_action_copy) { copyTheShell() },
+                    LinearLayout.LayoutParams(gap(10), gap(10)),
+                )
+                addView(
+                    shellControl(Mark.Shape.CLIP, R.string.omni_editor_paste) {
+                        pasteIntoTheShell()
+                    },
+                    LinearLayout.LayoutParams(gap(10), gap(10)),
                 )
                 addView(
                     View(context).apply {
@@ -8169,6 +8242,13 @@ class BuilderActivity : Activity() {
         reader.start()
     }
 
+    private fun writeToTheShell(bytes: ByteArray) {
+        if (shellHandle < 0 || bytes.isEmpty()) {
+            return
+        }
+        runCatching { Builder.nativeShellWrite(shellHandle, bytes) }
+    }
+
     private fun sendToTheShell(bytes: ByteArray) {
         if (shellHandle < 0 || bytes.isEmpty()) {
             return
@@ -8179,7 +8259,44 @@ class BuilderActivity : Activity() {
         } else {
             bytes
         }
-        runCatching { Builder.nativeShellWrite(shellHandle, said) }
+        writeToTheShell(said)
+    }
+
+    private fun pasteIntoTheShell() {
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
+        val held = clipboard.primaryClip?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(this)
+            ?.toString()
+            .orEmpty()
+        if (held.isEmpty()) {
+            return
+        }
+        val said = held.replace("\r\n", "\n")
+        if (shellView?.screen?.bracketed == true) {
+            writeToTheShell(PASTE_OPENS.toByteArray(Charsets.UTF_8))
+            writeToTheShell(said.toByteArray(Charsets.UTF_8))
+            writeToTheShell(PASTE_CLOSES.toByteArray(Charsets.UTF_8))
+        } else {
+            writeToTheShell(said.toByteArray(Charsets.UTF_8))
+        }
+        shellView?.requestFocus()
+    }
+
+    private fun copyTheShell() {
+        val said = shellView?.screen?.asText().orEmpty()
+        if (said.isEmpty()) {
+            return
+        }
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(getString(R.string.omni_tab_shell), said)
+        )
+        flash(
+            getString(R.string.omni_settings_logs_copied),
+            palette.ok,
+            Mark.Shape.COPY,
+        )
     }
 
     private fun closeTheShell() {
