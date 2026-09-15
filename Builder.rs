@@ -1379,11 +1379,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Kullanıldığı yerde yazılan bir sınıf bunu taşıyamaz."),
         ("A code length symbol is outside the alphabet.", "Bir kod uzunluğu simgesi alfabenin dışında."),
         ("A comment was opened and never closed.", "Bir yorum açıldı ve hiç kapatılmadı."),
+        ("A commit does not name the tree that belongs to it.", "Bir commit, kendisine ait ağacı adlandırmıyor."),
         ("A condition has to be a boolean.", "Bir koşulun boolean olması gerekir."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Bir kurucu, ne kendi sınıfına ne de üst sınıfına ait olan bir kurucuya devrediyor."),
         ("A content provider does not hand out access to everything it holds.", "İçerik sağlayıcı, taşıdığı her şeye erişim dağıtmaz."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Hata ayıklanabilir bir uygulama, cihazdaki herhangi bir sürecin ona hata ayıklayıcı bağlamasına, belleğini okumasına ve onun adına kod çalıştırmasına izin verir."),
         ("A declaration was opened and never closed.", "Bir bildirim açıldı ve hiç kapatılmadı."),
+        ("A delta carries an instruction the format reserves.", "Bir delta, biçimin ayırdığı bir yönergeyi taşıyor."),
+        ("A delta copies from beyond the end of its base object.", "Bir delta, taban nesnesinin sonundan ötesini kopyalıyor."),
+        ("A delta ends in the middle of the instruction it was writing.", "Bir delta, yazmakta olduğu yönergenin ortasında bitiyor."),
+        ("A delta expands to a size other than the one it states.", "Bir delta, bildirdiğinden başka bir boyuta açılıyor."),
+        ("A delta in a pack file points outside the pack that carries it.", "Bir paket dosyasındaki delta, kendisini taşıyan paketin dışını gösteriyor."),
+        ("A delta names a base object the pack does not carry.", "Bir delta, paketin taşımadığı bir taban nesnesini adlandırıyor."),
+        ("A delta states a base size other than the one the base object has.", "Bir delta, taban nesnesinin sahip olduğundan başka bir taban boyutu bildiriyor."),
         ("A dependency could not be read.", "Bir bağımlılık okunamadı."),
         ("A dependency holds something squeezed in a way this does not read.", "Bir bağımlılık, buranın okumadığı bir yöntemle sıkıştırılmış içerik taşıyor."),
         ("A dependency is a jar, which is a zip of class files.", "Bir bağımlılık jar'dır; jar da sınıf dosyalarından oluşan bir zip'tir."),
@@ -1408,6 +1416,7 @@ pub mod speech {
         ("A field was never interned.", "Bir alan hiç havuza alınmamış."),
         ("A file compiled here holds a class or an interface.", "Burada derlenen bir dosya, bir sınıf ya da arayüz taşır."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Burada derlenen bir dosya sınıf, arayüz, enum, record ve açıklama türleri taşır. Neyin alınıp neyin alınmadığı Compilers/Java.rs dosyasının başında yazılıdır."),
+        ("A file in the repository could not be written where it belongs.", "Depodaki bir dosya, ait olduğu yere yazılamadı."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "İmza anahtarının yerinde bir dosya var ve bu, bu yapının yardımsız açabileceği bir anahtar değil."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Paylaşılan anahtarın yerinde bir dosya var ve bu, bu yapının yazdığı bir anahtar değil."),
         ("A folder cannot be copied inside itself.", "Bir klasör kendi içine kopyalanamaz."),
@@ -1492,6 +1501,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Bir sayı, biçimin sabit noktalı gösterimine yazılamıyor."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Başında sıfır olan sayı sekizliktir ve 8 ile 9 sekizlik basamak değildir."),
         ("A number, a character, or a `-` in front of one.", "Bir sayı, bir karakter ya da bunlardan birinin önünde `-`."),
+        ("A pack file carries more objects than this build resolves.", "Bir paket dosyası, bu yapının çözdüğünden çok nesne taşıyor."),
+        ("A pack file does not open with the signature the format requires.", "Bir paket dosyası, biçimin istediği imzayla açılmıyor."),
+        ("A pack file ends before the objects it promised.", "Bir paket dosyası, söz verdiği nesnelerden önce bitiyor."),
+        ("A pack file ends in the middle of a number it was writing.", "Bir paket dosyası, yazmakta olduğu sayının ortasında bitiyor."),
+        ("A pack file is larger than this build reads in one piece.", "Bir paket dosyası, bu yapının tek parçada okuduğundan büyük."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Bir paket dosyası, kendisini kapatan başlık ve sağlama toplamından kısa."),
+        ("A pack file object expands to a size other than the one it states.", "Bir paket dosyası nesnesi, bildirdiğinden başka bir boyuta açılıyor."),
+        ("A pack file object states a kind the format reserves.", "Bir paket dosyası nesnesi, biçimin ayırdığı bir türü bildiriyor."),
+        ("A pack file states a size larger than this build reads.", "Bir paket dosyası, bu yapının okuduğundan büyük bir boyut bildiriyor."),
+        ("A pack file states a version this build does not read.", "Bir paket dosyası, bu yapının okumadığı bir sürüm bildiriyor."),
         ("A package built around a page needs the language its screen is written in.", "Bir sayfanın çevresine kurulan paket, ekranının yazıldığı dile ihtiyaç duyar."),
         ("A package is a zip. This one does not open as one.", "Paket bir zip'tir. Bu, zip olarak açılmıyor."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Bu denetimi geçemeyen paket, bu yapının üretildiği paket değildir. Aslını kurun ya da kaynaktan yeniden derleyin."),
@@ -1583,6 +1602,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Bir zaman değeri rakam olmayan bir şey içeriyor."),
         ("A time has a year that is not a number.", "Bir zaman değerinin yılı sayı değil."),
         ("A time is not valid text.", "Bir zaman değeri geçerli metin değil."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Bir ağaç girdisi, ait olduğu klasörün dışına çıkacak bir ad taşıyor."),
+        ("A tree entry is not shaped the way the format writes one.", "Bir ağaç girdisi, biçimin yazdığı biçimde değil."),
+        ("A tree names an entry the pack does not carry.", "Bir ağaç, paketin taşımadığı bir girdiyi adlandırıyor."),
+        ("A tree nests deeper than this build walks.", "Bir ağaç, bu yapının yürüdüğünden daha derine iç içe geçiyor."),
         ("A try needs a catch, a finally, or something to close.", "Bir try; bir catch, bir finally ya da kapatacak bir şey ister."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Parantezli bir try en az bir kapatılacak şey taşır ve her birine bir değer verilir."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Bir tür iki kez bildirilmiş ya da bir kilide nesne olmayan bir şey verilmiş."),
@@ -1603,6 +1626,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Verity özeti, bir fs-verity Merkle ağacının köküdür; bu yapının hesapladığı parçalı özetten farklı bir kurgudur. İddia ne doğrulanır ne çürütülür; hiçbir şeyle karşılaştırılmaz."),
         ("A yield is not inside a switch used for its value.", "Bir yield, değeri için kullanılan bir switch'in içinde değil."),
         ("A zlib header fails its own check.", "Bir zlib başlığı kendi denetiminden geçemiyor."),
+        ("A zlib stream ends before the checksum that closes it.", "Bir zlib akışı, kendisini kapatan sağlama toplamından önce bitiyor."),
         ("A zlib stream is shorter than its own header and check.", "Bir zlib akışı kendi başlığı ve denetiminden kısa."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Bir zlib akışı, bu yapının taşımadığı bir hazır sözlüğü adlandırıyor."),
         ("A zlib stream uses a compression method the format does not define.", "Bir zlib akışı, biçimin tanımlamadığı bir sıkıştırma yöntemi kullanıyor."),
@@ -2037,6 +2061,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "En düşük platform bir sayı değil."),
         ("The note saying where it came from could not be written.", "Nereden geldiğini söyleyen not yazılamadı."),
         ("The offset field is wrong, or the file is truncated.", "Konum alanı yanlış ya da dosya kesilmiş."),
+        ("The pack does not carry the object the branch points at.", "Paket, dalın gösterdiği nesneyi taşımıyor."),
         ("The package carries no signing block.", "Paket hiç imza bloğu taşımıyor."),
         ("The package does not match the digest recorded when it was signed.", "Paket, imzalandığında kaydedilen özetle uyuşmuyor."),
         ("The package has been changed since it was signed. Do not install it.", "Paket imzalandığından beri değiştirilmiş. Kurmayın."),
@@ -2439,11 +2464,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Eine Klasse, die dort geschrieben wird, wo sie benutzt wird, kann das nicht enthalten."),
         ("A code length symbol is outside the alphabet.", "Ein Codelängensymbol liegt außerhalb des Alphabets."),
         ("A comment was opened and never closed.", "Ein Kommentar wurde geöffnet und nie geschlossen."),
+        ("A commit does not name the tree that belongs to it.", "Ein Commit nennt den Baum nicht, der zu ihm gehört."),
         ("A condition has to be a boolean.", "Eine Bedingung muss ein boolean sein."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Ein Konstruktor übergibt an einen, der weder zu seiner eigenen Klasse noch zu seiner Oberklasse gehört."),
         ("A content provider does not hand out access to everything it holds.", "Ein Content Provider gibt keinen Zugriff auf alles heraus, was er enthält."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Eine als debuggable markierte Anwendung lässt jeden Prozess auf dem Gerät einen Debugger anhängen, ihren Speicher lesen und Code als sie ausführen."),
         ("A declaration was opened and never closed.", "Eine Deklaration wurde geöffnet und nie geschlossen."),
+        ("A delta carries an instruction the format reserves.", "Ein Delta trägt eine Anweisung, die das Format sich vorbehält."),
+        ("A delta copies from beyond the end of its base object.", "Ein Delta kopiert über das Ende seines Grundobjekts hinaus."),
+        ("A delta ends in the middle of the instruction it was writing.", "Ein Delta endet mitten in der Anweisung, die es schrieb."),
+        ("A delta expands to a size other than the one it states.", "Ein Delta entfaltet sich zu einer anderen Größe als der, die es angibt."),
+        ("A delta in a pack file points outside the pack that carries it.", "Ein Delta in einer Paketdatei zeigt aus dem Paket hinaus, das es trägt."),
+        ("A delta names a base object the pack does not carry.", "Ein Delta nennt ein Grundobjekt, das das Paket nicht trägt."),
+        ("A delta states a base size other than the one the base object has.", "Ein Delta gibt eine andere Grundgröße an als die, die das Grundobjekt hat."),
         ("A dependency could not be read.", "Eine Abhängigkeit konnte nicht gelesen werden."),
         ("A dependency holds something squeezed in a way this does not read.", "Eine Abhängigkeit enthält etwas, das auf eine Weise komprimiert ist, die hier nicht gelesen wird."),
         ("A dependency is a jar, which is a zip of class files.", "Eine Abhängigkeit ist ein Jar, also ein Zip aus Klassendateien."),
@@ -2468,6 +2501,7 @@ pub mod speech {
         ("A field was never interned.", "Ein Feld wurde nie in den Pool aufgenommen."),
         ("A file compiled here holds a class or an interface.", "Eine hier übersetzte Datei enthält eine Klasse oder eine Schnittstelle."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Eine hier übersetzte Datei enthält Klassen, Schnittstellen, Enums, Records und Annotationstypen. Was angenommen wird und was nicht, steht oben in Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Eine Datei des Verzeichnisses ließ sich nicht dort schreiben, wohin sie gehört."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Dort, wo dieser Signaturschlüssel hingehört, liegt eine Datei, und sie ist kein Schlüssel, den dieser Build allein öffnen kann."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Dort, wo der gemeinsame Schlüssel hingehört, liegt eine Datei, und sie ist kein Schlüssel, den dieser Build geschrieben hat."),
         ("A folder cannot be copied inside itself.", "Ein Ordner kann nicht in sich selbst kopiert werden."),
@@ -2552,6 +2586,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Eine Zahl lässt sich nicht im Festkommaformat des Formats schreiben."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Eine Zahl mit führender Null ist oktal, und 8 und 9 sind dort keine Ziffern."),
         ("A number, a character, or a `-` in front of one.", "Eine Zahl, ein Zeichen oder ein `-` davor."),
+        ("A pack file carries more objects than this build resolves.", "Eine Paketdatei trägt mehr Objekte, als dieser Bau auflöst."),
+        ("A pack file does not open with the signature the format requires.", "Eine Paketdatei beginnt nicht mit der Signatur, die das Format verlangt."),
+        ("A pack file ends before the objects it promised.", "Eine Paketdatei endet vor den Objekten, die sie versprach."),
+        ("A pack file ends in the middle of a number it was writing.", "Eine Paketdatei endet mitten in einer Zahl, die sie schrieb."),
+        ("A pack file is larger than this build reads in one piece.", "Eine Paketdatei ist größer, als dieser Bau in einem Stück liest."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Eine Paketdatei ist kürzer als der Kopf und die Prüfsumme, die sie schließen."),
+        ("A pack file object expands to a size other than the one it states.", "Ein Objekt einer Paketdatei entfaltet sich zu einer anderen Größe als der, die es angibt."),
+        ("A pack file object states a kind the format reserves.", "Ein Objekt einer Paketdatei gibt eine Art an, die das Format sich vorbehält."),
+        ("A pack file states a size larger than this build reads.", "Eine Paketdatei gibt eine Größe an, die größer ist als das, was dieser Bau liest."),
+        ("A pack file states a version this build does not read.", "Eine Paketdatei gibt eine Fassung an, die dieser Bau nicht liest."),
         ("A package built around a page needs the language its screen is written in.", "Ein um eine Seite gebautes Paket braucht die Sprache, in der sein Bildschirm geschrieben ist."),
         ("A package is a zip. This one does not open as one.", "Ein Paket ist ein Zip. Dieses lässt sich nicht als solches öffnen."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Ein Paket, das diese Prüfung nicht besteht, ist nicht das, als das dieser Build entstanden ist. Installieren Sie das Original oder bauen Sie es erneut aus den Quellen."),
@@ -2643,6 +2687,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Eine Zeitangabe enthält etwas, das keine Ziffer ist."),
         ("A time has a year that is not a number.", "Eine Zeitangabe hat ein Jahr, das keine Zahl ist."),
         ("A time is not valid text.", "Eine Zeitangabe ist kein gültiger Text."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Ein Baumeintrag trägt einen Namen, der den Ordner verließe, zu dem er gehört."),
+        ("A tree entry is not shaped the way the format writes one.", "Ein Baumeintrag hat nicht die Gestalt, in der das Format einen schreibt."),
+        ("A tree names an entry the pack does not carry.", "Ein Baum nennt einen Eintrag, den das Paket nicht trägt."),
+        ("A tree nests deeper than this build walks.", "Ein Baum schachtelt tiefer, als dieser Bau geht."),
         ("A try needs a catch, a finally, or something to close.", "Ein try braucht ein catch, ein finally oder etwas zu Schließendes."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Ein try mit Klammern enthält mindestens eine zu schließende Sache, und jede bekommt einen Wert."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Ein Typ ist zweimal deklariert, oder eine Sperre bekam etwas, das kein Objekt ist."),
@@ -2663,6 +2711,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Eine Verity-Prüfsumme ist die Wurzel eines fs-verity-Merkle-Baums und damit eine andere Konstruktion als die blockweise Prüfsumme, die dieser Build berechnet. Die Angabe wird weder bestätigt noch bestritten; sie wird mit nichts verglichen."),
         ("A yield is not inside a switch used for its value.", "Ein yield steht nicht in einem switch, der für seinen Wert benutzt wird."),
         ("A zlib header fails its own check.", "Ein zlib-Kopf besteht seine eigene Prüfung nicht."),
+        ("A zlib stream ends before the checksum that closes it.", "Ein zlib-Strom endet vor der Prüfsumme, die ihn schließt."),
         ("A zlib stream is shorter than its own header and check.", "Ein zlib-Strom ist kürzer als sein eigener Kopf und seine Prüfung."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Ein zlib-Strom benennt ein vorgegebenes Wörterbuch, das dieser Build nicht mitführt."),
         ("A zlib stream uses a compression method the format does not define.", "Ein zlib-Strom verwendet ein Kompressionsverfahren, das das Format nicht definiert."),
@@ -3097,6 +3146,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "Die Mindestplattform ist keine Zahl."),
         ("The note saying where it came from could not be written.", "Der Vermerk, woher es kam, konnte nicht geschrieben werden."),
         ("The offset field is wrong, or the file is truncated.", "Das Positionsfeld ist falsch, oder die Datei ist abgeschnitten."),
+        ("The pack does not carry the object the branch points at.", "Das Paket trägt das Objekt nicht, auf das der Zweig zeigt."),
         ("The package carries no signing block.", "Das Paket führt keinen Signaturblock mit."),
         ("The package does not match the digest recorded when it was signed.", "Das Paket stimmt nicht mit der Prüfsumme überein, die beim Signieren festgehalten wurde."),
         ("The package has been changed since it was signed. Do not install it.", "Das Paket wurde nach dem Signieren geändert. Nicht installieren."),
@@ -3499,11 +3549,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Una clase escrita donde se usa no puede contener eso."),
         ("A code length symbol is outside the alphabet.", "Un símbolo de longitud de código está fuera del alfabeto."),
         ("A comment was opened and never closed.", "Se abrió un comentario y nunca se cerró."),
+        ("A commit does not name the tree that belongs to it.", "Un commit no nombra el árbol que le pertenece."),
         ("A condition has to be a boolean.", "Una condición tiene que ser un boolean."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Un constructor cede a otro que no es ni de su propia clase ni de su superclase."),
         ("A content provider does not hand out access to everything it holds.", "Un proveedor de contenido no reparte acceso a todo lo que contiene."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Una aplicación marcada como depurable permite que cualquier proceso del dispositivo le adjunte un depurador, lea su memoria y ejecute código como ella."),
         ("A declaration was opened and never closed.", "Se abrió una declaración y nunca se cerró."),
+        ("A delta carries an instruction the format reserves.", "Un delta lleva una instrucción que el formato reserva."),
+        ("A delta copies from beyond the end of its base object.", "Un delta copia más allá del final de su objeto base."),
+        ("A delta ends in the middle of the instruction it was writing.", "Un delta termina en medio de la instrucción que escribía."),
+        ("A delta expands to a size other than the one it states.", "Un delta se expande a un tamaño distinto del que declara."),
+        ("A delta in a pack file points outside the pack that carries it.", "Un delta de un archivo de paquete apunta fuera del paquete que lo lleva."),
+        ("A delta names a base object the pack does not carry.", "Un delta nombra un objeto base que el paquete no lleva."),
+        ("A delta states a base size other than the one the base object has.", "Un delta declara un tamaño base distinto del que tiene el objeto base."),
         ("A dependency could not be read.", "No se pudo leer una dependencia."),
         ("A dependency holds something squeezed in a way this does not read.", "Una dependencia contiene algo comprimido de un modo que esto no lee."),
         ("A dependency is a jar, which is a zip of class files.", "Una dependencia es un jar, es decir, un zip de archivos de clase."),
@@ -3528,6 +3586,7 @@ pub mod speech {
         ("A field was never interned.", "Un campo nunca se incorporó al grupo."),
         ("A file compiled here holds a class or an interface.", "Un archivo compilado aquí contiene una clase o una interfaz."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Un archivo compilado aquí contiene clases, interfaces, enums, records y tipos de anotación. Lo que se acepta y lo que no está escrito al principio de Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Un archivo del repositorio no pudo escribirse donde le corresponde."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Donde corresponde a esa clave de firma hay un archivo, y no es una clave que esta compilación pueda abrir por sí sola."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Donde corresponde a la clave compartida hay un archivo, y no es una clave que esta compilación escribiera."),
         ("A folder cannot be copied inside itself.", "Una carpeta no se puede copiar dentro de sí misma."),
@@ -3612,6 +3671,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Un número no se puede escribir en la coma fija del formato."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Un número que empieza por cero es octal, y allí 8 y 9 no son dígitos."),
         ("A number, a character, or a `-` in front of one.", "Un número, un carácter, o un `-` delante de uno."),
+        ("A pack file carries more objects than this build resolves.", "Un archivo de paquete lleva más objetos de los que esta compilación resuelve."),
+        ("A pack file does not open with the signature the format requires.", "Un archivo de paquete no abre con la firma que el formato exige."),
+        ("A pack file ends before the objects it promised.", "Un archivo de paquete termina antes que los objetos que prometió."),
+        ("A pack file ends in the middle of a number it was writing.", "Un archivo de paquete termina en medio de un número que escribía."),
+        ("A pack file is larger than this build reads in one piece.", "Un archivo de paquete es mayor de lo que esta compilación lee de una vez."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Un archivo de paquete es más corto que la cabecera y la suma que lo cierran."),
+        ("A pack file object expands to a size other than the one it states.", "Un objeto de un archivo de paquete se expande a un tamaño distinto del que declara."),
+        ("A pack file object states a kind the format reserves.", "Un objeto de un archivo de paquete declara una clase que el formato reserva."),
+        ("A pack file states a size larger than this build reads.", "Un archivo de paquete declara un tamaño mayor del que esta compilación lee."),
+        ("A pack file states a version this build does not read.", "Un archivo de paquete declara una versión que esta compilación no lee."),
         ("A package built around a page needs the language its screen is written in.", "Un paquete construido alrededor de una página necesita el lenguaje en que está escrita su pantalla."),
         ("A package is a zip. This one does not open as one.", "Un paquete es un zip. Este no se abre como tal."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Un paquete que no supera esta comprobación no es aquel como el que se creó esta compilación. Instale el original, o vuelva a compilarlo desde el código fuente."),
@@ -3703,6 +3772,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Una hora contiene algo que no es un dígito."),
         ("A time has a year that is not a number.", "Una hora tiene un año que no es un número."),
         ("A time is not valid text.", "Una hora no es texto válido."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Una entrada de árbol lleva un nombre que saldría de la carpeta a la que pertenece."),
+        ("A tree entry is not shaped the way the format writes one.", "Una entrada de árbol no tiene la forma en que el formato escribe una."),
+        ("A tree names an entry the pack does not carry.", "Un árbol nombra una entrada que el paquete no lleva."),
+        ("A tree nests deeper than this build walks.", "Un árbol se anida más hondo de lo que esta compilación recorre."),
         ("A try needs a catch, a finally, or something to close.", "Un try necesita un catch, un finally o algo que cerrar."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Un try con paréntesis contiene al menos algo que cerrar, y a cada uno se le da un valor."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Un tipo está declarado dos veces, o a un cerrojo se le dio algo que no es un objeto."),
@@ -3723,6 +3796,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Un resumen verity es la raíz de un árbol Merkle de fs-verity, una construcción distinta del resumen por bloques que calcula esta compilación. La afirmación ni se confirma ni se desmiente; no se compara con nada."),
         ("A yield is not inside a switch used for its value.", "Un yield no está dentro de un switch usado por su valor."),
         ("A zlib header fails its own check.", "Una cabecera zlib no supera su propia comprobación."),
+        ("A zlib stream ends before the checksum that closes it.", "Un flujo zlib termina antes que la suma de comprobación que lo cierra."),
         ("A zlib stream is shorter than its own header and check.", "Un flujo zlib es más corto que su propia cabecera y comprobación."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Un flujo zlib nombra un diccionario predefinido que esta compilación no lleva."),
         ("A zlib stream uses a compression method the format does not define.", "Un flujo zlib usa un método de compresión que el formato no define."),
@@ -4157,6 +4231,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "La plataforma mínima no es un número."),
         ("The note saying where it came from could not be written.", "No se pudo escribir la nota que dice de dónde venía."),
         ("The offset field is wrong, or the file is truncated.", "El campo de posición es incorrecto, o el archivo está truncado."),
+        ("The pack does not carry the object the branch points at.", "El paquete no lleva el objeto al que apunta la rama."),
         ("The package carries no signing block.", "El paquete no lleva bloque de firma."),
         ("The package does not match the digest recorded when it was signed.", "El paquete no coincide con el resumen registrado cuando se firmó."),
         ("The package has been changed since it was signed. Do not install it.", "El paquete ha cambiado desde que se firmó. No lo instale."),
@@ -4559,11 +4634,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Une classe écrite là où elle est utilisée ne peut pas contenir cela."),
         ("A code length symbol is outside the alphabet.", "Un symbole de longueur de code est hors de l'alphabet."),
         ("A comment was opened and never closed.", "Un commentaire a été ouvert et jamais fermé."),
+        ("A commit does not name the tree that belongs to it.", "Un commit ne nomme pas l arbre qui lui appartient."),
         ("A condition has to be a boolean.", "Une condition doit être un booléen."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Un constructeur passe la main à un constructeur qui n'est ni celui de sa propre classe ni celui de sa superclasse."),
         ("A content provider does not hand out access to everything it holds.", "Un fournisseur de contenu ne donne pas accès à tout ce qu'il contient."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Une application débogable permet à n'importe quel processus de l'appareil d'attacher un débogueur, de lire sa mémoire et d'exécuter du code en son nom."),
         ("A declaration was opened and never closed.", "Une déclaration a été ouverte et jamais fermée."),
+        ("A delta carries an instruction the format reserves.", "Un delta porte une instruction que le format réserve."),
+        ("A delta copies from beyond the end of its base object.", "Un delta copie au-delà de la fin de son objet de base."),
+        ("A delta ends in the middle of the instruction it was writing.", "Un delta se termine au milieu de l instruction qu il écrivait."),
+        ("A delta expands to a size other than the one it states.", "Un delta se déploie à une taille autre que celle qu il déclare."),
+        ("A delta in a pack file points outside the pack that carries it.", "Un delta d un fichier paquet pointe hors du paquet qui le porte."),
+        ("A delta names a base object the pack does not carry.", "Un delta nomme un objet de base que le paquet ne porte pas."),
+        ("A delta states a base size other than the one the base object has.", "Un delta déclare une taille de base autre que celle de l objet de base."),
         ("A dependency could not be read.", "Une dépendance n'a pas pu être lue."),
         ("A dependency holds something squeezed in a way this does not read.", "Une dépendance contient quelque chose compressé d'une façon que ceci ne lit pas."),
         ("A dependency is a jar, which is a zip of class files.", "Une dépendance est un jar, c'est-à-dire un zip de fichiers class."),
@@ -4588,6 +4671,7 @@ pub mod speech {
         ("A field was never interned.", "Un champ n'a jamais été interné."),
         ("A file compiled here holds a class or an interface.", "Un fichier compilé ici contient une classe ou une interface."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Un fichier compilé ici contient des classes, des interfaces, des enums, des records et des types d'annotation. Ce qui est pris et ce qui ne l'est pas est écrit en tête de Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Un fichier du dépôt n a pas pu être écrit là où il appartient."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Un fichier est l'endroit où va cette clé de signature, et ce n'est pas une clé que cette compilation peut ouvrir sans aide."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Un fichier est l'endroit où va la clé partagée, et ce n'est pas une clé que cette compilation a écrite."),
         ("A folder cannot be copied inside itself.", "Un dossier ne peut pas être copié à l'intérieur de lui-même."),
@@ -4672,6 +4756,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Un nombre ne peut pas être écrit dans la virgule fixe du format."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Un nombre commençant par zéro est octal, et 8 et 9 n'y sont pas des chiffres."),
         ("A number, a character, or a `-` in front of one.", "Un nombre, un caractère, ou un `-` devant l'un d'eux."),
+        ("A pack file carries more objects than this build resolves.", "Un fichier paquet porte plus d objets que cette construction ne résout."),
+        ("A pack file does not open with the signature the format requires.", "Un fichier paquet ne commence pas par la signature que le format exige."),
+        ("A pack file ends before the objects it promised.", "Un fichier paquet se termine avant les objets qu il a promis."),
+        ("A pack file ends in the middle of a number it was writing.", "Un fichier paquet se termine au milieu d un nombre qu il écrivait."),
+        ("A pack file is larger than this build reads in one piece.", "Un fichier paquet est plus grand que ce que cette construction lit d un seul tenant."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Un fichier paquet est plus court que l en-tête et la somme qui le ferment."),
+        ("A pack file object expands to a size other than the one it states.", "Un objet d un fichier paquet se déploie à une taille autre que celle qu il déclare."),
+        ("A pack file object states a kind the format reserves.", "Un objet d un fichier paquet déclare un genre que le format réserve."),
+        ("A pack file states a size larger than this build reads.", "Un fichier paquet déclare une taille plus grande que ce que cette construction lit."),
+        ("A pack file states a version this build does not read.", "Un fichier paquet déclare une version que cette construction ne lit pas."),
         ("A package built around a page needs the language its screen is written in.", "Un paquet bâti autour d’une page a besoin du langage dans lequel son écran est écrit."),
         ("A package is a zip. This one does not open as one.", "Un paquet est un zip. Celui-ci ne s'ouvre pas comme tel."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Un paquet qui échoue à cette vérification n'est pas celui sous lequel cette compilation a été faite. Installez l'original, ou recompilez-le depuis les sources."),
@@ -4763,6 +4857,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Une heure contient quelque chose qui n'est pas un chiffre."),
         ("A time has a year that is not a number.", "Une heure a une année qui n'est pas un nombre."),
         ("A time is not valid text.", "Une heure n'est pas du texte valide."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Une entrée d arbre porte un nom qui quitterait le dossier auquel elle appartient."),
+        ("A tree entry is not shaped the way the format writes one.", "Une entrée d arbre n a pas la forme dans laquelle le format en écrit une."),
+        ("A tree names an entry the pack does not carry.", "Un arbre nomme une entrée que le paquet ne porte pas."),
+        ("A tree nests deeper than this build walks.", "Un arbre s imbrique plus profond que cette construction ne parcourt."),
         ("A try needs a catch, a finally, or something to close.", "Un try demande un catch, un finally ou quelque chose à fermer."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Un try avec parenthèses contient au moins une chose à fermer, et chacune reçoit une valeur."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Un type est déclaré deux fois, ou un verrou a reçu quelque chose qui n'est pas un objet."),
@@ -4783,6 +4881,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Une empreinte verity est la racine d'un arbre de Merkle fs-verity, qui est une construction différente de l'empreinte par blocs que cette compilation calcule. L'affirmation n'est ni confirmée ni contestée ; elle n'est comparée à rien."),
         ("A yield is not inside a switch used for its value.", "Un yield n'est pas dans un switch utilisé pour sa valeur."),
         ("A zlib header fails its own check.", "Un en-tête zlib échoue à sa propre vérification."),
+        ("A zlib stream ends before the checksum that closes it.", "Un flux zlib se termine avant la somme de contrôle qui le ferme."),
         ("A zlib stream is shorter than its own header and check.", "Un flux zlib est plus court que son propre en-tête et sa vérification."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Un flux zlib nomme un dictionnaire prédéfini, que cette compilation ne porte pas."),
         ("A zlib stream uses a compression method the format does not define.", "Un flux zlib utilise une méthode de compression que le format ne définit pas."),
@@ -5217,6 +5316,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "La plateforme minimale n'est pas un nombre."),
         ("The note saying where it came from could not be written.", "La note indiquant d'où cela venait n'a pas pu être écrite."),
         ("The offset field is wrong, or the file is truncated.", "Le champ de position est incorrect, ou le fichier est tronqué."),
+        ("The pack does not carry the object the branch points at.", "Le paquet ne porte pas l objet que la branche désigne."),
         ("The package carries no signing block.", "Le paquet ne porte aucun bloc de signature."),
         ("The package does not match the digest recorded when it was signed.", "Le paquet ne correspond pas à l'empreinte enregistrée lors de sa signature."),
         ("The package has been changed since it was signed. Do not install it.", "Le paquet a été modifié depuis sa signature. Ne l'installez pas."),
@@ -5622,11 +5722,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Una classe scritta dove viene usata non può contenere quello."),
         ("A code length symbol is outside the alphabet.", "Un simbolo di lunghezza di codice è fuori dall'alfabeto."),
         ("A comment was opened and never closed.", "Un commento è stato aperto e mai chiuso."),
+        ("A commit does not name the tree that belongs to it.", "Un commit non nomina l albero che gli appartiene."),
         ("A condition has to be a boolean.", "Una condizione deve essere un boolean."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Un costruttore passa la mano a uno che non è né della propria classe né della sua superclasse."),
         ("A content provider does not hand out access to everything it holds.", "Un fornitore di contenuti non dà accesso a tutto ciò che contiene."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Un'applicazione con il debug attivo permette a qualsiasi processo del dispositivo di collegare un debugger, leggerne la memoria ed eseguire codice a suo nome."),
         ("A declaration was opened and never closed.", "Una dichiarazione è stata aperta e mai chiusa."),
+        ("A delta carries an instruction the format reserves.", "Un delta porta un istruzione che il formato riserva."),
+        ("A delta copies from beyond the end of its base object.", "Un delta copia oltre la fine del proprio oggetto di base."),
+        ("A delta ends in the middle of the instruction it was writing.", "Un delta finisce nel mezzo dell istruzione che stava scrivendo."),
+        ("A delta expands to a size other than the one it states.", "Un delta si espande a una dimensione diversa da quella che dichiara."),
+        ("A delta in a pack file points outside the pack that carries it.", "Un delta di un file di pacchetto punta fuori dal pacchetto che lo porta."),
+        ("A delta names a base object the pack does not carry.", "Un delta nomina un oggetto di base che il pacchetto non porta."),
+        ("A delta states a base size other than the one the base object has.", "Un delta dichiara una dimensione di base diversa da quella dell oggetto di base."),
         ("A dependency could not be read.", "Non è stato possibile leggere una dipendenza."),
         ("A dependency holds something squeezed in a way this does not read.", "Una dipendenza contiene qualcosa compresso in un modo che questo non legge."),
         ("A dependency is a jar, which is a zip of class files.", "Una dipendenza è un jar, cioè uno zip di file class."),
@@ -5651,6 +5759,7 @@ pub mod speech {
         ("A field was never interned.", "Un campo non è mai stato registrato."),
         ("A file compiled here holds a class or an interface.", "Un file compilato qui contiene una classe o un'interfaccia."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Un file compilato qui contiene classi, interfacce, enum, record e tipi di annotazione. Ciò che viene preso e ciò che non lo è è scritto in cima a Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Un file del deposito non si è potuto scrivere dove gli spetta."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Un file è il posto di quella chiave di firma, e non è una chiave che questa compilazione possa aprire da sola."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Un file è il posto della chiave condivisa, e non è una chiave che questa compilazione abbia scritto."),
         ("A folder cannot be copied inside itself.", "Una cartella non può essere copiata dentro se stessa."),
@@ -5735,6 +5844,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Un numero non può essere scritto nella virgola fissa del formato."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Un numero che inizia con zero è ottale, e lì 8 e 9 non sono cifre."),
         ("A number, a character, or a `-` in front of one.", "Un numero, un carattere, oppure un `-` davanti a uno di essi."),
+        ("A pack file carries more objects than this build resolves.", "Un file di pacchetto porta più oggetti di quanti questa costruzione ne risolva."),
+        ("A pack file does not open with the signature the format requires.", "Un file di pacchetto non si apre con la firma che il formato richiede."),
+        ("A pack file ends before the objects it promised.", "Un file di pacchetto finisce prima degli oggetti che ha promesso."),
+        ("A pack file ends in the middle of a number it was writing.", "Un file di pacchetto finisce nel mezzo di un numero che stava scrivendo."),
+        ("A pack file is larger than this build reads in one piece.", "Un file di pacchetto è più grande di quanto questa costruzione legga in un pezzo solo."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Un file di pacchetto è più corto dell intestazione e della somma che lo chiudono."),
+        ("A pack file object expands to a size other than the one it states.", "Un oggetto di un file di pacchetto si espande a una dimensione diversa da quella che dichiara."),
+        ("A pack file object states a kind the format reserves.", "Un oggetto di un file di pacchetto dichiara un genere che il formato riserva."),
+        ("A pack file states a size larger than this build reads.", "Un file di pacchetto dichiara una dimensione più grande di quanto questa costruzione legga."),
+        ("A pack file states a version this build does not read.", "Un file di pacchetto dichiara una versione che questa costruzione non legge."),
         ("A package built around a page needs the language its screen is written in.", "Un pacchetto costruito attorno a una pagina ha bisogno del linguaggio in cui è scritta la sua schermata."),
         ("A package is a zip. This one does not open as one.", "Un pacchetto è uno zip. Questo non si apre come tale."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Un pacchetto che non supera questo controllo non è quello con cui questa compilazione è stata fatta. Installate l'originale, oppure ricompilatelo dai sorgenti."),
@@ -5826,6 +5945,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Un orario contiene qualcosa che non è una cifra."),
         ("A time has a year that is not a number.", "Un orario ha un anno che non è un numero."),
         ("A time is not valid text.", "Un orario non è testo valido."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Una voce di albero porta un nome che uscirebbe dalla cartella cui appartiene."),
+        ("A tree entry is not shaped the way the format writes one.", "Una voce di albero non ha la forma in cui il formato ne scrive una."),
+        ("A tree names an entry the pack does not carry.", "Un albero nomina una voce che il pacchetto non porta."),
+        ("A tree nests deeper than this build walks.", "Un albero si annida più in fondo di quanto questa costruzione percorra."),
         ("A try needs a catch, a finally, or something to close.", "Un try richiede un catch, un finally o qualcosa da chiudere."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Un try con parentesi contiene almeno una cosa da chiudere, e a ognuna è dato un valore."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Un tipo è dichiarato due volte, oppure a un lucchetto è stato dato qualcosa che non è un oggetto."),
@@ -5846,6 +5969,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Un'impronta verity è la radice di un albero di Merkle fs-verity, che è una costruzione diversa dall'impronta a blocchi che questa compilazione calcola. L'affermazione non è né confermata né contestata; non è confrontata con nulla."),
         ("A yield is not inside a switch used for its value.", "Uno yield non è dentro uno switch usato per il suo valore."),
         ("A zlib header fails its own check.", "Un'intestazione zlib non supera il proprio controllo."),
+        ("A zlib stream ends before the checksum that closes it.", "Un flusso zlib finisce prima della somma di controllo che lo chiude."),
         ("A zlib stream is shorter than its own header and check.", "Un flusso zlib è più corto della propria intestazione e del proprio controllo."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Un flusso zlib nomina un dizionario predefinito, che questa compilazione non porta."),
         ("A zlib stream uses a compression method the format does not define.", "Un flusso zlib usa un metodo di compressione che il formato non definisce."),
@@ -6280,6 +6404,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "La piattaforma minima non è un numero."),
         ("The note saying where it came from could not be written.", "Non è stato possibile scrivere la nota che dice da dove veniva."),
         ("The offset field is wrong, or the file is truncated.", "Il campo di posizione è sbagliato, oppure il file è troncato."),
+        ("The pack does not carry the object the branch points at.", "Il pacchetto non porta l oggetto a cui punta il ramo."),
         ("The package carries no signing block.", "Il pacchetto non porta alcun blocco di firma."),
         ("The package does not match the digest recorded when it was signed.", "Il pacchetto non corrisponde all'impronta registrata quando è stato firmato."),
         ("The package has been changed since it was signed. Do not install it.", "Il pacchetto è stato cambiato da quando è stato firmato. Non installatelo."),
@@ -6685,11 +6810,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Uma classe escrita onde é usada não pode conter isso."),
         ("A code length symbol is outside the alphabet.", "Um símbolo de comprimento de código está fora do alfabeto."),
         ("A comment was opened and never closed.", "Um comentário foi aberto e nunca fechado."),
+        ("A commit does not name the tree that belongs to it.", "Um commit não nomeia a árvore que lhe pertence."),
         ("A condition has to be a boolean.", "Uma condição tem de ser um boolean."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Um construtor passa a vez a um que não é nem da sua própria classe nem da sua superclasse."),
         ("A content provider does not hand out access to everything it holds.", "Um provedor de conteúdo não dá acesso a tudo o que contém."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Um aplicativo depurável permite que qualquer processo do dispositivo conecte um depurador, leia sua memória e execute código em seu nome."),
         ("A declaration was opened and never closed.", "Uma declaração foi aberta e nunca fechada."),
+        ("A delta carries an instruction the format reserves.", "Um delta traz uma instrução que o formato reserva."),
+        ("A delta copies from beyond the end of its base object.", "Um delta copia para além do fim do seu objeto de base."),
+        ("A delta ends in the middle of the instruction it was writing.", "Um delta termina a meio da instrução que estava a escrever."),
+        ("A delta expands to a size other than the one it states.", "Um delta expande-se para um tamanho diferente do que declara."),
+        ("A delta in a pack file points outside the pack that carries it.", "Um delta de um ficheiro de pacote aponta para fora do pacote que o traz."),
+        ("A delta names a base object the pack does not carry.", "Um delta nomeia um objeto de base que o pacote não traz."),
+        ("A delta states a base size other than the one the base object has.", "Um delta declara um tamanho de base diferente do que o objeto de base tem."),
         ("A dependency could not be read.", "Não foi possível ler uma dependência."),
         ("A dependency holds something squeezed in a way this does not read.", "Uma dependência contém algo comprimido de um jeito que isto não lê."),
         ("A dependency is a jar, which is a zip of class files.", "Uma dependência é um jar, isto é, um zip de arquivos class."),
@@ -6714,6 +6847,7 @@ pub mod speech {
         ("A field was never interned.", "Um campo nunca foi registrado."),
         ("A file compiled here holds a class or an interface.", "Um arquivo compilado aqui contém uma classe ou uma interface."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Um arquivo compilado aqui contém classes, interfaces, enums, records e tipos de anotação. O que é e o que não é aceito está escrito no topo de Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Um ficheiro do repositório não pôde ser escrito onde lhe pertence."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Um arquivo é o lugar dessa chave de assinatura, e não é uma chave que esta compilação consiga abrir sozinha."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Um arquivo é o lugar da chave compartilhada, e não é uma chave que esta compilação tenha escrito."),
         ("A folder cannot be copied inside itself.", "Uma pasta não pode ser copiada dentro de si mesma."),
@@ -6798,6 +6932,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Um número não pode ser escrito na vírgula fixa do formato."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Um número começado por zero é octal, e aí 8 e 9 não são dígitos."),
         ("A number, a character, or a `-` in front of one.", "Um número, um caractere, ou um `-` na frente de um deles."),
+        ("A pack file carries more objects than this build resolves.", "Um ficheiro de pacote traz mais objetos do que esta construção resolve."),
+        ("A pack file does not open with the signature the format requires.", "Um ficheiro de pacote não abre com a assinatura que o formato exige."),
+        ("A pack file ends before the objects it promised.", "Um ficheiro de pacote termina antes dos objetos que prometeu."),
+        ("A pack file ends in the middle of a number it was writing.", "Um ficheiro de pacote termina a meio de um número que estava a escrever."),
+        ("A pack file is larger than this build reads in one piece.", "Um ficheiro de pacote é maior do que esta construção lê de uma só vez."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Um ficheiro de pacote é mais curto que o cabeçalho e a soma que o fecham."),
+        ("A pack file object expands to a size other than the one it states.", "Um objeto de um ficheiro de pacote expande-se para um tamanho diferente do que declara."),
+        ("A pack file object states a kind the format reserves.", "Um objeto de um ficheiro de pacote declara um género que o formato reserva."),
+        ("A pack file states a size larger than this build reads.", "Um ficheiro de pacote declara um tamanho maior do que esta construção lê."),
+        ("A pack file states a version this build does not read.", "Um ficheiro de pacote declara uma versão que esta construção não lê."),
         ("A package built around a page needs the language its screen is written in.", "Um pacote construído à volta de uma página precisa da linguagem em que o seu ecrã está escrito."),
         ("A package is a zip. This one does not open as one.", "Um pacote é um zip. Este não abre como tal."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Um pacote que não passa nesta verificação não é aquele com que esta compilação foi feita. Instale o original, ou compile-o de novo a partir do código."),
@@ -6889,6 +7033,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Uma hora contém algo que não é um dígito."),
         ("A time has a year that is not a number.", "Uma hora tem um ano que não é um número."),
         ("A time is not valid text.", "Uma hora não é texto válido."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Uma entrada de árvore traz um nome que sairia da pasta a que pertence."),
+        ("A tree entry is not shaped the way the format writes one.", "Uma entrada de árvore não tem a forma com que o formato escreve uma."),
+        ("A tree names an entry the pack does not carry.", "Uma árvore nomeia uma entrada que o pacote não traz."),
+        ("A tree nests deeper than this build walks.", "Uma árvore aninha-se mais fundo do que esta construção percorre."),
         ("A try needs a catch, a finally, or something to close.", "Um try precisa de um catch, um finally ou algo para fechar."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Um try com parênteses contém pelo menos algo para fechar, e a cada um é dado um valor."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Um tipo está declarado duas vezes, ou a um trinco foi dado algo que não é um objeto."),
@@ -6909,6 +7057,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Um resumo verity é a raiz de uma árvore de Merkle fs-verity, que é uma construção diferente do resumo em blocos que esta compilação calcula. A alegação não é confirmada nem contestada; não é comparada com nada."),
         ("A yield is not inside a switch used for its value.", "Um yield não está dentro de um switch usado pelo seu valor."),
         ("A zlib header fails its own check.", "Um cabeçalho zlib falha na sua própria verificação."),
+        ("A zlib stream ends before the checksum that closes it.", "Um fluxo zlib termina antes da soma de verificação que o fecha."),
         ("A zlib stream is shorter than its own header and check.", "Um fluxo zlib é mais curto que o seu próprio cabeçalho e a sua verificação."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Um fluxo zlib nomeia um dicionário predefinido, que esta compilação não traz."),
         ("A zlib stream uses a compression method the format does not define.", "Um fluxo zlib usa um método de compressão que o formato não define."),
@@ -7343,6 +7492,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "A plataforma mínima não é um número."),
         ("The note saying where it came from could not be written.", "Não foi possível escrever a nota que diz de onde isso veio."),
         ("The offset field is wrong, or the file is truncated.", "O campo de posição está errado, ou o arquivo está truncado."),
+        ("The pack does not carry the object the branch points at.", "O pacote não traz o objeto para o qual o ramo aponta."),
         ("The package carries no signing block.", "O pacote não traz bloco de assinatura algum."),
         ("The package does not match the digest recorded when it was signed.", "O pacote não confere com o resumo registrado quando foi assinado."),
         ("The package has been changed since it was signed. Do not install it.", "O pacote foi mudado desde que foi assinado. Não o instale."),
@@ -7745,11 +7895,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Класс, записанный там, где он используется, не может содержать это."),
         ("A code length symbol is outside the alphabet.", "Символ длины кода вне алфавита."),
         ("A comment was opened and never closed.", "Комментарий открыт и не закрыт."),
+        ("A commit does not name the tree that belongs to it.", "Коммит не называет дерево, которое ему принадлежит."),
         ("A condition has to be a boolean.", "Условие должно быть boolean."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Конструктор передаёт управление тому, который не принадлежит ни его собственному классу, ни его надклассу."),
         ("A content provider does not hand out access to everything it holds.", "Поставщик содержимого не раздаёт доступ ко всему, что хранит."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Отлаживаемое приложение позволяет любому процессу на устройстве подключить отладчик, читать его память и выполнять код от его имени."),
         ("A declaration was opened and never closed.", "Объявление открыто и не закрыто."),
+        ("A delta carries an instruction the format reserves.", "Дельта несёт указание, которое формат оставляет за собой."),
+        ("A delta copies from beyond the end of its base object.", "Дельта копирует за концом своего опорного объекта."),
+        ("A delta ends in the middle of the instruction it was writing.", "Дельта обрывается посреди указания, которое записывала."),
+        ("A delta expands to a size other than the one it states.", "Дельта разворачивается до размера, отличного от заявленного."),
+        ("A delta in a pack file points outside the pack that carries it.", "Дельта в пакетном файле указывает за пределы пакета, который её несёт."),
+        ("A delta names a base object the pack does not carry.", "Дельта называет опорный объект, которого пакет не несёт."),
+        ("A delta states a base size other than the one the base object has.", "Дельта заявляет опорный размер, отличный от размера опорного объекта."),
         ("A dependency could not be read.", "Не удалось прочитать зависимость."),
         ("A dependency holds something squeezed in a way this does not read.", "Зависимость содержит нечто сжатое способом, который это не читает."),
         ("A dependency is a jar, which is a zip of class files.", "Зависимость — это jar, то есть zip из файлов class."),
@@ -7774,6 +7932,7 @@ pub mod speech {
         ("A field was never interned.", "Поле никогда не было внесено в таблицу."),
         ("A file compiled here holds a class or an interface.", "Файл, компилируемый здесь, содержит класс или интерфейс."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Файл, компилируемый здесь, содержит классы, интерфейсы, перечисления, записи и типы аннотаций. Что берётся и что не берётся, написано в начале Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Файл хранилища не удалось записать туда, где ему место."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Такому ключу подписи место в файле, и это не ключ, который эта сборка может открыть без посторонней помощи."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Общему ключу место в файле, и это не ключ, который написала эта сборка."),
         ("A folder cannot be copied inside itself.", "Папку нельзя скопировать внутрь себя самой."),
@@ -7858,6 +8017,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Число нельзя записать в формате с фиксированной запятой."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Число с ведущим нулём — восьмеричное, а 8 и 9 там не цифры."),
         ("A number, a character, or a `-` in front of one.", "Число, символ или `-` перед одним из них."),
+        ("A pack file carries more objects than this build resolves.", "Пакетный файл несёт больше объектов, чем разрешает эта сборка."),
+        ("A pack file does not open with the signature the format requires.", "Пакетный файл не открывается подписью, которую требует формат."),
+        ("A pack file ends before the objects it promised.", "Пакетный файл обрывается раньше объектов, которые обещал."),
+        ("A pack file ends in the middle of a number it was writing.", "Пакетный файл обрывается посреди числа, которое записывал."),
+        ("A pack file is larger than this build reads in one piece.", "Пакетный файл больше, чем эта сборка читает за один раз."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Пакетный файл короче заголовка и контрольной суммы, которые его замыкают."),
+        ("A pack file object expands to a size other than the one it states.", "Объект пакетного файла разворачивается до размера, отличного от заявленного."),
+        ("A pack file object states a kind the format reserves.", "Объект пакетного файла заявляет род, который формат оставляет за собой."),
+        ("A pack file states a size larger than this build reads.", "Пакетный файл заявляет размер больше того, что читает эта сборка."),
+        ("A pack file states a version this build does not read.", "Пакетный файл заявляет версию, которую эта сборка не читает."),
         ("A package built around a page needs the language its screen is written in.", "Пакету, построенному вокруг страницы, нужен язык, на котором написан его экран."),
         ("A package is a zip. This one does not open as one.", "Пакет — это zip. Этот как zip не открывается."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Пакет, не прошедший эту проверку, — не тот, каким была сделана эта сборка. Установите оригинал или соберите его заново из исходников."),
@@ -7949,6 +8118,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Время содержит нечто, что не является цифрой."),
         ("A time has a year that is not a number.", "У времени год, который не является числом."),
         ("A time is not valid text.", "Время не является правильным текстом."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Запись дерева несёт имя, которое вывело бы её из папки, которой она принадлежит."),
+        ("A tree entry is not shaped the way the format writes one.", "Запись дерева не имеет вида, в котором её пишет формат."),
+        ("A tree names an entry the pack does not carry.", "Дерево называет запись, которой пакет не несёт."),
+        ("A tree nests deeper than this build walks.", "Дерево вложено глубже, чем проходит эта сборка."),
         ("A try needs a catch, a finally, or something to close.", "try требует catch, finally или что-то, что нужно закрыть."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "try со скобками содержит хотя бы одно закрываемое, и каждому даётся значение."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Тип объявлен дважды, либо замку передано то, что не является объектом."),
@@ -7969,6 +8142,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Отпечаток verity — это корень дерева Меркла fs-verity, а это иная конструкция, чем поблочный отпечаток, который вычисляет эта сборка. Заявление не подтверждается и не оспаривается; оно ни с чем не сравнивается."),
         ("A yield is not inside a switch used for its value.", "yield находится не внутри switch, используемого ради значения."),
         ("A zlib header fails its own check.", "Заголовок zlib не проходит собственную проверку."),
+        ("A zlib stream ends before the checksum that closes it.", "Поток zlib обрывается раньше контрольной суммы, которая его замыкает."),
         ("A zlib stream is shorter than its own header and check.", "Поток zlib короче собственного заголовка и проверки."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Поток zlib называет предустановленный словарь, которого у этой сборки нет."),
         ("A zlib stream uses a compression method the format does not define.", "Поток zlib использует метод сжатия, которого формат не определяет."),
@@ -8403,6 +8577,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "Минимальная платформа не является числом."),
         ("The note saying where it came from could not be written.", "Запись о том, откуда это пришло, не удалось записать."),
         ("The offset field is wrong, or the file is truncated.", "Поле смещения неверно, либо файл обрезан."),
+        ("The pack does not carry the object the branch points at.", "Пакет не несёт объекта, на который указывает ветвь."),
         ("The package carries no signing block.", "Пакет не несёт блока подписи."),
         ("The package does not match the digest recorded when it was signed.", "Пакет не сходится с отпечатком, записанным при подписи."),
         ("The package has been changed since it was signed. Do not install it.", "Пакет был изменён после подписи. Не устанавливайте его."),
@@ -8805,11 +8980,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "صنف مكتوب حيث يُستعمل لا يمكنه أن يحمل ذلك."),
         ("A code length symbol is outside the alphabet.", "رمز طول رمزٍ خارج الأبجدية."),
         ("A comment was opened and never closed.", "فُتح تعليق ولم يُغلق أبدًا."),
+        ("A commit does not name the tree that belongs to it.", "لا يسمي الإيداع الشجرة التي تخصه."),
         ("A condition has to be a boolean.", "الشرط يجب أن يكون boolean."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "مُنشئ يسلّم إلى مُنشئ ليس لصنفه ولا لصنفه الأعلى."),
         ("A content provider does not hand out access to everything it holds.", "مزوّد المحتوى لا يمنح الوصول إلى كل ما يحمله."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "التطبيق القابل للتنقيح يتيح لأي عملية على الجهاز أن تربط منقّحًا وتقرأ ذاكرته وتنفّذ شيفرة باسمه."),
         ("A declaration was opened and never closed.", "فُتح إعلان ولم يُغلق أبدًا."),
+        ("A delta carries an instruction the format reserves.", "تحمل الدلتا تعليمة يحجزها التنسيق."),
+        ("A delta copies from beyond the end of its base object.", "تنسخ الدلتا بعد نهاية كائنها الأساس."),
+        ("A delta ends in the middle of the instruction it was writing.", "تنتهي الدلتا في وسط التعليمة التي كانت تكتبها."),
+        ("A delta expands to a size other than the one it states.", "تتمدد الدلتا إلى حجم غير الحجم الذي تعلنه."),
+        ("A delta in a pack file points outside the pack that carries it.", "دلتا في ملف حزمة تشير إلى خارج الحزمة التي تحملها."),
+        ("A delta names a base object the pack does not carry.", "تسمي الدلتا كائنا أساسا لا تحمله الحزمة."),
+        ("A delta states a base size other than the one the base object has.", "تعلن الدلتا حجما أساسا غير الحجم الذي للكائن الأساس."),
         ("A dependency could not be read.", "تعذّرت قراءة اعتمادية."),
         ("A dependency holds something squeezed in a way this does not read.", "اعتمادية تحوي شيئًا مضغوطًا بطريقة لا يقرأها هذا."),
         ("A dependency is a jar, which is a zip of class files.", "الاعتمادية ملف jar، أي ملف zip من ملفات class."),
@@ -8834,6 +9017,7 @@ pub mod speech {
         ("A field was never interned.", "حقل لم يُسجَّل قط."),
         ("A file compiled here holds a class or an interface.", "الملف المصرّف هنا يحوي صنفًا أو واجهة."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "الملف المصرّف هنا يحوي أصنافًا وواجهات وتعدادات وسجلات وأنواع تعليقات توضيحية. وما يُؤخذ وما لا يُؤخذ مكتوب في أعلى Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "تعذرت كتابة ملف من المستودع في موضعه."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "مكان مفتاح التوقيع ذاك ملف، وهو ليس مفتاحًا يستطيع هذا البناء فتحه بلا عون."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "مكان المفتاح المشترك ملف، وهو ليس مفتاحًا كتبه هذا البناء."),
         ("A folder cannot be copied inside itself.", "لا يمكن نسخ مجلد داخل نفسه."),
@@ -8918,6 +9102,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "لا يمكن كتابة عدد بصيغة الفاصلة الثابتة في التنسيق."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "الرقم الذي يبدأ بصفر ثماني، و8 و9 ليسا رقمين ثمانيين."),
         ("A number, a character, or a `-` in front of one.", "عدد، أو محرف، أو `-` أمام أحدهما."),
+        ("A pack file carries more objects than this build resolves.", "يحمل ملف الحزمة كائنات أكثر مما تحله هذه البنية."),
+        ("A pack file does not open with the signature the format requires.", "لا يفتتح ملف الحزمة بالتوقيع الذي يطلبه التنسيق."),
+        ("A pack file ends before the objects it promised.", "ينتهي ملف الحزمة قبل الكائنات التي وعد بها."),
+        ("A pack file ends in the middle of a number it was writing.", "ينتهي ملف الحزمة في وسط عدد كان يكتبه."),
+        ("A pack file is larger than this build reads in one piece.", "ملف الحزمة أكبر مما تقرؤه هذه البنية دفعة واحدة."),
+        ("A pack file is shorter than the header and the checksum that close it.", "ملف الحزمة أقصر من الترويسة ومجموع التحقق اللذين يغلقانه."),
+        ("A pack file object expands to a size other than the one it states.", "يتمدد كائن في ملف حزمة إلى حجم غير الحجم الذي يعلنه."),
+        ("A pack file object states a kind the format reserves.", "يعلن كائن في ملف حزمة نوعا يحجزه التنسيق."),
+        ("A pack file states a size larger than this build reads.", "يعلن ملف الحزمة حجما أكبر مما تقرؤه هذه البنية."),
+        ("A pack file states a version this build does not read.", "يعلن ملف الحزمة إصدارا لا تقرؤه هذه البنية."),
         ("A package built around a page needs the language its screen is written in.", "الحزمة المبنية حول صفحة تحتاج إلى اللغة التي كُتبت بها شاشتها."),
         ("A package is a zip. This one does not open as one.", "الحزمة ملف zip. وهذه لا تُفتح كذلك."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "الحزمة التي ترسب في هذا الفحص ليست الحزمة التي صُنع بها هذا البناء. ثبّت الأصل، أو أعد بناءه من المصدر."),
@@ -9009,6 +9203,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "وقت يحوي شيئًا ليس رقمًا."),
         ("A time has a year that is not a number.", "وقت له سنة ليست عددًا."),
         ("A time is not valid text.", "وقت ليس نصًا صالحًا."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "يحمل مدخل شجرة اسما يخرج من المجلد الذي يخصه."),
+        ("A tree entry is not shaped the way the format writes one.", "مدخل الشجرة ليس على الهيئة التي يكتبه بها التنسيق."),
+        ("A tree names an entry the pack does not carry.", "تسمي الشجرة مدخلا لا تحمله الحزمة."),
+        ("A tree nests deeper than this build walks.", "تتداخل الشجرة أعمق مما تمشيه هذه البنية."),
         ("A try needs a catch, a finally, or something to close.", "يحتاج try إلى catch أو finally أو شيء يُغلق."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "يحمل try ذو الأقواس شيئًا واحدًا يُغلق على الأقل، ويُعطى كل منها قيمة."),
         ("A type is declared twice, or a lock was given something that is not an object.", "أُعلن النوع مرتين، أو أُعطي القفل ما ليس كائنًا."),
@@ -9029,6 +9227,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "بصمة verity هي جذر شجرة ميركل لـ fs-verity، وهي بنية مختلفة عن البصمة المقطّعة التي يحسبها هذا البناء. والادعاء لا يُؤكَّد ولا يُنازَع؛ ولا يُقارن بشيء."),
         ("A yield is not inside a switch used for its value.", "yield ليس داخل switch مستعمل من أجل قيمته."),
         ("A zlib header fails its own check.", "ترويسة zlib ترسب في تحققها الخاص."),
+        ("A zlib stream ends before the checksum that closes it.", "ينتهي تدفق zlib قبل مجموع التحقق الذي يغلقه."),
         ("A zlib stream is shorter than its own header and check.", "تدفق zlib أقصر من ترويسته وتحققه."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "تدفق zlib يسمّي قاموسًا مسبقًا لا يحمله هذا البناء."),
         ("A zlib stream uses a compression method the format does not define.", "تدفق zlib يستخدم طريقة ضغط لا يعرّفها التنسيق."),
@@ -9463,6 +9662,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "المنصة الدنيا ليست عددًا."),
         ("The note saying where it came from could not be written.", "تعذّرت كتابة الملاحظة التي تقول من أين جاء هذا."),
         ("The offset field is wrong, or the file is truncated.", "حقل الإزاحة خاطئ، أو الملف مبتور."),
+        ("The pack does not carry the object the branch points at.", "لا تحمل الحزمة الكائن الذي يشير إليه الفرع."),
         ("The package carries no signing block.", "الحزمة لا تحمل أي كتلة توقيع."),
         ("The package does not match the digest recorded when it was signed.", "الحزمة لا تطابق البصمة المسجّلة عند توقيعها."),
         ("The package has been changed since it was signed. Do not install it.", "غُيّرت الحزمة منذ توقيعها. لا تثبّتها."),
@@ -9865,11 +10065,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "就地写出的类不能容纳那个东西。"),
         ("A code length symbol is outside the alphabet.", "一个码长符号在字母表之外。"),
         ("A comment was opened and never closed.", "注释只开不闭。"),
+        ("A commit does not name the tree that belongs to it.", "某个提交没有指明属于它的树。"),
         ("A condition has to be a boolean.", "条件必须是 boolean。"),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "一个构造器把控制权交给了既不属于本类也不属于父类的构造器。"),
         ("A content provider does not hand out access to everything it holds.", "内容提供者不会把它所持有的一切都开放出去。"),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "可调试的应用允许设备上任何进程附加调试器、读取它的内存并以它的身份运行代码。"),
         ("A declaration was opened and never closed.", "声明只开不闭。"),
+        ("A delta carries an instruction the format reserves.", "某个增量带有格式保留的指令。"),
+        ("A delta copies from beyond the end of its base object.", "某个增量从其基对象的末尾之外复制。"),
+        ("A delta ends in the middle of the instruction it was writing.", "某个增量在它正写的指令中途结束。"),
+        ("A delta expands to a size other than the one it states.", "某个增量展开后的大小与它声明的不同。"),
+        ("A delta in a pack file points outside the pack that carries it.", "包文件中的某个增量指向携带它的包之外。"),
+        ("A delta names a base object the pack does not carry.", "某个增量指明了包中没有的基对象。"),
+        ("A delta states a base size other than the one the base object has.", "某个增量声明的基大小与基对象的大小不同。"),
         ("A dependency could not be read.", "无法读取某个依赖。"),
         ("A dependency holds something squeezed in a way this does not read.", "某个依赖中有以此处不读的方式压缩的内容。"),
         ("A dependency is a jar, which is a zip of class files.", "依赖是一个 jar，也就是由 class 文件组成的 zip。"),
@@ -9894,6 +10102,7 @@ pub mod speech {
         ("A field was never interned.", "某个字段从未被登记。"),
         ("A file compiled here holds a class or an interface.", "此处编译的文件含有一个类或一个接口。"),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "此处编译的文件含有类、接口、枚举、记录和注解类型。哪些接受、哪些不接受，写在 Compilers/Java.rs 的开头。"),
+        ("A file in the repository could not be written where it belongs.", "仓库中的某个文件无法写到它该在的位置。"),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "那把签名密钥该放在文件里，而它不是此构建能独自打开的密钥。"),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "共享密钥该放在文件里，而它不是此构建写出的密钥。"),
         ("A folder cannot be copied inside itself.", "文件夹不能复制到它自己里面。"),
@@ -9978,6 +10187,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "某个数无法写成该格式的定点形式。"),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "以零开头的数是八进制，而 8 和 9 不是八进制数字。"),
         ("A number, a character, or a `-` in front of one.", "一个数、一个字符，或它们前面的一个 `-`。"),
+        ("A pack file carries more objects than this build resolves.", "某个包文件携带的对象比这次构建能解析的更多。"),
+        ("A pack file does not open with the signature the format requires.", "某个包文件没有以格式要求的签名开头。"),
+        ("A pack file ends before the objects it promised.", "某个包文件在它承诺的对象之前就结束了。"),
+        ("A pack file ends in the middle of a number it was writing.", "某个包文件在它正写的数字中途结束。"),
+        ("A pack file is larger than this build reads in one piece.", "某个包文件比这次构建一次读入的更大。"),
+        ("A pack file is shorter than the header and the checksum that close it.", "某个包文件比封闭它的头和校验和还短。"),
+        ("A pack file object expands to a size other than the one it states.", "包文件中的某个对象展开后的大小与它声明的不同。"),
+        ("A pack file object states a kind the format reserves.", "包文件中的某个对象声明了格式保留的类别。"),
+        ("A pack file states a size larger than this build reads.", "某个包文件声明的大小超过这次构建所读。"),
+        ("A pack file states a version this build does not read.", "某个包文件声明了这次构建不读的版本。"),
         ("A package built around a page needs the language its screen is written in.", "围绕一个网页构建的包，需要它的界面所用的那门语言。"),
         ("A package is a zip. This one does not open as one.", "包就是 zip。这个打不开。"),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "未通过此项检查的包，并非此构建当初所生成的那个。请安装原件，或从源码重新构建。"),
@@ -10069,6 +10288,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "某个时间中含有不是数字的内容。"),
         ("A time has a year that is not a number.", "某个时间的年份不是数字。"),
         ("A time is not valid text.", "某个时间不是有效文本。"),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "某个树条目带有会离开它所属文件夹的名字。"),
+        ("A tree entry is not shaped the way the format writes one.", "某个树条目不是格式所写的形状。"),
+        ("A tree names an entry the pack does not carry.", "某棵树指明了包中没有的条目。"),
+        ("A tree nests deeper than this build walks.", "某棵树嵌套得比这次构建所走的更深。"),
         ("A try needs a catch, a finally, or something to close.", "try 需要 catch、finally，或者需要关闭的东西。"),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "带括号的 try 至少要有一个需要关闭的东西，并且每个都要给值。"),
         ("A type is declared twice, or a lock was given something that is not an object.", "类型声明了两次，或者给锁的不是一个对象。"),
@@ -10089,6 +10312,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity 摘要是 fs-verity 默克尔树的根，和此构建计算的分块摘要是不同的构造。该主张既不被确认也不被反驳；它没有和任何东西比对。"),
         ("A yield is not inside a switch used for its value.", "yield 不在一个取值用的 switch 里面。"),
         ("A zlib header fails its own check.", "某个 zlib 头没有通过它自己的校验。"),
+        ("A zlib stream ends before the checksum that closes it.", "某个 zlib 流在封闭它的校验和之前就结束了。"),
         ("A zlib stream is shorter than its own header and check.", "某个 zlib 流比它自己的头和校验还短。"),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "某个 zlib 流指名了预设字典，而此构建并不带有它。"),
         ("A zlib stream uses a compression method the format does not define.", "某个 zlib 流使用了格式未定义的压缩方法。"),
@@ -10523,6 +10747,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "最低平台不是数字。"),
         ("The note saying where it came from could not be written.", "无法写出说明它来自何处的那条记录。"),
         ("The offset field is wrong, or the file is truncated.", "偏移字段有误，或者文件被截断了。"),
+        ("The pack does not carry the object the branch points at.", "包中没有分支所指向的对象。"),
         ("The package carries no signing block.", "包不带任何签名块。"),
         ("The package does not match the digest recorded when it was signed.", "包与签名时记录的摘要不符。"),
         ("The package has been changed since it was signed. Do not install it.", "包在签名之后被改动过。请勿安装。"),
@@ -10925,11 +11150,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "使う場所に書かれたクラスは、それを持てません。"),
         ("A code length symbol is outside the alphabet.", "符号長の記号がアルファベットの外にあります。"),
         ("A comment was opened and never closed.", "コメントが開かれたまま閉じられていません。"),
+        ("A commit does not name the tree that belongs to it.", "コミットが、自らに属する木を名指していません。"),
         ("A condition has to be a boolean.", "条件は真偽値でなければなりません。"),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "コンストラクタが、自分のクラスのものでも上位クラスのものでもないコンストラクタに引き渡しています。"),
         ("A content provider does not hand out access to everything it holds.", "コンテンツプロバイダーは、自分の持つすべてへの接続を配りはしません。"),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "デバッグ可能なアプリケーションは、端末上のどのプロセスにもデバッガの接続と、記憶の読み取りと、自分としてのコード実行を許します。"),
         ("A declaration was opened and never closed.", "宣言が開かれたまま閉じられていません。"),
+        ("A delta carries an instruction the format reserves.", "デルタが、形式の予約する命令を運んでいます。"),
+        ("A delta copies from beyond the end of its base object.", "デルタが、基となる対象の終わりより先から写しています。"),
+        ("A delta ends in the middle of the instruction it was writing.", "デルタが、書いていた命令の途中で終わっています。"),
+        ("A delta expands to a size other than the one it states.", "デルタが、自ら告げた大きさとは違う大きさに広がります。"),
+        ("A delta in a pack file points outside the pack that carries it.", "パックファイルの中のデルタが、それを運ぶパックの外を指しています。"),
+        ("A delta names a base object the pack does not carry.", "デルタが、パックの運ばない基の対象を名指しています。"),
+        ("A delta states a base size other than the one the base object has.", "デルタが、基の対象の持つ大きさとは違う基の大きさを告げています。"),
         ("A dependency could not be read.", "依存物を読めませんでした。"),
         ("A dependency holds something squeezed in a way this does not read.", "依存物が、ここでは読めない方法で縮められたものを含んでいます。"),
         ("A dependency is a jar, which is a zip of class files.", "依存物は jar、すなわちクラスファイルの zip です。"),
@@ -10954,6 +11187,7 @@ pub mod speech {
         ("A field was never interned.", "フィールドが一度も取り込まれていません。"),
         ("A file compiled here holds a class or an interface.", "ここで組むファイルは、クラスかインターフェイスを収めます。"),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "ここで組むファイルは、クラス、インターフェイス、列挙、レコード、注釈型を収めます。何を取り何を取らないかは Compilers/Java.rs の冒頭に書いてあります。"),
+        ("A file in the repository could not be written where it belongs.", "リポジトリの中のファイルを、あるべき場所へ書けませんでした。"),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "その署名鍵の在り処はファイルであり、それはこのビルドが独力で開ける鍵ではありません。"),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "共有鍵の在り処はファイルであり、それはこのビルドが書いた鍵ではありません。"),
         ("A folder cannot be copied inside itself.", "フォルダーを自分自身の中には複製できません。"),
@@ -11038,6 +11272,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "数を、形式の固定小数点では書き表せません。"),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "先頭がゼロの数は八進で、8 と 9 は数字ではありません。"),
         ("A number, a character, or a `-` in front of one.", "数か、文字か、その前の `-` です。"),
+        ("A pack file carries more objects than this build resolves.", "パックファイルが、この組み立ての解く数より多くの対象を運んでいます。"),
+        ("A pack file does not open with the signature the format requires.", "パックファイルが、形式の求める署名で始まっていません。"),
+        ("A pack file ends before the objects it promised.", "パックファイルが、約束した対象より前で終わっています。"),
+        ("A pack file ends in the middle of a number it was writing.", "パックファイルが、書いていた数の途中で終わっています。"),
+        ("A pack file is larger than this build reads in one piece.", "パックファイルが、この組み立てが一度に読む大きさより大きいです。"),
+        ("A pack file is shorter than the header and the checksum that close it.", "パックファイルが、それを閉じる頭部と検査和より短いです。"),
+        ("A pack file object expands to a size other than the one it states.", "パックファイルの対象が、自ら告げた大きさとは違う大きさに広がります。"),
+        ("A pack file object states a kind the format reserves.", "パックファイルの対象が、形式の予約する種を告げています。"),
+        ("A pack file states a size larger than this build reads.", "パックファイルが、この組み立ての読む大きさより大きな大きさを告げています。"),
+        ("A pack file states a version this build does not read.", "パックファイルが、この組み立ての読まない版を告げています。"),
         ("A package built around a page needs the language its screen is written in.", "ページを包むパッケージには、その画面が書かれている言語が要ります。"),
         ("A package is a zip. This one does not open as one.", "パッケージは zip です。これは zip として開けません。"),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "この検査に落ちるパッケージは、このビルドが作ったものではありません。元のものを入れ直すか、ソースから組み直してください。"),
@@ -11129,6 +11373,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "時刻に数字でないものが含まれています。"),
         ("A time has a year that is not a number.", "時刻の年が数値ではありません。"),
         ("A time is not valid text.", "時刻が正しい文字列ではありません。"),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "木の項が、属するフォルダーを出てしまう名を運んでいます。"),
+        ("A tree entry is not shaped the way the format writes one.", "木の項が、形式の書く形になっていません。"),
+        ("A tree names an entry the pack does not carry.", "木が、パックの運ばない項を名指しています。"),
+        ("A tree nests deeper than this build walks.", "木が、この組み立ての歩くより深く入れ子になっています。"),
         ("A try needs a catch, a finally, or something to close.", "try には catch か finally、あるいは閉じるものが要ります。"),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "括弧つきの try は閉じるものを少なくともひとつ収め、それぞれに値を与えます。"),
         ("A type is declared twice, or a lock was given something that is not an object.", "型が二度宣言されているか、ロックにオブジェクトでないものが渡されました。"),
@@ -11149,6 +11397,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity の要約は fs-verity のマークル木の根であり、このビルドの計算する分割要約とは別の作りです。その主張は肯定も否定もされません。何とも突き合わせていないからです。"),
         ("A yield is not inside a switch used for its value.", "yield が、値のために使う switch の中にありません。"),
         ("A zlib header fails its own check.", "zlib のヘッダーが自らの検査に落ちています。"),
+        ("A zlib stream ends before the checksum that closes it.", "zlib の流れが、それを閉じる検査和より前で終わっています。"),
         ("A zlib stream is shorter than its own header and check.", "zlib の流れが、自らのヘッダーと検査より短くなっています。"),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "zlib の流れが既定辞書を名指ししていますが、このビルドはそれを持ちません。"),
         ("A zlib stream uses a compression method the format does not define.", "zlib の流れが、形式の定めない圧縮方式を使っています。"),
@@ -11583,6 +11832,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "最小のプラットフォームが数値ではありません。"),
         ("The note saying where it came from could not be written.", "どこから来たかを述べる控えを書けませんでした。"),
         ("The offset field is wrong, or the file is truncated.", "位置の欄が違うか、ファイルが切り詰められています。"),
+        ("The pack does not carry the object the branch points at.", "パックが、枝の指す対象を運んでいません。"),
         ("The package carries no signing block.", "パッケージが署名ブロックを運んでいません。"),
         ("The package does not match the digest recorded when it was signed.", "パッケージが、署名されたときに記録された要約と合いません。"),
         ("The package has been changed since it was signed. Do not install it.", "パッケージは署名の後で変えられています。入れないでください。"),
@@ -11985,11 +12235,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "쓰이는 자리에 적은 클래스는 그것을 담을 수 없습니다."),
         ("A code length symbol is outside the alphabet.", "부호 길이 기호가 낱자 모둠 밖에 있습니다."),
         ("A comment was opened and never closed.", "주석을 열어 두고 닫지 않았습니다."),
+        ("A commit does not name the tree that belongs to it.", "커밋이 자신에게 속한 나무를 가리키지 않습니다."),
         ("A condition has to be a boolean.", "조건은 참거짓 값이어야 합니다."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "생성자가 제 클래스의 것도 상위 클래스의 것도 아닌 생성자에게 넘깁니다."),
         ("A content provider does not hand out access to everything it holds.", "콘텐트 프로바이더는 저가 지닌 모든 것에 대한 길을 내주지 않습니다."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "디버그가 열린 앱은 기기의 어느 프로세스든 디버거를 붙이고, 그 기억을 읽고, 그 이름으로 코드를 돌리게 둡니다."),
         ("A declaration was opened and never closed.", "선언을 열어 두고 닫지 않았습니다."),
+        ("A delta carries an instruction the format reserves.", "델타가 형식이 남겨 둔 지시를 지니고 있습니다."),
+        ("A delta copies from beyond the end of its base object.", "델타가 바탕 대상의 끝 너머에서 베껴 옵니다."),
+        ("A delta ends in the middle of the instruction it was writing.", "델타가 쓰고 있던 지시의 한가운데에서 끝납니다."),
+        ("A delta expands to a size other than the one it states.", "델타가 스스로 밝힌 크기와 다른 크기로 펼쳐집니다."),
+        ("A delta in a pack file points outside the pack that carries it.", "묶음 파일 속 델타가 자신을 지닌 묶음의 바깥을 가리킵니다."),
+        ("A delta names a base object the pack does not carry.", "델타가 묶음이 지니지 않은 바탕 대상을 가리킵니다."),
+        ("A delta states a base size other than the one the base object has.", "델타가 바탕 대상이 지닌 것과 다른 바탕 크기를 밝힙니다."),
         ("A dependency could not be read.", "의존물을 읽지 못했습니다."),
         ("A dependency holds something squeezed in a way this does not read.", "의존물이 여기서 읽지 못하는 방식으로 눌린 것을 담고 있습니다."),
         ("A dependency is a jar, which is a zip of class files.", "의존물은 jar, 곧 클래스 파일을 담은 zip입니다."),
@@ -12014,6 +12272,7 @@ pub mod speech {
         ("A field was never interned.", "필드가 한 번도 갈무리되지 않았습니다."),
         ("A file compiled here holds a class or an interface.", "여기서 엮는 파일은 클래스나 인터페이스를 담습니다."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "여기서 엮는 파일은 클래스, 인터페이스, 열거, 레코드, 주석 형을 담습니다. 무엇을 받고 무엇을 받지 않는지는 Compilers/Java.rs 첫머리에 적혀 있습니다."),
+        ("A file in the repository could not be written where it belongs.", "저장소의 파일 하나를 제자리에 쓸 수 없었습니다."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "그 서명 열쇠가 있어야 할 곳은 파일이며, 그것은 이 빌드가 혼자 열 수 있는 열쇠가 아닙니다."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "공유 열쇠가 있어야 할 곳은 파일이며, 그것은 이 빌드가 쓴 열쇠가 아닙니다."),
         ("A folder cannot be copied inside itself.", "폴더를 제 안으로 베낄 수는 없습니다."),
@@ -12098,6 +12357,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "수를 그 형식의 고정 소수점으로는 적을 수 없습니다."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "앞에 0이 붙은 수는 팔진수이며, 거기서 8과 9는 숫자가 아닙니다."),
         ("A number, a character, or a `-` in front of one.", "수이거나, 글자이거나, 그 앞의 `-`입니다."),
+        ("A pack file carries more objects than this build resolves.", "묶음 파일이 이 빌드가 푸는 것보다 많은 대상을 지니고 있습니다."),
+        ("A pack file does not open with the signature the format requires.", "묶음 파일이 형식이 요구하는 서명으로 열리지 않습니다."),
+        ("A pack file ends before the objects it promised.", "묶음 파일이 약속한 대상보다 먼저 끝납니다."),
+        ("A pack file ends in the middle of a number it was writing.", "묶음 파일이 쓰고 있던 수의 한가운데에서 끝납니다."),
+        ("A pack file is larger than this build reads in one piece.", "묶음 파일이 이 빌드가 한 번에 읽는 것보다 큽니다."),
+        ("A pack file is shorter than the header and the checksum that close it.", "묶음 파일이 그것을 닫는 머리말과 검사합보다 짧습니다."),
+        ("A pack file object expands to a size other than the one it states.", "묶음 파일의 대상이 스스로 밝힌 크기와 다른 크기로 펼쳐집니다."),
+        ("A pack file object states a kind the format reserves.", "묶음 파일의 대상이 형식이 남겨 둔 갈래를 밝힙니다."),
+        ("A pack file states a size larger than this build reads.", "묶음 파일이 이 빌드가 읽는 것보다 큰 크기를 밝힙니다."),
+        ("A pack file states a version this build does not read.", "묶음 파일이 이 빌드가 읽지 않는 판을 밝힙니다."),
         ("A package built around a page needs the language its screen is written in.", "쪽을 감싼 패키지에는 그 화면이 쓰인 말이 있어야 합니다."),
         ("A package is a zip. This one does not open as one.", "패키지는 zip입니다. 이것은 zip으로 열리지 않습니다."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "이 살핌을 통과하지 못하는 패키지는 이 빌드가 만든 것이 아닙니다. 원래 것을 다시 설치하거나 원본에서 다시 엮으십시오."),
@@ -12189,6 +12458,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "때에 숫자가 아닌 것이 들어 있습니다."),
         ("A time has a year that is not a number.", "때의 해가 수가 아닙니다."),
         ("A time is not valid text.", "때가 올바른 글이 아닙니다."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "나무 항목이 제가 속한 폴더를 벗어날 이름을 지니고 있습니다."),
+        ("A tree entry is not shaped the way the format writes one.", "나무 항목이 형식이 쓰는 모양이 아닙니다."),
+        ("A tree names an entry the pack does not carry.", "나무가 묶음이 지니지 않은 항목을 가리킵니다."),
+        ("A tree nests deeper than this build walks.", "나무가 이 빌드가 걷는 것보다 깊이 겹쳐 있습니다."),
         ("A try needs a catch, a finally, or something to close.", "try에는 catch나 finally, 또는 닫을 것이 있어야 합니다."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "괄호를 단 try는 닫을 것을 적어도 하나 담고, 저마다에 값을 줍니다."),
         ("A type is declared twice, or a lock was given something that is not an object.", "형이 두 번 선언되었거나, 자물쇠에 객체가 아닌 것이 주어졌습니다."),
@@ -12209,6 +12482,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity 요약은 fs-verity 머클 트리의 뿌리로, 이 빌드가 셈하는 조각 요약과는 다른 얼개입니다. 그 주장은 맞다고도 아니라고도 하지 않습니다. 무엇과도 견주지 않았기 때문입니다."),
         ("A yield is not inside a switch used for its value.", "yield가 값을 얻으려고 쓰는 switch 안에 있지 않습니다."),
         ("A zlib header fails its own check.", "zlib 머리말이 제 살핌을 통과하지 못합니다."),
+        ("A zlib stream ends before the checksum that closes it.", "zlib 흐름이 그것을 닫는 검사합보다 먼저 끝납니다."),
         ("A zlib stream is shorter than its own header and check.", "zlib 흐름이 제 머리말과 살핌보다 짧습니다."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "zlib 흐름이 미리 정한 사전을 가리키는데, 이 빌드는 그것을 지니지 않습니다."),
         ("A zlib stream uses a compression method the format does not define.", "zlib 흐름이 형식이 정하지 않은 누름 방식을 씁니다."),
@@ -12643,6 +12917,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "가장 낮은 플랫폼이 수가 아닙니다."),
         ("The note saying where it came from could not be written.", "어디서 왔는지 적은 쪽지를 쓰지 못했습니다."),
         ("The offset field is wrong, or the file is truncated.", "자리 칸이 틀렸거나 파일이 잘렸습니다."),
+        ("The pack does not carry the object the branch points at.", "묶음이 가지가 가리키는 대상을 지니고 있지 않습니다."),
         ("The package carries no signing block.", "패키지가 서명 덩이를 지니지 않았습니다."),
         ("The package does not match the digest recorded when it was signed.", "패키지가 서명될 때 적힌 요약과 맞지 않습니다."),
         ("The package has been changed since it was signed. Do not install it.", "패키지가 서명된 뒤에 바뀌었습니다. 설치하지 마십시오."),
@@ -13045,11 +13320,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "जहाँ उपयोग हो वहीं लिखा गया वर्ग वह नहीं रख सकता।"),
         ("A code length symbol is outside the alphabet.", "एक कोड-लंबाई प्रतीक वर्णमाला से बाहर है।"),
         ("A comment was opened and never closed.", "एक टिप्पणी खोली गई और कभी बंद नहीं हुई।"),
+        ("A commit does not name the tree that belongs to it.", "एक कमिट उस वृक्ष का नाम नहीं देता जो उसका है।"),
         ("A condition has to be a boolean.", "एक शर्त को बूलियन होना चाहिए।"),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "एक निर्माता ऐसे निर्माता को सौंपता है जो न उसके अपने वर्ग का है न उसके अधिवर्ग का।"),
         ("A content provider does not hand out access to everything it holds.", "एक कंटेंट प्रोवाइडर अपनी हर चीज़ तक पहुँच नहीं बाँटता।"),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "डिबग-योग्य ऐप्लिकेशन उपकरण की हर प्रक्रिया को डिबगर जोड़ने, उसकी स्मृति पढ़ने और उसके रूप में कोड चलाने देता है।"),
         ("A declaration was opened and never closed.", "एक घोषणा खोली गई और कभी बंद नहीं हुई।"),
+        ("A delta carries an instruction the format reserves.", "एक डेल्टा ऐसा निर्देश रखता है जिसे प्रारूप सुरक्षित रखता है।"),
+        ("A delta copies from beyond the end of its base object.", "एक डेल्टा अपने आधार वस्तु के अंत से आगे से नकल करता है।"),
+        ("A delta ends in the middle of the instruction it was writing.", "एक डेल्टा उस निर्देश के बीच में समाप्त हो जाता है जिसे वह लिख रहा था।"),
+        ("A delta expands to a size other than the one it states.", "एक डेल्टा अपने बताए आकार से भिन्न आकार में फैलता है।"),
+        ("A delta in a pack file points outside the pack that carries it.", "पैक फ़ाइल का एक डेल्टा उस पैक के बाहर संकेत करता है जो उसे रखता है।"),
+        ("A delta names a base object the pack does not carry.", "एक डेल्टा ऐसी आधार वस्तु का नाम देता है जो पैक में नहीं है।"),
+        ("A delta states a base size other than the one the base object has.", "एक डेल्टा आधार वस्तु के आकार से भिन्न आधार आकार बताता है।"),
         ("A dependency could not be read.", "एक निर्भरता पढ़ी नहीं जा सकी।"),
         ("A dependency holds something squeezed in a way this does not read.", "एक निर्भरता में ऐसी चीज़ है जो इस तरह दबाई गई है जिसे यहाँ पढ़ा नहीं जाता।"),
         ("A dependency is a jar, which is a zip of class files.", "एक निर्भरता jar है, जो वर्ग-फ़ाइलों का zip होता है।"),
@@ -13074,6 +13357,7 @@ pub mod speech {
         ("A field was never interned.", "एक क्षेत्र कभी अंतर्निहित नहीं किया गया।"),
         ("A file compiled here holds a class or an interface.", "यहाँ संकलित होने वाली फ़ाइल एक वर्ग या एक अंतरापृष्ठ रखती है।"),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "यहाँ संकलित होने वाली फ़ाइल वर्ग, अंतरापृष्ठ, गणन, अभिलेख और टिप्पणी-प्रकार रखती है। क्या लिया जाता है और क्या नहीं, यह Compilers/Java.rs के आरंभ में लिखा है।"),
+        ("A file in the repository could not be written where it belongs.", "भंडार की एक फ़ाइल वहाँ नहीं लिखी जा सकी जहाँ उसका स्थान है।"),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "उस हस्ताक्षर कुंजी का ठिकाना एक फ़ाइल है, और वह ऐसी कुंजी नहीं जिसे यह बनावट अकेले खोल सके।"),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "साझा कुंजी का ठिकाना एक फ़ाइल है, और वह ऐसी कुंजी नहीं जिसे इस बनावट ने लिखा हो।"),
         ("A folder cannot be copied inside itself.", "किसी फ़ोल्डर की नकल उसी के भीतर नहीं की जा सकती।"),
@@ -13158,6 +13442,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "एक संख्या को प्रारूप के स्थिर बिंदु में लिखा नहीं जा सकता।"),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "आगे शून्य वाली संख्या अष्टक होती है, जहाँ 8 और 9 अंक नहीं हैं।"),
         ("A number, a character, or a `-` in front of one.", "एक संख्या, एक अक्षर, या उसके आगे एक `-`।"),
+        ("A pack file carries more objects than this build resolves.", "एक पैक फ़ाइल इस निर्माण के सुलझाने से अधिक वस्तुएँ रखती है।"),
+        ("A pack file does not open with the signature the format requires.", "एक पैक फ़ाइल उस हस्ताक्षर से नहीं खुलती जो प्रारूप माँगता है।"),
+        ("A pack file ends before the objects it promised.", "एक पैक फ़ाइल उन वस्तुओं से पहले समाप्त हो जाती है जिनका वचन उसने दिया।"),
+        ("A pack file ends in the middle of a number it was writing.", "एक पैक फ़ाइल उस संख्या के बीच में समाप्त हो जाती है जिसे वह लिख रही थी।"),
+        ("A pack file is larger than this build reads in one piece.", "एक पैक फ़ाइल उससे बड़ी है जितना यह निर्माण एक बार में पढ़ता है।"),
+        ("A pack file is shorter than the header and the checksum that close it.", "एक पैक फ़ाइल उस शीर्षक और जाँच योग से छोटी है जो उसे बंद करते हैं।"),
+        ("A pack file object expands to a size other than the one it states.", "पैक फ़ाइल की एक वस्तु अपने बताए आकार से भिन्न आकार में फैलती है।"),
+        ("A pack file object states a kind the format reserves.", "पैक फ़ाइल की एक वस्तु ऐसा प्रकार बताती है जिसे प्रारूप सुरक्षित रखता है।"),
+        ("A pack file states a size larger than this build reads.", "एक पैक फ़ाइल उससे बड़ा आकार बताती है जितना यह निर्माण पढ़ता है।"),
+        ("A pack file states a version this build does not read.", "एक पैक फ़ाइल ऐसा संस्करण बताती है जिसे यह निर्माण नहीं पढ़ता।"),
         ("A package built around a page needs the language its screen is written in.", "किसी पन्ने के चारों ओर बना पैकेज उस भाषा को माँगता है जिसमें उसका परदा लिखा है।"),
         ("A package is a zip. This one does not open as one.", "पैकेज एक zip है। यह zip की तरह नहीं खुलता।"),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "जो पैकेज यह जाँच नहीं निकालता वह वही नहीं जिस रूप में यह बनावट बनी थी। मूल को लगाइए, या उसे स्रोत से फिर बनाइए।"),
@@ -13249,6 +13543,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "एक समय में कुछ ऐसा है जो अंक नहीं है।"),
         ("A time has a year that is not a number.", "एक समय का वर्ष कोई संख्या नहीं है।"),
         ("A time is not valid text.", "एक समय वैध पाठ नहीं है।"),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "एक वृक्ष प्रविष्टि ऐसा नाम रखती है जो उस फ़ोल्डर से बाहर निकल जाएगा जिसकी वह है।"),
+        ("A tree entry is not shaped the way the format writes one.", "एक वृक्ष प्रविष्टि उस रूप में नहीं है जिसमें प्रारूप उसे लिखता है।"),
+        ("A tree names an entry the pack does not carry.", "एक वृक्ष ऐसी प्रविष्टि का नाम देता है जो पैक में नहीं है।"),
+        ("A tree nests deeper than this build walks.", "एक वृक्ष उससे अधिक गहरा नत्थी है जितना यह निर्माण चलता है।"),
         ("A try needs a catch, a finally, or something to close.", "एक try को एक catch, एक finally, या बंद करने के लिए कुछ चाहिए।"),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "कोष्ठकों वाला try कम से कम एक बंद करने योग्य चीज़ रखता है, और हर एक को एक मान दिया जाता है।"),
         ("A type is declared twice, or a lock was given something that is not an object.", "एक प्रकार दो बार घोषित है, या किसी ताले को ऐसा कुछ दिया गया जो वस्तु नहीं है।"),
@@ -13269,6 +13567,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity सारांश एक fs-verity मर्कल वृक्ष की जड़ है, जो इस बनावट के गिने खंडित सारांश से अलग रचना है। उस दावे की न पुष्टि होती है न खंडन; उसकी किसी से तुलना नहीं की जाती।"),
         ("A yield is not inside a switch used for its value.", "एक yield ऐसे switch के भीतर नहीं है जिसका मान लिया जाता हो।"),
         ("A zlib header fails its own check.", "एक zlib शीर्षक अपनी ही जाँच में विफल है।"),
+        ("A zlib stream ends before the checksum that closes it.", "एक zlib धारा उस जाँच योग से पहले समाप्त हो जाती है जो उसे बंद करता है।"),
         ("A zlib stream is shorter than its own header and check.", "एक zlib धारा अपने ही शीर्षक और जाँच से छोटी है।"),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "एक zlib धारा एक पूर्वनिर्धारित शब्दकोश का नाम लेती है, जो यह बनावट नहीं रखती।"),
         ("A zlib stream uses a compression method the format does not define.", "एक zlib धारा ऐसी संपीडन विधि लेती है जिसे प्रारूप परिभाषित नहीं करता।"),
@@ -13703,6 +14002,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "न्यूनतम मंच कोई संख्या नहीं है।"),
         ("The note saying where it came from could not be written.", "वह टीप जो बताती है कि वह कहाँ से आया, लिखी नहीं जा सकी।"),
         ("The offset field is wrong, or the file is truncated.", "खिसकाव-क्षेत्र गलत है, या फ़ाइल कटी हुई है।"),
+        ("The pack does not carry the object the branch points at.", "पैक में वह वस्तु नहीं है जिस पर शाखा संकेत करती है।"),
         ("The package carries no signing block.", "पैकेज कोई हस्ताक्षर-खंड नहीं ले जाता।"),
         ("The package does not match the digest recorded when it was signed.", "पैकेज उस सारांश से मेल नहीं खाता जो हस्ताक्षर के समय दर्ज हुआ था।"),
         ("The package has been changed since it was signed. Do not install it.", "पैकेज हस्ताक्षर के बाद बदला गया है। उसे मत लगाइए।"),
@@ -14105,11 +14405,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Kelas yang ditulis di tempat ia dipakai tidak bisa memuat itu."),
         ("A code length symbol is outside the alphabet.", "Sebuah simbol panjang kode berada di luar abjad."),
         ("A comment was opened and never closed.", "Sebuah komentar dibuka dan tidak pernah ditutup."),
+        ("A commit does not name the tree that belongs to it.", "Sebuah commit tidak menyebut pohon yang menjadi miliknya."),
         ("A condition has to be a boolean.", "Sebuah syarat harus berupa boolean."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Sebuah konstruktor menyerahkan ke konstruktor yang bukan milik kelasnya sendiri maupun kelas induknya."),
         ("A content provider does not hand out access to everything it holds.", "Sebuah content provider tidak membagikan akses ke segala yang dimuatnya."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Aplikasi yang bisa didebug membiarkan proses mana pun di perangkat memasang debugger, membaca ingatannya dan menjalankan kode sebagai dirinya."),
         ("A declaration was opened and never closed.", "Sebuah deklarasi dibuka dan tidak pernah ditutup."),
+        ("A delta carries an instruction the format reserves.", "Sebuah delta membawa perintah yang disimpan oleh format."),
+        ("A delta copies from beyond the end of its base object.", "Sebuah delta menyalin melampaui ujung objek dasarnya."),
+        ("A delta ends in the middle of the instruction it was writing.", "Sebuah delta berakhir di tengah perintah yang sedang ditulisnya."),
+        ("A delta expands to a size other than the one it states.", "Sebuah delta mengembang ke ukuran selain yang dinyatakannya."),
+        ("A delta in a pack file points outside the pack that carries it.", "Sebuah delta dalam berkas paket menunjuk ke luar paket yang membawanya."),
+        ("A delta names a base object the pack does not carry.", "Sebuah delta menyebut objek dasar yang tidak dibawa paket itu."),
+        ("A delta states a base size other than the one the base object has.", "Sebuah delta menyatakan ukuran dasar selain yang dimiliki objek dasarnya."),
         ("A dependency could not be read.", "Sebuah dependensi tidak bisa dibaca."),
         ("A dependency holds something squeezed in a way this does not read.", "Sebuah dependensi memuat sesuatu yang dimampatkan dengan cara yang tidak dibaca di sini."),
         ("A dependency is a jar, which is a zip of class files.", "Sebuah dependensi adalah jar, yaitu zip berisi berkas kelas."),
@@ -14134,6 +14442,7 @@ pub mod speech {
         ("A field was never interned.", "Sebuah ruas tidak pernah disimpan ke lumbung untai."),
         ("A file compiled here holds a class or an interface.", "Berkas yang dibangun di sini memuat sebuah kelas atau antarmuka."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Berkas yang dibangun di sini memuat kelas, antarmuka, enum, record dan jenis anotasi. Apa yang diterima dan tidak ditulis di awal Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Sebuah berkas dalam gudang tidak dapat ditulis di tempat yang semestinya."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Kunci penanda tangan itu semestinya berupa berkas, dan itu bukan kunci yang bisa dibuka bangunan ini sendirian."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Kunci bersama itu semestinya berupa berkas, dan itu bukan kunci yang ditulis bangunan ini."),
         ("A folder cannot be copied inside itself.", "Sebuah map tidak bisa disalin ke dalam dirinya sendiri."),
@@ -14218,6 +14527,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Sebuah bilangan tidak bisa ditulis dalam titik tetap format ini."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Bilangan berawalan nol adalah oktal, dan di sana 8 dan 9 bukan angka."),
         ("A number, a character, or a `-` in front of one.", "Sebuah bilangan, sebuah aksara, atau sebuah `-` di depannya."),
+        ("A pack file carries more objects than this build resolves.", "Sebuah berkas paket membawa lebih banyak objek daripada yang diurai bangunan ini."),
+        ("A pack file does not open with the signature the format requires.", "Sebuah berkas paket tidak dibuka dengan tanda tangan yang dituntut format."),
+        ("A pack file ends before the objects it promised.", "Sebuah berkas paket berakhir sebelum objek yang dijanjikannya."),
+        ("A pack file ends in the middle of a number it was writing.", "Sebuah berkas paket berakhir di tengah bilangan yang sedang ditulisnya."),
+        ("A pack file is larger than this build reads in one piece.", "Sebuah berkas paket lebih besar daripada yang dibaca bangunan ini sekaligus."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Sebuah berkas paket lebih pendek daripada kepala dan jumlah periksa yang menutupnya."),
+        ("A pack file object expands to a size other than the one it states.", "Sebuah objek berkas paket mengembang ke ukuran selain yang dinyatakannya."),
+        ("A pack file object states a kind the format reserves.", "Sebuah objek berkas paket menyatakan jenis yang disimpan oleh format."),
+        ("A pack file states a size larger than this build reads.", "Sebuah berkas paket menyatakan ukuran lebih besar daripada yang dibaca bangunan ini."),
+        ("A pack file states a version this build does not read.", "Sebuah berkas paket menyatakan versi yang tidak dibaca bangunan ini."),
         ("A package built around a page needs the language its screen is written in.", "Paket yang dibangun mengelilingi sebuah halaman butuh bahasa tempat layarnya ditulis."),
         ("A package is a zip. This one does not open as one.", "Paket adalah zip. Yang ini tidak terbuka sebagai zip."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Paket yang gagal pemeriksaan ini bukan paket yang dibuat bangunan ini. Pasang yang asli, atau bangun lagi dari sumbernya."),
@@ -14309,6 +14628,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Sebuah waktu memuat sesuatu yang bukan angka."),
         ("A time has a year that is not a number.", "Sebuah waktu punya tahun yang bukan bilangan."),
         ("A time is not valid text.", "Sebuah waktu bukan teks yang sah."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Sebuah entri pohon membawa nama yang akan meninggalkan folder tempatnya berada."),
+        ("A tree entry is not shaped the way the format writes one.", "Sebuah entri pohon tidak berbentuk sebagaimana format menuliskannya."),
+        ("A tree names an entry the pack does not carry.", "Sebuah pohon menyebut entri yang tidak dibawa paket itu."),
+        ("A tree nests deeper than this build walks.", "Sebuah pohon bersarang lebih dalam daripada yang ditelusuri bangunan ini."),
         ("A try needs a catch, a finally, or something to close.", "Sebuah try butuh catch, finally, atau sesuatu untuk ditutup."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Try berkurung memuat sedikitnya satu hal untuk ditutup, dan tiap-tiapnya diberi nilai."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Sebuah jenis dinyatakan dua kali, atau sebuah kunci pengaman diberi sesuatu yang bukan objek."),
@@ -14329,6 +14652,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Sidik verity adalah akar pohon Merkle fs-verity, yang merupakan bangunan berbeda dari sidik berbongkah yang dihitung bangunan ini. Klaim itu tidak dibenarkan maupun dibantah; ia tidak dibandingkan dengan apa pun."),
         ("A yield is not inside a switch used for its value.", "Sebuah yield tidak berada di dalam switch yang dipakai untuk nilainya."),
         ("A zlib header fails its own check.", "Sebuah kepala zlib gagal pemeriksaannya sendiri."),
+        ("A zlib stream ends before the checksum that closes it.", "Sebuah arus zlib berakhir sebelum jumlah periksa yang menutupnya."),
         ("A zlib stream is shorter than its own header and check.", "Sebuah arus zlib lebih pendek daripada kepala dan pemeriksaannya sendiri."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Sebuah arus zlib menyebut kamus prasetel, yang tidak dibawa bangunan ini."),
         ("A zlib stream uses a compression method the format does not define.", "Sebuah arus zlib memakai metode pemampatan yang tidak didefinisikan format."),
@@ -14763,6 +15087,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "Platform minimum bukan sebuah bilangan."),
         ("The note saying where it came from could not be written.", "Catatan yang menyebut asalnya tidak bisa ditulis."),
         ("The offset field is wrong, or the file is truncated.", "Ruas offsetnya salah, atau berkasnya terpotong."),
+        ("The pack does not carry the object the branch points at.", "Paket itu tidak membawa objek yang ditunjuk cabang."),
         ("The package carries no signing block.", "Paket itu tidak membawa bongkah tanda tangan."),
         ("The package does not match the digest recorded when it was signed.", "Paket itu tidak cocok dengan sidik yang dicatat saat ia ditandatangani."),
         ("The package has been changed since it was signed. Do not install it.", "Paket itu telah berubah sejak ditandatangani. Jangan dipasang."),
@@ -15165,11 +15490,19 @@ pub mod speech {
         ("A class written where it is used cannot hold that.", "Uma classe escrita onde é usada não pode guardar isso."),
         ("A code length symbol is outside the alphabet.", "Um símbolo de comprimento de código está fora do alfabeto."),
         ("A comment was opened and never closed.", "Um comentário foi aberto e nunca fechado."),
+        ("A commit does not name the tree that belongs to it.", "Um commit não nomeia a árvore que pertence a ele."),
         ("A condition has to be a boolean.", "Uma condição tem de ser um booleano."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Um construtor repassa para um que não é nem da própria classe nem da superclasse."),
         ("A content provider does not hand out access to everything it holds.", "Um content provider não distribui acesso a tudo o que guarda."),
         ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Um aplicativo depurável deixa qualquer processo do aparelho anexar um depurador, ler a memória dele e rodar código em nome dele."),
         ("A declaration was opened and never closed.", "Uma declaração foi aberta e nunca fechada."),
+        ("A delta carries an instruction the format reserves.", "Um delta carrega uma instrução que o formato reserva."),
+        ("A delta copies from beyond the end of its base object.", "Um delta copia além do fim do seu objeto de base."),
+        ("A delta ends in the middle of the instruction it was writing.", "Um delta termina no meio da instrução que estava escrevendo."),
+        ("A delta expands to a size other than the one it states.", "Um delta se expande para um tamanho diferente do que declara."),
+        ("A delta in a pack file points outside the pack that carries it.", "Um delta de um arquivo de pacote aponta para fora do pacote que o carrega."),
+        ("A delta names a base object the pack does not carry.", "Um delta nomeia um objeto de base que o pacote não carrega."),
+        ("A delta states a base size other than the one the base object has.", "Um delta declara um tamanho de base diferente do que o objeto de base tem."),
         ("A dependency could not be read.", "Não deu para ler uma dependência."),
         ("A dependency holds something squeezed in a way this does not read.", "Uma dependência guarda algo comprimido de um jeito que isto não lê."),
         ("A dependency is a jar, which is a zip of class files.", "Uma dependência é um jar, que é um zip de arquivos de classe."),
@@ -15194,6 +15527,7 @@ pub mod speech {
         ("A field was never interned.", "Um campo nunca foi internado."),
         ("A file compiled here holds a class or an interface.", "Um arquivo compilado aqui guarda uma classe ou uma interface."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Um arquivo compilado aqui guarda classes, interfaces, enums, records e tipos de anotação. O que é e o que não é aceito está escrito no topo de Compilers/Java.rs."),
+        ("A file in the repository could not be written where it belongs.", "Um arquivo do repositório não pôde ser gravado onde pertence."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Essa chave de assinatura deveria estar num arquivo, e não é uma chave que esta compilação consiga abrir sozinha."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "A chave compartilhada deveria estar num arquivo, e não é uma chave que esta compilação tenha escrito."),
         ("A folder cannot be copied inside itself.", "Uma pasta não pode ser copiada dentro de si mesma."),
@@ -15278,6 +15612,16 @@ pub mod speech {
         ("A number cannot be written in the format's fixed point.", "Um número não pode ser escrito no ponto fixo do formato."),
         ("A number with a leading zero is octal, where 8 and 9 are not digits.", "Um número com zero à frente é octal, e ali 8 e 9 não são algarismos."),
         ("A number, a character, or a `-` in front of one.", "Um número, um caractere, ou um `-` na frente de um deles."),
+        ("A pack file carries more objects than this build resolves.", "Um arquivo de pacote carrega mais objetos do que esta construção resolve."),
+        ("A pack file does not open with the signature the format requires.", "Um arquivo de pacote não abre com a assinatura que o formato exige."),
+        ("A pack file ends before the objects it promised.", "Um arquivo de pacote termina antes dos objetos que prometeu."),
+        ("A pack file ends in the middle of a number it was writing.", "Um arquivo de pacote termina no meio de um número que estava escrevendo."),
+        ("A pack file is larger than this build reads in one piece.", "Um arquivo de pacote é maior do que esta construção lê de uma vez."),
+        ("A pack file is shorter than the header and the checksum that close it.", "Um arquivo de pacote é mais curto que o cabeçalho e a soma que o fecham."),
+        ("A pack file object expands to a size other than the one it states.", "Um objeto de um arquivo de pacote se expande para um tamanho diferente do que declara."),
+        ("A pack file object states a kind the format reserves.", "Um objeto de um arquivo de pacote declara um tipo que o formato reserva."),
+        ("A pack file states a size larger than this build reads.", "Um arquivo de pacote declara um tamanho maior do que esta construção lê."),
+        ("A pack file states a version this build does not read.", "Um arquivo de pacote declara uma versão que esta construção não lê."),
         ("A package built around a page needs the language its screen is written in.", "Um pacote construído em volta de uma página precisa do idioma em que a tela dela está escrita."),
         ("A package is a zip. This one does not open as one.", "Um pacote é um zip. Este não abre como um."),
         ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Um pacote que não passa nesta conferência não é aquele que esta compilação produziu. Instale o original, ou compile de novo a partir do código."),
@@ -15369,6 +15713,10 @@ pub mod speech {
         ("A time contains something that is not a digit.", "Uma hora contém algo que não é algarismo."),
         ("A time has a year that is not a number.", "Uma hora tem um ano que não é número."),
         ("A time is not valid text.", "Uma hora não é texto válido."),
+        ("A tree entry carries a name that would leave the folder it belongs to.", "Uma entrada de árvore carrega um nome que sairia da pasta a que pertence."),
+        ("A tree entry is not shaped the way the format writes one.", "Uma entrada de árvore não tem a forma com que o formato escreve uma."),
+        ("A tree names an entry the pack does not carry.", "Uma árvore nomeia uma entrada que o pacote não carrega."),
+        ("A tree nests deeper than this build walks.", "Uma árvore se aninha mais fundo do que esta construção percorre."),
         ("A try needs a catch, a finally, or something to close.", "Um try precisa de um catch, de um finally, ou de algo a fechar."),
         ("A try with brackets holds at least one thing to close, and each is given a value.", "Um try com parênteses guarda pelo menos uma coisa a fechar, e cada uma recebe um valor."),
         ("A type is declared twice, or a lock was given something that is not an object.", "Um tipo está declarado duas vezes, ou um bloqueio recebeu algo que não é um objeto."),
@@ -15389,6 +15737,7 @@ pub mod speech {
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Um resumo verity é a raiz de uma árvore de Merkle do fs-verity, que é uma construção diferente do resumo em blocos que esta compilação calcula. A alegação não é confirmada nem contestada; ela não é comparada com nada."),
         ("A yield is not inside a switch used for its value.", "Um yield não está dentro de um switch usado pelo seu valor."),
         ("A zlib header fails its own check.", "Um cabeçalho zlib falha na própria conferência."),
+        ("A zlib stream ends before the checksum that closes it.", "Um fluxo zlib termina antes da soma de verificação que o fecha."),
         ("A zlib stream is shorter than its own header and check.", "Um fluxo zlib é mais curto que o próprio cabeçalho e a conferência."),
         ("A zlib stream names a preset dictionary, which this build does not carry.", "Um fluxo zlib nomeia um dicionário predefinido, que esta compilação não carrega."),
         ("A zlib stream uses a compression method the format does not define.", "Um fluxo zlib usa um método de compressão que o formato não define."),
@@ -15823,6 +16172,7 @@ pub mod speech {
         ("The minimum platform is not a number.", "A plataforma mínima não é um número."),
         ("The note saying where it came from could not be written.", "Não deu para escrever o registro que diz de onde veio."),
         ("The offset field is wrong, or the file is truncated.", "O campo de deslocamento está errado, ou o arquivo está truncado."),
+        ("The pack does not carry the object the branch points at.", "O pacote não carrega o objeto para o qual o ramo aponta."),
         ("The package carries no signing block.", "O pacote não carrega bloco de assinatura."),
         ("The package does not match the digest recorded when it was signed.", "O pacote não bate com o resumo registrado quando foi assinado."),
         ("The package has been changed since it was signed. Do not install it.", "O pacote mudou desde que foi assinado. Não instale."),
@@ -40017,6 +40367,11 @@ pub mod inflate {
             self.bit -= drop;
         }
 
+        fn consumed(&mut self) -> usize {
+            self.align();
+            self.at - (self.bit / 8) as usize
+        }
+
         fn bytes(&mut self, count: usize) -> Result<&'a [u8], Diagnostic> {
             self.align();
             while self.bit >= 8 {
@@ -40187,6 +40542,10 @@ pub mod inflate {
     }
 
     pub fn raw(data: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        raw_counted(data).map(|(out, _)| out)
+    }
+
+    pub fn raw_counted(data: &[u8]) -> Result<(Vec<u8>, usize), Diagnostic> {
         let mut bits = Bits::new(data);
         let mut out: Vec<u8> = Vec::new();
 
@@ -40279,7 +40638,8 @@ pub mod inflate {
                 }
             }
             if last {
-                return Ok(out);
+                let used = bits.consumed();
+                return Ok((out, used));
             }
         }
     }
@@ -40326,6 +40686,52 @@ pub mod inflate {
             .with_context(format!("Computed: 0x{computed:08x}")));
         }
         Ok(out)
+    }
+
+    pub fn zlib_prefix(data: &[u8]) -> Result<(Vec<u8>, usize), Diagnostic> {
+        if data.len() < 6 {
+            return Err(fail(
+                "EI100",
+                "A zlib stream is shorter than its own header and check.",
+            ));
+        }
+        let method = data[0] & 0x0f;
+        if method != 8 {
+            return Err(fail(
+                "EI103",
+                "A zlib stream uses a compression method the format does not define.",
+            )
+            .with_context(format!("Method: {method}")));
+        }
+        if (u16::from(data[0]) * 256 + u16::from(data[1])) % 31 != 0 {
+            return Err(fail("EI104", "A zlib header fails its own check."));
+        }
+        if data[1] & 0x20 != 0 {
+            return Err(fail(
+                "EI105",
+                "A zlib stream names a preset dictionary, which this build does not carry.",
+            ));
+        }
+
+        let (out, used) = raw_counted(&data[2..])?;
+        let end = 2 + used;
+        if end + 4 > data.len() {
+            return Err(fail(
+                "EI107",
+                "A zlib stream ends before the checksum that closes it.",
+            ));
+        }
+        let stated = u32::from_be_bytes([data[end], data[end + 1], data[end + 2], data[end + 3]]);
+        let computed = crate::binary::checksum::adler32(&out);
+        if stated != computed {
+            return Err(fail(
+                "EI106",
+                "The decompressed data does not match the checksum the stream carries.",
+            )
+            .with_context(format!("Stated: 0x{stated:08x}"))
+            .with_context(format!("Computed: 0x{computed:08x}")));
+        }
+        Ok((out, end + 4))
     }
 }
 
@@ -50112,6 +50518,700 @@ pub mod progress {
     }
 }
 
+pub mod git {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::Sha1;
+    use crate::FailureClass;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    pub const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
+    pub const MAX_OBJECTS: usize = 1_000_000;
+    pub const MAX_ENTRY_BYTES: usize = 128 * 1024 * 1024;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.git",
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Kind {
+        Commit,
+        Tree,
+        Blob,
+        Tag,
+    }
+
+    impl Kind {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Kind::Commit => "commit",
+                Kind::Tree => "tree",
+                Kind::Blob => "blob",
+                Kind::Tag => "tag",
+            }
+        }
+
+        const fn of_code(code: u8) -> Option<Kind> {
+            match code {
+                1 => Some(Kind::Commit),
+                2 => Some(Kind::Tree),
+                3 => Some(Kind::Blob),
+                4 => Some(Kind::Tag),
+                _ => None,
+            }
+        }
+    }
+
+    pub fn identify(kind: Kind, body: &[u8]) -> [u8; 20] {
+        let mut hash = Sha1::default();
+        hash.update(kind.as_str().as_bytes());
+        hash.update(b" ");
+        hash.update(body.len().to_string().as_bytes());
+        hash.update(&[0u8]);
+        hash.update(body);
+        *hash.finish().as_bytes()
+    }
+
+    pub fn to_hex(id: &[u8; 20]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(40);
+        for byte in id {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    pub fn of_hex(text: &str) -> Option<[u8; 20]> {
+        let bytes = text.as_bytes();
+        if bytes.len() != 40 {
+            return None;
+        }
+        let mut out = [0u8; 20];
+        for (index, slot) in out.iter_mut().enumerate() {
+            let high = (bytes[index * 2] as char).to_digit(16)?;
+            let low = (bytes[index * 2 + 1] as char).to_digit(16)?;
+            *slot = ((high << 4) | low) as u8;
+        }
+        Some(out)
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Object {
+        pub kind: Kind,
+        pub body: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    pub struct Pack {
+        held: HashMap<[u8; 20], Object>,
+    }
+
+    impl Pack {
+        pub fn get(&self, id: &[u8; 20]) -> Option<&Object> {
+            self.held.get(id)
+        }
+
+        pub fn len(&self) -> usize {
+            self.held.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.held.is_empty()
+        }
+
+        pub fn count_of(&self, kind: Kind) -> usize {
+            self.held.values().filter(|one| one.kind == kind).count()
+        }
+    }
+
+    enum Base {
+        Whole(Kind),
+        Behind(usize),
+        Named([u8; 20]),
+    }
+
+    struct Entry {
+        at: usize,
+        base: Base,
+        payload: Vec<u8>,
+    }
+
+    fn size_at(data: &[u8], from: usize) -> Result<(usize, usize), Diagnostic> {
+        let mut value: usize = 0;
+        let mut shift: u32 = 0;
+        let mut at = from;
+        loop {
+            if at >= data.len() {
+                return Err(fail(
+                    "EG103",
+                    "A pack file ends in the middle of a number it was writing.",
+                ));
+            }
+            let byte = data[at];
+            at += 1;
+            if shift >= usize::BITS {
+                return Err(fail(
+                    "EG104",
+                    "A pack file states a size larger than this build reads.",
+                ));
+            }
+            value |= ((byte & 0x7f) as usize) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                return Ok((value, at));
+            }
+        }
+    }
+
+    fn read_entries(data: &[u8]) -> Result<Vec<Entry>, Diagnostic> {
+        if data.len() < 32 {
+            return Err(fail(
+                "EG100",
+                "A pack file is shorter than the header and the checksum that close it.",
+            ));
+        }
+        if &data[0..4] != b"PACK" {
+            return Err(fail(
+                "EG101",
+                "A pack file does not open with the signature the format requires.",
+            ));
+        }
+        let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        if version != 2 && version != 3 {
+            return Err(fail(
+                "EG102",
+                "A pack file states a version this build does not read.",
+            )
+            .with_context(format!("Declared: {version}")));
+        }
+        let promised = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        if promised > MAX_OBJECTS {
+            return Err(fail(
+                "EG105",
+                "A pack file carries more objects than this build resolves.",
+            )
+            .with_context(format!("Declared: {promised}")));
+        }
+
+        let body_end = data.len() - 20;
+        let mut entries: Vec<Entry> = Vec::with_capacity(promised);
+        let mut at = 12;
+        for _ in 0..promised {
+            let began = at;
+            if at >= body_end {
+                return Err(
+                    fail("EG106", "A pack file ends before the objects it promised.")
+                        .with_context(format!("Declared: {promised}"))
+                        .with_context(format!("Produced: {}", entries.len())),
+                );
+            }
+            let lead = data[at];
+            at += 1;
+            let code = (lead >> 4) & 0x07;
+            let mut stated = (lead & 0x0f) as usize;
+            let mut shift: u32 = 4;
+            let mut more = lead & 0x80 != 0;
+            while more {
+                if at >= body_end {
+                    return Err(fail(
+                        "EG103",
+                        "A pack file ends in the middle of a number it was writing.",
+                    ));
+                }
+                let byte = data[at];
+                at += 1;
+                if shift >= usize::BITS {
+                    return Err(fail(
+                        "EG104",
+                        "A pack file states a size larger than this build reads.",
+                    ));
+                }
+                stated |= ((byte & 0x7f) as usize) << shift;
+                shift += 7;
+                more = byte & 0x80 != 0;
+            }
+            if stated > MAX_ENTRY_BYTES {
+                return Err(fail(
+                    "EG104",
+                    "A pack file states a size larger than this build reads.",
+                )
+                .with_context(format!("Size: {stated}")));
+            }
+
+            let base = match code {
+                6 => {
+                    if at >= body_end {
+                        return Err(fail(
+                            "EG103",
+                            "A pack file ends in the middle of a number it was writing.",
+                        ));
+                    }
+                    let mut byte = data[at];
+                    at += 1;
+                    let mut back = (byte & 0x7f) as usize;
+                    while byte & 0x80 != 0 {
+                        if at >= body_end {
+                            return Err(fail(
+                                "EG103",
+                                "A pack file ends in the middle of a number it was writing.",
+                            ));
+                        }
+                        byte = data[at];
+                        at += 1;
+                        back = back
+                            .checked_add(1)
+                            .and_then(|value| value.checked_shl(7))
+                            .ok_or_else(|| {
+                                fail(
+                                    "EG104",
+                                    "A pack file states a size larger than this build reads.",
+                                )
+                            })?
+                            | (byte & 0x7f) as usize;
+                    }
+                    if back == 0 || back > began {
+                        return Err(fail(
+                            "EG107",
+                            "A delta in a pack file points outside the pack that carries it.",
+                        )
+                        .with_context(format!("Offset: {back}")));
+                    }
+                    Base::Behind(began - back)
+                }
+                7 => {
+                    if at + 20 > body_end {
+                        return Err(fail(
+                            "EG106",
+                            "A pack file ends before the objects it promised.",
+                        ));
+                    }
+                    let mut named = [0u8; 20];
+                    named.copy_from_slice(&data[at..at + 20]);
+                    at += 20;
+                    Base::Named(named)
+                }
+                other => match Kind::of_code(other) {
+                    Some(kind) => Base::Whole(kind),
+                    None => {
+                        return Err(fail(
+                            "EG108",
+                            "A pack file object states a kind the format reserves.",
+                        )
+                        .with_context(format!("Kind: {other}")));
+                    }
+                },
+            };
+
+            let (payload, used) = crate::inflate::zlib_prefix(&data[at..body_end])?;
+            if payload.len() != stated {
+                return Err(fail(
+                    "EG109",
+                    "A pack file object expands to a size other than the one it states.",
+                )
+                .with_context(format!("Declared: {stated}"))
+                .with_context(format!("Produced: {}", payload.len())));
+            }
+            at += used;
+            entries.push(Entry {
+                at: began,
+                base,
+                payload,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        let (source, at) = size_at(delta, 0)?;
+        let (target, mut at) = size_at(delta, at)?;
+        if source != base.len() {
+            return Err(fail(
+                "EG110",
+                "A delta states a base size other than the one the base object has.",
+            )
+            .with_context(format!("Declared: {source}"))
+            .with_context(format!("Produced: {}", base.len())));
+        }
+        if target > MAX_ENTRY_BYTES {
+            return Err(fail(
+                "EG104",
+                "A pack file states a size larger than this build reads.",
+            )
+            .with_context(format!("Size: {target}")));
+        }
+        let mut out: Vec<u8> = Vec::with_capacity(target);
+        while at < delta.len() {
+            let op = delta[at];
+            at += 1;
+            if op & 0x80 != 0 {
+                let mut from: usize = 0;
+                let mut span: usize = 0;
+                for step in 0..4u32 {
+                    if op & (1 << step) != 0 {
+                        if at >= delta.len() {
+                            return Err(fail(
+                                "EG111",
+                                "A delta ends in the middle of the instruction it was writing.",
+                            ));
+                        }
+                        from |= (delta[at] as usize) << (8 * step);
+                        at += 1;
+                    }
+                }
+                for step in 0..3u32 {
+                    if op & (0x10 << step) != 0 {
+                        if at >= delta.len() {
+                            return Err(fail(
+                                "EG111",
+                                "A delta ends in the middle of the instruction it was writing.",
+                            ));
+                        }
+                        span |= (delta[at] as usize) << (8 * step);
+                        at += 1;
+                    }
+                }
+                if span == 0 {
+                    span = 0x10000;
+                }
+                let end = from.checked_add(span).ok_or_else(|| {
+                    fail(
+                        "EG112",
+                        "A delta copies from beyond the end of its base object.",
+                    )
+                })?;
+                if end > base.len() {
+                    return Err(fail(
+                        "EG112",
+                        "A delta copies from beyond the end of its base object.",
+                    )
+                    .with_context(format!("Offset: {from}"))
+                    .with_context(format!("Size: {span}")));
+                }
+                out.extend_from_slice(&base[from..end]);
+            } else if op != 0 {
+                let span = op as usize;
+                if at + span > delta.len() {
+                    return Err(fail(
+                        "EG111",
+                        "A delta ends in the middle of the instruction it was writing.",
+                    ));
+                }
+                out.extend_from_slice(&delta[at..at + span]);
+                at += span;
+            } else {
+                return Err(fail(
+                    "EG113",
+                    "A delta carries an instruction the format reserves.",
+                ));
+            }
+            if out.len() > target {
+                break;
+            }
+        }
+        if out.len() != target {
+            return Err(fail(
+                "EG114",
+                "A delta expands to a size other than the one it states.",
+            )
+            .with_context(format!("Declared: {target}"))
+            .with_context(format!("Produced: {}", out.len())));
+        }
+        Ok(out)
+    }
+
+    pub fn unpack(data: &[u8]) -> Result<Pack, Diagnostic> {
+        if data.len() > MAX_PACK_BYTES {
+            return Err(fail(
+                "EG115",
+                "A pack file is larger than this build reads in one piece.",
+            )
+            .with_context(format!("Size: {}", data.len())));
+        }
+        let entries = read_entries(data)?;
+        let mut where_at: HashMap<usize, usize> = HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            where_at.insert(entry.at, index);
+        }
+
+        let mut settled: Vec<Option<(Kind, [u8; 20])>> = vec![None; entries.len()];
+        let mut pack = Pack::default();
+
+        for (index, entry) in entries.iter().enumerate() {
+            if let Base::Whole(kind) = entry.base {
+                let id = identify(kind, &entry.payload);
+                settled[index] = Some((kind, id));
+                pack.held.insert(
+                    id,
+                    Object {
+                        kind,
+                        body: entry.payload.clone(),
+                    },
+                );
+            }
+        }
+
+        let mut left = entries.len() - pack.held.len().min(entries.len());
+        while left > 0 {
+            let mut moved = 0usize;
+            for (index, entry) in entries.iter().enumerate() {
+                if settled[index].is_some() {
+                    continue;
+                }
+                let found = match entry.base {
+                    Base::Whole(_) => continue,
+                    Base::Behind(at) => match where_at.get(&at).and_then(|one| settled[*one]) {
+                        Some(value) => value,
+                        None => continue,
+                    },
+                    Base::Named(id) => match pack.held.get(&id) {
+                        Some(object) => (object.kind, id),
+                        None => continue,
+                    },
+                };
+                let (kind, base_id) = found;
+                let body = {
+                    let base = match pack.held.get(&base_id) {
+                        Some(object) => object,
+                        None => continue,
+                    };
+                    apply_delta(&base.body, &entry.payload)?
+                };
+                let id = identify(kind, &body);
+                settled[index] = Some((kind, id));
+                pack.held.insert(id, Object { kind, body });
+                moved += 1;
+            }
+            if moved == 0 {
+                return Err(fail(
+                    "EG116",
+                    "A delta names a base object the pack does not carry.",
+                )
+                .with_context(format!("Produced: {}", pack.held.len())));
+            }
+            left = left.saturating_sub(moved);
+        }
+        Ok(pack)
+    }
+
+    pub fn tree_of(pack: &Pack, id: &[u8; 20]) -> Result<[u8; 20], Diagnostic> {
+        let object = pack.get(id).ok_or_else(|| {
+            fail(
+                "EG117",
+                "The pack does not carry the object the branch points at.",
+            )
+            .with_context(format!("Name: {}", to_hex(id)))
+        })?;
+        match object.kind {
+            Kind::Tree => Ok(*id),
+            Kind::Commit => {
+                let head = object
+                    .body
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .unwrap_or(&[]);
+                let text = core::str::from_utf8(head).map_err(|_| {
+                    fail(
+                        "EG118",
+                        "A commit does not name the tree that belongs to it.",
+                    )
+                })?;
+                let named = text.strip_prefix("tree ").and_then(of_hex).ok_or_else(|| {
+                    fail(
+                        "EG118",
+                        "A commit does not name the tree that belongs to it.",
+                    )
+                })?;
+                Ok(named)
+            }
+            Kind::Tag => {
+                for line in object.body.split(|byte| *byte == b'\n') {
+                    if let Some(rest) = line.strip_prefix(b"object ") {
+                        if let Some(named) = core::str::from_utf8(rest).ok().and_then(of_hex) {
+                            return tree_of(pack, &named);
+                        }
+                    }
+                }
+                Err(fail(
+                    "EG118",
+                    "A commit does not name the tree that belongs to it.",
+                ))
+            }
+            Kind::Blob => Err(fail(
+                "EG117",
+                "The pack does not carry the object the branch points at.",
+            )),
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Written {
+        pub files: u64,
+        pub folders: u64,
+        pub links: u64,
+        pub bytes: u64,
+    }
+
+    fn safe_name(name: &[u8]) -> Option<&str> {
+        let text = core::str::from_utf8(name).ok()?;
+        if text.is_empty() || text == "." || text == ".." {
+            return None;
+        }
+        if text.contains('/') || text.contains('\\') || text.contains('\0') {
+            return None;
+        }
+        Some(text)
+    }
+
+    fn walk(
+        pack: &Pack,
+        tree: &[u8; 20],
+        into: &Path,
+        depth: usize,
+        tally: &mut Written,
+    ) -> Result<(), Diagnostic> {
+        if depth > 64 {
+            return Err(fail("EG119", "A tree nests deeper than this build walks."));
+        }
+        let object = pack.get(tree).ok_or_else(|| {
+            fail("EG120", "A tree names an entry the pack does not carry.")
+                .with_context(format!("Name: {}", to_hex(tree)))
+        })?;
+        if object.kind != Kind::Tree {
+            return Err(fail(
+                "EG120",
+                "A tree names an entry the pack does not carry.",
+            ));
+        }
+        let body = &object.body;
+        let mut at = 0usize;
+        while at < body.len() {
+            let space = body[at..]
+                .iter()
+                .position(|byte| *byte == b' ')
+                .ok_or_else(|| {
+                    fail(
+                        "EG121",
+                        "A tree entry is not shaped the way the format writes one.",
+                    )
+                })?;
+            let mode = core::str::from_utf8(&body[at..at + space])
+                .ok()
+                .and_then(|text| u32::from_str_radix(text, 8).ok())
+                .ok_or_else(|| {
+                    fail(
+                        "EG121",
+                        "A tree entry is not shaped the way the format writes one.",
+                    )
+                })?;
+            at += space + 1;
+            let stop = body[at..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or_else(|| {
+                    fail(
+                        "EG121",
+                        "A tree entry is not shaped the way the format writes one.",
+                    )
+                })?;
+            let name = safe_name(&body[at..at + stop]).ok_or_else(|| {
+                fail(
+                    "EG122",
+                    "A tree entry carries a name that would leave the folder it belongs to.",
+                )
+            })?;
+            at += stop + 1;
+            if at + 20 > body.len() {
+                return Err(fail(
+                    "EG121",
+                    "A tree entry is not shaped the way the format writes one.",
+                ));
+            }
+            let mut id = [0u8; 20];
+            id.copy_from_slice(&body[at..at + 20]);
+            at += 20;
+
+            let here = into.join(name);
+            match mode {
+                0o040000 => {
+                    std::fs::create_dir_all(&here).map_err(|error| {
+                        fail(
+                            "EG123",
+                            "A file in the repository could not be written where it belongs.",
+                        )
+                        .with_context(format!("Path: {name}"))
+                        .with_context(format!("Kind: {error}"))
+                    })?;
+                    tally.folders += 1;
+                    walk(pack, &id, &here, depth + 1, tally)?;
+                }
+                0o160000 => {
+                    std::fs::create_dir_all(&here).map_err(|error| {
+                        fail(
+                            "EG123",
+                            "A file in the repository could not be written where it belongs.",
+                        )
+                        .with_context(format!("Path: {name}"))
+                        .with_context(format!("Kind: {error}"))
+                    })?;
+                    tally.folders += 1;
+                }
+                _ => {
+                    let blob = pack.get(&id).ok_or_else(|| {
+                        fail("EG120", "A tree names an entry the pack does not carry.")
+                            .with_context(format!("Name: {name}"))
+                    })?;
+                    if mode == 0o120000 {
+                        tally.links += 1;
+                    }
+                    std::fs::write(&here, &blob.body).map_err(|error| {
+                        fail(
+                            "EG123",
+                            "A file in the repository could not be written where it belongs.",
+                        )
+                        .with_context(format!("Path: {name}"))
+                        .with_context(format!("Kind: {error}"))
+                    })?;
+                    set_mode(&here, mode);
+                    tally.files += 1;
+                    tally.bytes += blob.body.len() as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let bits = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits));
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(_path: &Path, _mode: u32) {}
+
+    pub fn checkout(pack: &Pack, id: &[u8; 20], into: &Path) -> Result<Written, Diagnostic> {
+        let tree = tree_of(pack, id)?;
+        std::fs::create_dir_all(into).map_err(|error| {
+            fail(
+                "EG123",
+                "A file in the repository could not be written where it belongs.",
+            )
+            .with_context(format!("Kind: {error}"))
+        })?;
+        let mut tally = Written::default();
+        walk(pack, &tree, into, 0, &mut tally)?;
+        Ok(tally)
+    }
+}
+
 pub mod ffi {
     use std::ffi::{c_char, CStr, CString};
     use std::panic::catch_unwind;
@@ -51549,6 +52649,7 @@ mod tests {
     use super::caps::{Capability, Decision, Policy};
     use super::dex;
     use super::diag::{Diagnostic, Location, Severity, Sink};
+    use super::git;
     use super::graph::{Graph, Kind as NodeKind, Node, NodeId, Status as NodeStatus};
     use super::hash::Digest;
     use super::json::Writer;
@@ -63427,6 +64528,288 @@ public final class MainActivity extends Activity {
             "deflate: {original} bytes written as {packed_total}, read back exactly by this \
              build and by an independent reader"
         );
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|code| code.success())
+            .unwrap_or(false)
+    }
+
+    fn pack_entry_header(kind: u8, size: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut byte = (kind << 4) | (size & 0x0f) as u8;
+        let mut rest = size >> 4;
+        while rest > 0 {
+            out.push(byte | 0x80);
+            byte = (rest & 0x7f) as u8;
+            rest >>= 7;
+        }
+        out.push(byte);
+        out
+    }
+
+    fn pack_back_reference(offset: usize) -> Vec<u8> {
+        let mut value = offset;
+        let mut out = vec![(value & 0x7f) as u8];
+        value >>= 7;
+        while value > 0 {
+            value -= 1;
+            out.push(0x80 | (value & 0x7f) as u8);
+            value >>= 7;
+        }
+        out.reverse();
+        out
+    }
+
+    fn pack_around(count: u32, body: Vec<u8>) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"PACK");
+        out.extend_from_slice(&2u32.to_be_bytes());
+        out.extend_from_slice(&count.to_be_bytes());
+        out.extend_from_slice(&body);
+        let mut hash = crate::hash::Sha1::default();
+        hash.update(&out);
+        out.extend_from_slice(hash.finish().as_bytes());
+        out
+    }
+
+    #[test]
+    fn git_names_an_object_the_way_the_format_names_it() {
+        assert_eq!(
+            git::to_hex(&git::identify(git::Kind::Blob, b"")),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+        assert_eq!(
+            git::to_hex(&git::identify(git::Kind::Blob, b"hello world\n")),
+            "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
+        );
+        assert_eq!(
+            git::of_hex("3b18e512dba79e4c8300dd08aeb37f8e728b8dad"),
+            Some(git::identify(git::Kind::Blob, b"hello world\n"))
+        );
+        assert_eq!(git::of_hex("3b18e5"), None);
+    }
+
+    #[test]
+    fn git_resolves_both_kinds_of_delta_in_one_pack() {
+        let leaf = b"hello world\n".to_vec();
+        let leaf_id = git::identify(git::Kind::Blob, &leaf);
+        let grown = b"hello world\nmore\n".to_vec();
+        let grown_id = git::identify(git::Kind::Blob, &grown);
+
+        let mut delta = vec![
+            leaf.len() as u8,
+            grown.len() as u8,
+            0x90,
+            leaf.len() as u8,
+            5,
+        ];
+        delta.extend_from_slice(b"more\n");
+
+        let mut tree = Vec::new();
+        tree.extend_from_slice(b"100644 one\0");
+        tree.extend_from_slice(&leaf_id);
+        tree.extend_from_slice(b"100755 two\0");
+        tree.extend_from_slice(&grown_id);
+        let tree_id = git::identify(git::Kind::Tree, &tree);
+
+        let commit = format!(
+            "tree {}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nfirst\n",
+            git::to_hex(&tree_id)
+        )
+        .into_bytes();
+
+        let mut body = Vec::new();
+        let leaf_at = body.len();
+        body.extend_from_slice(&pack_entry_header(3, leaf.len()));
+        body.extend_from_slice(&crate::deflate::zlib(&leaf));
+
+        body.extend_from_slice(&pack_entry_header(7, delta.len()));
+        body.extend_from_slice(&leaf_id);
+        body.extend_from_slice(&crate::deflate::zlib(&delta));
+
+        let second_at = body.len();
+        body.extend_from_slice(&pack_entry_header(6, delta.len()));
+        body.extend_from_slice(&pack_back_reference(second_at - leaf_at));
+        body.extend_from_slice(&crate::deflate::zlib(&delta));
+
+        body.extend_from_slice(&pack_entry_header(2, tree.len()));
+        body.extend_from_slice(&crate::deflate::zlib(&tree));
+        body.extend_from_slice(&pack_entry_header(1, commit.len()));
+        body.extend_from_slice(&crate::deflate::zlib(&commit));
+
+        let pack = git::unpack(&pack_around(5, body)).expect("the pack resolves");
+        assert_eq!(pack.count_of(git::Kind::Blob), 2);
+        assert_eq!(pack.count_of(git::Kind::Tree), 1);
+        assert_eq!(pack.count_of(git::Kind::Commit), 1);
+        assert_eq!(pack.get(&grown_id).map(|one| one.body.clone()), Some(grown));
+
+        let commit_id = git::identify(git::Kind::Commit, &commit);
+        assert_eq!(git::tree_of(&pack, &commit_id), Ok(tree_id));
+
+        let into = std::env::temp_dir().join("omni_git_two_deltas");
+        let _ = std::fs::remove_dir_all(&into);
+        let written = git::checkout(&pack, &commit_id, &into).expect("the tree is written");
+        assert_eq!(written.files, 2);
+        assert_eq!(std::fs::read(into.join("one")).unwrap(), b"hello world\n");
+        assert_eq!(
+            std::fs::read(into.join("two")).unwrap(),
+            b"hello world\nmore\n"
+        );
+        let _ = std::fs::remove_dir_all(&into);
+    }
+
+    #[test]
+    fn git_refuses_a_pack_that_is_not_one() {
+        assert!(git::unpack(b"").is_err());
+        assert!(git::unpack(&[0u8; 64]).is_err());
+        let mut wrong = pack_around(0, Vec::new());
+        wrong[0] = b'X';
+        assert!(git::unpack(&wrong).is_err());
+        let mut later = pack_around(0, Vec::new());
+        later[7] = 9;
+        assert!(git::unpack(&later).is_err());
+    }
+
+    #[test]
+    fn git_refuses_a_name_that_would_leave_the_folder() {
+        let leaf = b"x".to_vec();
+        let leaf_id = git::identify(git::Kind::Blob, &leaf);
+        for name in ["..", "a/b", ".", ""] {
+            let mut tree = Vec::new();
+            tree.extend_from_slice(format!("100644 {name}\0").as_bytes());
+            tree.extend_from_slice(&leaf_id);
+            let tree_id = git::identify(git::Kind::Tree, &tree);
+
+            let mut body = Vec::new();
+            body.extend_from_slice(&pack_entry_header(3, leaf.len()));
+            body.extend_from_slice(&crate::deflate::zlib(&leaf));
+            body.extend_from_slice(&pack_entry_header(2, tree.len()));
+            body.extend_from_slice(&crate::deflate::zlib(&tree));
+
+            let pack = git::unpack(&pack_around(2, body)).expect("the pack resolves");
+            let into = std::env::temp_dir().join("omni_git_escape");
+            let _ = std::fs::remove_dir_all(&into);
+            assert!(
+                git::checkout(&pack, &tree_id, &into).is_err(),
+                "a tree naming {name:?} was written"
+            );
+            let _ = std::fs::remove_dir_all(&into);
+        }
+    }
+
+    #[test]
+    fn git_reads_what_the_reference_implementation_packs() {
+        if !git_available() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_GIT_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_GIT_CONFORMANCE is set but no reference git is here"
+            );
+            eprintln!("git: no reference implementation is available here");
+            return;
+        }
+
+        let work = std::env::temp_dir().join("omni_git_conformance");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(work.join("deep/deeper")).expect("the work tree is made");
+
+        let mut filler = String::new();
+        for round in 0..400 {
+            filler.push_str(&format!("line {round} of a file that compresses well\n"));
+        }
+        std::fs::write(work.join("README.md"), "# title\n\nbody\n").unwrap();
+        std::fs::write(work.join("deep/one.txt"), &filler).unwrap();
+        std::fs::write(
+            work.join("deep/deeper/two.txt"),
+            format!("{filler}and one more\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            work.join("binary.bin"),
+            (0u8..=255).cycle().take(9000).collect::<Vec<u8>>(),
+        )
+        .unwrap();
+
+        let run = |args: &[&str]| {
+            let done = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .expect("git runs");
+            assert!(done.status.success(), "git {args:?}: {done:?}");
+            done.stdout
+        };
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        run(&["config", "user.email", "a@b"]);
+        run(&["config", "user.name", "A"]);
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "first"]);
+        std::fs::write(work.join("deep/one.txt"), format!("{filler}changed\n")).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "second"]);
+        run(&["repack", "-a", "-d", "--quiet"]);
+
+        let head = String::from_utf8(run(&["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_string();
+        let packs: Vec<std::path::PathBuf> = std::fs::read_dir(work.join(".git/objects/pack"))
+            .expect("the pack folder is there")
+            .filter_map(|entry| entry.ok().map(|one| one.path()))
+            .filter(|path| path.extension().is_some_and(|end| end == "pack"))
+            .collect();
+        assert_eq!(packs.len(), 1, "one pack was expected");
+
+        let bytes = std::fs::read(&packs[0]).expect("the pack is read");
+        let pack = git::unpack(&bytes).expect("the pack resolves");
+
+        let listed =
+            String::from_utf8(run(&["cat-file", "--batch-all-objects", "--batch-check"])).unwrap();
+        let mut counted = 0usize;
+        for line in listed.lines() {
+            let mut parts = line.split_whitespace();
+            let (Some(id), Some(kind)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let named = git::of_hex(id).expect("git names an object in hex");
+            let held = pack
+                .get(&named)
+                .unwrap_or_else(|| panic!("{id} is missing"));
+            assert_eq!(held.kind.as_str(), kind, "{id} is read as the wrong kind");
+            assert_eq!(git::to_hex(&git::identify(held.kind, &held.body)), id);
+            counted += 1;
+        }
+        assert_eq!(
+            counted,
+            pack.len(),
+            "the pack holds objects git does not list"
+        );
+
+        let into = std::env::temp_dir().join("omni_git_conformance_out");
+        let _ = std::fs::remove_dir_all(&into);
+        let named = git::of_hex(&head).expect("HEAD is hex");
+        let written = git::checkout(&pack, &named, &into).expect("the tree is written");
+        assert_eq!(written.files, 4);
+
+        for relative in [
+            "README.md",
+            "deep/one.txt",
+            "deep/deeper/two.txt",
+            "binary.bin",
+        ] {
+            assert_eq!(
+                std::fs::read(into.join(relative)).unwrap(),
+                std::fs::read(work.join(relative)).unwrap(),
+                "{relative} differs from what git checked out"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&into);
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     #[test]
