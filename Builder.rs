@@ -451,6 +451,25 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         ],
     },
     Subsystem {
+        name: "Git client",
+        status: Status::Partial,
+        directive_section: 46,
+        summary: "Reads a packfile the way the format writes one: the header, every object header, and every zlib stream inflated in turn, with both kinds of delta resolved in as many passes as the ordering needs. Every object is named by the SHA-1 over its own header and body, so a wrong byte gives a name that matches nothing. A commit is walked to its tree and the tree is written to disk, with the executable bit carried and any entry name that would leave its folder refused rather than written.",
+        missing: &[
+            "No .git folder is written, so what lands on disk is the source at one \
+             commit and not a repository: nothing here commits, pushes, branches or \
+             reads a history back.",
+            "Attributes are not applied. A repository that asks for CRLF in the \
+             working tree through .gitattributes gets the bytes the blob holds, \
+             which is what a checkout with no conversion configured would write.",
+            "A pack is read whole, from a file held in memory, so a repository \
+             larger than the memory this is given cannot be fetched in one piece.",
+            "Only the smart HTTP protocol over TLS, and only fetching: no SSH \
+             transport, no packed-refs or thin-pack completion against an existing \
+             object store, and no submodule is followed.",
+        ],
+    },
+    Subsystem {
         name: "Binary XML",
         status: Status::Partial,
         directive_section: 22,
