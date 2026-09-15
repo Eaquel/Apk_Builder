@@ -563,7 +563,7 @@ def check_interpolation() -> str:
         )
     return f"no escaped template in {len(text.split(chr(10)))} lines of interface"
 
-DIAGNOSTIC_MAKERS = ("fail", "problem", "reject", "diagnostic", "io_failure", "new")
+DIAGNOSTIC_MAKERS = ("fail", "problem", "reject", "diagnostic", "io_failure", "path_failure", "new")
 
 def spoken_surface() -> tuple[set[str], set[str], list[str]]:
     """Every sentence and every context label a diagnostic can carry.

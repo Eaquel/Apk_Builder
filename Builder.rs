@@ -155,9 +155,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Named mounts, normalised paths, traversal and symlink refusal, \
                   quotas, atomic writes.",
         missing: &[
-            "No locking.",
-            "No snapshot or rollback.",
-            "No temporary-file lifetime management beyond a single write.",
+            "The lock is advisory: a file two builds agree to look at, not something the platform enforces, so a writer that never takes it is never stopped by it. A lock an ended build left behind is taken over once it is old enough, which is a guess about the holder rather than knowledge of it.",
+            "A rollback keeps what it would put back in memory, so what one covers is bounded by the write quota and a change past it is refused rather than quietly left unrecoverable. Only writes made through this are recorded; a plugin that reaches the disk another way is outside it.",
+            "Nothing sweeps on a timer. A partial file left behind by a build that died goes when a sweep is asked for, and no caller asks for one yet.",
         ],
     },
     Subsystem {
@@ -1436,6 +1436,7 @@ pub mod speech {
         ("A field was never interned.", "Bir alan hiç havuza alınmamış."),
         ("A file compiled here holds a class or an interface.", "Burada derlenen bir dosya, bir sınıf ya da arayüz taşır."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Burada derlenen bir dosya sınıf, arayüz, enum, record ve açıklama türleri taşır. Neyin alınıp neyin alınmadığı Compilers/Java.rs dosyasının başında yazılıdır."),
+        ("A file could not be put back the way it was.", "Bir dosya, eski hâline geri konulamadı."),
         ("A file in the repository could not be written where it belongs.", "Depodaki bir dosya, ait olduğu yere yazılamadı."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "İmza anahtarının yerinde bir dosya var ve bu, bu yapının yardımsız açabileceği bir anahtar değil."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Paylaşılan anahtarın yerinde bir dosya var ve bu, bu yapının yazdığı bir anahtar değil."),
@@ -1727,6 +1728,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Bilinmeyen bir bölüm yok sayılmak yerine raporlanır; çünkü yürürlükte görünüp de olmayan ayarlar, eksik ayarlardan kötüdür."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android bugüne dek yalnızca küçük sonlu DEX dosyaları yayımladı. Büyük sonlu olan ya başka bir platforma aittir ya da bozuktur."),
         ("Another application cannot place its own screen inside this one's task.", "Başka bir uygulama kendi ekranını bunun görevinin içine yerleştiremez."),
+        ("Another build holds the lock on this tree.", "Bu ağacın kilidini başka bir yapı tutuyor."),
         ("Any application on the device can reach an exported component that no permission guards.", "Hiçbir iznin korumadığı, dışa açık bir bileşene cihazdaki her uygulama erişebilir."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "API 30'un altında platform v2 imza şart koşmaz, varsayılan olarak açık metne izin verir ve yukarıdaki kuralların varsaydığı kapsamlı depolama ile donanım destekli anahtar korumalarından yoksundur."),
         ("Both sides of an and or an or want booleans.", "Bir ve ya da veya işlecinin iki yanı da boolean ister."),
@@ -2063,6 +2065,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Anahtarlar klasörü oluşturulamadı."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "Birinin neleri kurduğunun listesi, o kişi hakkında çok şey söyler; bunun tamamını okumak, izleme kütüphanelerinin profil çıkarma yöntemidir. Android bunu API 30'da bilerek daralttı."),
         ("The locale a device falls back to was not chosen.", "Cihazın geri düştüğü yerel ayar seçilmedi."),
+        ("The lock could not be taken.", "Kilit alınamadı."),
         ("The loop variable does not match what is walked over.", "Döngü değişkeni, üzerinde yürünen şeye uymuyor."),
         ("The magic is not terminated.", "İmza dizisi sonlandırılmamış."),
         ("The manifest could not be read.", "Bildirim okunamadı."),
@@ -2113,6 +2116,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Projenin ayarları okunamadı."),
         ("The project's settings could not be written.", "Projenin ayarları yazılamadı."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Körleme açık üs üzerine kuruludur ve burada hiçbir şey körlemesiz imzalamaz."),
+        ("The record a rollback would need is larger than the quota allows.", "Bir geri almanın ihtiyaç duyacağı kayıt, kotanın izin verdiğinden büyük."),
         ("The resource folder could not be made.", "Kaynak klasörü oluşturulamadı."),
         ("The resource table could not be built.", "Kaynak tablosu kurulamadı."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Cihazdaki çalışma ortamında modül sistemi yoktur: her sınıf, kendisine verilen sınıf yükleyicisi tarafından bulunur. Burada bütün işi paketler ve içe aktarmalar yapar."),
@@ -2128,6 +2132,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "İmza bloğunun iki boyut alanı uyuşmuyor."),
         ("The signing key could not be stored.", "İmza anahtarı saklanamadı."),
         ("The stack went below empty.", "Yığın boşun altına indi."),
+        ("The state a rollback would need could not be read.", "Bir geri almanın ihtiyaç duyacağı durum okunamadı."),
         ("The stream expands beyond what this build reads.", "Akış, bu yapının okuduğunun ötesine genişliyor."),
         ("The system random source could not be opened.", "Sistemin rastgelelik kaynağı açılamadı."),
         ("The system random source ran short.", "Sistemin rastgelelik kaynağı yetersiz kaldı."),
@@ -2184,6 +2189,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "En çok 128 karakter olacak şekilde harf, rakam, '.', '-' ve '_' kullanın, örneğin 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "';' ile ayrılmış anahtar=değer biçimini kullanın."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Dışa açık her şeyde standart başlatma kipini kullanın ya da başka hiçbir uygulamanın görevine katılamaması için android:taskAffinity değerini boş dize yapın."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Bitmesini bekleyin. Ölen bir yapının geride bıraktığı kilit, yeterince eskidiğinde devralınır."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Burada yazılan bir sınıfın çevresinden okuduğu içeri kopyalanır; bu yüzden bir yazma dışarıdan görülmezdi. Bir alan ya da tek elemanlı bir dizi kullanın."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Bir özniteliğin aldığı, çatının aldığını söylediğidir; almadığı bir değer cihaz tarafından değil burada reddedilir."),
         ("What is written where a class is used is not a class or an interface.", "Bir sınıfın kullanıldığı yere yazılan şey bir sınıf ya da arayüz değil."),
@@ -2293,6 +2299,7 @@ pub mod speech {
         ("Hands off to", "Devrettiği"),
         ("Header", "Başlık"),
         ("Held", "Tutulan"),
+        ("Held by", "Tutan"),
         ("Id", "Kimlik"),
         ("Identifier", "Tanımlayıcı"),
         ("Identifiers present", "Mevcut tanımlayıcı"),
@@ -2522,6 +2529,7 @@ pub mod speech {
         ("A field was never interned.", "Ein Feld wurde nie in den Pool aufgenommen."),
         ("A file compiled here holds a class or an interface.", "Eine hier übersetzte Datei enthält eine Klasse oder eine Schnittstelle."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Eine hier übersetzte Datei enthält Klassen, Schnittstellen, Enums, Records und Annotationstypen. Was angenommen wird und was nicht, steht oben in Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Eine Datei ließ sich nicht so zurücklegen, wie sie war."),
         ("A file in the repository could not be written where it belongs.", "Eine Datei des Verzeichnisses ließ sich nicht dort schreiben, wohin sie gehört."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Dort, wo dieser Signaturschlüssel hingehört, liegt eine Datei, und sie ist kein Schlüssel, den dieser Build allein öffnen kann."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Dort, wo der gemeinsame Schlüssel hingehört, liegt eine Datei, und sie ist kein Schlüssel, den dieser Build geschrieben hat."),
@@ -2813,6 +2821,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Ein unbekannter Abschnitt wird gemeldet statt übergangen, denn Einstellungen, die in Kraft zu sein scheinen und es nicht sind, sind schlimmer als fehlende."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android hat immer nur DEX-Dateien in Little-Endian ausgeliefert. Eine in Big-Endian gehört zu einer anderen Plattform oder ist beschädigt."),
         ("Another application cannot place its own screen inside this one's task.", "Eine andere Anwendung kann ihren eigenen Bildschirm nicht in den Task dieser Anwendung setzen."),
+        ("Another build holds the lock on this tree.", "Ein anderer Bau hält die Sperre auf diesem Baum."),
         ("Any application on the device can reach an exported component that no permission guards.", "Jede Anwendung auf dem Gerät erreicht eine exportierte Komponente, die keine Berechtigung schützt."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Unter API 30 verlangt die Plattform keine v2-Signatur, erlaubt Klartext standardmäßig und hat weder den eingegrenzten Speicher noch den hardwaregestützten Schlüsselschutz, den die Regeln oben voraussetzen."),
         ("Both sides of an and or an or want booleans.", "Beide Seiten eines Und oder eines Oder wollen booleans."),
@@ -3149,6 +3158,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Der Ordner für Schlüssel konnte nicht angelegt werden."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "Die Liste dessen, was jemand installiert hat, sagt viel über die Person, und alles davon zu lesen ist die Art, wie Tracking-Bibliotheken ein Profil bauen. Android hat das in API 30 bewusst eingeschränkt."),
         ("The locale a device falls back to was not chosen.", "Das Gebietsschema, auf das ein Gerät zurückfällt, wurde nicht gewählt."),
+        ("The lock could not be taken.", "Die Sperre ließ sich nicht nehmen."),
         ("The loop variable does not match what is walked over.", "Die Schleifenvariable passt nicht zu dem, worüber gelaufen wird."),
         ("The magic is not terminated.", "Die Kennung ist nicht abgeschlossen."),
         ("The manifest could not be read.", "Das Manifest konnte nicht gelesen werden."),
@@ -3199,6 +3209,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Die Einstellungen des Projekts konnten nicht gelesen werden."),
         ("The project's settings could not be written.", "Die Einstellungen des Projekts konnten nicht geschrieben werden."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Die Blendung baut auf dem öffentlichen Exponenten auf, und hier signiert nichts ohne Blendung."),
+        ("The record a rollback would need is larger than the quota allows.", "Der Vermerk, den ein Zurücknehmen bräuchte, ist größer als die Quote erlaubt."),
         ("The resource folder could not be made.", "Der Ressourcenordner konnte nicht angelegt werden."),
         ("The resource table could not be built.", "Die Ressourcentabelle konnte nicht gebaut werden."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Die Laufzeit auf einem Gerät hat kein Modulsystem: jede Klasse wird von dem Klassenlader gefunden, dem sie gegeben wurde. Die ganze Arbeit machen hier Pakete und Importe."),
@@ -3214,6 +3225,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Die beiden Größenfelder des Signaturblocks widersprechen sich."),
         ("The signing key could not be stored.", "Der Signaturschlüssel konnte nicht abgelegt werden."),
         ("The stack went below empty.", "Der Stapel ist unter leer gegangen."),
+        ("The state a rollback would need could not be read.", "Der Zustand, den ein Zurücknehmen bräuchte, ließ sich nicht lesen."),
         ("The stream expands beyond what this build reads.", "Der Strom dehnt sich über das hinaus aus, was dieser Build liest."),
         ("The system random source could not be opened.", "Die Zufallsquelle des Systems konnte nicht geöffnet werden."),
         ("The system random source ran short.", "Die Zufallsquelle des Systems hat zu wenig geliefert."),
@@ -3270,6 +3282,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Verwenden Sie Buchstaben, Ziffern, '.', '-' und '_', bis zu 128 Zeichen, zum Beispiel 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Verwenden Sie die Form schlüssel=wert, getrennt durch ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Verwenden Sie für alles Exportierte den Standard-Startmodus, oder setzen Sie android:taskAffinity auf eine leere Zeichenkette, damit keine andere Anwendung seinem Task beitreten kann."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Warten Sie, bis er fertig ist. Eine Sperre, die ein gestorbener Bau hinterließ, wird übernommen, sobald sie alt genug ist."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Was eine hier geschriebene Klasse aus ihrer Umgebung liest, wird hineinkopiert; ein Schreibzugriff wäre draußen also nicht zu sehen. Verwenden Sie ein Feld oder ein einelementiges Array."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Was ein Attribut annimmt, sagt das Framework, und ein Wert, den es nicht annimmt, wird hier abgelehnt statt vom Gerät."),
         ("What is written where a class is used is not a class or an interface.", "Was dort steht, wo eine Klasse benutzt wird, ist keine Klasse und kein Interface."),
@@ -3379,6 +3392,7 @@ pub mod speech {
         ("Hands off to", "Übergibt an"),
         ("Header", "Kopf"),
         ("Held", "Enthalten"),
+        ("Held by", "Gehalten von"),
         ("Id", "Kennung"),
         ("Identifier", "Bezeichner"),
         ("Identifiers present", "Vorhandene Bezeichner"),
@@ -3608,6 +3622,7 @@ pub mod speech {
         ("A field was never interned.", "Un campo nunca se incorporó al grupo."),
         ("A file compiled here holds a class or an interface.", "Un archivo compilado aquí contiene una clase o una interfaz."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Un archivo compilado aquí contiene clases, interfaces, enums, records y tipos de anotación. Lo que se acepta y lo que no está escrito al principio de Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Un archivo no se pudo dejar como estaba."),
         ("A file in the repository could not be written where it belongs.", "Un archivo del repositorio no pudo escribirse donde le corresponde."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Donde corresponde a esa clave de firma hay un archivo, y no es una clave que esta compilación pueda abrir por sí sola."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Donde corresponde a la clave compartida hay un archivo, y no es una clave que esta compilación escribiera."),
@@ -3899,6 +3914,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Una sección desconocida se informa en lugar de ignorarse, porque los ajustes que parecen estar en vigor y no lo están son peores que los ajustes que faltan."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android solo ha publicado archivos DEX en little-endian. Uno en big-endian es de otra plataforma o está dañado."),
         ("Another application cannot place its own screen inside this one's task.", "Otra aplicación no puede colocar su propia pantalla dentro de la tarea de esta."),
+        ("Another build holds the lock on this tree.", "Otra compilación tiene el bloqueo sobre este árbol."),
         ("Any application on the device can reach an exported component that no permission guards.", "Cualquier aplicación del dispositivo puede alcanzar un componente exportado que ningún permiso protege."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Por debajo de API 30 la plataforma no exige una firma v2, permite texto claro de forma predeterminada y carece del almacenamiento delimitado y de la protección de claves por hardware que dan por supuestas las reglas anteriores."),
         ("Both sides of an and or an or want booleans.", "Ambos lados de un y o de un o quieren booleans."),
@@ -4235,6 +4251,7 @@ pub mod speech {
         ("The keys folder could not be made.", "No se pudo crear la carpeta de claves."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "La lista de lo que alguien tiene instalado dice mucho sobre esa persona, y leerla entera es como las bibliotecas de rastreo construyen un perfil. Android lo restringió a propósito en API 30."),
         ("The locale a device falls back to was not chosen.", "No se eligió el ajuste regional al que recurre un dispositivo."),
+        ("The lock could not be taken.", "El bloqueo no se pudo tomar."),
         ("The loop variable does not match what is walked over.", "La variable del bucle no coincide con lo que se recorre."),
         ("The magic is not terminated.", "La firma inicial no está terminada."),
         ("The manifest could not be read.", "No se pudo leer el manifiesto."),
@@ -4285,6 +4302,7 @@ pub mod speech {
         ("The project's settings could not be read.", "No se pudieron leer los ajustes del proyecto."),
         ("The project's settings could not be written.", "No se pudieron escribir los ajustes del proyecto."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "El cegado se construye sobre el exponente público, y aquí nada firma sin cegado."),
+        ("The record a rollback would need is larger than the quota allows.", "El registro que necesitaría una reversión es mayor de lo que permite la cuota."),
         ("The resource folder could not be made.", "No se pudo crear la carpeta de recursos."),
         ("The resource table could not be built.", "No se pudo construir la tabla de recursos."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "El entorno de ejecución de un dispositivo no tiene sistema de módulos: cada clase la encuentra el cargador de clases que la recibió. Aquí todo el trabajo lo hacen los paquetes y las importaciones."),
@@ -4300,6 +4318,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Los dos campos de tamaño del bloque de firma no coinciden."),
         ("The signing key could not be stored.", "No se pudo guardar la clave de firma."),
         ("The stack went below empty.", "La pila bajó por debajo de vacía."),
+        ("The state a rollback would need could not be read.", "El estado que necesitaría una reversión no se pudo leer."),
         ("The stream expands beyond what this build reads.", "El flujo se expande más allá de lo que lee esta compilación."),
         ("The system random source could not be opened.", "No se pudo abrir la fuente de aleatoriedad del sistema."),
         ("The system random source ran short.", "La fuente de aleatoriedad del sistema se quedó corta."),
@@ -4356,6 +4375,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Use letras, dígitos, '.', '-' y '_', hasta 128 caracteres, por ejemplo 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Use la forma clave=valor, separada por ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Use el modo de inicio estándar para todo lo exportado, o ponga android:taskAffinity en una cadena vacía para que ninguna otra aplicación pueda unirse a su tarea."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Espere a que termine. Un bloqueo que dejó una compilación muerta se toma en cuanto es bastante viejo."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Lo que una clase escrita aquí lee de su alrededor se copia dentro, así que una escritura no se vería fuera. Use un campo, o un array de un elemento."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Lo que acepta un atributo es lo que dice el framework que acepta, y un valor que no acepta se rechaza aquí y no en el dispositivo."),
         ("What is written where a class is used is not a class or an interface.", "Lo que está escrito donde se usa una clase no es una clase ni una interfaz."),
@@ -4465,6 +4485,7 @@ pub mod speech {
         ("Hands off to", "Cede a"),
         ("Header", "Cabecera"),
         ("Held", "Contenido"),
+        ("Held by", "En manos de"),
         ("Id", "Id"),
         ("Identifier", "Identificador"),
         ("Identifiers present", "Identificadores presentes"),
@@ -4694,6 +4715,7 @@ pub mod speech {
         ("A field was never interned.", "Un champ n'a jamais été interné."),
         ("A file compiled here holds a class or an interface.", "Un fichier compilé ici contient une classe ou une interface."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Un fichier compilé ici contient des classes, des interfaces, des enums, des records et des types d'annotation. Ce qui est pris et ce qui ne l'est pas est écrit en tête de Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Un fichier n a pas pu être remis comme il était."),
         ("A file in the repository could not be written where it belongs.", "Un fichier du dépôt n a pas pu être écrit là où il appartient."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Un fichier est l'endroit où va cette clé de signature, et ce n'est pas une clé que cette compilation peut ouvrir sans aide."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Un fichier est l'endroit où va la clé partagée, et ce n'est pas une clé que cette compilation a écrite."),
@@ -4985,6 +5007,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Une section inconnue est signalée plutôt qu'ignorée, parce que des réglages qui semblent en vigueur sans l'être sont pires que des réglages absents."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android n'a jamais livré que des fichiers DEX petit-boutistes. Un fichier gros-boutiste appartient à une autre plateforme ou est endommagé."),
         ("Another application cannot place its own screen inside this one's task.", "Une autre application ne peut pas placer son propre écran dans la tâche de celle-ci."),
+        ("Another build holds the lock on this tree.", "Une autre construction tient le verrou sur cet arbre."),
         ("Any application on the device can reach an exported component that no permission guards.", "N'importe quelle application de l'appareil peut atteindre un composant exporté qu'aucune permission ne garde."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "En dessous de l'API 30, la plateforme n'exige pas de signature v2, autorise le texte en clair par défaut, et n'a ni le stockage cloisonné ni les protections de clés matérielles que les règles ci-dessus supposent."),
         ("Both sides of an and or an or want booleans.", "Les deux côtés d'un et ou d'un ou veulent des booléens."),
@@ -5321,6 +5344,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Le dossier des clés n'a pas pu être créé."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "La liste de ce que quelqu'un a installé en dit long sur cette personne, et lire l'ensemble est la façon dont les bibliothèques de pistage construisent un profil. Android a délibérément restreint cela en API 30."),
         ("The locale a device falls back to was not chosen.", "La locale vers laquelle un appareil se rabat n'a pas été choisie."),
+        ("The lock could not be taken.", "Le verrou n a pas pu être pris."),
         ("The loop variable does not match what is walked over.", "La variable de boucle ne correspond pas à ce qui est parcouru."),
         ("The magic is not terminated.", "Le nombre magique n'est pas terminé."),
         ("The manifest could not be read.", "Le manifeste n'a pas pu être lu."),
@@ -5371,6 +5395,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Les réglages du projet n'ont pas pu être lus."),
         ("The project's settings could not be written.", "Les réglages du projet n'ont pas pu être écrits."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "L'exposant public est ce sur quoi repose l'aveuglement, et rien ici ne signe sans aveuglement."),
+        ("The record a rollback would need is larger than the quota allows.", "Le relevé dont un retour arrière aurait besoin est plus grand que le quota ne permet."),
         ("The resource folder could not be made.", "Le dossier de ressources n'a pas pu être créé."),
         ("The resource table could not be built.", "La table des ressources n'a pas pu être construite."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "L'exécution sur un appareil n'a pas de système de modules : chaque classe est trouvée par le chargeur de classes auquel elle a été confiée. Les paquets et les imports font ici tout le travail."),
@@ -5386,6 +5411,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Les deux champs de taille du bloc de signature ne s'accordent pas."),
         ("The signing key could not be stored.", "La clé de signature n'a pas pu être rangée."),
         ("The stack went below empty.", "La pile est passée sous le vide."),
+        ("The state a rollback would need could not be read.", "L état dont un retour arrière aurait besoin n a pas pu être lu."),
         ("The stream expands beyond what this build reads.", "Le flux se déploie au-delà de ce que cette compilation lit."),
         ("The system random source could not be opened.", "La source d'aléa du système n'a pas pu être ouverte."),
         ("The system random source ran short.", "La source d'aléa du système s'est épuisée."),
@@ -5442,6 +5468,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Utilisez des lettres, des chiffres, '.', '-' et '_', jusqu'à 128 caractères, par exemple 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Utilisez la forme clé=valeur, séparée par ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Utilisez le mode de lancement standard pour tout ce qui est exporté, ou mettez android:taskAffinity à une chaîne vide pour qu'aucune autre application ne puisse rejoindre sa tâche."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Attendez qu elle finisse. Un verrou laissé par une construction morte est repris dès qu il est assez vieux."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Ce qu'une classe écrite ici lit de ce qui l'entoure y est recopié, si bien qu'une écriture ne serait pas vue à l'extérieur. Utilisez un champ, ou un tableau d'un seul élément."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Ce qu'un attribut accepte est ce que le framework dit qu'il accepte, et une valeur qu'il n'accepte pas est refusée ici plutôt que par l'appareil."),
         ("What is written where a class is used is not a class or an interface.", "Ce qui est écrit là où une classe est utilisée n'est ni une classe ni une interface."),
@@ -5554,6 +5581,7 @@ pub mod speech {
         ("Hands off to", "Passe la main à"),
         ("Header", "En-tête"),
         ("Held", "Contenu"),
+        ("Held by", "Tenu par"),
         ("Id", "Id"),
         ("Identifier", "Identifiant"),
         ("Identifiers present", "Identifiants présents"),
@@ -5783,6 +5811,7 @@ pub mod speech {
         ("A field was never interned.", "Un campo non è mai stato registrato."),
         ("A file compiled here holds a class or an interface.", "Un file compilato qui contiene una classe o un'interfaccia."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Un file compilato qui contiene classi, interfacce, enum, record e tipi di annotazione. Ciò che viene preso e ciò che non lo è è scritto in cima a Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Un file non si è potuto rimettere com era."),
         ("A file in the repository could not be written where it belongs.", "Un file del deposito non si è potuto scrivere dove gli spetta."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Un file è il posto di quella chiave di firma, e non è una chiave che questa compilazione possa aprire da sola."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Un file è il posto della chiave condivisa, e non è una chiave che questa compilazione abbia scritto."),
@@ -6074,6 +6103,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Una sezione sconosciuta è segnalata invece di essere ignorata, perché impostazioni che sembrano in vigore e non lo sono sono peggio di impostazioni mancanti."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android ha sempre e solo distribuito file DEX little-endian. Uno big-endian è di un'altra piattaforma oppure è danneggiato."),
         ("Another application cannot place its own screen inside this one's task.", "Un'altra applicazione non può mettere la propria schermata dentro il task di questa."),
+        ("Another build holds the lock on this tree.", "Un altra costruzione tiene il blocco su questo albero."),
         ("Any application on the device can reach an exported component that no permission guards.", "Qualsiasi applicazione sul dispositivo può raggiungere un componente esportato che nessun permesso protegge."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Sotto l'API 30 la piattaforma non richiede una firma v2, consente il testo in chiaro per impostazione predefinita, e non ha né l'archiviazione delimitata né le protezioni delle chiavi in hardware che le regole qui sopra presuppongono."),
         ("Both sides of an and or an or want booleans.", "Entrambi i lati di un e oppure di un o vogliono boolean."),
@@ -6410,6 +6440,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Non è stato possibile creare la cartella delle chiavi."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "L'elenco di ciò che qualcuno ha installato dice molto su quella persona, e leggerlo tutto è il modo in cui le librerie di tracciamento costruiscono un profilo. Android lo ha ristretto deliberatamente nell'API 30."),
         ("The locale a device falls back to was not chosen.", "La locale su cui un dispositivo ripiega non è stata scelta."),
+        ("The lock could not be taken.", "Il blocco non si è potuto prendere."),
         ("The loop variable does not match what is walked over.", "La variabile del ciclo non corrisponde a ciò che viene percorso."),
         ("The magic is not terminated.", "Il numero magico non è terminato."),
         ("The manifest could not be read.", "Non è stato possibile leggere il manifesto."),
@@ -6460,6 +6491,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Non è stato possibile leggere le impostazioni del progetto."),
         ("The project's settings could not be written.", "Non è stato possibile scrivere le impostazioni del progetto."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "L'esponente pubblico è ciò su cui si regge l'accecamento, e nulla qui firma senza accecamento."),
+        ("The record a rollback would need is larger than the quota allows.", "La registrazione che servirebbe a un annullamento è più grande di quanto la quota permetta."),
         ("The resource folder could not be made.", "Non è stato possibile creare la cartella delle risorse."),
         ("The resource table could not be built.", "Non è stato possibile costruire la tabella delle risorse."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "L'esecuzione su un dispositivo non ha un sistema di moduli: ogni classe è trovata dal caricatore di classi a cui è stata affidata. Qui i pacchetti e le importazioni fanno tutto il lavoro."),
@@ -6475,6 +6507,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "I due campi di dimensione del blocco di firma non concordano."),
         ("The signing key could not be stored.", "Non è stato possibile conservare la chiave di firma."),
         ("The stack went below empty.", "La pila è scesa sotto il vuoto."),
+        ("The state a rollback would need could not be read.", "Lo stato che servirebbe a un annullamento non si è potuto leggere."),
         ("The stream expands beyond what this build reads.", "Il flusso si espande oltre ciò che questa compilazione legge."),
         ("The system random source could not be opened.", "Non è stato possibile aprire la sorgente di casualità del sistema."),
         ("The system random source ran short.", "La sorgente di casualità del sistema si è esaurita."),
@@ -6531,6 +6564,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Usate lettere, cifre, '.', '-' e '_', fino a 128 caratteri, per esempio 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Usate la forma chiave=valore, separata da ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Usate la modalità di avvio standard per tutto ciò che è esportato, oppure impostate android:taskAffinity a una stringa vuota così che nessun'altra applicazione possa unirsi al suo task."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Aspetta che finisca. Un blocco lasciato da una costruzione morta viene preso appena è abbastanza vecchio."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Ciò che una classe scritta qui legge da ciò che la circonda vi è copiato dentro, quindi una scrittura non sarebbe vista fuori. Usate un campo, oppure un array di un solo elemento."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Ciò che un attributo accetta è ciò che il framework dice che accetta, e un valore che non accetta è rifiutato qui invece che dal dispositivo."),
         ("What is written where a class is used is not a class or an interface.", "Ciò che è scritto dove si usa una classe non è né una classe né un'interfaccia."),
@@ -6643,6 +6677,7 @@ pub mod speech {
         ("Hands off to", "Passa a"),
         ("Header", "Intestazione"),
         ("Held", "Contenuto"),
+        ("Held by", "Tenuto da"),
         ("Id", "Id"),
         ("Identifier", "Identificatore"),
         ("Identifiers present", "Identificatori presenti"),
@@ -6872,6 +6907,7 @@ pub mod speech {
         ("A field was never interned.", "Um campo nunca foi registrado."),
         ("A file compiled here holds a class or an interface.", "Um arquivo compilado aqui contém uma classe ou uma interface."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Um arquivo compilado aqui contém classes, interfaces, enums, records e tipos de anotação. O que é e o que não é aceito está escrito no topo de Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Um ficheiro não se pôde repor como estava."),
         ("A file in the repository could not be written where it belongs.", "Um ficheiro do repositório não pôde ser escrito onde lhe pertence."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Um arquivo é o lugar dessa chave de assinatura, e não é uma chave que esta compilação consiga abrir sozinha."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Um arquivo é o lugar da chave compartilhada, e não é uma chave que esta compilação tenha escrito."),
@@ -7163,6 +7199,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Uma seção desconhecida é relatada em vez de ignorada, porque configurações que parecem em vigor e não estão são piores que configurações ausentes."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "O Android só distribuiu arquivos DEX little-endian. Um big-endian é de outra plataforma ou está danificado."),
         ("Another application cannot place its own screen inside this one's task.", "Outro aplicativo não pode pôr a própria tela dentro da tarefa deste."),
+        ("Another build holds the lock on this tree.", "Outra construção detém o bloqueio sobre esta árvore."),
         ("Any application on the device can reach an exported component that no permission guards.", "Qualquer aplicativo no dispositivo pode alcançar um componente exportado que nenhuma permissão protege."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Abaixo da API 30 a plataforma não exige uma assinatura v2, permite texto em claro por padrão, e não tem o armazenamento delimitado nem as proteções de chave em hardware que as regras acima pressupõem."),
         ("Both sides of an and or an or want booleans.", "Ambos os lados de um e ou de um ou querem booleans."),
@@ -7499,6 +7536,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Não foi possível criar a pasta das chaves."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "A lista do que alguém instalou diz muito sobre essa pessoa, e ler tudo isso é como as bibliotecas de rastreamento montam um perfil. O Android estreitou isso deliberadamente na API 30."),
         ("The locale a device falls back to was not chosen.", "A localidade a que um dispositivo recorre não foi escolhida."),
+        ("The lock could not be taken.", "O bloqueio não se pôde tomar."),
         ("The loop variable does not match what is walked over.", "A variável do ciclo não corresponde ao que é percorrido."),
         ("The magic is not terminated.", "O número mágico não está terminado."),
         ("The manifest could not be read.", "Não foi possível ler o manifesto."),
@@ -7549,6 +7587,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Não foi possível ler as definições do projeto."),
         ("The project's settings could not be written.", "Não foi possível escrever as definições do projeto."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "O expoente público é aquilo em que o cegamento se apoia, e nada aqui assina sem cegamento."),
+        ("The record a rollback would need is larger than the quota allows.", "O registo de que uma reversão precisaria é maior do que a quota permite."),
         ("The resource folder could not be made.", "Não foi possível criar a pasta de recursos."),
         ("The resource table could not be built.", "Não foi possível construir a tabela de recursos."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "A execução num dispositivo não tem sistema de módulos: cada classe é encontrada pelo carregador de classes a que foi entregue. Aqui os pacotes e as importações fazem todo o trabalho."),
@@ -7564,6 +7603,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Os dois campos de tamanho do bloco de assinatura discordam."),
         ("The signing key could not be stored.", "Não foi possível guardar a chave de assinatura."),
         ("The stack went below empty.", "A pilha foi abaixo do vazio."),
+        ("The state a rollback would need could not be read.", "O estado de que uma reversão precisaria não se pôde ler."),
         ("The stream expands beyond what this build reads.", "O fluxo se expande além do que esta compilação lê."),
         ("The system random source could not be opened.", "Não foi possível abrir a fonte de aleatoriedade do sistema."),
         ("The system random source ran short.", "A fonte de aleatoriedade do sistema se esgotou."),
@@ -7620,6 +7660,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Use letras, dígitos, '.', '-' e '_', até 128 caracteres, por exemplo 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Use a forma chave=valor, separada por ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Use o modo de início padrão para tudo o que é exportado, ou ponha android:taskAffinity como uma cadeia vazia para que nenhum outro aplicativo possa entrar na sua tarefa."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Espere que termine. Um bloqueio deixado por uma construção morta é tomado assim que for suficientemente antigo."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "O que uma classe escrita aqui lê do que a cerca é copiado para dentro, então uma escrita não seria vista fora. Use um campo, ou um vetor de um elemento."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "O que um atributo aceita é o que o framework diz que ele aceita, e um valor que ele não aceita é recusado aqui em vez de pelo dispositivo."),
         ("What is written where a class is used is not a class or an interface.", "O que está escrito onde uma classe é usada não é uma classe nem uma interface."),
@@ -7729,6 +7770,7 @@ pub mod speech {
         ("Hands off to", "Passa para"),
         ("Header", "Cabeçalho"),
         ("Held", "Contido"),
+        ("Held by", "Detido por"),
         ("Id", "Id"),
         ("Identifier", "Identificador"),
         ("Identifiers present", "Identificadores presentes"),
@@ -7958,6 +8000,7 @@ pub mod speech {
         ("A field was never interned.", "Поле никогда не было внесено в таблицу."),
         ("A file compiled here holds a class or an interface.", "Файл, компилируемый здесь, содержит класс или интерфейс."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Файл, компилируемый здесь, содержит классы, интерфейсы, перечисления, записи и типы аннотаций. Что берётся и что не берётся, написано в начале Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Файл не удалось вернуть в прежний вид."),
         ("A file in the repository could not be written where it belongs.", "Файл хранилища не удалось записать туда, где ему место."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Такому ключу подписи место в файле, и это не ключ, который эта сборка может открыть без посторонней помощи."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Общему ключу место в файле, и это не ключ, который написала эта сборка."),
@@ -8249,6 +8292,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Неизвестный раздел сообщается, а не игнорируется, потому что настройки, которые выглядят действующими, но не действуют, хуже отсутствующих."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android всегда выпускал только DEX-файлы с прямым порядком байт. Файл с обратным порядком либо от другой платформы, либо повреждён."),
         ("Another application cannot place its own screen inside this one's task.", "Другое приложение не может поместить собственный экран внутрь задачи этого."),
+        ("Another build holds the lock on this tree.", "Замок на этом дереве держит другая сборка."),
         ("Any application on the device can reach an exported component that no permission guards.", "Любое приложение на устройстве может добраться до экспортируемого компонента, который не защищён разрешением."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Ниже API 30 платформа не требует подписи v2, по умолчанию разрешает открытый текст и не имеет ни ограниченного хранилища, ни аппаратной защиты ключей, которые предполагают правила выше."),
         ("Both sides of an and or an or want booleans.", "Обе стороны И или ИЛИ хотят boolean."),
@@ -8585,6 +8629,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Папку ключей не удалось создать."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "Список того, что человек установил, говорит о нём очень многое, и чтение всего этого — то, как библиотеки слежки строят профиль. Android намеренно сузил это в API 30."),
         ("The locale a device falls back to was not chosen.", "Локаль, к которой откатывается устройство, не выбрана."),
+        ("The lock could not be taken.", "Замок не удалось взять."),
         ("The loop variable does not match what is walked over.", "Переменная цикла не соответствует тому, по чему идёт обход."),
         ("The magic is not terminated.", "Магическое число не завершено."),
         ("The manifest could not be read.", "Манифест не удалось прочитать."),
@@ -8635,6 +8680,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Настройки проекта не удалось прочитать."),
         ("The project's settings could not be written.", "Настройки проекта не удалось записать."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Открытая экспонента — то, на чём построено ослепление, а ничто здесь не подписывает без ослепления."),
+        ("The record a rollback would need is larger than the quota allows.", "Запись, нужная для отката, больше того, что позволяет квота."),
         ("The resource folder could not be made.", "Папку ресурсов не удалось создать."),
         ("The resource table could not be built.", "Таблицу ресурсов не удалось построить."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "У среды выполнения на устройстве нет системы модулей: каждый класс находит тот загрузчик классов, которому его дали. Здесь всю работу делают пакеты и импорты."),
@@ -8650,6 +8696,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Два поля размера блока подписи расходятся."),
         ("The signing key could not be stored.", "Ключ подписи не удалось сохранить."),
         ("The stack went below empty.", "Стек ушёл ниже пустого."),
+        ("The state a rollback would need could not be read.", "Состояние, нужное для отката, не удалось прочитать."),
         ("The stream expands beyond what this build reads.", "Поток разворачивается дальше того, что читает эта сборка."),
         ("The system random source could not be opened.", "Системный источник случайности не удалось открыть."),
         ("The system random source ran short.", "Системный источник случайности иссяк."),
@@ -8706,6 +8753,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Используйте буквы, цифры, '.', '-' и '_', не более 128 символов, например 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Используйте вид ключ=значение, разделяя через ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Используйте обычный режим запуска для всего экспортируемого или поставьте android:taskAffinity в пустую строку, чтобы никакое другое приложение не могло войти в его задачу."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Подождите, пока она закончит. Замок, оставленный умершей сборкой, перенимается, как только он достаточно стар."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "То, что класс, написанный здесь, читает из окружения, копируется внутрь, поэтому запись снаружи видна не будет. Используйте поле или массив из одного элемента."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "То, что принимает атрибут, — это то, что говорит каркас, а значение, которого он не принимает, отклоняется здесь, а не устройством."),
         ("What is written where a class is used is not a class or an interface.", "То, что записано там, где используется класс, не класс и не интерфейс."),
@@ -8815,6 +8863,7 @@ pub mod speech {
         ("Hands off to", "Передаёт"),
         ("Header", "Заголовок"),
         ("Held", "Содержится"),
+        ("Held by", "Держит"),
         ("Id", "Ид"),
         ("Identifier", "Идентификатор"),
         ("Identifiers present", "Имеющиеся идентификаторы"),
@@ -9044,6 +9093,7 @@ pub mod speech {
         ("A field was never interned.", "حقل لم يُسجَّل قط."),
         ("A file compiled here holds a class or an interface.", "الملف المصرّف هنا يحوي صنفًا أو واجهة."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "الملف المصرّف هنا يحوي أصنافًا وواجهات وتعدادات وسجلات وأنواع تعليقات توضيحية. وما يُؤخذ وما لا يُؤخذ مكتوب في أعلى Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "تعذرت إعادة ملف إلى ما كان عليه."),
         ("A file in the repository could not be written where it belongs.", "تعذرت كتابة ملف من المستودع في موضعه."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "مكان مفتاح التوقيع ذاك ملف، وهو ليس مفتاحًا يستطيع هذا البناء فتحه بلا عون."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "مكان المفتاح المشترك ملف، وهو ليس مفتاحًا كتبه هذا البناء."),
@@ -9335,6 +9385,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "يُبلَّغ عن القسم المجهول بدل تجاهله، لأن الإعدادات التي تبدو سارية وهي ليست كذلك أسوأ من إعدادات مفقودة."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "لم يصدر أندرويد قط إلا ملفات DEX بترتيب البايت الصغير. والملف بترتيب البايت الكبير إما من منصة أخرى وإما تالف."),
         ("Another application cannot place its own screen inside this one's task.", "لا يستطيع تطبيق آخر وضع شاشته داخل مهمة هذا التطبيق."),
+        ("Another build holds the lock on this tree.", "تمسك بنية أخرى بقفل هذه الشجرة."),
         ("Any application on the device can reach an exported component that no permission guards.", "يستطيع أي تطبيق على الجهاز بلوغ مكوّن مصدَّر لا يحرسه إذن."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "دون API 30 لا تشترط المنصة توقيع v2، وتسمح بالنص الصريح افتراضيًا، وتفتقر إلى التخزين المحدود وحماية المفاتيح المدعومة بالعتاد التي تفترضها القواعد أعلاه."),
         ("Both sides of an and or an or want booleans.", "طرفا الـو أو الـأو يريدان boolean."),
@@ -9671,6 +9722,7 @@ pub mod speech {
         ("The keys folder could not be made.", "تعذّر إنشاء مجلد المفاتيح."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "قائمة ما ثبّته المرء تقول عنه الكثير، وقراءتها كلها هي الطريقة التي تبني بها مكتبات التتبع ملفًا شخصيًا. وقد ضيّق أندرويد هذا عن قصد في API 30."),
         ("The locale a device falls back to was not chosen.", "لم تُختر اللغة المحلية التي يرجع إليها الجهاز."),
+        ("The lock could not be taken.", "تعذر أخذ القفل."),
         ("The loop variable does not match what is walked over.", "متغير الحلقة لا يطابق ما يُمَرّ عليه."),
         ("The magic is not terminated.", "العدد السحري غير منتهٍ."),
         ("The manifest could not be read.", "تعذّرت قراءة البيان."),
@@ -9721,6 +9773,7 @@ pub mod speech {
         ("The project's settings could not be read.", "تعذّرت قراءة إعدادات المشروع."),
         ("The project's settings could not be written.", "تعذّرت كتابة إعدادات المشروع."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "الأس العام هو ما تقوم عليه التعمية، ولا شيء هنا يوقّع بلا تعمية."),
+        ("The record a rollback would need is larger than the quota allows.", "السجل الذي يحتاجه التراجع أكبر مما تسمح به الحصة."),
         ("The resource folder could not be made.", "تعذّر إنشاء مجلد الموارد."),
         ("The resource table could not be built.", "تعذّر بناء جدول الموارد."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "ليس لوقت التشغيل على جهاز نظام وحدات: كل صنف يجده محمّل الأصناف الذي أُعطي له. والحزم والاستيرادات تقوم هنا بالعمل كله."),
@@ -9736,6 +9789,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "حقلا الحجم في كتلة التوقيع مختلفان."),
         ("The signing key could not be stored.", "تعذّر تخزين مفتاح التوقيع."),
         ("The stack went below empty.", "نزل المكدس تحت الفارغ."),
+        ("The state a rollback would need could not be read.", "تعذرت قراءة الحالة التي يحتاجها التراجع."),
         ("The stream expands beyond what this build reads.", "يتمدد التدفق إلى ما بعد ما يقرأه هذا البناء."),
         ("The system random source could not be opened.", "تعذّر فتح مصدر العشوائية في النظام."),
         ("The system random source ran short.", "نفد مصدر العشوائية في النظام."),
@@ -9792,6 +9846,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "استخدم حروفًا وأرقامًا و'.' و'-' و'_'، حتى 128 محرفًا، مثلًا 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "استخدم صورة مفتاح=قيمة، مفصولة بـ ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "استخدم وضع التشغيل القياسي لكل ما هو مصدَّر، أو اضبط android:taskAffinity على سلسلة فارغة حتى لا يستطيع أي تطبيق آخر الانضمام إلى مهمته."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "انتظر حتى تنتهي. القفل الذي تركته بنية ماتت يؤخذ حالما يصير قديما بما يكفي."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "ما يقرأه الصنف المكتوب هنا مما حوله يُنسخ إلى داخله، فلن تُرى الكتابة في الخارج. استخدم حقلًا، أو مصفوفة من عنصر واحد."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "ما تأخذه السمة هو ما يقول إطار العمل إنها تأخذه، والقيمة التي لا تأخذها تُرفض هنا لا من الجهاز."),
         ("What is written where a class is used is not a class or an interface.", "ما كُتب حيث يُستعمل صنف ليس صنفًا ولا واجهة."),
@@ -9901,6 +9956,7 @@ pub mod speech {
         ("Hands off to", "يسلّم إلى"),
         ("Header", "الترويسة"),
         ("Held", "المحتوى"),
+        ("Held by", "يمسكه"),
         ("Id", "المعرّف"),
         ("Identifier", "المعرّف"),
         ("Identifiers present", "المعرّفات الموجودة"),
@@ -10130,6 +10186,7 @@ pub mod speech {
         ("A field was never interned.", "某个字段从未被登记。"),
         ("A file compiled here holds a class or an interface.", "此处编译的文件含有一个类或一个接口。"),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "此处编译的文件含有类、接口、枚举、记录和注解类型。哪些接受、哪些不接受，写在 Compilers/Java.rs 的开头。"),
+        ("A file could not be put back the way it was.", "一个文件无法放回原样。"),
         ("A file in the repository could not be written where it belongs.", "仓库中的某个文件无法写到它该在的位置。"),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "那把签名密钥该放在文件里，而它不是此构建能独自打开的密钥。"),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "共享密钥该放在文件里，而它不是此构建写出的密钥。"),
@@ -10421,6 +10478,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "未知的小节会被报告而不是忽略，因为看似生效而实际不生效的设置，比缺失的设置更糟。"),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android 出的一直都是小端序的 DEX 文件。大端序的要么属于别的平台，要么已经损坏。"),
         ("Another application cannot place its own screen inside this one's task.", "别的应用不能把自己的界面塞进这个应用的任务里。"),
+        ("Another build holds the lock on this tree.", "另一次构建持有这棵树的锁。"),
         ("Any application on the device can reach an exported component that no permission guards.", "设备上任何应用都能触及没有权限把守的导出组件。"),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "在 API 30 以下，平台不要求 v2 签名，默认允许明文，也没有上面这些规则所假定的分区存储和硬件密钥保护。"),
         ("Both sides of an and or an or want booleans.", "与和或的两边都要 boolean。"),
@@ -10757,6 +10815,7 @@ pub mod speech {
         ("The keys folder could not be made.", "无法创建密钥文件夹。"),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "一个人装了些什么，这份清单能说明他很多事情，而把它整个读走，正是追踪库建立画像的办法。Android 在 API 30 中有意收窄了这一点。"),
         ("The locale a device falls back to was not chosen.", "没有选择设备回退所用的区域设置。"),
+        ("The lock could not be taken.", "无法取得该锁。"),
         ("The loop variable does not match what is walked over.", "循环变量与所遍历的东西不匹配。"),
         ("The magic is not terminated.", "魔数没有结束。"),
         ("The manifest could not be read.", "无法读取清单。"),
@@ -10807,6 +10866,7 @@ pub mod speech {
         ("The project's settings could not be read.", "读不到这个项目的设置。"),
         ("The project's settings could not be written.", "写不了这个项目的设置。"),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "盲化正是建立在公开指数之上的，而此处不做无盲化的签名。"),
+        ("The record a rollback would need is larger than the quota allows.", "回滚所需的记录超出配额允许的大小。"),
         ("The resource folder could not be made.", "无法创建资源文件夹。"),
         ("The resource table could not be built.", "无法构建资源表。"),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "设备上的运行时没有模块系统：每个类都由拿到它的类加载器找到。这里的活全由包和导入来做。"),
@@ -10822,6 +10882,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "签名块的两个大小字段不一致。"),
         ("The signing key could not be stored.", "无法存放签名密钥。"),
         ("The stack went below empty.", "栈降到了空以下。"),
+        ("The state a rollback would need could not be read.", "无法读取回滚所需的状态。"),
         ("The stream expands beyond what this build reads.", "该流展开后超出了此构建所读取的范围。"),
         ("The system random source could not be opened.", "无法打开系统的随机源。"),
         ("The system random source ran short.", "系统的随机源供给不足。"),
@@ -10878,6 +10939,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "请使用字母、数字、'.'、'-' 和 '_'，最多 128 个字符，例如 'dex.classes'。"),
         ("Use the form key=value, separated by ';'.", "请使用 键=值 的形式，之间用 ';' 分隔。"),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "凡是导出的都请使用标准启动模式，或者把 android:taskAffinity 设为空字符串，这样别的应用就无法加入它的任务。"),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "请等它结束。已死构建留下的锁，足够旧之后会被接手。"),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "此处写下的类，从周围读到的东西是被复制进去的，所以在外面看不到写入的结果。请使用一个字段，或者一个只有一个元素的数组。"),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "属性接受什么，由框架说了算；它不接受的值会在此处被拒绝，而不是由设备来拒绝。"),
         ("What is written where a class is used is not a class or an interface.", "写在用类的位置上的东西既不是类也不是接口。"),
@@ -10987,6 +11049,7 @@ pub mod speech {
         ("Hands off to", "交给"),
         ("Header", "头部"),
         ("Held", "持有"),
+        ("Held by", "持有者"),
         ("Id", "标识"),
         ("Identifier", "标识符"),
         ("Identifiers present", "现有标识符"),
@@ -11216,6 +11279,7 @@ pub mod speech {
         ("A field was never interned.", "フィールドが一度も取り込まれていません。"),
         ("A file compiled here holds a class or an interface.", "ここで組むファイルは、クラスかインターフェイスを収めます。"),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "ここで組むファイルは、クラス、インターフェイス、列挙、レコード、注釈型を収めます。何を取り何を取らないかは Compilers/Java.rs の冒頭に書いてあります。"),
+        ("A file could not be put back the way it was.", "ファイルを元のとおりに戻せませんでした。"),
         ("A file in the repository could not be written where it belongs.", "リポジトリの中のファイルを、あるべき場所へ書けませんでした。"),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "その署名鍵の在り処はファイルであり、それはこのビルドが独力で開ける鍵ではありません。"),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "共有鍵の在り処はファイルであり、それはこのビルドが書いた鍵ではありません。"),
@@ -11507,6 +11571,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "知らない区画は無視せずに報告します。効いているように見えて効いていない設定は、欠けている設定より悪いからです。"),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android が出したのはリトルエンディアンの DEX ファイルだけです。ビッグエンディアンのものは、別のプラットフォームのものか、壊れているかです。"),
         ("Another application cannot place its own screen inside this one's task.", "ほかのアプリケーションが、このアプリケーションのタスクの中に自分の画面を置くことはできません。"),
+        ("Another build holds the lock on this tree.", "この木の錠は、別の組み立てが握っています。"),
         ("Any application on the device can reach an exported component that no permission guards.", "どの権限も守っていない、外に出した部品には、端末上のどのアプリケーションからも届きます。"),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "API 30 より下では、プラットフォームは v2 署名を求めず、既定で平文を許し、上の規則が前提とするスコープ付きストレージとハードウェアに支えられた鍵の保護を欠きます。"),
         ("Both sides of an and or an or want booleans.", "and や or の両辺は真偽値を求めます。"),
@@ -11843,6 +11908,7 @@ pub mod speech {
         ("The keys folder could not be made.", "鍵のフォルダーを作れませんでした。"),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "誰が何を入れているかの一覧は、その人について多くを語ります。そのすべてを読むことこそ、追跡のライブラリが人物像を組み立てるやり方です。Android は API 30 でこれを意図して狭めました。"),
         ("The locale a device falls back to was not chosen.", "端末が後退する先のロケールが選ばれていません。"),
+        ("The lock could not be taken.", "錠を取れませんでした。"),
         ("The loop variable does not match what is walked over.", "繰り返しの変数が、歩く対象と合いません。"),
         ("The magic is not terminated.", "魔法数が終端されていません。"),
         ("The manifest could not be read.", "マニフェストを読めませんでした。"),
@@ -11893,6 +11959,7 @@ pub mod speech {
         ("The project's settings could not be read.", "プロジェクトの設定を読めませんでした。"),
         ("The project's settings could not be written.", "プロジェクトの設定を書けませんでした。"),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "公開指数は目隠しの土台であり、ここでは目隠しなしに何も署名しません。"),
+        ("The record a rollback would need is larger than the quota allows.", "巻き戻しに要る控えが、割り当ての許す大きさより大きいです。"),
         ("The resource folder could not be made.", "リソースのフォルダーを作れませんでした。"),
         ("The resource table could not be built.", "リソースの表を組めませんでした。"),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "端末上の実行環境にモジュールの仕組みはありません。どのクラスも、それを渡されたクラスローダーが見つけます。ここではパッケージと import がすべての仕事をします。"),
@@ -11908,6 +11975,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "署名ブロックの二つの大きさ欄が食い違っています。"),
         ("The signing key could not be stored.", "署名鍵を保管できませんでした。"),
         ("The stack went below empty.", "スタックが空を下回りました。"),
+        ("The state a rollback would need could not be read.", "巻き戻しに要る様子を読めませんでした。"),
         ("The stream expands beyond what this build reads.", "流れが、このビルドの読む範囲を超えて膨らみます。"),
         ("The system random source could not be opened.", "システムの乱数源を開けませんでした。"),
         ("The system random source ran short.", "システムの乱数源が足りませんでした。"),
@@ -11964,6 +12032,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "英字、数字、'.'、'-'、'_' を最大 128 文字まで使ってください。たとえば 'dex.classes' です。"),
         ("Use the form key=value, separated by ';'.", "key=value の形を、';' で区切って使ってください。"),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "外に出すものには標準の起動方式を使うか、android:taskAffinity を空の文字列にして、ほかのどのアプリケーションもそのタスクに加われないようにしてください。"),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "終わるまでお待ちください。死んだ組み立てが残した錠は、十分に古くなれば引き継がれます。"),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "ここに書かれたクラスが周りから読むものは複製されて入ります。ですから書き込んでも外からは見えません。フィールドか、要素ひとつの配列を使ってください。"),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "属性が何を取るかは、フレームワークの言うとおりです。それが取らない値は、端末ではなくここで拒みます。"),
         ("What is written where a class is used is not a class or an interface.", "クラスの使われる場所に書かれているものが、クラスでもインターフェイスでもありません。"),
@@ -12073,6 +12142,7 @@ pub mod speech {
         ("Hands off to", "引き渡し先"),
         ("Header", "ヘッダー"),
         ("Held", "保持"),
+        ("Held by", "握っているもの"),
         ("Id", "識別子"),
         ("Identifier", "識別子"),
         ("Identifiers present", "ある識別子"),
@@ -12302,6 +12372,7 @@ pub mod speech {
         ("A field was never interned.", "필드가 한 번도 갈무리되지 않았습니다."),
         ("A file compiled here holds a class or an interface.", "여기서 엮는 파일은 클래스나 인터페이스를 담습니다."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "여기서 엮는 파일은 클래스, 인터페이스, 열거, 레코드, 주석 형을 담습니다. 무엇을 받고 무엇을 받지 않는지는 Compilers/Java.rs 첫머리에 적혀 있습니다."),
+        ("A file could not be put back the way it was.", "파일을 있던 대로 되돌려 놓지 못했습니다."),
         ("A file in the repository could not be written where it belongs.", "저장소의 파일 하나를 제자리에 쓸 수 없었습니다."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "그 서명 열쇠가 있어야 할 곳은 파일이며, 그것은 이 빌드가 혼자 열 수 있는 열쇠가 아닙니다."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "공유 열쇠가 있어야 할 곳은 파일이며, 그것은 이 빌드가 쓴 열쇠가 아닙니다."),
@@ -12593,6 +12664,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "모르는 구역은 못 본 척하지 않고 알립니다. 걸린 듯 보이면서 걸리지 않은 설정은 빠진 설정보다 나쁘기 때문입니다."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android가 내놓은 DEX 파일은 리틀엔디언뿐이었습니다. 빅엔디언인 것은 다른 플랫폼의 것이거나 상한 것입니다."),
         ("Another application cannot place its own screen inside this one's task.", "다른 앱이 이 앱의 태스크 안에 제 화면을 놓을 수는 없습니다."),
+        ("Another build holds the lock on this tree.", "이 나무의 잠금은 다른 빌드가 쥐고 있습니다."),
         ("Any application on the device can reach an exported component that no permission guards.", "어떤 권한도 지키지 않는, 밖으로 열린 부품에는 기기의 어느 앱이든 닿을 수 있습니다."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "API 30 아래에서는 플랫폼이 v2 서명을 요구하지 않고, 맨글을 기본으로 허락하며, 위 규칙이 전제하는 범위 저장소와 하드웨어가 받쳐 주는 열쇠 보호가 없습니다."),
         ("Both sides of an and or an or want booleans.", "and나 or의 양쪽은 참거짓 값을 바랍니다."),
@@ -12929,6 +13001,7 @@ pub mod speech {
         ("The keys folder could not be made.", "열쇠 폴더를 만들지 못했습니다."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "누가 무엇을 설치했는지의 목록은 그 사람에 대해 아주 많은 것을 말합니다. 그 전부를 읽는 것이야말로 추적 라이브러리가 사람의 윤곽을 그리는 방법입니다. Android는 API 30에서 이것을 일부러 좁혔습니다."),
         ("The locale a device falls back to was not chosen.", "기기가 되돌아갈 로캘을 고르지 않았습니다."),
+        ("The lock could not be taken.", "잠금을 쥐지 못했습니다."),
         ("The loop variable does not match what is walked over.", "되풀이 변수가 걷는 대상과 맞지 않습니다."),
         ("The magic is not terminated.", "마법수가 끝맺어지지 않았습니다."),
         ("The manifest could not be read.", "매니페스트를 읽지 못했습니다."),
@@ -12979,6 +13052,7 @@ pub mod speech {
         ("The project's settings could not be read.", "프로젝트의 설정을 읽지 못했습니다."),
         ("The project's settings could not be written.", "프로젝트의 설정을 쓰지 못했습니다."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "공개 지수는 가림이 세워진 바탕이며, 여기서는 가림 없이 아무것도 서명하지 않습니다."),
+        ("The record a rollback would need is larger than the quota allows.", "되돌리기에 필요한 기록이 몫이 허락하는 것보다 큽니다."),
         ("The resource folder could not be made.", "자원 폴더를 만들지 못했습니다."),
         ("The resource table could not be built.", "자원 표를 엮지 못했습니다."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "기기 위의 실행 환경에는 모듈 얼개가 없습니다. 클래스는 저마다 그것을 받은 클래스 로더가 찾습니다. 여기서는 패키지와 import가 모든 일을 합니다."),
@@ -12994,6 +13068,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "서명 덩이의 두 크기 칸이 어긋납니다."),
         ("The signing key could not be stored.", "서명 열쇠를 두지 못했습니다."),
         ("The stack went below empty.", "스택이 빈 것보다 아래로 내려갔습니다."),
+        ("The state a rollback would need could not be read.", "되돌리기에 필요한 상태를 읽지 못했습니다."),
         ("The stream expands beyond what this build reads.", "흐름이 이 빌드가 읽는 데를 넘어 부풉니다."),
         ("The system random source could not be opened.", "시스템의 무작위 샘을 열지 못했습니다."),
         ("The system random source ran short.", "시스템의 무작위 샘이 모자랐습니다."),
@@ -13050,6 +13125,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "글자, 숫자, '.', '-', '_'를 128자까지 쓰십시오. 이를테면 'dex.classes'입니다."),
         ("Use the form key=value, separated by ';'.", "key=value 꼴을 ';'로 나누어 쓰십시오."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "밖으로 여는 것에는 표준 띄우기 방식을 쓰거나, android:taskAffinity를 빈 문자열로 두어 다른 어느 앱도 그 태스크에 끼어들지 못하게 하십시오."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "끝날 때까지 기다리십시오. 죽은 빌드가 남긴 잠금은 충분히 오래되면 넘겨받습니다."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "여기 적은 클래스가 둘레에서 읽는 것은 베껴 들어옵니다. 그러니 써 넣어도 밖에서는 보이지 않습니다. 필드나 원소 하나짜리 배열을 쓰십시오."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "속성이 무엇을 받는지는 프레임워크가 말하는 그대로이며, 그것이 받지 않는 값은 기기가 아니라 여기서 물리칩니다."),
         ("What is written where a class is used is not a class or an interface.", "클래스가 쓰이는 자리에 적힌 것이 클래스도 인터페이스도 아닙니다."),
@@ -13159,6 +13235,7 @@ pub mod speech {
         ("Hands off to", "넘기는 곳"),
         ("Header", "머리말"),
         ("Held", "지님"),
+        ("Held by", "쥔 쪽"),
         ("Id", "식별자"),
         ("Identifier", "식별자"),
         ("Identifiers present", "있는 식별자"),
@@ -13388,6 +13465,7 @@ pub mod speech {
         ("A field was never interned.", "एक क्षेत्र कभी अंतर्निहित नहीं किया गया।"),
         ("A file compiled here holds a class or an interface.", "यहाँ संकलित होने वाली फ़ाइल एक वर्ग या एक अंतरापृष्ठ रखती है।"),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "यहाँ संकलित होने वाली फ़ाइल वर्ग, अंतरापृष्ठ, गणन, अभिलेख और टिप्पणी-प्रकार रखती है। क्या लिया जाता है और क्या नहीं, यह Compilers/Java.rs के आरंभ में लिखा है।"),
+        ("A file could not be put back the way it was.", "एक फ़ाइल को जैसी थी वैसी वापस नहीं रखा जा सका।"),
         ("A file in the repository could not be written where it belongs.", "भंडार की एक फ़ाइल वहाँ नहीं लिखी जा सकी जहाँ उसका स्थान है।"),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "उस हस्ताक्षर कुंजी का ठिकाना एक फ़ाइल है, और वह ऐसी कुंजी नहीं जिसे यह बनावट अकेले खोल सके।"),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "साझा कुंजी का ठिकाना एक फ़ाइल है, और वह ऐसी कुंजी नहीं जिसे इस बनावट ने लिखा हो।"),
@@ -13679,6 +13757,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "अनजान खंड को अनदेखा करने के बजाय बताया जाता है, क्योंकि जो व्यवस्थाएँ लागू दिखें पर लागू न हों, वे अनुपस्थित व्यवस्थाओं से बुरी हैं।"),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android ने कभी केवल लघु-अंत्य DEX फ़ाइलें ही दी हैं। बृहद्-अंत्य वाली या तो किसी दूसरे मंच की है या बिगड़ी हुई।"),
         ("Another application cannot place its own screen inside this one's task.", "कोई दूसरा ऐप्लिकेशन अपना परदा इसके कार्य के भीतर नहीं रख सकता।"),
+        ("Another build holds the lock on this tree.", "इस वृक्ष का ताला कोई दूसरा निर्माण पकड़े हुए है।"),
         ("Any application on the device can reach an exported component that no permission guards.", "जिस निर्यातित घटक की रखवाली कोई अनुमति नहीं करती, उस तक उपकरण का हर ऐप्लिकेशन पहुँच सकता है।"),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "API 30 से नीचे मंच v2 हस्ताक्षर नहीं माँगता, तयशुदा रूप से सादा पाठ की छूट देता है, और उस सीमित भंडारण तथा हार्डवेयर-समर्थित कुंजी-सुरक्षा से रहित है जिन्हें ऊपर के नियम मानकर चलते हैं।"),
         ("Both sides of an and or an or want booleans.", "and या or के दोनों पक्ष बूलियन चाहते हैं।"),
@@ -14015,6 +14094,7 @@ pub mod speech {
         ("The keys folder could not be made.", "कुंजियों का फ़ोल्डर बनाया नहीं जा सका।"),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "किसी ने क्या-क्या लगा रखा है इसकी सूची उसके बारे में बहुत कुछ कहती है, और उस सबको पढ़ना ही वह तरीका है जिससे अनुरेखण-पुस्तकालय किसी का ख़ाका बनाते हैं। Android ने API 30 में इसे जान-बूझकर सँकरा किया।"),
         ("The locale a device falls back to was not chosen.", "जिस लोकेल पर उपकरण लौटता है वह चुना नहीं गया।"),
+        ("The lock could not be taken.", "ताला नहीं लिया जा सका।"),
         ("The loop variable does not match what is walked over.", "चक्र का चर उससे मेल नहीं खाता जिस पर चला जा रहा है।"),
         ("The magic is not terminated.", "जादू-चिह्न समाप्त नहीं किया गया।"),
         ("The manifest could not be read.", "मैनिफ़ेस्ट पढ़ा नहीं जा सका।"),
@@ -14065,6 +14145,7 @@ pub mod speech {
         ("The project's settings could not be read.", "परियोजना की व्यवस्थाएँ पढ़ी नहीं जा सकीं।"),
         ("The project's settings could not be written.", "परियोजना की व्यवस्थाएँ लिखी नहीं जा सकीं।"),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "सार्वजनिक घातांक ही वह नींव है जिस पर ओट खड़ी है, और यहाँ बिना ओट के कुछ भी हस्ताक्षरित नहीं होता।"),
+        ("The record a rollback would need is larger than the quota allows.", "वापसी के लिए जो अभिलेख चाहिए वह कोटे की अनुमति से बड़ा है।"),
         ("The resource folder could not be made.", "संसाधन का फ़ोल्डर बनाया नहीं जा सका।"),
         ("The resource table could not be built.", "संसाधन-सारणी बनाई नहीं जा सकी।"),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "किसी उपकरण के क्रियाकाल में कोई मॉड्यूल-तंत्र नहीं होता: हर वर्ग को वही वर्ग-लादक ढूँढ़ता है जिसे वह दिया गया था। यहाँ सारा काम पैकेज और आयात करते हैं।"),
@@ -14080,6 +14161,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "हस्ताक्षर-खंड के दोनों आकार-क्षेत्र असहमत हैं।"),
         ("The signing key could not be stored.", "हस्ताक्षर कुंजी संचित नहीं की जा सकी।"),
         ("The stack went below empty.", "ढेर खाली से भी नीचे चला गया।"),
+        ("The state a rollback would need could not be read.", "वापसी के लिए जो स्थिति चाहिए वह पढ़ी नहीं जा सकी।"),
         ("The stream expands beyond what this build reads.", "धारा उससे आगे फैलती है जितना यह बनावट पढ़ती है।"),
         ("The system random source could not be opened.", "तंत्र का यादृच्छिक स्रोत खोला नहीं जा सका।"),
         ("The system random source ran short.", "तंत्र का यादृच्छिक स्रोत कम पड़ गया।"),
@@ -14136,6 +14218,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "अक्षर, अंक, '.', '-' और '_' लीजिए, अधिक से अधिक 128 अक्षर, उदाहरण के लिए 'dex.classes'।"),
         ("Use the form key=value, separated by ';'.", "key=value का रूप लीजिए, ';' से अलग करके।"),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "जो भी निर्यात हो उसके लिए मानक प्रारंभ-विधि लीजिए, या android:taskAffinity को खाली स्ट्रिंग कीजिए ताकि कोई दूसरा ऐप्लिकेशन उसके कार्य में शामिल न हो सके।"),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "उसके समाप्त होने की प्रतीक्षा करें। मरे हुए निर्माण का छोड़ा ताला पर्याप्त पुराना होते ही ले लिया जाता है।"),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "यहाँ लिखा गया वर्ग अपने आसपास से जो पढ़ता है वह नकल होकर भीतर आता है, इसलिए लिखने पर वह बाहर दिखाई नहीं देगा। कोई क्षेत्र लीजिए, या एक तत्व की सरणी।"),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "कोई गुण क्या लेता है यह वही है जो ढाँचा कहता है, और जो मान वह न ले उसे उपकरण के बजाय यहीं मना कर दिया जाता है।"),
         ("What is written where a class is used is not a class or an interface.", "जहाँ किसी वर्ग का उपयोग होता है वहाँ जो लिखा है वह न वर्ग है न अंतरापृष्ठ।"),
@@ -14245,6 +14328,7 @@ pub mod speech {
         ("Hands off to", "किसे सौंपता है"),
         ("Header", "शीर्षक"),
         ("Held", "रखा गया"),
+        ("Held by", "पकड़े हुए"),
         ("Id", "पहचान"),
         ("Identifier", "पहचानकर्ता"),
         ("Identifiers present", "मौजूद पहचानकर्ता"),
@@ -14474,6 +14558,7 @@ pub mod speech {
         ("A field was never interned.", "Sebuah ruas tidak pernah disimpan ke lumbung untai."),
         ("A file compiled here holds a class or an interface.", "Berkas yang dibangun di sini memuat sebuah kelas atau antarmuka."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Berkas yang dibangun di sini memuat kelas, antarmuka, enum, record dan jenis anotasi. Apa yang diterima dan tidak ditulis di awal Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Sebuah berkas tidak dapat dikembalikan seperti semula."),
         ("A file in the repository could not be written where it belongs.", "Sebuah berkas dalam gudang tidak dapat ditulis di tempat yang semestinya."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Kunci penanda tangan itu semestinya berupa berkas, dan itu bukan kunci yang bisa dibuka bangunan ini sendirian."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "Kunci bersama itu semestinya berupa berkas, dan itu bukan kunci yang ditulis bangunan ini."),
@@ -14765,6 +14850,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Bagian yang tidak dikenal dilaporkan alih-alih diabaikan, sebab setelan yang tampak berlaku padahal tidak lebih buruk daripada setelan yang hilang."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android hanya pernah mengeluarkan berkas DEX little-endian. Yang big-endian entah milik platform lain entah rusak."),
         ("Another application cannot place its own screen inside this one's task.", "Aplikasi lain tidak bisa menaruh layarnya sendiri di dalam tugas aplikasi ini."),
+        ("Another build holds the lock on this tree.", "Kunci pohon ini dipegang bangunan lain."),
         ("Any application on the device can reach an exported component that no permission guards.", "Aplikasi mana pun di perangkat bisa menjangkau komponen terekspor yang tidak dijaga izin apa pun."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Di bawah API 30 platform tidak mewajibkan tanda tangan v2, mengizinkan teks terang secara bawaan, dan tidak punya penyimpanan berlingkup serta perlindungan kunci bersandar perangkat keras yang diandaikan aturan di atas."),
         ("Both sides of an and or an or want booleans.", "Kedua sisi and atau or menginginkan boolean."),
@@ -15101,6 +15187,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Map kunci tidak bisa dibuat."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "Daftar apa saja yang dipasang seseorang mengatakan banyak hal tentangnya, dan membaca semuanya adalah cara pustaka pelacak menyusun profil. Android sengaja mempersempit ini di API 30."),
         ("The locale a device falls back to was not chosen.", "Lokal tempat sebuah perangkat berbalik belum dipilih."),
+        ("The lock could not be taken.", "Kunci itu tidak dapat diambil."),
         ("The loop variable does not match what is walked over.", "Variabel putaran tidak cocok dengan yang ditelusuri."),
         ("The magic is not terminated.", "Angka ajaibnya tidak diakhiri."),
         ("The manifest could not be read.", "Manifes tidak bisa dibaca."),
@@ -15151,6 +15238,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Setelan proyek tidak bisa dibaca."),
         ("The project's settings could not be written.", "Setelan proyek tidak bisa ditulis."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Eksponen publik adalah dasar penyamaran itu dibangun, dan tidak ada di sini yang menandatangani tanpa penyamaran."),
+        ("The record a rollback would need is larger than the quota allows.", "Catatan yang diperlukan sebuah pembatalan lebih besar daripada yang diizinkan jatah."),
         ("The resource folder could not be made.", "Map sumber daya tidak bisa dibuat."),
         ("The resource table could not be built.", "Tabel sumber daya tidak bisa dibangun."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Runtime di sebuah perangkat tidak punya sistem modul: setiap kelas ditemukan oleh pemuat kelas yang diberi kelas itu. Paket dan impor melakukan semua pekerjaannya di sini."),
@@ -15166,6 +15254,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Dua ruas ukuran bongkah tanda tangan berselisih."),
         ("The signing key could not be stored.", "Kunci penanda tangan tidak bisa disimpan."),
         ("The stack went below empty.", "Tumpukan turun di bawah kosong."),
+        ("The state a rollback would need could not be read.", "Keadaan yang diperlukan sebuah pembatalan tidak dapat dibaca."),
         ("The stream expands beyond what this build reads.", "Arus mengembang melampaui yang dibaca bangunan ini."),
         ("The system random source could not be opened.", "Sumber acak sistem tidak bisa dibuka."),
         ("The system random source ran short.", "Sumber acak sistem kehabisan."),
@@ -15222,6 +15311,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Pakai huruf, angka, '.', '-' dan '_', sampai 128 aksara, misalnya 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Pakai bentuk key=value, dipisah ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Pakai mode peluncuran standar untuk apa pun yang diekspor, atau setel android:taskAffinity ke untai kosong supaya tidak ada aplikasi lain yang bisa bergabung ke tugasnya."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Tunggu sampai selesai. Kunci yang ditinggalkan bangunan yang mati diambil alih begitu cukup tua."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Apa yang dibaca kelas yang ditulis di sini dari sekelilingnya disalin masuk, jadi penulisan tidak akan terlihat dari luar. Pakai sebuah ruas, atau larik berisi satu."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Apa yang diterima sebuah atribut adalah apa yang dikatakan kerangka kerja, dan nilai yang tidak diterimanya ditolak di sini, bukan oleh perangkat."),
         ("What is written where a class is used is not a class or an interface.", "Yang ditulis di tempat sebuah kelas dipakai bukan kelas maupun antarmuka."),
@@ -15331,6 +15421,7 @@ pub mod speech {
         ("Hands off to", "Menyerahkan ke"),
         ("Header", "Kepala"),
         ("Held", "Disimpan"),
+        ("Held by", "Dipegang oleh"),
         ("Id", "Id"),
         ("Identifier", "Pengenal"),
         ("Identifiers present", "Pengenal yang ada"),
@@ -15560,6 +15651,7 @@ pub mod speech {
         ("A field was never interned.", "Um campo nunca foi internado."),
         ("A file compiled here holds a class or an interface.", "Um arquivo compilado aqui guarda uma classe ou uma interface."),
         ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Um arquivo compilado aqui guarda classes, interfaces, enums, records e tipos de anotação. O que é e o que não é aceito está escrito no topo de Compilers/Java.rs."),
+        ("A file could not be put back the way it was.", "Um arquivo não pôde ser reposto como estava."),
         ("A file in the repository could not be written where it belongs.", "Um arquivo do repositório não pôde ser gravado onde pertence."),
         ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "Essa chave de assinatura deveria estar num arquivo, e não é uma chave que esta compilação consiga abrir sozinha."),
         ("A file is where the shared key belongs, and it is not a key this build wrote.", "A chave compartilhada deveria estar num arquivo, e não é uma chave que esta compilação tenha escrito."),
@@ -15851,6 +15943,7 @@ pub mod speech {
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Uma seção desconhecida é relatada em vez de ignorada, porque ajustes que parecem valer e não valem são piores que ajustes que faltam."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "O Android só chegou a lançar arquivos DEX little-endian. Um big-endian ou é de outra plataforma ou está danificado."),
         ("Another application cannot place its own screen inside this one's task.", "Outro aplicativo não pode colocar a própria tela dentro da tarefa deste."),
+        ("Another build holds the lock on this tree.", "Outra construção detém a trava desta árvore."),
         ("Any application on the device can reach an exported component that no permission guards.", "Qualquer aplicativo do aparelho alcança um componente exportado que permissão nenhuma protege."),
         ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "Abaixo da API 30 a plataforma não exige assinatura v2, permite texto em claro por padrão, e não tem o armazenamento com escopo nem as proteções de chave apoiadas em hardware que as regras acima pressupõem."),
         ("Both sides of an and or an or want booleans.", "Os dois lados de um and ou de um or querem booleanos."),
@@ -16187,6 +16280,7 @@ pub mod speech {
         ("The keys folder could not be made.", "Não deu para criar a pasta de chaves."),
         ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "A lista do que alguém tem instalado diz muito sobre a pessoa, e ler tudo isso é como bibliotecas de rastreamento montam um perfil. O Android estreitou isso de propósito na API 30."),
         ("The locale a device falls back to was not chosen.", "A localidade para a qual um aparelho recua não foi escolhida."),
+        ("The lock could not be taken.", "A trava não pôde ser tomada."),
         ("The loop variable does not match what is walked over.", "A variável do laço não bate com o que está sendo percorrido."),
         ("The magic is not terminated.", "O número mágico não está terminado."),
         ("The manifest could not be read.", "Não deu para ler o manifesto."),
@@ -16237,6 +16331,7 @@ pub mod speech {
         ("The project's settings could not be read.", "Não deu para ler os ajustes do projeto."),
         ("The project's settings could not be written.", "Não deu para escrever os ajustes do projeto."),
         ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "O expoente público é a base sobre a qual a ocultação é construída, e nada aqui assina sem ocultação."),
+        ("The record a rollback would need is larger than the quota allows.", "O registro de que uma reversão precisaria é maior do que a cota permite."),
         ("The resource folder could not be made.", "Não deu para criar a pasta de recursos."),
         ("The resource table could not be built.", "Não deu para montar a tabela de recursos."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "O runtime num aparelho não tem sistema de módulos: toda classe é achada pelo class loader a que ela foi entregue. Pacotes e imports fazem todo o trabalho aqui."),
@@ -16252,6 +16347,7 @@ pub mod speech {
         ("The signing block's two size fields disagree.", "Os dois campos de tamanho do bloco de assinatura discordam."),
         ("The signing key could not be stored.", "Não deu para guardar a chave de assinatura."),
         ("The stack went below empty.", "A pilha foi abaixo de vazia."),
+        ("The state a rollback would need could not be read.", "O estado de que uma reversão precisaria não pôde ser lido."),
         ("The stream expands beyond what this build reads.", "O fluxo se expande além do que esta compilação lê."),
         ("The system random source could not be opened.", "Não deu para abrir a fonte de aleatoriedade do sistema."),
         ("The system random source ran short.", "A fonte de aleatoriedade do sistema ficou curta."),
@@ -16308,6 +16404,7 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "Use letras, algarismos, '.', '-' e '_', até 128 caracteres, por exemplo 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "Use a forma chave=valor, separada por ';'."),
         ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Use o modo de inicialização padrão para qualquer coisa exportada, ou deixe android:taskAffinity como string vazia para que nenhum outro aplicativo possa entrar na tarefa dela."),
+        ("Wait for it to finish. A lock left behind by a build that died is taken over once it is old enough.", "Espere ela terminar. Uma trava deixada por uma construção morta é tomada assim que fica velha o bastante."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "O que uma classe escrita aqui lê do que está em volta é copiado para dentro, então uma escrita não seria vista de fora. Use um campo, ou um vetor de um."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "O que um atributo aceita é o que o framework diz que ele aceita, e um valor que ele não aceita é recusado aqui e não pelo aparelho."),
         ("What is written where a class is used is not a class or an interface.", "O que está escrito onde uma classe é usada não é uma classe nem uma interface."),
@@ -16417,6 +16514,7 @@ pub mod speech {
         ("Hands off to", "Passa para"),
         ("Header", "Cabeçalho"),
         ("Held", "Guardado"),
+        ("Held by", "Retido por"),
         ("Id", "Id"),
         ("Identifier", "Identificador"),
         ("Identifiers present", "Identificadores presentes"),
@@ -19167,11 +19265,194 @@ pub mod vfs {
         pub refusals: u64,
     }
 
+    pub const PARTIAL_MARK: &str = "omni-partial";
+
+    pub const LOCK_MARK: &str = "omni-lock";
+
+    pub const LOCK_STALE_SECONDS: u64 = 15 * 60;
+
+    fn seconds_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn path_failure(code: &str, message: &str, at: &Path, error: std::io::Error) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Recoverable,
+            "core.vfs",
+            message,
+        )
+        .with_context(format!("Path: {}", at.display()))
+        .with_context(format!("Cause: {error}"))
+    }
+
+    #[derive(Debug)]
+    pub struct Lock {
+        held: Option<PathBuf>,
+    }
+
+    impl Lock {
+        pub fn take(where_at: &Path, named: &str) -> Result<Lock, Diagnostic> {
+            Self::take_after(where_at, named, LOCK_STALE_SECONDS)
+        }
+
+        pub fn take_after(where_at: &Path, named: &str, stale: u64) -> Result<Lock, Diagnostic> {
+            let at = where_at.join(format!("{named}.{LOCK_MARK}"));
+            fs::create_dir_all(where_at).map_err(|error| {
+                path_failure("EV040", "The lock could not be taken.", &at, error)
+            })?;
+
+            for round in 0..2 {
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&at)
+                {
+                    Ok(mut file) => {
+                        let said = format!("{}\n{}\n", std::process::id(), seconds_now());
+                        file.write_all(said.as_bytes())
+                            .and_then(|()| file.sync_all())
+                            .map_err(|error| {
+                                path_failure("EV040", "The lock could not be taken.", &at, error)
+                            })?;
+                        return Ok(Lock { held: Some(at) });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if round == 0 && Self::is_stale(&at, stale) {
+                            let _ = fs::remove_file(&at);
+                            continue;
+                        }
+                        return Err(Diagnostic::new(
+                            "EV041",
+                            Severity::Error,
+                            FailureClass::Recoverable,
+                            "core.vfs",
+                            "Another build holds the lock on this tree.",
+                        )
+                        .with_context(format!("Path: {}", at.display()))
+                        .with_context(format!("Held by: {}", Self::holder(&at)))
+                        .with_suggestion(
+                            "Wait for it to finish. A lock left behind by a build that \
+                             died is taken over once it is old enough.",
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(path_failure(
+                            "EV040",
+                            "The lock could not be taken.",
+                            &at,
+                            error,
+                        ))
+                    }
+                }
+            }
+            Err(Diagnostic::new(
+                "EV041",
+                Severity::Error,
+                FailureClass::Recoverable,
+                "core.vfs",
+                "Another build holds the lock on this tree.",
+            )
+            .with_context(format!("Path: {}", at.display())))
+        }
+
+        fn holder(at: &Path) -> String {
+            fs::read_to_string(at)
+                .ok()
+                .and_then(|said| said.lines().next().map(|first| first.trim().to_string()))
+                .filter(|first| !first.is_empty())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+
+        fn is_stale(at: &Path, stale: u64) -> bool {
+            let Ok(found) = fs::metadata(at) else {
+                return true;
+            };
+            let Ok(changed) = found.modified() else {
+                return false;
+            };
+            changed
+                .elapsed()
+                .map(|since| since.as_secs() >= stale)
+                .unwrap_or(false)
+        }
+
+        pub fn path(&self) -> Option<&Path> {
+            self.held.as_deref()
+        }
+
+        pub fn release(&mut self) {
+            if let Some(at) = self.held.take() {
+                let _ = fs::remove_file(at);
+            }
+        }
+    }
+
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    pub fn sweep_partials(where_at: &Path, older_than: u64) -> Result<u64, Diagnostic> {
+        fn walk(here: &Path, older_than: u64, depth: usize, swept: &mut u64) {
+            if depth > MAX_SEGMENTS {
+                return;
+            }
+            let Ok(listed) = fs::read_dir(here) else {
+                return;
+            };
+            for found in listed.flatten() {
+                let at = found.path();
+                if at.is_dir() {
+                    walk(&at, older_than, depth + 1, swept);
+                    continue;
+                }
+                let named = at
+                    .file_name()
+                    .and_then(|one| one.to_str())
+                    .unwrap_or_default();
+                if !named.ends_with(PARTIAL_MARK) {
+                    continue;
+                }
+                let old = found
+                    .metadata()
+                    .ok()
+                    .and_then(|about| about.modified().ok())
+                    .and_then(|when| when.elapsed().ok())
+                    .map(|since| since.as_secs() >= older_than)
+                    .unwrap_or(true);
+                if old && fs::remove_file(&at).is_ok() {
+                    *swept += 1;
+                }
+            }
+        }
+
+        if !where_at.is_dir() {
+            return Ok(0);
+        }
+        let mut swept = 0u64;
+        walk(where_at, older_than, 0, &mut swept);
+        Ok(swept)
+    }
+
+    #[derive(Debug, Default)]
+    struct Journal {
+        open: bool,
+        kept: Vec<(PathBuf, Option<Vec<u8>>)>,
+        bytes: u64,
+    }
+
     #[derive(Debug)]
     pub struct VirtualFs {
         mounts: Vec<Mount>,
         quota: Quota,
         usage: Usage,
+        journal: Journal,
     }
 
     impl VirtualFs {
@@ -19180,6 +19461,7 @@ pub mod vfs {
                 mounts: Vec::new(),
                 quota,
                 usage: Usage::default(),
+                journal: Journal::default(),
             }
         }
 
@@ -19258,6 +19540,91 @@ pub mod vfs {
 
         pub fn quota(&self) -> Quota {
             self.quota
+        }
+
+        pub fn begin(&mut self) {
+            self.journal.open = true;
+            self.journal.kept.clear();
+            self.journal.bytes = 0;
+        }
+
+        pub fn recording(&self) -> bool {
+            self.journal.open
+        }
+
+        pub fn commit(&mut self) -> usize {
+            let held = self.journal.kept.len();
+            self.journal.open = false;
+            self.journal.kept.clear();
+            self.journal.bytes = 0;
+            held
+        }
+
+        pub fn rollback(&mut self) -> Result<usize, Diagnostic> {
+            self.journal.open = false;
+            self.journal.bytes = 0;
+            let kept: Vec<(PathBuf, Option<Vec<u8>>)> = self.journal.kept.drain(..).rev().collect();
+            let mut put_back = 0usize;
+            let mut trouble: Option<Diagnostic> = None;
+            for (at, before) in kept {
+                let done = match &before {
+                    Some(bytes) => fs::write(&at, bytes),
+                    None => match fs::remove_file(&at) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        other => other,
+                    },
+                };
+                match done {
+                    Ok(()) => put_back += 1,
+                    Err(error) => {
+                        if trouble.is_none() {
+                            trouble = Some(path_failure(
+                                "EV042",
+                                "A file could not be put back the way it was.",
+                                &at,
+                                error,
+                            ));
+                        }
+                    }
+                }
+            }
+            match trouble {
+                Some(error) => Err(error),
+                None => Ok(put_back),
+            }
+        }
+
+        fn keep(&mut self, at: &Path) -> Result<(), Diagnostic> {
+            if !self.journal.open || self.journal.kept.iter().any(|(held, _)| held == at) {
+                return Ok(());
+            }
+            let before = match fs::read(at) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(path_failure(
+                        "EV043",
+                        "The state a rollback would need could not be read.",
+                        at,
+                        error,
+                    ))
+                }
+            };
+            let weight = before.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
+            if self.journal.bytes + weight > self.quota.max_written_bytes {
+                return Err(Diagnostic::new(
+                    "EV044",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.vfs",
+                    "The record a rollback would need is larger than the quota allows.",
+                )
+                .with_context(format!("Written: {} bytes", self.journal.bytes))
+                .with_context(format!("Limit: {} bytes", self.quota.max_written_bytes)));
+            }
+            self.journal.bytes += weight;
+            self.journal.kept.push((at.to_path_buf(), before));
+            Ok(())
         }
 
         pub fn read(
@@ -19346,6 +19713,7 @@ pub mod vfs {
             }
 
             let resolved = self.resolve(mount, path, true)?;
+            self.keep(&resolved)?;
 
             if let Some(parent) = resolved.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
@@ -19355,7 +19723,7 @@ pub mod vfs {
             }
 
             let temporary = resolved.with_extension(format!(
-                "{}omni-partial",
+                "{}{PARTIAL_MARK}",
                 resolved.extension().map(|_| ".").unwrap_or_default()
             ));
 
@@ -72631,6 +72999,169 @@ Viewbinding   = false
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn a_lock_is_held_by_one_holder_at_a_time() {
+        let root = temp_directory("omni-vfs-lock");
+        let first = super::vfs::Lock::take(&root, "build").expect("the lock is taken");
+        assert!(first.path().is_some_and(|at| at.is_file()));
+
+        let second = super::vfs::Lock::take(&root, "build").unwrap_err();
+        assert_eq!(second.code, "EV041");
+
+        let elsewhere = super::vfs::Lock::take(&root, "other").expect("a second name is free");
+        drop(elsewhere);
+
+        drop(first);
+        let again = super::vfs::Lock::take(&root, "build").expect("the lock is free again");
+        assert!(again.path().is_some_and(|at| at.is_file()));
+        drop(again);
+        assert!(!root.join("build.omni-lock").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_lock_a_dead_build_left_behind_is_taken_over() {
+        let root = temp_directory("omni-vfs-stale");
+        let held = super::vfs::Lock::take(&root, "build").expect("the lock is taken");
+        std::mem::forget(held);
+
+        assert_eq!(
+            super::vfs::Lock::take_after(&root, "build", u64::MAX)
+                .unwrap_err()
+                .code,
+            "EV041"
+        );
+        let taken = super::vfs::Lock::take_after(&root, "build", 0).expect("a stale lock is taken");
+        assert!(taken.path().is_some());
+        drop(taken);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_rollback_puts_back_what_a_build_changed() {
+        let root = temp_directory("omni-vfs-rollback");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("kept.txt"), b"first").unwrap();
+
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("project", &root, Access::ReadWrite).unwrap();
+        let mut policy = policy_with(&[Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        assert!(!vfs.recording());
+        vfs.begin();
+        assert!(vfs.recording());
+
+        let kept = VirtualPath::parse("kept.txt").unwrap();
+        let made = VirtualPath::parse("deep/made.txt").unwrap();
+        vfs.write_atomic(&mut ctx, "plugin.test", "project", &kept, b"second")
+            .expect("the file is written");
+        vfs.write_atomic(&mut ctx, "plugin.test", "project", &made, b"new")
+            .expect("the file is written");
+        assert_eq!(std::fs::read(root.join("kept.txt")).unwrap(), b"second");
+        assert!(root.join("deep/made.txt").is_file());
+
+        assert_eq!(vfs.rollback().expect("the rollback runs"), 2);
+        assert!(!vfs.recording());
+        assert_eq!(std::fs::read(root.join("kept.txt")).unwrap(), b"first");
+        assert!(!root.join("deep/made.txt").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_commit_keeps_what_a_build_changed() {
+        let root = temp_directory("omni-vfs-commit");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("kept.txt"), b"first").unwrap();
+
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("project", &root, Access::ReadWrite).unwrap();
+        let mut policy = policy_with(&[Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        vfs.begin();
+        let kept = VirtualPath::parse("kept.txt").unwrap();
+        vfs.write_atomic(&mut ctx, "plugin.test", "project", &kept, b"second")
+            .unwrap();
+        vfs.write_atomic(&mut ctx, "plugin.test", "project", &kept, b"third")
+            .unwrap();
+        assert_eq!(vfs.commit(), 1);
+        assert_eq!(std::fs::read(root.join("kept.txt")).unwrap(), b"third");
+        assert_eq!(vfs.rollback().expect("a closed journal undoes nothing"), 0);
+        assert_eq!(std::fs::read(root.join("kept.txt")).unwrap(), b"third");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn what_a_rollback_would_need_is_bounded_by_the_quota() {
+        let root = temp_directory("omni-vfs-journal-quota");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("big.bin"), vec![7u8; 4096]).unwrap();
+
+        let mut vfs = VirtualFs::new(Quota {
+            max_file_bytes: 64 * 1024,
+            max_written_bytes: 1024,
+        });
+        vfs.mount("project", &root, Access::ReadWrite).unwrap();
+        let mut policy = policy_with(&[Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        vfs.begin();
+        let big = VirtualPath::parse("big.bin").unwrap();
+        let error = vfs
+            .write_atomic(&mut ctx, "plugin.test", "project", &big, b"small")
+            .unwrap_err();
+        assert_eq!(error.code, "EV044");
+        assert_eq!(
+            std::fs::read(root.join("big.bin")).unwrap(),
+            vec![7u8; 4096]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_partial_file_a_dead_write_left_behind_is_swept() {
+        let root = temp_directory("omni-vfs-sweep");
+        std::fs::create_dir_all(root.join("deep")).unwrap();
+        std::fs::write(root.join("a.txt.omni-partial"), b"half").unwrap();
+        std::fs::write(root.join("deep/b.bin.omni-partial"), b"half").unwrap();
+        std::fs::write(root.join("deep/keep.txt"), b"whole").unwrap();
+
+        assert_eq!(
+            super::vfs::sweep_partials(&root, u64::MAX).expect("the sweep runs"),
+            0,
+            "a partial younger than the age given was swept"
+        );
+        assert_eq!(
+            super::vfs::sweep_partials(&root, 0).expect("the sweep runs"),
+            2
+        );
+        assert!(!root.join("a.txt.omni-partial").exists());
+        assert!(!root.join("deep/b.bin.omni-partial").exists());
+        assert_eq!(std::fs::read(root.join("deep/keep.txt")).unwrap(), b"whole");
+        assert_eq!(
+            super::vfs::sweep_partials(&root.join("nowhere"), 0).expect("a missing tree is empty"),
+            0
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
