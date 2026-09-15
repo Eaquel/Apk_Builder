@@ -256,9 +256,8 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 23,
         summary: "The ZIP container an APK is: read, validated, and written deterministically. Entries are compressed with this build\u{2019}s own DEFLATE where it saves bytes, while the resource table and native libraries stay stored and aligned because the platform maps them in place. unzip extracts what this writes byte for byte and zipalign agrees on the alignment.",
         missing: &[
-            "No ZIP64, so four gigabytes and 65535 entries are hard limits.",
             "One compression setting, chosen here rather than by the caller, and no store-only override for a caller who wants one.",
-            "No data descriptors and no streaming: every entry is held whole in memory while the archive is built.",
+            "No data descriptors and no streaming: every entry is held whole in memory while the archive is built, so ZIP64 lifts the format's limits and not this one's.",
         ],
     },
     Subsystem {
@@ -1350,6 +1349,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Bir PNG, biçimin kendisi için ayırdığı sekiz baytla başlar. Burada başka hiçbir şey kabul edilmez, çünkü başka hiçbir şey okunmaz."),
         ("A PNG ends with IEND. A file without one was cut short.", "Bir PNG, IEND ile biter. Bunu taşımayan dosya yarıda kesilmiş demektir."),
         ("A UTCTime is not in the form a certificate uses.", "Bir UTCTime, sertifikaların kullandığı biçimde değil."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Bir ZIP64 ek alanı, taşıması gereken boyutlardan kısa."),
+        ("A ZIP64 record is not where the archive says it is.", "Bir ZIP64 kaydı, arşivin söylediği yerde değil."),
         ("A `catch` needs a register a `move-exception` can name.", "Bir `catch`, `move-exception` komutunun adlandırabileceği bir yazmaca ihtiyaç duyar."),
         ("A `switch` covers a range this cannot write.", "Bir `switch`, buranın yazamayacağı bir aralığı kapsıyor."),
         ("A `switch` holds more cases than this can write.", "Bir `switch`, buranın yazabileceğinden çok durum taşıyor."),
@@ -1690,7 +1691,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Bir girdi, arşivin onun için kaydettiği sağlama toplamıyla uyuşmuyor."),
         ("An entry has no name.", "Bir girdinin adı yok."),
         ("An entry is encrypted.", "Bir girdi şifrelenmiş."),
-        ("An entry is larger than the format's 32-bit size field.", "Bir girdi, biçimin 32 bitlik boyut alanından büyük."),
         ("An entry is named differently in its two headers.", "Bir girdi iki başlığında farklı adlandırılmış."),
         ("An entry name climbs out of the archive.", "Bir girdi adı arşivin dışına çıkıyor."),
         ("An entry name contains a backslash.", "Bir girdi adı ters eğik çizgi içeriyor."),
@@ -1706,6 +1706,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Sabitlerinin tamamı adlandırılmış bir enum ya da alt türlerinin tamamı adlandırılmış bir `sealed` tür zaten her durumu karşılar ve `default` gerektirmez."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Bir kaçış ya da karakter sabiti Java'nın yazdığı biçimde değil."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "URI yetkisi dağıtan, dışa açık bir sağlayıcıya, çağıranın erişmemesi gereken dosyaları verdirtilebilir."),
+        ("An extra field states a length the record does not hold.", "Bir ek alan, kaydın taşımadığı bir uzunluk bildiriyor."),
         ("An identifier a library declares could not be added.", "Bir kütüphanenin bildirdiği tanımlayıcı eklenemedi."),
         ("An identifier could not be declared.", "Bir tanımlayıcı bildirilemedi."),
         ("An identifier holds 65536 entries per type.", "Bir tanımlayıcı, tür başına 65536 girdi taşır."),
@@ -2215,7 +2216,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Türü yazın ya da bir değer verin."),
         ("Write the type.", "Türü yazın."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Bir çıktı bağlamasına yazın. Kaynak ağacı bilerek salt okunur bağlanır."),
-        ("ZIP64 is not implemented.", "ZIP64 gerçeklenmemiştir."),
     ];
 
     const TURKISH_WORDS: &[(&str, &str)] = &[
@@ -2435,6 +2435,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Ein PNG beginnt mit den acht Byte, die das Format dafür reserviert. Hier wird nichts anderes angenommen, weil nichts anderes gelesen wird."),
         ("A PNG ends with IEND. A file without one was cut short.", "Ein PNG endet mit IEND. Eine Datei ohne dieses Ende wurde abgeschnitten."),
         ("A UTCTime is not in the form a certificate uses.", "Eine UTCTime hat nicht die Form, die ein Zertifikat verwendet."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Ein ZIP64-Zusatzfeld ist kürzer als die Größen, die es tragen muss."),
+        ("A ZIP64 record is not where the archive says it is.", "Ein ZIP64-Satz liegt nicht dort, wo das Archiv ihn nennt."),
         ("A `catch` needs a register a `move-exception` can name.", "Ein `catch` braucht ein Register, das ein `move-exception` benennen kann."),
         ("A `switch` covers a range this cannot write.", "Ein `switch` deckt einen Bereich ab, den dies nicht schreiben kann."),
         ("A `switch` holds more cases than this can write.", "Ein `switch` enthält mehr Fälle, als dies schreiben kann."),
@@ -2775,7 +2777,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Ein Eintrag stimmt nicht mit der Prüfsumme überein, die das Archiv für ihn festhält."),
         ("An entry has no name.", "Ein Eintrag hat keinen Namen."),
         ("An entry is encrypted.", "Ein Eintrag ist verschlüsselt."),
-        ("An entry is larger than the format's 32-bit size field.", "Ein Eintrag ist größer als das 32-Bit-Größenfeld des Formats."),
         ("An entry is named differently in its two headers.", "Ein Eintrag heißt in seinen beiden Köpfen unterschiedlich."),
         ("An entry name climbs out of the archive.", "Ein Eintragsname führt aus dem Archiv heraus."),
         ("An entry name contains a backslash.", "Ein Eintragsname enthält einen umgekehrten Schrägstrich."),
@@ -2791,6 +2792,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Ein enum, dessen Konstanten alle benannt sind, oder ein `sealed`-Typ, dessen Untertypen es alle sind, deckt bereits alles ab und braucht kein `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Eine Escape-Sequenz oder ein Zeichenliteral hat nicht die Form, die Java schreibt."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Einem exportierten Provider, der URI-Rechte vergibt, lässt sich abringen, einem Aufrufer Zugriff auf Dateien zu geben, die er nicht erreichen sollte."),
+        ("An extra field states a length the record does not hold.", "Ein Zusatzfeld gibt eine Länge an, die der Satz nicht trägt."),
         ("An identifier a library declares could not be added.", "Ein von einer Bibliothek deklarierter Bezeichner konnte nicht hinzugefügt werden."),
         ("An identifier could not be declared.", "Ein Bezeichner konnte nicht deklariert werden."),
         ("An identifier holds 65536 entries per type.", "Ein Bezeichner fasst 65536 Einträge je Typ."),
@@ -3300,7 +3302,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Schreiben Sie den Typ, oder geben Sie ihm einen Wert."),
         ("Write the type.", "Schreiben Sie den Typ."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Schreiben Sie in einen Ausgabe-Einhängepunkt. Ein Quellbaum ist mit Absicht nur lesbar eingehängt."),
-        ("ZIP64 is not implemented.", "ZIP64 ist nicht umgesetzt."),
     ];
 
     const GERMAN_WORDS: &[(&str, &str)] = &[
@@ -3520,6 +3521,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Un PNG empieza con los ocho bytes que el formato le reserva. Aquí no se acepta nada más, porque no se lee nada más."),
         ("A PNG ends with IEND. A file without one was cut short.", "Un PNG termina con IEND. Un archivo sin él quedó cortado."),
         ("A UTCTime is not in the form a certificate uses.", "Un UTCTime no tiene la forma que usa un certificado."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Un campo extra ZIP64 es más corto que los tamaños que debe llevar."),
+        ("A ZIP64 record is not where the archive says it is.", "Un registro ZIP64 no está donde el archivo dice que está."),
         ("A `catch` needs a register a `move-exception` can name.", "Un `catch` necesita un registro que un `move-exception` pueda nombrar."),
         ("A `switch` covers a range this cannot write.", "Un `switch` cubre un rango que esto no puede escribir."),
         ("A `switch` holds more cases than this can write.", "Un `switch` contiene más casos de los que esto puede escribir."),
@@ -3860,7 +3863,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Una entrada no coincide con la suma de verificación que el archivo comprimido registra para ella."),
         ("An entry has no name.", "Una entrada no tiene nombre."),
         ("An entry is encrypted.", "Una entrada está cifrada."),
-        ("An entry is larger than the format's 32-bit size field.", "Una entrada es mayor que el campo de tamaño de 32 bits del formato."),
         ("An entry is named differently in its two headers.", "Una entrada se llama de forma distinta en sus dos cabeceras."),
         ("An entry name climbs out of the archive.", "Un nombre de entrada se sale del archivo comprimido."),
         ("An entry name contains a backslash.", "Un nombre de entrada contiene una barra invertida."),
@@ -3876,6 +3878,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Un enum con todas sus constantes nombradas, o un tipo `sealed` con todos sus subtipos nombrados, ya responde por todo y no necesita `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Un escape o un literal de carácter no tiene la forma con que Java lo escribe."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "A un proveedor exportado que reparte permisos de URI se le puede hacer dar a quien llama acceso a archivos que no debería alcanzar."),
+        ("An extra field states a length the record does not hold.", "Un campo extra declara una longitud que el registro no contiene."),
         ("An identifier a library declares could not be added.", "No se pudo añadir un identificador que declara una biblioteca."),
         ("An identifier could not be declared.", "No se pudo declarar un identificador."),
         ("An identifier holds 65536 entries per type.", "Un identificador contiene 65536 entradas por tipo."),
@@ -4385,7 +4388,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Escriba el tipo, o déle un valor."),
         ("Write the type.", "Escriba el tipo."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Escriba en un punto de montaje de salida. Un árbol de fuentes se monta de solo lectura a propósito."),
-        ("ZIP64 is not implemented.", "ZIP64 no está implementado."),
     ];
 
     const SPANISH_WORDS: &[(&str, &str)] = &[
@@ -4605,6 +4607,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Un PNG commence par les huit octets que le format lui réserve. Rien d'autre n'est accepté ici, parce que rien d'autre n'est lu."),
         ("A PNG ends with IEND. A file without one was cut short.", "Un PNG se termine par IEND. Un fichier qui n'en a pas a été tronqué."),
         ("A UTCTime is not in the form a certificate uses.", "Un UTCTime n'est pas dans la forme qu'utilise un certificat."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Un champ supplémentaire ZIP64 est plus court que les tailles qu il doit porter."),
+        ("A ZIP64 record is not where the archive says it is.", "Un enregistrement ZIP64 n est pas là où l archive le dit."),
         ("A `catch` needs a register a `move-exception` can name.", "Un `catch` a besoin d'un registre qu'un `move-exception` peut nommer."),
         ("A `switch` covers a range this cannot write.", "Un `switch` couvre une plage que ceci ne peut pas écrire."),
         ("A `switch` holds more cases than this can write.", "Un `switch` contient plus de cas que ceci ne peut écrire."),
@@ -4945,7 +4949,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Une entrée ne correspond pas à la somme de contrôle que l'archive enregistre pour elle."),
         ("An entry has no name.", "Une entrée n'a pas de nom."),
         ("An entry is encrypted.", "Une entrée est chiffrée."),
-        ("An entry is larger than the format's 32-bit size field.", "Une entrée est plus grande que le champ de taille 32 bits du format."),
         ("An entry is named differently in its two headers.", "Une entrée porte un nom différent dans ses deux en-têtes."),
         ("An entry name climbs out of the archive.", "Un nom d'entrée sort de l'archive."),
         ("An entry name contains a backslash.", "Un nom d'entrée contient une barre oblique inverse."),
@@ -4961,6 +4964,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Un enum dont toutes les constantes sont nommées, ou un type `sealed` dont tous les sous-types le sont, répond déjà de tout et n'a besoin d'aucun `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Une séquence d'échappement ou un littéral de caractère n'a pas la forme que Java écrit."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Un fournisseur exporté qui distribue des autorisations d'URI peut être amené à donner à un appelant l'accès à des fichiers qu'il ne devrait pas atteindre."),
+        ("An extra field states a length the record does not hold.", "Un champ supplémentaire déclare une longueur que l enregistrement ne porte pas."),
         ("An identifier a library declares could not be added.", "Un identifiant qu'une bibliothèque déclare n'a pas pu être ajouté."),
         ("An identifier could not be declared.", "Un identifiant n'a pas pu être déclaré."),
         ("An identifier holds 65536 entries per type.", "Un identifiant contient 65536 entrées par type."),
@@ -5470,7 +5474,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Écrivez le type, ou donnez-lui une valeur."),
         ("Write the type.", "Écrivez le type."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Écrivez vers un point de montage de sortie. Un arbre de sources est monté en lecture seule à dessein."),
-        ("ZIP64 is not implemented.", "ZIP64 n'est pas implémenté."),
     ];
 
     const FRENCH_WORDS: &[(&str, &str)] = &[
@@ -5693,6 +5696,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Un PNG comincia con gli otto byte che il formato gli riserva. Nient'altro è accettato qui, perché nient'altro è letto."),
         ("A PNG ends with IEND. A file without one was cut short.", "Un PNG finisce con IEND. Un file che non ne ha uno è stato troncato."),
         ("A UTCTime is not in the form a certificate uses.", "Un UTCTime non è nella forma che usa un certificato."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Un campo extra ZIP64 è più corto delle dimensioni che deve portare."),
+        ("A ZIP64 record is not where the archive says it is.", "Un record ZIP64 non è dove l archivio dice che sia."),
         ("A `catch` needs a register a `move-exception` can name.", "Un `catch` ha bisogno di un registro che un `move-exception` possa nominare."),
         ("A `switch` covers a range this cannot write.", "Uno `switch` copre un intervallo che questo non può scrivere."),
         ("A `switch` holds more cases than this can write.", "Uno `switch` contiene più casi di quanti questo possa scriverne."),
@@ -6033,7 +6038,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Una voce non corrisponde alla somma di controllo che l'archivio registra per essa."),
         ("An entry has no name.", "Una voce non ha nome."),
         ("An entry is encrypted.", "Una voce è cifrata."),
-        ("An entry is larger than the format's 32-bit size field.", "Una voce è più grande del campo di dimensione a 32 bit del formato."),
         ("An entry is named differently in its two headers.", "Una voce ha un nome diverso nelle sue due intestazioni."),
         ("An entry name climbs out of the archive.", "Un nome di voce esce dall'archivio."),
         ("An entry name contains a backslash.", "Un nome di voce contiene una barra rovesciata."),
@@ -6049,6 +6053,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Un enum le cui costanti sono tutte nominate, o un tipo `sealed` i cui sottotipi lo sono tutti, risponde già di tutto e non ha bisogno di alcun `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Un escape o un letterale di carattere non ha la forma con cui Java lo scrive."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Un fornitore esportato che distribuisce concessioni di URI può essere indotto a dare a un chiamante accesso a file che non dovrebbe raggiungere."),
+        ("An extra field states a length the record does not hold.", "Un campo extra dichiara una lunghezza che il record non porta."),
         ("An identifier a library declares could not be added.", "Non è stato possibile aggiungere un identificatore che una libreria dichiara."),
         ("An identifier could not be declared.", "Non è stato possibile dichiarare un identificatore."),
         ("An identifier holds 65536 entries per type.", "Un identificatore contiene 65536 voci per tipo."),
@@ -6558,7 +6563,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Scrivete il tipo, oppure dategli un valore."),
         ("Write the type.", "Scrivete il tipo."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Scrivete verso un punto di montaggio di uscita. Un albero di sorgenti è montato in sola lettura di proposito."),
-        ("ZIP64 is not implemented.", "ZIP64 non è implementato."),
     ];
 
     const ITALIAN_WORDS: &[(&str, &str)] = &[
@@ -6781,6 +6785,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Um PNG começa com os oito bytes que o formato reserva para ele. Nada mais é aceito aqui, porque nada mais é lido."),
         ("A PNG ends with IEND. A file without one was cut short.", "Um PNG termina com IEND. Um arquivo sem ele foi truncado."),
         ("A UTCTime is not in the form a certificate uses.", "Um UTCTime não está na forma que um certificado usa."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Um campo extra ZIP64 é mais curto que os tamanhos que tem de levar."),
+        ("A ZIP64 record is not where the archive says it is.", "Um registo ZIP64 não está onde o arquivo diz que está."),
         ("A `catch` needs a register a `move-exception` can name.", "Um `catch` precisa de um registrador que um `move-exception` possa nomear."),
         ("A `switch` covers a range this cannot write.", "Um `switch` cobre um intervalo que isto não consegue escrever."),
         ("A `switch` holds more cases than this can write.", "Um `switch` contém mais casos do que isto consegue escrever."),
@@ -7121,7 +7127,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Uma entrada não confere com a soma de verificação que o arquivo compactado registra para ela."),
         ("An entry has no name.", "Uma entrada não tem nome."),
         ("An entry is encrypted.", "Uma entrada está cifrada."),
-        ("An entry is larger than the format's 32-bit size field.", "Uma entrada é maior que o campo de tamanho de 32 bits do formato."),
         ("An entry is named differently in its two headers.", "Uma entrada tem nome diferente nos seus dois cabeçalhos."),
         ("An entry name climbs out of the archive.", "Um nome de entrada sobe para fora do arquivo compactado."),
         ("An entry name contains a backslash.", "Um nome de entrada contém uma barra invertida."),
@@ -7137,6 +7142,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Um enum cujas constantes estão todas nomeadas, ou um tipo `sealed` cujos subtipos todos estão, já responde por tudo e não precisa de `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Um escape ou um literal de carácter não tem a forma com que Java o escreve."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Um provedor exportado que distribui concessões de URI pode ser levado a dar a um chamador acesso a arquivos que ele não deveria alcançar."),
+        ("An extra field states a length the record does not hold.", "Um campo extra declara um comprimento que o registo não leva."),
         ("An identifier a library declares could not be added.", "Não foi possível adicionar um identificador que uma biblioteca declara."),
         ("An identifier could not be declared.", "Não foi possível declarar um identificador."),
         ("An identifier holds 65536 entries per type.", "Um identificador comporta 65536 entradas por tipo."),
@@ -7646,7 +7652,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Escreva o tipo, ou dê-lhe um valor."),
         ("Write the type.", "Escreva o tipo."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Escreva para um ponto de montagem de saída. Uma árvore de fontes é montada somente para leitura de propósito."),
-        ("ZIP64 is not implemented.", "ZIP64 não está implementado."),
     ];
 
     const PORTUGUESE_WORDS: &[(&str, &str)] = &[
@@ -7866,6 +7871,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG начинается с восьми байт, которые формат для этого отводит. Больше здесь ничего не принимается, потому что больше ничего не читается."),
         ("A PNG ends with IEND. A file without one was cut short.", "PNG заканчивается на IEND. Файл без него был обрезан."),
         ("A UTCTime is not in the form a certificate uses.", "UTCTime записан не в той форме, какую использует сертификат."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Дополнительное поле ZIP64 короче размеров, которые оно должно нести."),
+        ("A ZIP64 record is not where the archive says it is.", "Запись ZIP64 находится не там, где её называет архив."),
         ("A `catch` needs a register a `move-exception` can name.", "Для `catch` нужен регистр, который может назвать `move-exception`."),
         ("A `switch` covers a range this cannot write.", "`switch` покрывает диапазон, который это не может записать."),
         ("A `switch` holds more cases than this can write.", "`switch` содержит больше вариантов, чем это может записать."),
@@ -8206,7 +8213,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Запись не сходится с контрольной суммой, которую записывает для неё архив."),
         ("An entry has no name.", "У записи нет имени."),
         ("An entry is encrypted.", "Запись зашифрована."),
-        ("An entry is larger than the format's 32-bit size field.", "Запись больше, чем 32-битное поле размера у формата."),
         ("An entry is named differently in its two headers.", "Запись названа по-разному в двух своих заголовках."),
         ("An entry name climbs out of the archive.", "Имя записи выбирается за пределы архива."),
         ("An entry name contains a backslash.", "Имя записи содержит обратный слэш."),
@@ -8222,6 +8228,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Перечисление, все константы которого названы, или тип `sealed`, все подтипы которого названы, уже отвечает за всё и не нуждается в `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Escape-последовательность или символьный литерал записан не так, как их пишет Java."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Экспортируемый поставщик, раздающий разрешения на URI, может быть вынужден дать вызывающему доступ к файлам, до которых тому доставать не следует."),
+        ("An extra field states a length the record does not hold.", "Дополнительное поле заявляет длину, которой запись не несёт."),
         ("An identifier a library declares could not be added.", "Не удалось добавить идентификатор, который объявляет библиотека."),
         ("An identifier could not be declared.", "Не удалось объявить идентификатор."),
         ("An identifier holds 65536 entries per type.", "Идентификатор вмещает 65536 записей на тип."),
@@ -8731,7 +8738,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Напишите тип или дайте этому значение."),
         ("Write the type.", "Напишите тип."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Пишите в выходную точку монтирования. Дерево исходников намеренно смонтировано только для чтения."),
-        ("ZIP64 is not implemented.", "ZIP64 не реализован."),
     ];
 
     const RUSSIAN_WORDS: &[(&str, &str)] = &[
@@ -8951,6 +8957,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "يبدأ ملف PNG بالبايتات الثمانية التي يحجزها له التنسيق. لا يُقبل هنا شيء غير ذلك، لأنه لا يُقرأ شيء غير ذلك."),
         ("A PNG ends with IEND. A file without one was cut short.", "ينتهي ملف PNG بـ IEND. والملف الذي لا يحمله قد بُتر."),
         ("A UTCTime is not in the form a certificate uses.", "قيمة UTCTime ليست بالصيغة التي تستخدمها الشهادة."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "حقل ZIP64 الإضافي أقصر من الأحجام التي عليه حملها."),
+        ("A ZIP64 record is not where the archive says it is.", "سجل ZIP64 ليس حيث يقول الأرشيف إنه موجود."),
         ("A `catch` needs a register a `move-exception` can name.", "تحتاج `catch` إلى سجل يستطيع `move-exception` تسميته."),
         ("A `switch` covers a range this cannot write.", "تغطي `switch` مدى لا يستطيع هذا كتابته."),
         ("A `switch` holds more cases than this can write.", "تحتوي `switch` على حالات أكثر مما يستطيع هذا كتابته."),
@@ -9291,7 +9299,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "مدخل لا يطابق مجموع التحقق الذي يسجّله له الأرشيف."),
         ("An entry has no name.", "مدخل بلا اسم."),
         ("An entry is encrypted.", "مدخل مشفّر."),
-        ("An entry is larger than the format's 32-bit size field.", "مدخل أكبر من حقل الحجم ذي 32 بتًا في التنسيق."),
         ("An entry is named differently in its two headers.", "مدخل مسمّى باسمين مختلفين في ترويستيه."),
         ("An entry name climbs out of the archive.", "اسم مدخل يخرج من الأرشيف."),
         ("An entry name contains a backslash.", "اسم مدخل يحوي شرطة مائلة عكسية."),
@@ -9307,6 +9314,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "التعداد الذي سُمّيت كل ثوابته، أو النوع `sealed` الذي سُمّيت كل أنواعه الفرعية، يجيب عن كل شيء أصلًا ولا يحتاج `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "هروب أو حرف مفرد ليس بالشكل الذي تكتبه جافا."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "المزوّد المصدَّر الذي يمنح أذونات URI يمكن أن يُدفع إلى منح المستدعي وصولًا إلى ملفات لا ينبغي أن يبلغها."),
+        ("An extra field states a length the record does not hold.", "يعلن حقل إضافي طولا لا يحمله السجل."),
         ("An identifier a library declares could not be added.", "تعذّرت إضافة معرّف تعلنه مكتبة."),
         ("An identifier could not be declared.", "تعذّر إعلان معرّف."),
         ("An identifier holds 65536 entries per type.", "يسع المعرّف 65536 مدخلًا لكل نوع."),
@@ -9816,7 +9824,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "اكتب النوع، أو أعطه قيمة."),
         ("Write the type.", "اكتب النوع."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "اكتب إلى نقطة وصل مخرجات. فشجرة المصدر موصولة للقراءة فقط عن قصد."),
-        ("ZIP64 is not implemented.", "ZIP64 غير منفَّذ."),
     ];
 
     const ARABIC_WORDS: &[(&str, &str)] = &[
@@ -10036,6 +10043,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG 以格式为它保留的那八个字节开头。这里不接受别的，因为这里也不读别的。"),
         ("A PNG ends with IEND. A file without one was cut short.", "PNG 以 IEND 结尾。没有它的文件是被截断的。"),
         ("A UTCTime is not in the form a certificate uses.", "UTCTime 不是证书所用的形式。"),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "某个 ZIP64 额外字段比它必须携带的大小还短。"),
+        ("A ZIP64 record is not where the archive says it is.", "某个 ZIP64 记录不在归档所说的位置。"),
         ("A `catch` needs a register a `move-exception` can name.", "`catch` 需要一个 `move-exception` 能指名的寄存器。"),
         ("A `switch` covers a range this cannot write.", "`switch` 覆盖的范围超出此处能写出的。"),
         ("A `switch` holds more cases than this can write.", "`switch` 的分支多于此处能写出的。"),
@@ -10376,7 +10385,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "某个条目与归档为它记录的校验和不符。"),
         ("An entry has no name.", "某个条目没有名称。"),
         ("An entry is encrypted.", "某个条目是加密的。"),
-        ("An entry is larger than the format's 32-bit size field.", "某个条目大于格式的 32 位大小字段。"),
         ("An entry is named differently in its two headers.", "某个条目在它的两个头部里名字不同。"),
         ("An entry name climbs out of the archive.", "某个条目名爬到了归档之外。"),
         ("An entry name contains a backslash.", "某个条目名含有反斜杠。"),
@@ -10392,6 +10400,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "常量全部列名的枚举，或子类型全部列名的 `sealed` 类型，本身已经涵盖了一切，不需要 `default`。"),
         ("An escape or a character literal is not shaped the way Java writes one.", "转义或字符字面量不是 Java 书写的形式。"),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "会发放 URI 授权的导出提供者，可能被诱使把它不该触及的文件的访问权交给调用方。"),
+        ("An extra field states a length the record does not hold.", "某个额外字段声明了记录并不携带的长度。"),
         ("An identifier a library declares could not be added.", "无法加入某个库所声明的标识符。"),
         ("An identifier could not be declared.", "无法声明某个标识符。"),
         ("An identifier holds 65536 entries per type.", "一个标识符每种类型可容纳 65536 个条目。"),
@@ -10901,7 +10910,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "请写出类型，或者给它一个值。"),
         ("Write the type.", "请写出类型。"),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "请写入一个输出挂载点。源码树是有意以只读方式挂载的。"),
-        ("ZIP64 is not implemented.", "未实现 ZIP64。"),
     ];
 
     const CHINESE_WORDS: &[(&str, &str)] = &[
@@ -11121,6 +11129,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG は、形式が自らのために取ってある八バイトで始まります。ここではそれ以外は受け付けません。ほかは読まないからです。"),
         ("A PNG ends with IEND. A file without one was cut short.", "PNG は IEND で終わります。それを持たないファイルは途中で切れています。"),
         ("A UTCTime is not in the form a certificate uses.", "UTCTime が証明書の使う形になっていません。"),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "ZIP64 の追加欄が、運ぶべき大きさより短くなっています。"),
+        ("A ZIP64 record is not where the archive says it is.", "ZIP64 の記録が、書庫の言う場所にありません。"),
         ("A `catch` needs a register a `move-exception` can name.", "`catch` には `move-exception` が名指しできるレジスタが要ります。"),
         ("A `switch` covers a range this cannot write.", "`switch` が、ここでは書けない範囲を覆っています。"),
         ("A `switch` holds more cases than this can write.", "`switch` が、ここで書ける数より多くの場合を持っています。"),
@@ -11461,7 +11471,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "項目が、書庫の記録するチェックサムと合いません。"),
         ("An entry has no name.", "項目に名前がありません。"),
         ("An entry is encrypted.", "項目が暗号化されています。"),
-        ("An entry is larger than the format's 32-bit size field.", "項目が、形式の 32 ビットの大きさ欄より大きくなっています。"),
         ("An entry is named differently in its two headers.", "項目の名前が、二つのヘッダーで違っています。"),
         ("An entry name climbs out of the archive.", "項目の名前が書庫の外へ登っています。"),
         ("An entry name contains a backslash.", "項目の名前に逆斜線が含まれています。"),
@@ -11477,6 +11486,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "定数がすべて名づけられた列挙や、下位の型がすべて名づけられた `sealed` 型は、すでにどれにも答えており、`default` を要しません。"),
         ("An escape or a character literal is not shaped the way Java writes one.", "エスケープまたは文字リテラルが、Java の書く形になっていません。"),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "URI の許可を配る、外に出したプロバイダーは、届くべきでないファイルへの接続を呼び出し側に与えさせられることがあります。"),
+        ("An extra field states a length the record does not hold.", "追加欄が、記録の持たない長さを告げています。"),
         ("An identifier a library declares could not be added.", "ライブラリの宣言する識別子を加えられませんでした。"),
         ("An identifier could not be declared.", "識別子を宣言できませんでした。"),
         ("An identifier holds 65536 entries per type.", "識別子は型ごとに 65536 項目を収めます。"),
@@ -11986,7 +11996,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "型を書くか、値を与えてください。"),
         ("Write the type.", "型を書いてください。"),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "出力のマウントへ書いてください。ソースの木は、意図して読み取り専用でマウントされます。"),
-        ("ZIP64 is not implemented.", "ZIP64 は実装していません。"),
     ];
 
     const JAPANESE_WORDS: &[(&str, &str)] = &[
@@ -12206,6 +12215,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG는 그 형식이 저를 위해 남겨 둔 여덟 바이트로 시작합니다. 여기서는 그 밖의 것은 받지 않습니다. 그 밖의 것은 읽지 않기 때문입니다."),
         ("A PNG ends with IEND. A file without one was cut short.", "PNG는 IEND로 끝납니다. 그것이 없는 파일은 도중에 잘렸습니다."),
         ("A UTCTime is not in the form a certificate uses.", "UTCTime이 인증서가 쓰는 꼴이 아닙니다."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "ZIP64 덧붙임 칸이 지녀야 할 크기보다 짧습니다."),
+        ("A ZIP64 record is not where the archive says it is.", "ZIP64 기록이 보관집이 말하는 자리에 없습니다."),
         ("A `catch` needs a register a `move-exception` can name.", "`catch`에는 `move-exception`이 가리킬 수 있는 레지스터가 있어야 합니다."),
         ("A `switch` covers a range this cannot write.", "`switch`가 여기서 쓸 수 없는 범위를 덮습니다."),
         ("A `switch` holds more cases than this can write.", "`switch`가 여기서 쓸 수 있는 것보다 많은 경우를 가집니다."),
@@ -12546,7 +12557,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "항목이 꾸러미가 적어 둔 검사합과 맞지 않습니다."),
         ("An entry has no name.", "항목에 이름이 없습니다."),
         ("An entry is encrypted.", "항목이 암호로 잠겼습니다."),
-        ("An entry is larger than the format's 32-bit size field.", "항목이 형식의 32비트 크기 칸보다 큽니다."),
         ("An entry is named differently in its two headers.", "항목의 이름이 두 머리말에서 서로 다릅니다."),
         ("An entry name climbs out of the archive.", "항목 이름이 꾸러미 밖으로 기어 나갑니다."),
         ("An entry name contains a backslash.", "항목 이름에 역빗금이 들어 있습니다."),
@@ -12562,6 +12572,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "상수를 모두 이름 지은 열거나, 하위 형을 모두 이름 지은 `sealed` 형은 이미 무엇에도 답하므로 `default`가 필요 없습니다."),
         ("An escape or a character literal is not shaped the way Java writes one.", "이스케이프나 문자 리터럴이 Java가 적는 꼴이 아닙니다."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "URI 권한을 나눠 주는, 밖으로 열린 프로바이더는 부른 쪽에 닿아서는 안 될 파일까지 길을 내주게 만들 수 있습니다."),
+        ("An extra field states a length the record does not hold.", "덧붙임 칸이 기록에 없는 길이를 밝힙니다."),
         ("An identifier a library declares could not be added.", "라이브러리가 선언한 식별자를 더하지 못했습니다."),
         ("An identifier could not be declared.", "식별자를 선언하지 못했습니다."),
         ("An identifier holds 65536 entries per type.", "식별자는 형마다 65536개의 항목을 담습니다."),
@@ -13071,7 +13082,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "형을 적거나 값을 주십시오."),
         ("Write the type.", "형을 적으십시오."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "산출 마운트에 쓰십시오. 원본 나무는 뜻을 두고 읽기만 되게 마운트됩니다."),
-        ("ZIP64 is not implemented.", "ZIP64는 만들어 두지 않았습니다."),
     ];
 
     const KOREAN_WORDS: &[(&str, &str)] = &[
@@ -13291,6 +13301,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG उन आठ बाइटों से शुरू होता है जिन्हें यह प्रारूप अपने लिए रखता है। यहाँ और कुछ स्वीकार नहीं होता, क्योंकि और कुछ पढ़ा ही नहीं जाता।"),
         ("A PNG ends with IEND. A file without one was cut short.", "PNG का अंत IEND से होता है। जिस फ़ाइल में वह नहीं, वह बीच में कट गई है।"),
         ("A UTCTime is not in the form a certificate uses.", "UTCTime उस रूप में नहीं है जिसे प्रमाणपत्र काम में लेते हैं।"),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "एक ZIP64 अतिरिक्त क्षेत्र उन आकारों से छोटा है जो उसे रखने हैं।"),
+        ("A ZIP64 record is not where the archive says it is.", "एक ZIP64 अभिलेख वहाँ नहीं है जहाँ संग्रह कहता है।"),
         ("A `catch` needs a register a `move-exception` can name.", "`catch` को ऐसा रजिस्टर चाहिए जिसे `move-exception` नाम दे सके।"),
         ("A `switch` covers a range this cannot write.", "`switch` ऐसी सीमा घेरता है जिसे यहाँ लिखा नहीं जा सकता।"),
         ("A `switch` holds more cases than this can write.", "`switch` में उससे अधिक मामले हैं जितने यहाँ लिखे जा सकते हैं।"),
@@ -13631,7 +13643,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "एक प्रविष्टि उस परिकलन-योग से मेल नहीं खाती जो संग्रह उसके लिए दर्ज करता है।"),
         ("An entry has no name.", "एक प्रविष्टि का कोई नाम नहीं है।"),
         ("An entry is encrypted.", "एक प्रविष्टि गूढ़लिखित है।"),
-        ("An entry is larger than the format's 32-bit size field.", "एक प्रविष्टि प्रारूप के 32-बिट आकार-क्षेत्र से बड़ी है।"),
         ("An entry is named differently in its two headers.", "एक प्रविष्टि का नाम उसके दोनों शीर्षकों में अलग-अलग है।"),
         ("An entry name climbs out of the archive.", "एक प्रविष्टि का नाम संग्रह से बाहर चढ़ जाता है।"),
         ("An entry name contains a backslash.", "एक प्रविष्टि के नाम में उल्टी तिरछी रेखा है।"),
@@ -13647,6 +13658,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "जिस गणन के सभी अचर नामित हों, या जिस `sealed` प्रकार के सभी उपप्रकार नामित हों, वह पहले ही हर बात का उत्तर देता है और उसे `default` नहीं चाहिए।"),
         ("An escape or a character literal is not shaped the way Java writes one.", "एक निकास या अक्षर-शाब्दिक उस आकार में नहीं जिसमें Java उसे लिखता है।"),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "जो निर्यात किया गया प्रोवाइडर URI अनुदान बाँटता है, उससे पुकारने वाले को उन फ़ाइलों तक पहुँच दिलवाई जा सकती है जहाँ उसे नहीं पहुँचना चाहिए।"),
+        ("An extra field states a length the record does not hold.", "एक अतिरिक्त क्षेत्र ऐसी लंबाई बताता है जो अभिलेख में नहीं है।"),
         ("An identifier a library declares could not be added.", "एक पुस्तकालय जो पहचानकर्ता घोषित करता है वह जोड़ा नहीं जा सका।"),
         ("An identifier could not be declared.", "एक पहचानकर्ता घोषित नहीं किया जा सका।"),
         ("An identifier holds 65536 entries per type.", "एक पहचानकर्ता प्रति प्रकार 65536 प्रविष्टियाँ रखता है।"),
@@ -14156,7 +14168,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "प्रकार लिखिए या उसे एक मान दीजिए।"),
         ("Write the type.", "प्रकार लिखिए।"),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "किसी निर्गम-आरोहण पर लिखिए। स्रोत-वृक्ष जान-बूझकर केवल-पढ़ने के लिए आरोहित किया जाता है।"),
-        ("ZIP64 is not implemented.", "ZIP64 गढ़ा नहीं गया है।"),
     ];
 
     const HINDI_WORDS: &[(&str, &str)] = &[
@@ -14376,6 +14387,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Sebuah PNG dimulai dengan delapan bita yang disisihkan format itu untuk dirinya. Tidak ada yang lain diterima di sini, karena tidak ada yang lain dibaca."),
         ("A PNG ends with IEND. A file without one was cut short.", "Sebuah PNG berakhir dengan IEND. Berkas tanpa itu terpotong di tengah."),
         ("A UTCTime is not in the form a certificate uses.", "Sebuah UTCTime tidak dalam bentuk yang dipakai sertifikat."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Sebuah bidang tambahan ZIP64 lebih pendek daripada ukuran yang harus dibawanya."),
+        ("A ZIP64 record is not where the archive says it is.", "Sebuah catatan ZIP64 tidak berada di tempat yang disebut arsip."),
         ("A `catch` needs a register a `move-exception` can name.", "Sebuah `catch` butuh register yang bisa disebut `move-exception`."),
         ("A `switch` covers a range this cannot write.", "Sebuah `switch` mencakup rentang yang tidak bisa ditulis di sini."),
         ("A `switch` holds more cases than this can write.", "Sebuah `switch` memuat lebih banyak kasus daripada yang bisa ditulis di sini."),
@@ -14716,7 +14729,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Sebuah entri tidak cocok dengan sidik jumlah yang dicatat arsip untuknya."),
         ("An entry has no name.", "Sebuah entri tidak punya nama."),
         ("An entry is encrypted.", "Sebuah entri disandikan."),
-        ("An entry is larger than the format's 32-bit size field.", "Sebuah entri lebih besar daripada ruas ukuran 32 bit format ini."),
         ("An entry is named differently in its two headers.", "Sebuah entri dinamai berbeda di dua kepalanya."),
         ("An entry name climbs out of the archive.", "Nama sebuah entri memanjat keluar dari arsip."),
         ("An entry name contains a backslash.", "Nama sebuah entri memuat garis miring terbalik."),
@@ -14732,6 +14744,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Enum yang semua tetapannya bernama, atau jenis `sealed` yang semua subjenisnya bernama, sudah menjawab segalanya dan tidak butuh `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Sebuah pelolosan atau literal aksara tidak berbentuk seperti yang ditulis Java."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Provider terekspor yang membagikan hibah URI bisa dibuat memberi pemanggil akses ke berkas yang semestinya tak terjangkau."),
+        ("An extra field states a length the record does not hold.", "Sebuah bidang tambahan menyatakan panjang yang tidak dibawa catatan itu."),
         ("An identifier a library declares could not be added.", "Pengenal yang dinyatakan sebuah pustaka tidak bisa ditambahkan."),
         ("An identifier could not be declared.", "Sebuah pengenal tidak bisa dinyatakan."),
         ("An identifier holds 65536 entries per type.", "Sebuah pengenal memuat 65536 entri per jenis."),
@@ -15241,7 +15254,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Tulis jenisnya, atau beri ia sebuah nilai."),
         ("Write the type.", "Tulis jenisnya."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Tulis ke kaitan keluaran. Pohon sumber sengaja dikaitkan hanya-baca."),
-        ("ZIP64 is not implemented.", "ZIP64 tidak diwujudkan."),
     ];
 
     const INDONESIAN_WORDS: &[(&str, &str)] = &[
@@ -15461,6 +15473,8 @@ pub mod speech {
         ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Um PNG começa com os oito bytes que o formato reserva para ele. Mais nada é aceito aqui, porque mais nada é lido."),
         ("A PNG ends with IEND. A file without one was cut short.", "Um PNG termina com IEND. Um arquivo sem ele foi cortado no meio."),
         ("A UTCTime is not in the form a certificate uses.", "Um UTCTime não está na forma que um certificado usa."),
+        ("A ZIP64 extra field is shorter than the sizes it must carry.", "Um campo extra ZIP64 é mais curto que os tamanhos que precisa carregar."),
+        ("A ZIP64 record is not where the archive says it is.", "Um registro ZIP64 não está onde o arquivo diz que está."),
         ("A `catch` needs a register a `move-exception` can name.", "Um `catch` precisa de um registrador que um `move-exception` possa nomear."),
         ("A `switch` covers a range this cannot write.", "Um `switch` cobre uma faixa que isto não consegue escrever."),
         ("A `switch` holds more cases than this can write.", "Um `switch` tem mais casos do que isto consegue escrever."),
@@ -15801,7 +15815,6 @@ pub mod speech {
         ("An entry does not match the checksum the archive records for it.", "Uma entrada não bate com a soma de verificação que o arquivo compactado registra para ela."),
         ("An entry has no name.", "Uma entrada não tem nome."),
         ("An entry is encrypted.", "Uma entrada está cifrada."),
-        ("An entry is larger than the format's 32-bit size field.", "Uma entrada é maior que o campo de tamanho de 32 bits do formato."),
         ("An entry is named differently in its two headers.", "Uma entrada tem nomes diferentes nos seus dois cabeçalhos."),
         ("An entry name climbs out of the archive.", "O nome de uma entrada sobe para fora do arquivo compactado."),
         ("An entry name contains a backslash.", "O nome de uma entrada contém uma barra invertida."),
@@ -15817,6 +15830,7 @@ pub mod speech {
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Um enum cujas constantes são todas nomeadas, ou um tipo `sealed` cujos subtipos todos são, já responde por tudo e não precisa de `default`."),
         ("An escape or a character literal is not shaped the way Java writes one.", "Um escape ou um literal de caractere não tem o formato com que Java escreve um."),
         ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "Um provider exportado que distribui concessões de URI pode ser levado a dar a quem chama acesso a arquivos que ele não deveria alcançar."),
+        ("An extra field states a length the record does not hold.", "Um campo extra declara um comprimento que o registro não carrega."),
         ("An identifier a library declares could not be added.", "Não deu para acrescentar um identificador que uma biblioteca declara."),
         ("An identifier could not be declared.", "Não deu para declarar um identificador."),
         ("An identifier holds 65536 entries per type.", "Um identificador guarda 65536 entradas por tipo."),
@@ -16326,7 +16340,6 @@ pub mod speech {
         ("Write the type, or give it a value.", "Escreva o tipo, ou dê um valor a ele."),
         ("Write the type.", "Escreva o tipo."),
         ("Write to an output mount. A source tree is mounted read-only on purpose.", "Escreva numa montagem de saída. Uma árvore de código é montada como somente leitura de propósito."),
-        ("ZIP64 is not implemented.", "ZIP64 não está implementado."),
     ];
 
     const BRAZILIAN_WORDS: &[(&str, &str)] = &[
@@ -26918,11 +26931,25 @@ pub mod archive {
 
     pub const END_OF_CENTRAL_DIRECTORY_SIZE: u64 = 22;
 
-    pub const MAX_ENTRIES: usize = 65_535;
+    pub const ZIP64_END_SIGNATURE: u32 = 0x0606_4b50;
+
+    pub const ZIP64_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
+
+    pub const ZIP64_END_SIZE: u64 = 56;
+
+    pub const ZIP64_LOCATOR_SIZE: u64 = 20;
+
+    pub const ZIP64_EXTRA_ID: u16 = 0x0001;
+
+    pub const MAX_ENTRIES: usize = 16_777_216;
 
     pub const MAX_NAME_BYTES: usize = 4_096;
 
-    pub const MAX_ARCHIVE_BYTES: u64 = u32::MAX as u64;
+    pub const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+    const WIDE_U16: u16 = 0xFFFF;
+
+    const WIDE_U32: u32 = 0xFFFF_FFFF;
 
     pub const FIXED_DOS_DATE: u16 = 0x0021;
 
@@ -27198,8 +27225,7 @@ pub mod archive {
                     "core.archive",
                     "The archive is larger than this implementation reads.",
                 )
-                .with_context(format!("Limit: {MAX_ARCHIVE_BYTES} bytes"))
-                .with_suggestion("ZIP64 is not implemented."),
+                .with_context(format!("Limit: {MAX_ARCHIVE_BYTES} bytes")),
             );
             return None;
         }
@@ -27218,13 +27244,53 @@ pub mod archive {
             return None;
         }
 
-        let record = match read_end_record(&mut reader, data.len() as u64) {
-            Ok(record) => record,
+        let wide = match end_record_is_wide(&mut reader, end) {
+            Ok(wide) => wide,
             Err(error) => {
                 sink.emit(error);
                 return None;
             }
         };
+        let widened = if wide {
+            match read_zip64_end(data, end, data.len() as u64) {
+                Ok(found) => found,
+                Err(error) => {
+                    sink.emit(error);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Err(error) = reader.seek(end) {
+            sink.emit(error);
+            return None;
+        }
+        let record = match widened {
+            Some(record) => record,
+            None => match read_end_record(&mut reader, data.len() as u64) {
+                Ok(record) => record,
+                Err(error) => {
+                    sink.emit(error);
+                    return None;
+                }
+            },
+        };
+
+        if record.entry_count > MAX_ENTRIES as u64 {
+            sink.emit(
+                Diagnostic::new(
+                    "EA052",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.archive",
+                    "The archive holds more entries than the format's counter allows.",
+                )
+                .with_context(format!("Declared: {}", record.entry_count)),
+            );
+            return None;
+        }
 
         let mut entries: Vec<Entry> = Vec::with_capacity(record.entry_count as usize);
         if let Err(error) = reader.seek(record.central_directory_offset) {
@@ -27269,8 +27335,86 @@ pub mod archive {
     }
 
     struct EndRecord {
-        entry_count: u16,
+        entry_count: u64,
         central_directory_offset: u64,
+    }
+
+    fn read_zip64_end(data: &[u8], end: u64, total: u64) -> Result<Option<EndRecord>, Diagnostic> {
+        if end < ZIP64_LOCATOR_SIZE {
+            return Err(fail(
+                "EA019",
+                "A ZIP64 record is not where the archive says it is.",
+            ));
+        }
+        let mut reader = Reader::new(data, Endian::Little, "archive");
+        reader.seek(end - ZIP64_LOCATOR_SIZE)?;
+        if reader.u32()? != ZIP64_LOCATOR_SIGNATURE {
+            return Ok(None);
+        }
+        let _start_disk = reader.u32()?;
+        let where_at = reader.u64()?;
+        let disks = reader.u32()?;
+        if disks > 1 {
+            return Err(fail("EA015", "The archive is split across several disks.")
+                .with_suggestion("Split archives are not read."));
+        }
+        if where_at + ZIP64_END_SIZE > total {
+            return Err(fail(
+                "EA019",
+                "A ZIP64 record is not where the archive says it is.",
+            )
+            .with_context(format!("At offset: {where_at}")));
+        }
+
+        reader.seek(where_at)?;
+        if reader.u32()? != ZIP64_END_SIGNATURE {
+            return Err(fail(
+                "EA019",
+                "A ZIP64 record is not where the archive says it is.",
+            )
+            .with_context(format!("At offset: {where_at}")));
+        }
+        let _record_size = reader.u64()?;
+        let _made_by = reader.u16()?;
+        let _needed = reader.u16()?;
+        let this_disk = reader.u32()?;
+        let start_disk = reader.u32()?;
+        let entries_here = reader.u64()?;
+        let entries_total = reader.u64()?;
+        let directory_size = reader.u64()?;
+        let directory_offset = reader.u64()?;
+
+        if this_disk != 0 || start_disk != 0 {
+            return Err(fail("EA015", "The archive is split across several disks.")
+                .with_suggestion("Split archives are not read."));
+        }
+        if entries_here != entries_total {
+            return Err(fail(
+                "EA016",
+                "The archive disagrees with itself about its entry count.",
+            )
+            .with_context(format!(
+                "On this disk: {entries_here}, in total: {entries_total}"
+            )));
+        }
+        let Some(directory_end) = directory_offset.checked_add(directory_size) else {
+            return Err(fail(
+                "EA017",
+                "The central directory's offset and size overflow.",
+            ));
+        };
+        if directory_end > total {
+            return Err(fail(
+                "EA018",
+                "The central directory extends past the end of the file.",
+            )
+            .with_context(format!("Directory: {directory_offset}..{directory_end}"))
+            .with_context(format!("File: {total} bytes")));
+        }
+        Ok(Some(EndRecord {
+            entry_count: entries_total,
+            central_directory_offset: directory_offset,
+        }))
     }
 
     fn find_end_of_central_directory(data: &[u8]) -> Result<u64, Diagnostic> {
@@ -27351,15 +27495,77 @@ pub mod archive {
         }
 
         Ok(EndRecord {
-            entry_count: entries_total,
+            entry_count: u64::from(entries_total),
             central_directory_offset: directory_offset,
         })
+    }
+
+    fn end_record_is_wide(reader: &mut Reader<'_>, end: u64) -> Result<bool, Diagnostic> {
+        reader.seek(end + 8)?;
+        let entries_here = reader.u16()?;
+        let entries_total = reader.u16()?;
+        let directory_size = reader.u32()?;
+        let directory_offset = reader.u32()?;
+        Ok(entries_here == WIDE_U16
+            || entries_total == WIDE_U16
+            || directory_size == WIDE_U32
+            || directory_offset == WIDE_U32)
+    }
+
+    fn widen(
+        extra: &[u8],
+        uncompressed: &mut u64,
+        compressed: &mut u64,
+        offset: &mut u64,
+    ) -> Result<(), Diagnostic> {
+        let mut at = 0usize;
+        while at + 4 <= extra.len() {
+            let id = u16::from_le_bytes([extra[at], extra[at + 1]]);
+            let size = usize::from(u16::from_le_bytes([extra[at + 2], extra[at + 3]]));
+            at += 4;
+            if at + size > extra.len() {
+                return Err(fail(
+                    "EA023",
+                    "An extra field states a length the record does not hold.",
+                ));
+            }
+            if id != ZIP64_EXTRA_ID {
+                at += size;
+                continue;
+            }
+            let body = &extra[at..at + size];
+            let mut step = 0usize;
+            let mut take = |slot: &mut u64| -> Result<(), Diagnostic> {
+                if step + 8 > body.len() {
+                    return Err(fail(
+                        "EA024",
+                        "A ZIP64 extra field is shorter than the sizes it must carry.",
+                    ));
+                }
+                let mut room = [0u8; 8];
+                room.copy_from_slice(&body[step..step + 8]);
+                *slot = u64::from_le_bytes(room);
+                step += 8;
+                Ok(())
+            };
+            if *uncompressed == u64::from(WIDE_U32) {
+                take(uncompressed)?;
+            }
+            if *compressed == u64::from(WIDE_U32) {
+                take(compressed)?;
+            }
+            if *offset == u64::from(WIDE_U32) {
+                take(offset)?;
+            }
+            return Ok(());
+        }
+        Ok(())
     }
 
     fn read_central_entry(
         reader: &mut Reader<'_>,
         data: &[u8],
-        index: u16,
+        index: u64,
     ) -> Result<Entry, Diagnostic> {
         let signature = reader.u32()?;
         if signature != CENTRAL_HEADER_SIGNATURE {
@@ -27378,15 +27584,15 @@ pub mod archive {
         let _time = reader.u16()?;
         let _date = reader.u16()?;
         let crc32 = reader.u32()?;
-        let compressed_size = u64::from(reader.u32()?);
-        let uncompressed_size = u64::from(reader.u32()?);
+        let mut compressed_size = u64::from(reader.u32()?);
+        let mut uncompressed_size = u64::from(reader.u32()?);
         let name_length = usize::from(reader.u16()?);
         let extra_length = usize::from(reader.u16()?);
         let comment_length = usize::from(reader.u16()?);
         let _disk_start = reader.u16()?;
         let _internal = reader.u16()?;
         let _external = reader.u32()?;
-        let local_header_offset = u64::from(reader.u32()?);
+        let mut local_header_offset = u64::from(reader.u32()?);
 
         if flags & 0x0001 != 0 {
             return Err(fail("EA021", "An entry is encrypted.")
@@ -27402,7 +27608,18 @@ pub mod archive {
         let name = name.to_string();
         validate_entry_name(&name)?;
 
-        reader.skip(extra_length)?;
+        let extra = reader.bytes(extra_length)?;
+        if uncompressed_size == u64::from(WIDE_U32)
+            || compressed_size == u64::from(WIDE_U32)
+            || local_header_offset == u64::from(WIDE_U32)
+        {
+            widen(
+                extra,
+                &mut uncompressed_size,
+                &mut compressed_size,
+                &mut local_header_offset,
+            )?;
+        }
         reader.skip(comment_length)?;
 
         let data_offset = read_local_header(data, &name, local_header_offset, crc32, method)?;
@@ -27646,8 +27863,7 @@ pub mod archive {
                     "core.archive",
                     "The archive would hold more entries than the format allows.",
                 )
-                .with_context(format!("Limit: {MAX_ENTRIES}"))
-                .with_suggestion("ZIP64 is not implemented."));
+                .with_context(format!("Limit: {MAX_ENTRIES}")));
             }
 
             let must_store = must_be_stored(&name);
@@ -27665,7 +27881,7 @@ pub mod archive {
                 .sort_by(|left, right| left.name.cmp(&right.name));
 
             let mut writer = BinaryWriter::new(Endian::Little);
-            let mut written: Vec<(Pending, u64, u32, Compression, u32)> =
+            let mut written: Vec<(Pending, u64, u32, Compression, u64)> =
                 Vec::with_capacity(self.entries.len());
 
             for entry in self.entries {
@@ -27690,29 +27906,9 @@ pub mod archive {
                 };
                 let payload = packed.as_deref().unwrap_or(&entry.bytes);
 
-                let stored_size = u32::try_from(payload.len()).map_err(|_| {
-                    Diagnostic::new(
-                        "EA053",
-                        Severity::Error,
-                        FailureClass::ResourceExhaustion,
-                        "core.archive",
-                        "An entry is larger than the format's 32-bit size field.",
-                    )
-                    .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
-                    .with_suggestion("ZIP64 is not implemented.")
-                })?;
-
-                let size = u32::try_from(entry.bytes.len()).map_err(|_| {
-                    Diagnostic::new(
-                        "EA053",
-                        Severity::Error,
-                        FailureClass::ResourceExhaustion,
-                        "core.archive",
-                        "An entry is larger than the format's 32-bit size field.",
-                    )
-                    .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
-                    .with_suggestion("ZIP64 is not implemented.")
-                })?;
+                let stored_size = payload.len() as u64;
+                let size = entry.bytes.len() as u64;
+                let wide_sizes = stored_size > u64::from(WIDE_U32) || size > u64::from(WIDE_U32);
 
                 let name_bytes = entry.name.as_bytes();
                 let name_length = u16::try_from(name_bytes.len()).map_err(|_| {
@@ -27725,12 +27921,13 @@ pub mod archive {
                     )
                 })?;
 
-                let base = header_offset + LOCAL_HEADER_SIZE + u64::from(name_length);
+                let wide_extra: u64 = if wide_sizes { 20 } else { 0 };
+                let base = header_offset + LOCAL_HEADER_SIZE + u64::from(name_length) + wide_extra;
                 let mut padding = (alignment - (base % alignment)) % alignment;
                 while padding != 0 && padding < 4 {
                     padding += alignment;
                 }
-                let extra_length = u16::try_from(padding).map_err(|_| {
+                let extra_length = u16::try_from(wide_extra + padding).map_err(|_| {
                     Diagnostic::new(
                         "EA054",
                         Severity::Error,
@@ -27743,22 +27940,33 @@ pub mod archive {
                 })?;
 
                 writer.u32(LOCAL_HEADER_SIGNATURE)?;
-                writer.u16(20)?;
+                writer.u16(if wide_sizes { 45 } else { 20 })?;
                 writer.u16(0)?;
                 writer.u16(method.method())?;
                 writer.u16(FIXED_DOS_TIME)?;
                 writer.u16(FIXED_DOS_DATE)?;
                 writer.u32(crc)?;
-                writer.u32(stored_size)?;
-                writer.u32(size)?;
+                writer.u32(if wide_sizes {
+                    WIDE_U32
+                } else {
+                    stored_size as u32
+                })?;
+                writer.u32(if wide_sizes { WIDE_U32 } else { size as u32 })?;
                 writer.u16(name_length)?;
                 writer.u16(extra_length)?;
                 writer.bytes(name_bytes)?;
 
-                if extra_length >= 4 {
+                if wide_sizes {
+                    writer.u16(ZIP64_EXTRA_ID)?;
+                    writer.u16(16)?;
+                    writer.u64(size)?;
+                    writer.u64(stored_size)?;
+                }
+                if padding >= 4 {
+                    let room = u16::try_from(padding - 4).unwrap_or(0);
                     writer.u16(ALIGNMENT_EXTRA_ID)?;
-                    writer.u16(extra_length - 4)?;
-                    for _ in 0..extra_length - 4 {
+                    writer.u16(room)?;
+                    for _ in 0..room {
                         writer.u8(0)?;
                     }
                 }
@@ -27771,45 +27979,98 @@ pub mod archive {
             let directory_offset = writer.position() as u64;
 
             for (entry, header_offset, crc, method, stored_size) in &written {
-                let size = entry.bytes.len() as u32;
+                let size = entry.bytes.len() as u64;
+                let wide_sizes = *stored_size > u64::from(WIDE_U32) || size > u64::from(WIDE_U32);
+                let wide_offset = *header_offset > u64::from(WIDE_U32);
+                let body: u16 = if wide_sizes { 16 } else { 0 } + if wide_offset { 8 } else { 0 };
+                let extra = if body > 0 { body + 4 } else { 0 };
+                let needed = if wide_sizes || wide_offset { 45 } else { 20 };
+
                 writer.u32(CENTRAL_HEADER_SIGNATURE)?;
-                writer.u16(20)?;
-                writer.u16(20)?;
+                writer.u16(needed)?;
+                writer.u16(needed)?;
                 writer.u16(0)?;
                 writer.u16(method.method())?;
                 writer.u16(FIXED_DOS_TIME)?;
                 writer.u16(FIXED_DOS_DATE)?;
                 writer.u32(*crc)?;
-                writer.u32(*stored_size)?;
-                writer.u32(size)?;
+                writer.u32(if wide_sizes {
+                    WIDE_U32
+                } else {
+                    *stored_size as u32
+                })?;
+                writer.u32(if wide_sizes { WIDE_U32 } else { size as u32 })?;
                 writer.u16(entry.name.len() as u16)?;
-                writer.u16(0)?;
+                writer.u16(extra)?;
                 writer.u16(0)?;
                 writer.u16(0)?;
                 writer.u16(0)?;
                 writer.u32(0)?;
-                writer.u32(*header_offset as u32)?;
+                writer.u32(if wide_offset {
+                    WIDE_U32
+                } else {
+                    *header_offset as u32
+                })?;
                 writer.bytes(entry.name.as_bytes())?;
+                if extra > 0 {
+                    writer.u16(ZIP64_EXTRA_ID)?;
+                    writer.u16(body)?;
+                    if wide_sizes {
+                        writer.u64(size)?;
+                        writer.u64(*stored_size)?;
+                    }
+                    if wide_offset {
+                        writer.u64(*header_offset)?;
+                    }
+                }
             }
 
             let directory_size = writer.position() as u64 - directory_offset;
-            let count = u16::try_from(written.len()).map_err(|_| {
-                Diagnostic::new(
-                    "EA052",
-                    Severity::Error,
-                    FailureClass::ResourceExhaustion,
-                    "core.archive",
-                    "The archive holds more entries than the format's counter allows.",
-                )
-            })?;
+            let held = written.len() as u64;
+            let wide_end = held > u64::from(WIDE_U16)
+                || directory_size > u64::from(WIDE_U32)
+                || directory_offset > u64::from(WIDE_U32);
+
+            if wide_end {
+                let record_at = writer.position() as u64;
+                writer.u32(ZIP64_END_SIGNATURE)?;
+                writer.u64(ZIP64_END_SIZE - 12)?;
+                writer.u16(45)?;
+                writer.u16(45)?;
+                writer.u32(0)?;
+                writer.u32(0)?;
+                writer.u64(held)?;
+                writer.u64(held)?;
+                writer.u64(directory_size)?;
+                writer.u64(directory_offset)?;
+
+                writer.u32(ZIP64_LOCATOR_SIGNATURE)?;
+                writer.u32(0)?;
+                writer.u64(record_at)?;
+                writer.u32(1)?;
+            }
+
+            let count = if wide_end {
+                WIDE_U16
+            } else {
+                written.len() as u16
+            };
 
             writer.u32(END_OF_CENTRAL_DIRECTORY_SIGNATURE)?;
             writer.u16(0)?;
             writer.u16(0)?;
             writer.u16(count)?;
             writer.u16(count)?;
-            writer.u32(directory_size as u32)?;
-            writer.u32(directory_offset as u32)?;
+            writer.u32(if wide_end {
+                WIDE_U32
+            } else {
+                directory_size as u32
+            })?;
+            writer.u32(if wide_end {
+                WIDE_U32
+            } else {
+                directory_offset as u32
+            })?;
             writer.u16(0)?;
 
             Ok(writer.finish())
@@ -64474,6 +64735,148 @@ public final class MainActivity extends Activity {
                 into.push(child);
             }
         }
+    }
+
+    const BEYOND_THE_COUNTER: usize = 70_000;
+
+    fn python_zip_available() -> bool {
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import zipfile")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn zip64_round_trips_more_entries_than_the_classic_counter_holds() {
+        let mut builder = ArchiveBuilder::new();
+        for index in 0..BEYOND_THE_COUNTER {
+            builder
+                .add(
+                    format!("f{index}.txt"),
+                    format!("body {index}").into_bytes(),
+                )
+                .expect("the entry is taken");
+        }
+        let bytes = builder.finish().expect("the archive is written");
+
+        let classic = u32::from_le_bytes([0x50, 0x4b, 0x05, 0x06]);
+        assert_eq!(classic, archive::END_OF_CENTRAL_DIRECTORY_SIGNATURE);
+        assert!(
+            bytes
+                .windows(4)
+                .any(|four| four == archive::ZIP64_END_SIGNATURE.to_le_bytes()),
+            "no ZIP64 end record was written"
+        );
+        assert!(
+            bytes
+                .windows(4)
+                .any(|four| four == archive::ZIP64_LOCATOR_SIGNATURE.to_le_bytes()),
+            "no ZIP64 locator was written"
+        );
+
+        let mut sink = Sink::new();
+        let read = archive::read(&bytes, &mut sink).expect("the archive reads back");
+        assert_eq!(read.len(), BEYOND_THE_COUNTER);
+        for index in [0usize, 1, 65_534, 65_535, 65_536, BEYOND_THE_COUNTER - 1] {
+            let name = format!("f{index}.txt");
+            let entry = read
+                .entry(&name)
+                .unwrap_or_else(|| panic!("{name} is gone"));
+            assert_eq!(
+                read.content(&bytes, entry).expect("the entry reads"),
+                format!("body {index}").into_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn zip64_reads_what_an_independent_tool_writes() {
+        if !python_zip_available() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_ZIP64_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_ZIP64_CONFORMANCE is set but no independent tool is here"
+            );
+            eprintln!("zip64: no independent archiver is available here");
+            return;
+        }
+        let directory = temp_directory("omni-zip64-in");
+        let made = directory.join("wide.zip");
+        let program = format!(
+            "import zipfile\nz = zipfile.ZipFile(r'{}', 'w', zipfile.ZIP_DEFLATED, allowZip64=True)\nfor i in range({}):\n    z.writestr('f%d.txt' % i, b'body %d' % i)\nz.close()\n",
+            made.to_str().expect("a path"),
+            BEYOND_THE_COUNTER,
+        );
+        let run = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&program)
+            .output()
+            .expect("python runs");
+        assert!(run.status.success(), "{run:?}");
+
+        let bytes = std::fs::read(&made).expect("the archive is read");
+        let mut sink = Sink::new();
+        let read = archive::read(&bytes, &mut sink).expect("the archive reads");
+        assert_eq!(read.len(), BEYOND_THE_COUNTER);
+        for index in [0usize, 65_535, 65_536, BEYOND_THE_COUNTER - 1] {
+            let name = format!("f{index}.txt");
+            let entry = read
+                .entry(&name)
+                .unwrap_or_else(|| panic!("{name} is gone"));
+            assert_eq!(
+                read.content(&bytes, entry).expect("the entry reads"),
+                format!("body {index}").into_bytes()
+            );
+        }
+        let (checked, failed) = archive::verify_checksums(&read, &bytes, &mut sink);
+        assert_eq!(failed, 0);
+        assert_eq!(checked as usize, BEYOND_THE_COUNTER);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn what_this_writes_beyond_the_counter_an_independent_tool_reads() {
+        if !python_zip_available() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_ZIP64_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_ZIP64_CONFORMANCE is set but no independent tool is here"
+            );
+            eprintln!("zip64: no independent archiver is available here");
+            return;
+        }
+        let mut builder = ArchiveBuilder::new();
+        for index in 0..BEYOND_THE_COUNTER {
+            builder
+                .add(
+                    format!("f{index}.txt"),
+                    format!("body {index}").into_bytes(),
+                )
+                .expect("the entry is taken");
+        }
+        let bytes = builder.finish().expect("the archive is written");
+
+        let directory = temp_directory("omni-zip64-out");
+        let made = directory.join("wide.zip");
+        std::fs::write(&made, &bytes).expect("the archive is written out");
+        let program = format!(
+            "import zipfile\nz = zipfile.ZipFile(r'{}')\nassert z.testzip() is None, 'a checksum failed'\nnames = z.namelist()\nassert len(names) == {}, len(names)\nassert z.read('f65536.txt') == b'body 65536'\nassert z.read('f{}.txt') == b'body {}'\nprint('ok')\n",
+            made.to_str().expect("a path"),
+            BEYOND_THE_COUNTER,
+            BEYOND_THE_COUNTER - 1,
+            BEYOND_THE_COUNTER - 1,
+        );
+        let run = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&program)
+            .output()
+            .expect("python runs");
+        assert!(
+            run.status.success(),
+            "an independent reader refused it: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     fn python_available() -> bool {
