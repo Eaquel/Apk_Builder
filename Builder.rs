@@ -349,7 +349,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &[
             "The multiplication under the ladder is not constant-time: how long it takes still depends on the numbers going into it. For a private key the blinding in front of it means those numbers are drawn fresh every time and correlate with nothing; for a public one there is nothing secret to leak. Neither of those is the same as fixing the arithmetic.",
             "No primality testing and no key generation: a key is read, never made.",
-            "Schoolbook multiplication only; no Karatsuba and no Montgomery form.",
+            "Karatsuba above a hundred and twenty-eight limbs and schoolbook below it, a crossover measured on this code rather than assumed: at thirty-two limbs the split cost more than it saved and made two-thousand-and-forty-eight-bit work slower. There is still no Montgomery form, so a modular exponentiation pays a division for every reduction.",
         ],
     },
     Subsystem {
@@ -33362,6 +33362,8 @@ pub mod bignum {
 
     pub const MAX_BITS: usize = 16_384;
 
+    pub const KARATSUBA_LIMBS: usize = 128;
+
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
             code,
@@ -33518,6 +33520,54 @@ pub mod bignum {
             if self.is_zero() || other.is_zero() {
                 return Natural::zero();
             }
+            if self.limbs.len() < KARATSUBA_LIMBS || other.limbs.len() < KARATSUBA_LIMBS {
+                return self.mul_long(other);
+            }
+            self.mul_split(other)
+        }
+
+        fn split_limbs(&self, at: usize) -> (Natural, Natural) {
+            let cut = at.min(self.limbs.len());
+            let mut low = Natural {
+                limbs: self.limbs[..cut].to_vec(),
+            };
+            let mut high = Natural {
+                limbs: self.limbs[cut..].to_vec(),
+            };
+            low.trim();
+            high.trim();
+            (high, low)
+        }
+
+        fn shl_limbs(&self, count: usize) -> Natural {
+            if self.is_zero() {
+                return Natural::zero();
+            }
+            let mut limbs = vec![0u32; count];
+            limbs.extend_from_slice(&self.limbs);
+            let mut value = Natural { limbs };
+            value.trim();
+            value
+        }
+
+        fn mul_split(&self, other: &Natural) -> Natural {
+            let half = self.limbs.len().max(other.limbs.len()) / 2;
+            let (high_left, low_left) = self.split_limbs(half);
+            let (high_right, low_right) = other.split_limbs(half);
+
+            let low = low_left.mul(&low_right);
+            let high = high_left.mul(&high_right);
+            let crossed = low_left.add(&high_left).mul(&low_right.add(&high_right));
+            let Ok(middle) = crossed.sub(&low.add(&high)) else {
+                return self.mul_long(other);
+            };
+
+            high.shl_limbs(half * 2)
+                .add(&middle.shl_limbs(half))
+                .add(&low)
+        }
+
+        fn mul_long(&self, other: &Natural) -> Natural {
             let mut limbs = vec![0u32; self.limbs.len() + other.limbs.len()];
             for (i, left) in self.limbs.iter().enumerate() {
                 let mut carry = 0u64;
@@ -75264,6 +75314,94 @@ Viewbinding   = false
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn splitting_a_multiplication_comes_to_what_the_long_way_comes_to() {
+        use super::bignum::{Natural, KARATSUBA_LIMBS};
+
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let widths = [
+            1usize,
+            2,
+            KARATSUBA_LIMBS - 1,
+            KARATSUBA_LIMBS,
+            KARATSUBA_LIMBS + 1,
+            KARATSUBA_LIMBS * 2,
+            KARATSUBA_LIMBS * 4 + 3,
+        ];
+
+        for left_width in widths {
+            for right_width in widths {
+                let mut left = vec![0u8; left_width * 4];
+                let mut right = vec![0u8; right_width * 4];
+                for slot in left.iter_mut() {
+                    *slot = next() as u8;
+                }
+                for slot in right.iter_mut() {
+                    *slot = next() as u8;
+                }
+                left[0] |= 0x80;
+                right[0] |= 0x80;
+
+                let a = Natural::from_bytes_be(&left);
+                let b = Natural::from_bytes_be(&right);
+                let product = a.mul(&b);
+
+                let wide = product.bit_len().div_ceil(8).max(1);
+                let by_parts = product.to_bytes_be(wide).expect("the product fits");
+
+                let (quotient, remainder) = product.divmod(&a).expect("the product divides");
+                assert!(
+                    remainder.is_zero(),
+                    "{left_width}x{right_width} left a remainder"
+                );
+                assert_eq!(
+                    quotient, b,
+                    "{left_width}x{right_width} came to the wrong number"
+                );
+                assert_eq!(
+                    Natural::from_bytes_be(&by_parts),
+                    product,
+                    "{left_width}x{right_width} did not survive its own bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_split_multiplication_agrees_with_numbers_anyone_can_check() {
+        use super::bignum::Natural;
+
+        let ones = Natural::from_bytes_be(&vec![0xffu8; 256]);
+        let squared = ones.mul(&ones);
+        let one = Natural::one();
+        let expected = {
+            let shifted = Natural::from_bytes_be(&{
+                let mut room = vec![0u8; 513];
+                room[0] = 1;
+                room
+            });
+            shifted
+                .sub(&ones)
+                .and_then(|value| value.sub(&ones))
+                .and_then(|value| value.sub(&one))
+                .expect("the identity holds")
+        };
+        assert_eq!(
+            squared, expected,
+            "n squared must be 2^4096 - 2n - 1 for n all ones"
+        );
+
+        assert!(Natural::zero().mul(&ones).is_zero());
+        assert_eq!(ones.mul(&one), ones);
     }
 
     fn a_project() -> super::project::Project {
