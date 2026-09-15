@@ -200,8 +200,8 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 9,
         summary: "A real DAG with deterministic ordering and cycle detection.",
         missing: &[
-            "Nothing constructs a graph from a project yet.",
-            "No graph is persisted between builds, so nothing can be compared.",
+            "A graph is built from the settings a project carries, not from the files it holds: the steps and their order are fixed here, and the input digest of a step stands for inputs nothing has read yet.",
+            "A shape is written and read back, and comparing two says which steps must run again --- a step whose own digest moved, and then everything standing on it. Nothing writes one during a build yet, because the build engine does not use the graph.",
         ],
     },
     Subsystem {
@@ -2046,6 +2046,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Yapı motoru, bir adı bu noktadan önce projenin kendi tablosuna göre çözer. Ad olarak gelen birinin arkasında tablo yoktur."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Yapı motoru ?attr/ad ifadesini özniteliğin tanımlayıcısına çevirir ve sayısal biçimi buraya verir, örneğin ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Yapı motoru bir adı, projenin kendi tablosuna göre tanımlayıcısına çevirir ve sayısal biçimi buraya verir, örneğin @0x7f060000. Çözülmemiş gelen bir adın arkasında tablo yoktur."),
+        ("The build graph could not be put in place.", "Yapı çizgesi yerine konulamadı."),
+        ("The build graph could not be written.", "Yapı çizgesi yazılamadı."),
         ("The build graph has more nodes than the scheduler accepts.", "Yapı çizgesi, zamanlayıcının kabul ettiğinden çok düğüm taşıyor."),
         ("The bundle writer does not know that android attribute.", "Paket yazıcısı bu android özniteliğini bilmiyor."),
         ("The byte-order marker is not a value the format defines.", "Bayt sırası imi, biçimin tanımladığı bir değer değil."),
@@ -2105,6 +2107,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "Dosya kesilmiş ya da kayıt yanlış."),
         ("The file is truncated, padded, or not the file it claims.", "Dosya kesilmiş, doldurulmuş ya da iddia ettiği dosya değil."),
         ("The folder for that file could not be made.", "Bu dosyanın klasörü oluşturulamadı."),
+        ("The folder for the build graph could not be made.", "Yapı çizgesi için klasör oluşturulamadı."),
         ("The folder for the cache index could not be made.", "Önbellek dizininin klasörü oluşturulamadı."),
         ("The folder for the copy could not be made.", "Kopyanın klasörü oluşturulamadı."),
         ("The folder for the new name could not be made.", "Yeni adın klasörü oluşturulamadı."),
@@ -3263,6 +3266,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Die Build-Maschine löst einen Namen vor dieser Stelle gegen die eigene Tabelle des Projekts auf. Einer, der als Name ankommt, hat keine Tabelle hinter sich."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Die Build-Maschine macht aus ?attr/name den Bezeichner des Attributs und übergibt hier die numerische Form, zum Beispiel ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Die Build-Maschine macht aus einem Namen gegen die eigene Tabelle des Projekts seinen Bezeichner und übergibt hier die numerische Form, zum Beispiel @0x7f060000. Ein Name, der unaufgelöst ankommt, hat keine Tabelle hinter sich."),
+        ("The build graph could not be put in place.", "Der Baugraph ließ sich nicht an seinen Platz bringen."),
+        ("The build graph could not be written.", "Der Baugraph ließ sich nicht schreiben."),
         ("The build graph has more nodes than the scheduler accepts.", "Der Baugraph hat mehr Knoten, als der Planer annimmt."),
         ("The bundle writer does not know that android attribute.", "Der Bundle-Schreiber kennt dieses android-Attribut nicht."),
         ("The byte-order marker is not a value the format defines.", "Die Bytereihenfolge-Markierung ist kein Wert, den das Format definiert."),
@@ -3322,6 +3327,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "Die Datei ist abgeschnitten, oder der Eintrag ist falsch."),
         ("The file is truncated, padded, or not the file it claims.", "Die Datei ist abgeschnitten, aufgefüllt oder nicht die, für die sie sich ausgibt."),
         ("The folder for that file could not be made.", "Der Ordner für diese Datei konnte nicht angelegt werden."),
+        ("The folder for the build graph could not be made.", "Der Ordner für den Baugraphen ließ sich nicht anlegen."),
         ("The folder for the cache index could not be made.", "Der Ordner für den Cache-Index konnte nicht angelegt werden."),
         ("The folder for the copy could not be made.", "Der Ordner für die Kopie konnte nicht angelegt werden."),
         ("The folder for the new name could not be made.", "Der Ordner für den neuen Namen konnte nicht angelegt werden."),
@@ -4480,6 +4486,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "El motor de compilación resuelve un nombre contra la tabla propia del proyecto antes de este punto. Uno que llega por nombre no tiene ninguna tabla detrás."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "El motor de compilación convierte ?attr/nombre en el identificador del atributo y entrega aquí la forma numérica, por ejemplo ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "El motor de compilación convierte un nombre en su identificador contra la tabla propia del proyecto y entrega aquí la forma numérica, por ejemplo @0x7f060000. Un nombre que llega sin resolver no tiene ninguna tabla detrás."),
+        ("The build graph could not be put in place.", "El grafo de compilación no se pudo poner en su sitio."),
+        ("The build graph could not be written.", "El grafo de compilación no se pudo escribir."),
         ("The build graph has more nodes than the scheduler accepts.", "El grafo de compilación tiene más nodos de los que el planificador acepta."),
         ("The bundle writer does not know that android attribute.", "El escritor de paquetes no conoce ese atributo de android."),
         ("The byte-order marker is not a value the format defines.", "La marca de orden de bytes no es un valor que el formato defina."),
@@ -4539,6 +4547,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "El archivo está truncado, o el registro es incorrecto."),
         ("The file is truncated, padded, or not the file it claims.", "El archivo está truncado, rellenado, o no es el archivo que dice ser."),
         ("The folder for that file could not be made.", "No se pudo crear la carpeta para ese archivo."),
+        ("The folder for the build graph could not be made.", "No se pudo crear la carpeta para el grafo de compilación."),
         ("The folder for the cache index could not be made.", "No se pudo crear la carpeta para el índice de la caché."),
         ("The folder for the copy could not be made.", "No se pudo crear la carpeta para la copia."),
         ("The folder for the new name could not be made.", "No se pudo crear la carpeta para el nombre nuevo."),
@@ -5697,6 +5706,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Le moteur de compilation résout un nom contre la table propre au projet avant ce point. Un nom qui arrive tel quel n'a aucune table derrière lui."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Le moteur de compilation transforme ?attr/nom en l'identifiant de l'attribut et transmet ici la forme numérique, par exemple ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Le moteur de compilation transforme un nom en son identifiant contre la table propre au projet et transmet ici la forme numérique, par exemple @0x7f060000. Un nom qui arrive non résolu n'a aucune table derrière lui."),
+        ("The build graph could not be put in place.", "Le graphe de construction n a pas pu être mis en place."),
+        ("The build graph could not be written.", "Le graphe de construction n a pas pu être écrit."),
         ("The build graph has more nodes than the scheduler accepts.", "Le graphe de construction a plus de nœuds que l ordonnanceur n en accepte."),
         ("The bundle writer does not know that android attribute.", "L'écrivain de bundle ne connaît pas cet attribut android."),
         ("The byte-order marker is not a value the format defines.", "Le marqueur d'ordre des octets n'est pas une valeur que le format définit."),
@@ -5756,6 +5767,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "Le fichier est tronqué, ou l'enregistrement est incorrect."),
         ("The file is truncated, padded, or not the file it claims.", "Le fichier est tronqué, complété, ou n'est pas le fichier qu'il prétend être."),
         ("The folder for that file could not be made.", "Le dossier de ce fichier n'a pas pu être créé."),
+        ("The folder for the build graph could not be made.", "Le dossier du graphe de construction n a pas pu être créé."),
         ("The folder for the cache index could not be made.", "Le dossier de l'index du cache n'a pas pu être créé."),
         ("The folder for the copy could not be made.", "Le dossier de la copie n'a pas pu être créé."),
         ("The folder for the new name could not be made.", "Le dossier du nouveau nom n'a pas pu être créé."),
@@ -6917,6 +6929,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Il motore di compilazione risolve un nome contro la tabella propria del progetto prima di questo punto. Uno che arriva per nome non ha alcuna tabella dietro di sé."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Il motore di compilazione trasforma ?attr/nome nell'identificatore dell'attributo e consegna qui la forma numerica, per esempio ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Il motore di compilazione trasforma un nome nel suo identificatore contro la tabella propria del progetto e consegna qui la forma numerica, per esempio @0x7f060000. Un nome che arriva non risolto non ha alcuna tabella dietro di sé."),
+        ("The build graph could not be put in place.", "Il grafo di costruzione non si è potuto mettere al suo posto."),
+        ("The build graph could not be written.", "Il grafo di costruzione non si è potuto scrivere."),
         ("The build graph has more nodes than the scheduler accepts.", "Il grafo di costruzione ha più nodi di quanti il pianificatore ne accetti."),
         ("The bundle writer does not know that android attribute.", "Lo scrittore di bundle non conosce quell'attributo android."),
         ("The byte-order marker is not a value the format defines.", "Il marcatore dell'ordine dei byte non è un valore che il formato definisce."),
@@ -6976,6 +6990,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "Il file è troncato, oppure il record è sbagliato."),
         ("The file is truncated, padded, or not the file it claims.", "Il file è troncato, riempito, oppure non è il file che dichiara di essere."),
         ("The folder for that file could not be made.", "Non è stato possibile creare la cartella per quel file."),
+        ("The folder for the build graph could not be made.", "La cartella per il grafo di costruzione non si è potuta creare."),
         ("The folder for the cache index could not be made.", "Non è stato possibile creare la cartella per l'indice della cache."),
         ("The folder for the copy could not be made.", "Non è stato possibile creare la cartella per la copia."),
         ("The folder for the new name could not be made.", "Non è stato possibile creare la cartella per il nuovo nome."),
@@ -8137,6 +8152,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "O motor de compilação resolve um nome contra a tabela própria do projeto antes deste ponto. Um que chega por nome não tem tabela alguma atrás de si."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "O motor de compilação transforma ?attr/nome no identificador do atributo e entrega aqui a forma numérica, por exemplo ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "O motor de compilação transforma um nome no seu identificador contra a tabela própria do projeto e entrega aqui a forma numérica, por exemplo @0x7f060000. Um nome que chega sem resolver não tem tabela alguma atrás de si."),
+        ("The build graph could not be put in place.", "O grafo de construção não se pôde pôr no lugar."),
+        ("The build graph could not be written.", "O grafo de construção não se pôde escrever."),
         ("The build graph has more nodes than the scheduler accepts.", "O grafo de construção tem mais nós do que o escalonador aceita."),
         ("The bundle writer does not know that android attribute.", "O escritor de bundle não conhece esse atributo android."),
         ("The byte-order marker is not a value the format defines.", "O marcador de ordem de bytes não é um valor que o formato defina."),
@@ -8196,6 +8213,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "O arquivo está truncado, ou o registro está errado."),
         ("The file is truncated, padded, or not the file it claims.", "O arquivo está truncado, preenchido, ou não é o arquivo que alega ser."),
         ("The folder for that file could not be made.", "Não foi possível criar a pasta desse arquivo."),
+        ("The folder for the build graph could not be made.", "Não foi possível criar a pasta para o grafo de construção."),
         ("The folder for the cache index could not be made.", "Não foi possível criar a pasta do índice do cache."),
         ("The folder for the copy could not be made.", "Não foi possível criar a pasta da cópia."),
         ("The folder for the new name could not be made.", "Não foi possível criar a pasta do novo nome."),
@@ -9354,6 +9372,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Сборочный движок разрешает имя по собственной таблице проекта раньше этой точки. У того, что приходит по имени, за спиной нет никакой таблицы."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Сборочный движок превращает ?attr/имя в идентификатор атрибута и передаёт сюда числовую форму, например ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Сборочный движок превращает имя в его идентификатор по собственной таблице проекта и передаёт сюда числовую форму, например @0x7f060000. У имени, которое приходит неразрешённым, за спиной нет никакой таблицы."),
+        ("The build graph could not be put in place.", "Граф сборки не удалось поставить на место."),
+        ("The build graph could not be written.", "Граф сборки не удалось записать."),
         ("The build graph has more nodes than the scheduler accepts.", "В графе сборки больше узлов, чем принимает планировщик."),
         ("The bundle writer does not know that android attribute.", "Писатель бандла не знает этого атрибута android."),
         ("The byte-order marker is not a value the format defines.", "Метка порядка байт не является значением, которое определяет формат."),
@@ -9413,6 +9433,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "Файл обрезан, либо запись неверна."),
         ("The file is truncated, padded, or not the file it claims.", "Файл обрезан, дополнен или не тот, каким себя называет."),
         ("The folder for that file could not be made.", "Папку для этого файла не удалось создать."),
+        ("The folder for the build graph could not be made.", "Папку для графа сборки не удалось создать."),
         ("The folder for the cache index could not be made.", "Папку для указателя кеша не удалось создать."),
         ("The folder for the copy could not be made.", "Папку для копии не удалось создать."),
         ("The folder for the new name could not be made.", "Папку для нового имени не удалось создать."),
@@ -10571,6 +10592,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "يحلّ محرك البناء الاسم في مقابل جدول المشروع نفسه قبل هذه النقطة. والاسم الذي يصل كاسم لا جدول خلفه."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "يحوّل محرك البناء ?attr/اسم إلى معرّف السمة ويسلّم الصورة العددية هنا، مثلًا ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "يحوّل محرك البناء الاسم إلى معرّفه في مقابل جدول المشروع نفسه ويسلّم الصورة العددية هنا، مثلًا @0x7f060000. والاسم الذي يصل بلا حلّ لا جدول خلفه."),
+        ("The build graph could not be put in place.", "تعذر وضع رسم البناء في موضعه."),
+        ("The build graph could not be written.", "تعذرت كتابة رسم البناء."),
         ("The build graph has more nodes than the scheduler accepts.", "رسم البناء فيه عقد أكثر مما يقبله المجدول."),
         ("The bundle writer does not know that android attribute.", "كاتب الحزمة المجمّعة لا يعرف سمة android تلك."),
         ("The byte-order marker is not a value the format defines.", "علامة ترتيب البايتات ليست قيمة يعرّفها التنسيق."),
@@ -10630,6 +10653,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "الملف مبتور، أو السجل خاطئ."),
         ("The file is truncated, padded, or not the file it claims.", "الملف مبتور أو محشو أو ليس الملف الذي يدّعيه."),
         ("The folder for that file could not be made.", "تعذّر إنشاء مجلد ذلك الملف."),
+        ("The folder for the build graph could not be made.", "تعذر إنشاء مجلد رسم البناء."),
         ("The folder for the cache index could not be made.", "تعذّر إنشاء مجلد فهرس المخبأ."),
         ("The folder for the copy could not be made.", "تعذّر إنشاء مجلد النسخة."),
         ("The folder for the new name could not be made.", "تعذّر إنشاء مجلد الاسم الجديد."),
@@ -11788,6 +11812,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "构建引擎会在此之前对照项目自己的表解析名称。以名称形式到达这里的，背后没有任何表。"),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "构建引擎会把 ?attr/名称 变成该属性的标识符，并把数值形式交到此处，例如 ?0x01010435。"),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "构建引擎会对照项目自己的表把名称变成它的标识符，并把数值形式交到此处，例如 @0x7f060000。未经解析就到达的名称，背后没有任何表。"),
+        ("The build graph could not be put in place.", "无法把构建图放到位。"),
+        ("The build graph could not be written.", "无法写入构建图。"),
         ("The build graph has more nodes than the scheduler accepts.", "构建图的节点比调度器接受的更多。"),
         ("The bundle writer does not know that android attribute.", "捆绑包写入器不认识那个 android 属性。"),
         ("The byte-order marker is not a value the format defines.", "字节序标记不是格式所定义的值。"),
@@ -11847,6 +11873,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "文件被截断了，或者这条记录有误。"),
         ("The file is truncated, padded, or not the file it claims.", "文件被截断、被填充，或者它并不是它自称的那个文件。"),
         ("The folder for that file could not be made.", "无法为那个文件创建文件夹。"),
+        ("The folder for the build graph could not be made.", "无法创建构建图所用的目录。"),
         ("The folder for the cache index could not be made.", "无法为缓存索引创建文件夹。"),
         ("The folder for the copy could not be made.", "无法为该副本创建文件夹。"),
         ("The folder for the new name could not be made.", "无法为新名称创建文件夹。"),
@@ -13005,6 +13032,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "ビルドエンジンは、ここより前でプロジェクト自身の表に照らして名前を解決します。名前のまま届いたものには、その後ろに表がありません。"),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "ビルドエンジンは ?attr/name を属性の識別子に変え、数値の形をここへ渡します。たとえば ?0x01010435 です。"),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "ビルドエンジンは、プロジェクト自身の表に照らして名前を識別子に変え、数値の形をここへ渡します。たとえば @0x7f060000 です。解決されないまま届いた名前には、その後ろに表がありません。"),
+        ("The build graph could not be put in place.", "組み立ての図を所定の場所へ置けませんでした。"),
+        ("The build graph could not be written.", "組み立ての図を書けませんでした。"),
         ("The build graph has more nodes than the scheduler accepts.", "組み立ての図の節点が、割り振り役の受け入れる数より多いです。"),
         ("The bundle writer does not know that android attribute.", "バンドルの書き手は、その android 属性を知りません。"),
         ("The byte-order marker is not a value the format defines.", "バイト順の印は、形式の定める値ではありません。"),
@@ -13064,6 +13093,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "ファイルが切り詰められているか、そのレコードが違います。"),
         ("The file is truncated, padded, or not the file it claims.", "ファイルが切り詰められているか、詰め物をされているか、名乗るとおりのファイルではありません。"),
         ("The folder for that file could not be made.", "そのファイルのためのフォルダーを作れませんでした。"),
+        ("The folder for the build graph could not be made.", "組み立ての図のための入れ物を作れませんでした。"),
         ("The folder for the cache index could not be made.", "キャッシュの索引のためのフォルダーを作れませんでした。"),
         ("The folder for the copy could not be made.", "複製のためのフォルダーを作れませんでした。"),
         ("The folder for the new name could not be made.", "新しい名前のためのフォルダーを作れませんでした。"),
@@ -14222,6 +14252,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "빌드 엔진은 이 지점보다 앞에서 프로젝트 제 표에 비추어 이름을 풉니다. 이름인 채로 닿은 것에는 뒤에 표가 없습니다."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "빌드 엔진은 ?attr/name을 속성의 식별자로 바꿔 숫자 꼴을 여기로 넘깁니다. 이를테면 ?0x01010435입니다."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "빌드 엔진은 프로젝트 제 표에 비추어 이름을 식별자로 바꿔 숫자 꼴을 여기로 넘깁니다. 이를테면 @0x7f060000입니다. 풀리지 않은 채 닿은 이름에는 뒤에 표가 없습니다."),
+        ("The build graph could not be put in place.", "빌드 그림을 제자리에 놓지 못했습니다."),
+        ("The build graph could not be written.", "빌드 그림을 쓰지 못했습니다."),
         ("The build graph has more nodes than the scheduler accepts.", "빌드 그림의 마디가 배정기가 받아들이는 것보다 많습니다."),
         ("The bundle writer does not know that android attribute.", "번들 쓰는 쪽은 그 android 속성을 모릅니다."),
         ("The byte-order marker is not a value the format defines.", "바이트 차례 표는 형식이 정한 값이 아닙니다."),
@@ -14281,6 +14313,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "파일이 잘렸거나 그 기록이 틀렸습니다."),
         ("The file is truncated, padded, or not the file it claims.", "파일이 잘렸거나, 채워졌거나, 저가 내세우는 그 파일이 아닙니다."),
         ("The folder for that file could not be made.", "그 파일을 담을 폴더를 만들지 못했습니다."),
+        ("The folder for the build graph could not be made.", "빌드 그림을 둘 폴더를 만들지 못했습니다."),
         ("The folder for the cache index could not be made.", "캐시 색인을 담을 폴더를 만들지 못했습니다."),
         ("The folder for the copy could not be made.", "베낌을 담을 폴더를 만들지 못했습니다."),
         ("The folder for the new name could not be made.", "새 이름을 담을 폴더를 만들지 못했습니다."),
@@ -15439,6 +15472,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "बनावट-इंजन इस बिंदु से पहले ही नाम को परियोजना की अपनी सारणी के विरुद्ध सुलझा देता है। जो नाम की तरह पहुँचे उसके पीछे कोई सारणी नहीं है।"),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "बनावट-इंजन ?attr/name को गुण के पहचानकर्ता में बदलता है और संख्यात्मक रूप यहाँ सौंपता है, उदाहरण के लिए ?0x01010435।"),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "बनावट-इंजन नाम को परियोजना की अपनी सारणी के विरुद्ध उसके पहचानकर्ता में बदलता है और संख्यात्मक रूप यहाँ सौंपता है, उदाहरण के लिए @0x7f060000। जो नाम बिना सुलझे पहुँचे उसके पीछे कोई सारणी नहीं है।"),
+        ("The build graph could not be put in place.", "निर्माण ग्राफ़ को उसके स्थान पर नहीं रखा जा सका।"),
+        ("The build graph could not be written.", "निर्माण ग्राफ़ नहीं लिखा जा सका।"),
         ("The build graph has more nodes than the scheduler accepts.", "निर्माण ग्राफ़ में उससे अधिक नोड हैं जितने अनुसूचक स्वीकार करता है।"),
         ("The bundle writer does not know that android attribute.", "बंडल-लेखक उस android गुण को नहीं जानता।"),
         ("The byte-order marker is not a value the format defines.", "बाइट-क्रम का चिह्न ऐसा मान नहीं जिसे प्रारूप परिभाषित करता हो।"),
@@ -15498,6 +15533,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "फ़ाइल कटी हुई है, या वह अभिलेख गलत है।"),
         ("The file is truncated, padded, or not the file it claims.", "फ़ाइल कटी हुई है, भरी हुई है, या वह फ़ाइल नहीं जो होने का दावा करती है।"),
         ("The folder for that file could not be made.", "उस फ़ाइल के लिए फ़ोल्डर बनाया नहीं जा सका।"),
+        ("The folder for the build graph could not be made.", "निर्माण ग्राफ़ के लिए फ़ोल्डर नहीं बनाया जा सका।"),
         ("The folder for the cache index could not be made.", "संचय-अनुक्रमणिका के लिए फ़ोल्डर बनाया नहीं जा सका।"),
         ("The folder for the copy could not be made.", "नकल के लिए फ़ोल्डर बनाया नहीं जा सका।"),
         ("The folder for the new name could not be made.", "नए नाम के लिए फ़ोल्डर बनाया नहीं जा सका।"),
@@ -16656,6 +16692,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Mesin bangunan menyelesaikan sebuah nama terhadap tabel milik proyek sebelum titik ini. Yang tiba dalam bentuk nama tidak punya tabel di belakangnya."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Mesin bangunan mengubah ?attr/name menjadi pengenal atributnya dan menyerahkan bentuk angkanya ke sini, misalnya ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Mesin bangunan mengubah sebuah nama menjadi pengenalnya terhadap tabel milik proyek dan menyerahkan bentuk angkanya ke sini, misalnya @0x7f060000. Nama yang tiba tanpa diselesaikan tidak punya tabel di belakangnya."),
+        ("The build graph could not be put in place.", "Graf bangunan tidak dapat ditempatkan pada posisinya."),
+        ("The build graph could not be written.", "Graf bangunan tidak dapat ditulis."),
         ("The build graph has more nodes than the scheduler accepts.", "Graf bangunan punya lebih banyak simpul daripada yang diterima penjadwal."),
         ("The bundle writer does not know that android attribute.", "Penulis bundel tidak mengenal atribut android itu."),
         ("The byte-order marker is not a value the format defines.", "Penanda urutan bita bukan nilai yang didefinisikan format."),
@@ -16715,6 +16753,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "Berkas itu terpotong, atau rekamannya salah."),
         ("The file is truncated, padded, or not the file it claims.", "Berkas itu terpotong, diganjal, atau bukan berkas seperti yang diakuinya."),
         ("The folder for that file could not be made.", "Map untuk berkas itu tidak bisa dibuat."),
+        ("The folder for the build graph could not be made.", "Folder untuk graf bangunan tidak dapat dibuat."),
         ("The folder for the cache index could not be made.", "Map untuk indeks singgahan tidak bisa dibuat."),
         ("The folder for the copy could not be made.", "Map untuk salinannya tidak bisa dibuat."),
         ("The folder for the new name could not be made.", "Map untuk nama barunya tidak bisa dibuat."),
@@ -17873,6 +17912,8 @@ pub mod speech {
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "O motor de compilação resolve um nome contra a tabela do próprio projeto antes deste ponto. Um que chega como nome não tem tabela por trás."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "O motor de compilação transforma ?attr/name no identificador do atributo e entrega aqui a forma numérica, por exemplo ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "O motor de compilação transforma um nome no seu identificador contra a tabela do próprio projeto e entrega aqui a forma numérica, por exemplo @0x7f060000. Um nome que chega sem resolver não tem tabela por trás."),
+        ("The build graph could not be put in place.", "O grafo de construção não pôde ser posto no lugar."),
+        ("The build graph could not be written.", "O grafo de construção não pôde ser gravado."),
         ("The build graph has more nodes than the scheduler accepts.", "O grafo de construção tem mais nós do que o escalonador aceita."),
         ("The bundle writer does not know that android attribute.", "O escritor do bundle não conhece esse atributo android."),
         ("The byte-order marker is not a value the format defines.", "O marcador de ordem de bytes não é um valor que o formato defina."),
@@ -17932,6 +17973,7 @@ pub mod speech {
         ("The file is truncated, or the record is wrong.", "O arquivo está truncado, ou o registro está errado."),
         ("The file is truncated, padded, or not the file it claims.", "O arquivo está truncado, preenchido, ou não é o arquivo que alega ser."),
         ("The folder for that file could not be made.", "Não deu para criar a pasta desse arquivo."),
+        ("The folder for the build graph could not be made.", "Não foi possível criar a pasta para o grafo de construção."),
         ("The folder for the cache index could not be made.", "Não deu para criar a pasta do índice do cache."),
         ("The folder for the copy could not be made.", "Não deu para criar a pasta da cópia."),
         ("The folder for the new name could not be made.", "Não deu para criar a pasta do nome novo."),
@@ -23961,6 +24003,344 @@ pub mod graph {
     #[derive(Clone, Debug, Default)]
     pub struct Graph {
         nodes: Vec<Node>,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Shape {
+        held: Vec<(String, Digest, Vec<String>)>,
+    }
+
+    impl Shape {
+        pub fn of(graph: &Graph) -> Shape {
+            let mut held: Vec<(String, Digest, Vec<String>)> = graph
+                .nodes
+                .iter()
+                .map(|node| {
+                    let mut record = crate::canonical::Record::new();
+                    record.text("kind", node.kind.as_str());
+                    record.text("plugin", &node.plugin);
+                    record.digest("input", node.input_digest);
+                    record.digest("configuration", node.configuration_digest);
+                    record.digest("toolchain", node.toolchain_digest);
+                    record.digest("plugin.digest", node.plugin_digest);
+                    record.sequence(
+                        "outputs",
+                        &node
+                            .outputs
+                            .iter()
+                            .map(|one| one.as_str().as_bytes().to_vec())
+                            .collect::<Vec<_>>(),
+                    );
+                    let mut after: Vec<String> = node
+                        .dependencies
+                        .iter()
+                        .map(|one| one.as_str().to_string())
+                        .collect();
+                    after.sort();
+                    record.sequence(
+                        "after",
+                        &after
+                            .iter()
+                            .map(|one| one.as_bytes().to_vec())
+                            .collect::<Vec<_>>(),
+                    );
+                    (node.id.as_str().to_string(), record.to_digest(), after)
+                })
+                .collect();
+            held.sort_by(|left, right| left.0.cmp(&right.0));
+            Shape { held }
+        }
+
+        pub fn len(&self) -> usize {
+            self.held.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.held.is_empty()
+        }
+
+        pub fn encode(&self) -> Vec<u8> {
+            let mut out = String::new();
+            for (name, digest, after) in &self.held {
+                out.push_str(name);
+                out.push('\t');
+                out.push_str(&digest.to_hex());
+                out.push('\t');
+                out.push_str(&after.join(","));
+                out.push('\n');
+            }
+            out.into_bytes()
+        }
+
+        pub fn decode(data: &[u8]) -> Shape {
+            let Ok(text) = core::str::from_utf8(data) else {
+                return Shape::default();
+            };
+            let mut held = Vec::new();
+            for line in text.lines() {
+                let mut parts = line.split('\t');
+                let (Some(name), Some(digest), Some(after)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                if parts.next().is_some() || name.is_empty() {
+                    continue;
+                }
+                let Some(digest) = Digest::from_hex(digest) else {
+                    continue;
+                };
+                let after: Vec<String> = after
+                    .split(',')
+                    .filter(|one| !one.is_empty())
+                    .map(|one| one.to_string())
+                    .collect();
+                held.push((name.to_string(), digest, after));
+            }
+            held.sort_by(|left, right| left.0.cmp(&right.0));
+            Shape { held }
+        }
+
+        pub fn read(path: &str) -> Shape {
+            std::fs::read(path)
+                .map(|data| Shape::decode(&data))
+                .unwrap_or_default()
+        }
+
+        pub fn write(&self, path: &str) -> Result<(), Diagnostic> {
+            if let Some(folder) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(folder).map_err(|why| {
+                    Diagnostic::new(
+                        "E4010",
+                        Severity::Error,
+                        FailureClass::Recoverable,
+                        "core.graph",
+                        "The folder for the build graph could not be made.",
+                    )
+                    .with_context(format!("Reason: {why}"))
+                })?;
+            }
+            let beside = format!("{path}.writing");
+            std::fs::write(&beside, self.encode()).map_err(|why| {
+                Diagnostic::new(
+                    "E4011",
+                    Severity::Error,
+                    FailureClass::Recoverable,
+                    "core.graph",
+                    "The build graph could not be written.",
+                )
+                .with_context(format!("Path: {beside}"))
+                .with_context(format!("Reason: {why}"))
+            })?;
+            std::fs::rename(&beside, path).map_err(|why| {
+                std::fs::remove_file(&beside).ok();
+                Diagnostic::new(
+                    "E4012",
+                    Severity::Error,
+                    FailureClass::Recoverable,
+                    "core.graph",
+                    "The build graph could not be put in place.",
+                )
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+            })
+        }
+
+        pub fn changed_since(&self, before: &Shape) -> Vec<String> {
+            let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for (name, digest, _) in &self.held {
+                let same = before
+                    .held
+                    .iter()
+                    .find(|(held, _, _)| held == name)
+                    .is_some_and(|(_, held, _)| held == digest);
+                if !same {
+                    changed.insert(name.clone());
+                }
+            }
+            loop {
+                let mut moved = false;
+                for (name, _, after) in &self.held {
+                    if changed.contains(name) {
+                        continue;
+                    }
+                    if after.iter().any(|one| changed.contains(one)) {
+                        changed.insert(name.clone());
+                        moved = true;
+                    }
+                }
+                if !moved {
+                    break;
+                }
+            }
+            changed.into_iter().collect()
+        }
+    }
+
+    pub const MANIFEST_NODE: &str = "manifest";
+
+    pub const RESOURCES_NODE: &str = "resources";
+
+    pub const ANALYSIS_NODE: &str = "source.analysis";
+
+    pub const COMPILE_NODE: &str = "compile";
+
+    pub const DEX_NODE: &str = "dex";
+
+    pub const NATIVE_NODE: &str = "native";
+
+    pub const LAYOUT_NODE: &str = "apk.layout";
+
+    pub const PACKAGE_NODE: &str = "package";
+
+    pub const SIGN_NODE: &str = "sign";
+
+    pub const VERIFY_NODE: &str = "verify";
+
+    fn plan_digests(
+        project: &crate::project::Project,
+        toolchain: Digest,
+        step: &str,
+        plugin: &str,
+    ) -> [Digest; 4] {
+        let configuration = project.digest();
+        let mut input = crate::canonical::Record::new();
+        input.text("step", step);
+        input.digest("configuration", configuration);
+        [
+            input.to_digest(),
+            configuration,
+            toolchain,
+            crate::hash::sha256(plugin.as_bytes()),
+        ]
+    }
+
+    pub fn of_project(
+        project: &crate::project::Project,
+        toolchain: Digest,
+        abis: &[String],
+    ) -> Result<Graph, Diagnostic> {
+        let mut graph = Graph::new();
+        let step = |graph: &mut Graph,
+                    name: &str,
+                    kind: Kind,
+                    plugin: &str,
+                    outputs: &[&str],
+                    after: &[&str]|
+         -> Result<(), Diagnostic> {
+            let mut node = Node::new(
+                NodeId::new(name)?,
+                kind,
+                plugin,
+                plan_digests(project, toolchain, name, plugin),
+            );
+            for one in outputs {
+                node = node.with_output(ArtifactId::new(*one)?);
+            }
+            for one in after {
+                node = node.after(NodeId::new(*one)?);
+            }
+            for one in after {
+                if let Some(held) = graph.node(&NodeId::new(*one)?) {
+                    for made in held.outputs() {
+                        node = node.with_input(made.clone());
+                    }
+                }
+            }
+            graph.add(node)
+        };
+
+        step(
+            &mut graph,
+            MANIFEST_NODE,
+            Kind::Manifest,
+            "omni.manifest",
+            &["manifest.binary"],
+            &[],
+        )?;
+        step(
+            &mut graph,
+            RESOURCES_NODE,
+            Kind::Resources,
+            "omni.resources",
+            &["resources.table", "resources.files"],
+            &[MANIFEST_NODE],
+        )?;
+        step(
+            &mut graph,
+            ANALYSIS_NODE,
+            Kind::SourceAnalysis,
+            "omni.analysis",
+            &["analysis.symbols"],
+            &[],
+        )?;
+        step(
+            &mut graph,
+            COMPILE_NODE,
+            Kind::CompilerIr,
+            "omni.java",
+            &["compile.classes"],
+            &[ANALYSIS_NODE, RESOURCES_NODE],
+        )?;
+        step(
+            &mut graph,
+            DEX_NODE,
+            Kind::Dex,
+            "omni.dex",
+            &["dex.classes"],
+            &[COMPILE_NODE],
+        )?;
+
+        let mut before_layout = vec![MANIFEST_NODE, RESOURCES_NODE, DEX_NODE];
+        if !abis.is_empty() {
+            step(
+                &mut graph,
+                NATIVE_NODE,
+                Kind::Native,
+                "omni.native",
+                &["native.libraries"],
+                &[ANALYSIS_NODE],
+            )?;
+            before_layout.push(NATIVE_NODE);
+        }
+
+        step(
+            &mut graph,
+            LAYOUT_NODE,
+            Kind::ApkLayout,
+            "omni.layout",
+            &["layout.tree"],
+            &before_layout,
+        )?;
+        step(
+            &mut graph,
+            PACKAGE_NODE,
+            Kind::Package,
+            "omni.archive",
+            &["package.unsigned"],
+            &[LAYOUT_NODE],
+        )?;
+        step(
+            &mut graph,
+            SIGN_NODE,
+            Kind::Sign,
+            "omni.signing",
+            &["package.signed"],
+            &[PACKAGE_NODE],
+        )?;
+        if project.verification {
+            step(
+                &mut graph,
+                VERIFY_NODE,
+                Kind::Verify,
+                "omni.verify",
+                &["verify.report"],
+                &[SIGN_NODE],
+            )?;
+        }
+
+        graph.plan()?;
+        Ok(graph)
     }
 
     impl Graph {
@@ -74884,6 +75264,124 @@ Viewbinding   = false
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    fn a_project() -> super::project::Project {
+        super::project::Project::defaults("App", "com.my.app")
+    }
+
+    #[test]
+    fn a_graph_is_built_from_a_project() {
+        let toolchain = super::hash::sha256(b"toolchain");
+        let project = a_project();
+        let graph = super::graph::of_project(&project, toolchain, &[]).expect("a graph is built");
+
+        let named: Vec<&str> = graph.nodes().iter().map(|one| one.id().as_str()).collect();
+        assert!(named.contains(&super::graph::MANIFEST_NODE));
+        assert!(named.contains(&super::graph::DEX_NODE));
+        assert!(named.contains(&super::graph::SIGN_NODE));
+        assert!(
+            !named.contains(&super::graph::NATIVE_NODE),
+            "a project naming no architecture gets no native step"
+        );
+
+        let with_native = super::graph::of_project(&project, toolchain, &["arm64-v8a".to_string()])
+            .expect("a graph is built");
+        assert_eq!(with_native.len(), graph.len() + 1);
+        let layout = with_native
+            .node(&NodeId::new(super::graph::LAYOUT_NODE).unwrap())
+            .expect("the layout step is there");
+        assert!(layout
+            .dependencies()
+            .iter()
+            .any(|one| one.as_str() == super::graph::NATIVE_NODE));
+
+        let mut quiet = a_project();
+        quiet.verification = false;
+        let without = super::graph::of_project(&quiet, toolchain, &[]).expect("a graph is built");
+        assert!(!without
+            .nodes()
+            .iter()
+            .any(|one| one.id().as_str() == super::graph::VERIFY_NODE));
+    }
+
+    #[test]
+    fn a_graph_from_a_project_plans_in_dependency_order() {
+        let graph = super::graph::of_project(&a_project(), super::hash::sha256(b"t"), &[])
+            .expect("a graph is built");
+        let order = graph.plan().expect("the graph plans");
+        let at = |name: &str| {
+            order
+                .iter()
+                .position(|one| one.as_str() == name)
+                .unwrap_or_else(|| panic!("{name} is not in the plan"))
+        };
+        assert!(at(super::graph::MANIFEST_NODE) < at(super::graph::RESOURCES_NODE));
+        assert!(at(super::graph::ANALYSIS_NODE) < at(super::graph::COMPILE_NODE));
+        assert!(at(super::graph::COMPILE_NODE) < at(super::graph::DEX_NODE));
+        assert!(at(super::graph::DEX_NODE) < at(super::graph::LAYOUT_NODE));
+        assert!(at(super::graph::LAYOUT_NODE) < at(super::graph::PACKAGE_NODE));
+        assert!(at(super::graph::PACKAGE_NODE) < at(super::graph::SIGN_NODE));
+
+        let dex = graph
+            .node(&NodeId::new(super::graph::DEX_NODE).unwrap())
+            .expect("the dex step is there");
+        assert!(
+            dex.inputs()
+                .iter()
+                .any(|one| one.as_str() == "compile.classes"),
+            "a step takes what the step before it produced"
+        );
+    }
+
+    #[test]
+    fn a_graph_shape_survives_being_written_and_read() {
+        let graph = super::graph::of_project(&a_project(), super::hash::sha256(b"t"), &[])
+            .expect("a graph is built");
+        let shape = super::graph::Shape::of(&graph);
+        assert_eq!(shape.len(), graph.len());
+        assert_eq!(super::graph::Shape::decode(&shape.encode()), shape);
+
+        let folder = temp_directory("omni-graph-shape");
+        let at = folder.join("deep/shape.tsv");
+        let path = at.to_str().unwrap();
+        shape.write(path).expect("the shape is written");
+        assert_eq!(super::graph::Shape::read(path), shape);
+        assert!(super::graph::Shape::read("nowhere at all").is_empty());
+        assert!(super::graph::Shape::decode(b"rubbish\nwith no tabs\n").is_empty());
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn a_changed_setting_marks_every_step_that_stands_on_it() {
+        let toolchain = super::hash::sha256(b"toolchain");
+        let before = super::graph::Shape::of(
+            &super::graph::of_project(&a_project(), toolchain, &[]).expect("a graph is built"),
+        );
+        assert!(
+            before.changed_since(&before).is_empty(),
+            "nothing changed between a graph and itself"
+        );
+
+        let mut moved = a_project();
+        moved.min_sdk += 1;
+        let after = super::graph::Shape::of(
+            &super::graph::of_project(&moved, toolchain, &[]).expect("a graph is built"),
+        );
+        assert_eq!(
+            after.changed_since(&before).len(),
+            after.len(),
+            "a setting every step carries changes every step"
+        );
+
+        let elsewhere = super::graph::Shape::of(
+            &super::graph::of_project(&a_project(), super::hash::sha256(b"other"), &[])
+                .expect("a graph is built"),
+        );
+        assert_eq!(elsewhere.changed_since(&before).len(), elsewhere.len());
+
+        let fresh = super::graph::Shape::default();
+        assert_eq!(before.changed_since(&fresh).len(), before.len());
     }
 
     fn cache_key(named: &str) -> super::cache::Key {
