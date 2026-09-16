@@ -206,14 +206,12 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
     },
     Subsystem {
         name: "Scheduler",
-        status: Status::Partial,
+        status: Status::Beta,
         directive_section: 10,
-        summary: "Executes a graph in dependency order, propagates failure, honours \
-                  cancellation.",
+        summary: "Executes a graph across as many lanes as the machine can afford, propagates failure, honours cancellation, and picks a build up where the last one stopped. Work whose dependencies have all produced their outputs is handed to whichever lane is free, so a fan of steps that wait on nothing runs at once; what each node says and what it asked the capability policy for are gathered per node and merged in plan order, so a build spread over four lanes reports exactly what the same build on one lane reports, node for node and sentence for sentence. How wide it spreads is read off the machine rather than guessed --- free memory divided by what a lane is allowed, one lane on a low battery that is not charging, half as many while a thermal zone is hot and one while it is scalding --- and read again as the build runs, so one that heats the phone narrows itself rather than being narrowed afterwards. A node writes down each step it passes, so a run that stops halfway starts again at the step it stopped at, and a node a previous run carried through is not run again at all unless its own work changed, which is what makes a build that was interrupted cheap to repeat.",
         missing: &[
-            "Sequential only; nothing runs in parallel.",
-            "Not memory, battery or thermal aware, which directive section 36 requires.",
-            "No checkpoint or resume inside a node.",
+            "A lane is allowed half a gigabyte and nothing holds a node to it: the width of the build answers to what the machine has free, but a single node that wants more than its lane still takes it, and the peak a node reports is the number the node hands back rather than one the scheduler watched it reach.",
+            "The steps a node passes are written down and read back, but every plugin this build carries does its work in one step, so the resume that has anything to resume here is the one between nodes rather than the one inside them.",
         ],
     },
     Subsystem {
@@ -2045,6 +2043,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "Bir stil kümesinin karşılık geldiği dizide öznitelik başına tek bir yer vardır; bu yüzden birini iki kez adlandırmanın koyacak ikinci bir yeri yoktur."),
         ("The artifact does not match the digest taken when it was built.", "Yapıt, yapıldığında alınan özetle eşleşmiyor."),
         ("The bootstrap methods attribute stops early.", "Bootstrap yöntemleri özniteliği erken bitiyor."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "Yapı sürer. Bu düğümü durduğu yerden sürdürme olanağından başka hiçbir şey yitmez, bu yüzden sonraki bir çalışma onu baştan alır."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Yapı motoru, bir adı bu noktadan önce projenin kendi tablosuna göre çözer. Ad olarak gelen birinin arkasında tablo yoktur."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Yapı motoru ?attr/ad ifadesini özniteliğin tanımlayıcısına çevirir ve sayısal biçimi buraya verir, örneğin ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Yapı motoru bir adı, projenin kendi tablosuna göre tanımlayıcısına çevirir ve sayısal biçimi buraya verir, örneğin @0x7f060000. Çözülmemiş gelen bir adın arkasında tablo yoktur."),
@@ -3268,6 +3267,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "Das Feld, zu dem ein Attributsatz wird, hat einen Platz je Attribut; eines zweimal zu benennen hat also keinen zweiten Platz."),
         ("The artifact does not match the digest taken when it was built.", "Das Artefakt stimmt nicht mit dem Abdruck überein, der beim Bauen genommen wurde."),
         ("The bootstrap methods attribute stops early.", "Das Attribut der Bootstrap-Methoden endet zu früh."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "Der Bau läuft weiter. Verloren geht nichts außer der Gelegenheit, diesen Knoten dort fortzusetzen, wo er stehen blieb, sodass ein späterer Lauf ihn von vorn beginnt."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Die Build-Maschine löst einen Namen vor dieser Stelle gegen die eigene Tabelle des Projekts auf. Einer, der als Name ankommt, hat keine Tabelle hinter sich."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Die Build-Maschine macht aus ?attr/name den Bezeichner des Attributs und übergibt hier die numerische Form, zum Beispiel ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Die Build-Maschine macht aus einem Namen gegen die eigene Tabelle des Projekts seinen Bezeichner und übergibt hier die numerische Form, zum Beispiel @0x7f060000. Ein Name, der unaufgelöst ankommt, hat keine Tabelle hinter sich."),
@@ -4491,6 +4491,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "El array al que da lugar un conjunto de atributos tiene un sitio por atributo, así que nombrar uno dos veces no tiene un segundo sitio donde ponerlo."),
         ("The artifact does not match the digest taken when it was built.", "El artefacto no coincide con el resumen tomado cuando se construyó."),
         ("The bootstrap methods attribute stops early.", "El atributo de métodos bootstrap termina antes de tiempo."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "La compilación continúa. No se pierde nada salvo la ocasión de retomar este nodo donde se detuvo, de modo que una ejecución posterior lo empieza de nuevo."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "El motor de compilación resuelve un nombre contra la tabla propia del proyecto antes de este punto. Uno que llega por nombre no tiene ninguna tabla detrás."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "El motor de compilación convierte ?attr/nombre en el identificador del atributo y entrega aquí la forma numérica, por ejemplo ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "El motor de compilación convierte un nombre en su identificador contra la tabla propia del proyecto y entrega aquí la forma numérica, por ejemplo @0x7f060000. Un nombre que llega sin resolver no tiene ninguna tabla detrás."),
@@ -5714,6 +5715,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "Le tableau auquel aboutit un attribut composé a une place par attribut ; nommer un attribut deux fois n'a donc pas de seconde place où le mettre."),
         ("The artifact does not match the digest taken when it was built.", "L artefact ne correspond pas à l empreinte prise lors de sa construction."),
         ("The bootstrap methods attribute stops early.", "L'attribut des méthodes d'amorçage s'arrête trop tôt."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "La construction se poursuit. Rien n'est perdu sinon l'occasion de reprendre ce nœud là où il s'est arrêté, de sorte qu'une exécution ultérieure le recommence."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Le moteur de compilation résout un nom contre la table propre au projet avant ce point. Un nom qui arrive tel quel n'a aucune table derrière lui."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Le moteur de compilation transforme ?attr/nom en l'identifiant de l'attribut et transmet ici la forme numérique, par exemple ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Le moteur de compilation transforme un nom en son identifiant contre la table propre au projet et transmet ici la forme numérique, par exemple @0x7f060000. Un nom qui arrive non résolu n'a aucune table derrière lui."),
@@ -6940,6 +6942,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "L'array a cui arriva un insieme di attributi ha un posto per attributo, quindi nominarne uno due volte non ha un secondo posto dove metterlo."),
         ("The artifact does not match the digest taken when it was built.", "L artefatto non corrisponde all impronta presa quando fu costruito."),
         ("The bootstrap methods attribute stops early.", "L'attributo dei metodi di avvio si ferma troppo presto."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "La costruzione prosegue. Non si perde nulla se non l'occasione di riprendere questo nodo dove si è fermato, cosicché una esecuzione successiva lo ricomincia."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Il motore di compilazione risolve un nome contro la tabella propria del progetto prima di questo punto. Uno che arriva per nome non ha alcuna tabella dietro di sé."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Il motore di compilazione trasforma ?attr/nome nell'identificatore dell'attributo e consegna qui la forma numerica, per esempio ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Il motore di compilazione trasforma un nome nel suo identificatore contro la tabella propria del progetto e consegna qui la forma numerica, per esempio @0x7f060000. Un nome che arriva non risolto non ha alcuna tabella dietro di sé."),
@@ -8166,6 +8169,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "O vetor a que um conjunto de atributos chega tem um lugar por atributo, então nomear um duas vezes não tem um segundo lugar onde pô-lo."),
         ("The artifact does not match the digest taken when it was built.", "O artefacto não corresponde ao resumo tirado quando foi construído."),
         ("The bootstrap methods attribute stops early.", "O atributo dos métodos de inicialização para cedo demais."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "A construção prossegue. Nada se perde a não ser a ocasião de retomar este nó onde parou, pelo que uma execução posterior o começa de novo."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "O motor de compilação resolve um nome contra a tabela própria do projeto antes deste ponto. Um que chega por nome não tem tabela alguma atrás de si."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "O motor de compilação transforma ?attr/nome no identificador do atributo e entrega aqui a forma numérica, por exemplo ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "O motor de compilação transforma um nome no seu identificador contra a tabela própria do projeto e entrega aqui a forma numérica, por exemplo @0x7f060000. Um nome que chega sem resolver não tem tabela alguma atrás de si."),
@@ -9389,6 +9393,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "В массиве, к которому приходит набор атрибутов, по одному месту на атрибут, поэтому названному дважды атрибуту некуда деться во второй раз."),
         ("The artifact does not match the digest taken when it was built.", "Артефакт не совпадает со свёрткой, снятой при сборке."),
         ("The bootstrap methods attribute stops early.", "Атрибут методов начальной загрузки обрывается слишком рано."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "Сборка продолжается. Не теряется ничего, кроме возможности продолжить этот узел с того места, где он остановился, поэтому следующий запуск начнёт его заново."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Сборочный движок разрешает имя по собственной таблице проекта раньше этой точки. У того, что приходит по имени, за спиной нет никакой таблицы."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Сборочный движок превращает ?attr/имя в идентификатор атрибута и передаёт сюда числовую форму, например ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Сборочный движок превращает имя в его идентификатор по собственной таблице проекта и передаёт сюда числовую форму, например @0x7f060000. У имени, которое приходит неразрешённым, за спиной нет никакой таблицы."),
@@ -10612,6 +10617,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "المصفوفة التي تنتهي إليها مجموعة السمات فيها مكان واحد لكل سمة، فتسمية سمة مرتين لا مكان ثانيًا لها فيه."),
         ("The artifact does not match the digest taken when it was built.", "الأثر لا يطابق الخلاصة المأخوذة عند بنائه."),
         ("The bootstrap methods attribute stops early.", "سمة طرق الإقلاع تنتهي مبكرًا."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "يمضي البناء قدما. لا يضيع شيء سوى فرصة متابعة هذه العقدة من حيث توقفت، فيبدأها تشغيل لاحق من جديد."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "يحلّ محرك البناء الاسم في مقابل جدول المشروع نفسه قبل هذه النقطة. والاسم الذي يصل كاسم لا جدول خلفه."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "يحوّل محرك البناء ?attr/اسم إلى معرّف السمة ويسلّم الصورة العددية هنا، مثلًا ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "يحوّل محرك البناء الاسم إلى معرّفه في مقابل جدول المشروع نفسه ويسلّم الصورة العددية هنا، مثلًا @0x7f060000. والاسم الذي يصل بلا حلّ لا جدول خلفه."),
@@ -11835,6 +11841,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "属性组最终得到的数组每个属性只有一个位置，所以同一个属性写两次，没有第二个位置可放。"),
         ("The artifact does not match the digest taken when it was built.", "产物与构建时取下的摘要不一致。"),
         ("The bootstrap methods attribute stops early.", "引导方法属性提前结束了。"),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "构建继续进行。除了无法从这个节点停下的地方接着做之外，什么也没有丢失，因此以后的运行会从头再做一遍。"),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "构建引擎会在此之前对照项目自己的表解析名称。以名称形式到达这里的，背后没有任何表。"),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "构建引擎会把 ?attr/名称 变成该属性的标识符，并把数值形式交到此处，例如 ?0x01010435。"),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "构建引擎会对照项目自己的表把名称变成它的标识符，并把数值形式交到此处，例如 @0x7f060000。未经解析就到达的名称，背后没有任何表。"),
@@ -13058,6 +13065,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "styleable の作る配列は属性ごとにひとつの場所を持ちます。ですから同じものを二度名指ししても、置く二つ目の場所はありません。"),
         ("The artifact does not match the digest taken when it was built.", "成果物が、作られたときに取った要約と合いません。"),
         ("The bootstrap methods attribute stops early.", "ブートストラップメソッド属性が途中で止まっています。"),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "組み立ては続きます。失われるのは、このノードを止まったところから続ける機会だけで、後の実行はそれを初めからやり直します。"),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "ビルドエンジンは、ここより前でプロジェクト自身の表に照らして名前を解決します。名前のまま届いたものには、その後ろに表がありません。"),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "ビルドエンジンは ?attr/name を属性の識別子に変え、数値の形をここへ渡します。たとえば ?0x01010435 です。"),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "ビルドエンジンは、プロジェクト自身の表に照らして名前を識別子に変え、数値の形をここへ渡します。たとえば @0x7f060000 です。解決されないまま届いた名前には、その後ろに表がありません。"),
@@ -14281,6 +14289,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "styleable이 이루는 배열은 속성마다 자리가 하나이므로, 같은 것을 두 번 가리켜도 놓을 둘째 자리가 없습니다."),
         ("The artifact does not match the digest taken when it was built.", "산출물이 만들어질 때 뜬 요약과 맞지 않습니다."),
         ("The bootstrap methods attribute stops early.", "부트스트랩 메서드 속성이 일찍 멈춥니다."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "빌드는 계속됩니다. 이 마디를 멈춘 자리에서 이어갈 기회 말고는 잃는 것이 없으며, 나중의 실행은 그것을 처음부터 다시 합니다."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "빌드 엔진은 이 지점보다 앞에서 프로젝트 제 표에 비추어 이름을 풉니다. 이름인 채로 닿은 것에는 뒤에 표가 없습니다."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "빌드 엔진은 ?attr/name을 속성의 식별자로 바꿔 숫자 꼴을 여기로 넘깁니다. 이를테면 ?0x01010435입니다."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "빌드 엔진은 프로젝트 제 표에 비추어 이름을 식별자로 바꿔 숫자 꼴을 여기로 넘깁니다. 이를테면 @0x7f060000입니다. 풀리지 않은 채 닿은 이름에는 뒤에 표가 없습니다."),
@@ -15504,6 +15513,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "जो सरणी किसी styleable से बनती है उसमें हर गुण के लिए एक ही जगह होती है, इसलिए किसी का दो बार नाम लेने पर उसे रखने के लिए दूसरी जगह नहीं है।"),
         ("The artifact does not match the digest taken when it was built.", "कलाकृति उस सारांश से मेल नहीं खाती जो उसे बनाते समय लिया गया था।"),
         ("The bootstrap methods attribute stops early.", "बूटस्ट्रैप-विधि गुण समय से पहले रुक जाता है।"),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "निर्माण चलता रहता है। इस गाँठ को वहीं से आगे बढ़ाने के अवसर के सिवा कुछ नहीं खोता, इसलिए बाद का कोई चलाव इसे नए सिरे से शुरू करता है।"),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "बनावट-इंजन इस बिंदु से पहले ही नाम को परियोजना की अपनी सारणी के विरुद्ध सुलझा देता है। जो नाम की तरह पहुँचे उसके पीछे कोई सारणी नहीं है।"),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "बनावट-इंजन ?attr/name को गुण के पहचानकर्ता में बदलता है और संख्यात्मक रूप यहाँ सौंपता है, उदाहरण के लिए ?0x01010435।"),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "बनावट-इंजन नाम को परियोजना की अपनी सारणी के विरुद्ध उसके पहचानकर्ता में बदलता है और संख्यात्मक रूप यहाँ सौंपता है, उदाहरण के लिए @0x7f060000। जो नाम बिना सुलझे पहुँचे उसके पीछे कोई सारणी नहीं है।"),
@@ -16727,6 +16737,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "Larik yang terbentuk dari sebuah styleable punya satu tempat per atribut, jadi menyebut satu atribut dua kali tidak punya tempat kedua untuk menaruhnya."),
         ("The artifact does not match the digest taken when it was built.", "Artefak tidak cocok dengan ringkasan yang diambil ketika ia dibangun."),
         ("The bootstrap methods attribute stops early.", "Atribut metode bootstrap berhenti terlalu cepat."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "Pembangunan tetap berjalan. Tidak ada yang hilang selain kesempatan melanjutkan simpul ini dari tempat ia berhenti, sehingga jalan berikutnya memulainya dari awal."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Mesin bangunan menyelesaikan sebuah nama terhadap tabel milik proyek sebelum titik ini. Yang tiba dalam bentuk nama tidak punya tabel di belakangnya."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Mesin bangunan mengubah ?attr/name menjadi pengenal atributnya dan menyerahkan bentuk angkanya ke sini, misalnya ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Mesin bangunan mengubah sebuah nama menjadi pengenalnya terhadap tabel milik proyek dan menyerahkan bentuk angkanya ke sini, misalnya @0x7f060000. Nama yang tiba tanpa diselesaikan tidak punya tabel di belakangnya."),
@@ -17950,6 +17961,7 @@ pub mod speech {
         ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "O vetor a que um styleable dá origem tem um lugar por atributo, então nomear um duas vezes não tem um segundo lugar onde pôr."),
         ("The artifact does not match the digest taken when it was built.", "O artefato não corresponde ao resumo tirado quando foi construído."),
         ("The bootstrap methods attribute stops early.", "O atributo de métodos bootstrap para antes da hora."),
+        ("The build carries on. Nothing is lost except the chance to resume this node where it stopped, so a later run starts it over.", "A construção continua. Nada se perde a não ser a chance de retomar este nó onde ele parou, de modo que uma execução posterior o começa de novo."),
         ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "O motor de compilação resolve um nome contra a tabela do próprio projeto antes deste ponto. Um que chega como nome não tem tabela por trás."),
         ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "O motor de compilação transforma ?attr/name no identificador do atributo e entrega aqui a forma numérica, por exemplo ?0x01010435."),
         ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "O motor de compilação transforma um nome no seu identificador contra a tabela do próprio projeto e entrega aqui a forma numérica, por exemplo @0x7f060000. Um nome que chega sem resolver não tem tabela por trás."),
@@ -18630,6 +18642,10 @@ pub mod caps {
 
         pub fn audit(&self) -> &[AuditRecord] {
             &self.audit
+        }
+
+        pub fn absorb(&mut self, records: Vec<AuditRecord>) {
+            self.audit.extend(records);
         }
 
         pub fn write_json(&self, w: &mut Writer, key: &str) {
@@ -23995,6 +24011,17 @@ pub mod graph {
             &self.diagnostics
         }
 
+        pub fn stamp(&self) -> Digest {
+            let mut record = crate::canonical::Record::new();
+            record.text("kind", self.kind.as_str());
+            record.text("plugin", &self.plugin);
+            record.digest("input", self.input_digest);
+            record.digest("configuration", self.configuration_digest);
+            record.digest("toolchain", self.toolchain_digest);
+            record.digest("plugin.digest", self.plugin_digest);
+            record.to_digest()
+        }
+
         pub fn write_json(&self, w: &mut Writer) {
             w.begin_object(None);
             w.field_str("id", self.id.as_str());
@@ -24582,7 +24609,7 @@ pub mod graph {
 }
 
 pub mod scheduler {
-    use crate::caps::Policy;
+    use crate::caps::{AuditRecord, Policy};
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::graph::{Graph, Measurements, Node, NodeId, Status};
     use crate::hash::Digest;
@@ -24590,8 +24617,36 @@ pub mod scheduler {
     use crate::plugin::{Context, Registry};
     use crate::FailureClass;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Instant;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    pub const LANE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+
+    pub const LEAST_BATTERY_PERCENT: u8 = 20;
+
+    pub const HOT_MILLIDEGREES: i32 = 65_000;
+
+    pub const SCALDING_MILLIDEGREES: i32 = 80_000;
+
+    pub const MOST_LANES: usize = 64;
+
+    pub const CONDITIONS_HOLD_MILLIS: u64 = 500;
+
+    pub const MEMINFO: &str = "/proc/meminfo";
+
+    pub const POWER_SUPPLIES: &str = "/sys/class/power_supply";
+
+    pub const THERMAL_ZONES: &str = "/sys/class/thermal";
+
+    pub const HOTTEST_BELIEVABLE_MILLIDEGREES: i32 = 200_000;
+
+    pub const CHECKPOINT_SUFFIX: &str = ".steps";
+
+    pub const STEP_LINE: &str = "step ";
+
+    pub const DONE_LINE: &str = "done ";
+
+    pub const NOTHING_MADE: &str = "-";
 
     #[derive(Clone, Debug, Default)]
     pub struct Cancellation {
@@ -24619,9 +24674,440 @@ pub mod scheduler {
         pub peak_memory_bytes: u64,
     }
 
+    fn read_number(path: &str) -> Option<i64> {
+        std::fs::read_to_string(path)
+            .ok()?
+            .trim()
+            .parse::<i64>()
+            .ok()
+    }
+
+    fn read_word(path: &str) -> Option<String> {
+        Some(std::fs::read_to_string(path).ok()?.trim().to_string())
+    }
+
+    fn free_memory_bytes() -> u64 {
+        let Ok(text) = std::fs::read_to_string(MEMINFO) else {
+            return 0;
+        };
+        let mut available = 0u64;
+        let mut free = 0u64;
+        let mut cached = 0u64;
+        for line in text.lines() {
+            let Some((name, rest)) = line.split_once(':') else {
+                continue;
+            };
+            let Some(number) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let Ok(value) = number.parse::<u64>() else {
+                continue;
+            };
+            let value = value.saturating_mul(1024);
+            match name {
+                "MemAvailable" => available = value,
+                "MemFree" => free = value,
+                "Cached" => cached = value,
+                _ => {}
+            }
+        }
+        if available > 0 {
+            available
+        } else {
+            free.saturating_add(cached)
+        }
+    }
+
+    fn supplies() -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(POWER_SUPPLIES) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| entry.path().to_str().map(|path| path.to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn battery_percent() -> Option<u8> {
+        for supply in supplies() {
+            if read_word(&format!("{supply}/type")).as_deref() != Some("Battery") {
+                continue;
+            }
+            if let Some(percent) = read_number(&format!("{supply}/capacity")) {
+                if (0..=100).contains(&percent) {
+                    return Some(percent as u8);
+                }
+            }
+        }
+        None
+    }
+
+    fn on_power() -> bool {
+        let mut seen = false;
+        for supply in supplies() {
+            let kind = read_word(&format!("{supply}/type"));
+            match kind.as_deref() {
+                Some("Battery") => {
+                    seen = true;
+                    let status = read_word(&format!("{supply}/status"));
+                    if matches!(status.as_deref(), Some("Charging") | Some("Full")) {
+                        return true;
+                    }
+                }
+                Some("Mains") | Some("USB") | Some("Wireless") => {
+                    seen = true;
+                    if read_number(&format!("{supply}/online")) == Some(1) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        !seen
+    }
+
+    fn hottest_millidegrees() -> Option<i32> {
+        let Ok(entries) = std::fs::read_dir(THERMAL_ZONES) else {
+            return None;
+        };
+        let mut hottest: Option<i32> = None;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(path) = path.to_str() else {
+                continue;
+            };
+            let Some(name) = path.rsplit('/').next() else {
+                continue;
+            };
+            if !name.starts_with("thermal_zone") {
+                continue;
+            }
+            let Some(reading) = read_number(&format!("{path}/temp")) else {
+                continue;
+            };
+            if !(0..=i64::from(HOTTEST_BELIEVABLE_MILLIDEGREES)).contains(&reading) {
+                continue;
+            }
+            let reading = reading as i32;
+            hottest = Some(hottest.map_or(reading, |held: i32| held.max(reading)));
+        }
+        hottest
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Conditions {
+        pub processors: usize,
+        pub free_memory_bytes: u64,
+        pub battery_percent: Option<u8>,
+        pub on_power: bool,
+        pub hottest_millidegrees: Option<i32>,
+    }
+
+    impl Default for Conditions {
+        fn default() -> Self {
+            Conditions::unknown()
+        }
+    }
+
+    impl Conditions {
+        pub const fn unknown() -> Conditions {
+            Conditions {
+                processors: 1,
+                free_memory_bytes: 0,
+                battery_percent: None,
+                on_power: true,
+                hottest_millidegrees: None,
+            }
+        }
+
+        pub fn read() -> Conditions {
+            Conditions {
+                processors: std::thread::available_parallelism()
+                    .map(|count| count.get())
+                    .unwrap_or(1),
+                free_memory_bytes: free_memory_bytes(),
+                battery_percent: battery_percent(),
+                on_power: on_power(),
+                hottest_millidegrees: hottest_millidegrees(),
+            }
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("processors", self.processors as u64);
+            w.field_u64("freeMemoryBytes", self.free_memory_bytes);
+            match self.battery_percent {
+                Some(percent) => w.field_u64("batteryPercent", u64::from(percent)),
+                None => w.field_str("batteryPercent", "UNKNOWN"),
+            }
+            w.field_bool("onPower", self.on_power);
+            match self.hottest_millidegrees {
+                Some(heat) => w.field_u64("hottestMillidegrees", heat.max(0) as u64),
+                None => w.field_str("hottestMillidegrees", "UNKNOWN"),
+            }
+            w.end_object();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Limits {
+        pub lanes: usize,
+        pub memory_per_lane_bytes: u64,
+        pub least_battery_percent: u8,
+        pub hot_millidegrees: i32,
+        pub scalding_millidegrees: i32,
+    }
+
+    impl Default for Limits {
+        fn default() -> Self {
+            Limits::sensible()
+        }
+    }
+
+    impl Limits {
+        pub const fn sensible() -> Limits {
+            Limits {
+                lanes: 0,
+                memory_per_lane_bytes: LANE_MEMORY_BYTES,
+                least_battery_percent: LEAST_BATTERY_PERCENT,
+                hot_millidegrees: HOT_MILLIDEGREES,
+                scalding_millidegrees: SCALDING_MILLIDEGREES,
+            }
+        }
+
+        pub const fn one_lane() -> Limits {
+            Limits {
+                lanes: 1,
+                memory_per_lane_bytes: LANE_MEMORY_BYTES,
+                least_battery_percent: LEAST_BATTERY_PERCENT,
+                hot_millidegrees: HOT_MILLIDEGREES,
+                scalding_millidegrees: SCALDING_MILLIDEGREES,
+            }
+        }
+
+        pub const fn as_wide_as(lanes: usize) -> Limits {
+            Limits {
+                lanes,
+                memory_per_lane_bytes: 0,
+                least_battery_percent: 0,
+                hot_millidegrees: i32::MAX,
+                scalding_millidegrees: i32::MAX,
+            }
+        }
+
+        pub fn lanes_under(&self, conditions: &Conditions) -> usize {
+            let mut lanes = if self.lanes > 0 {
+                self.lanes
+            } else {
+                conditions.processors.max(1)
+            }
+            .min(MOST_LANES);
+            if self.memory_per_lane_bytes > 0 && conditions.free_memory_bytes > 0 {
+                let afforded = conditions.free_memory_bytes / self.memory_per_lane_bytes;
+                lanes = lanes.min(afforded.min(MOST_LANES as u64) as usize);
+            }
+            if let Some(percent) = conditions.battery_percent {
+                if !conditions.on_power && percent < self.least_battery_percent {
+                    lanes = 1;
+                }
+            }
+            if let Some(heat) = conditions.hottest_millidegrees {
+                if heat >= self.scalding_millidegrees {
+                    lanes = 1;
+                } else if heat >= self.hot_millidegrees {
+                    lanes = lanes.div_ceil(2);
+                }
+            }
+            lanes.max(1)
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Settings {
+        pub limits: Limits,
+        pub checkpoints: Option<String>,
+    }
+
+    impl Settings {
+        pub fn sequential() -> Settings {
+            Settings {
+                limits: Limits::one_lane(),
+                checkpoints: None,
+            }
+        }
+
+        pub fn resuming_under(folder: impl Into<String>) -> Settings {
+            Settings {
+                limits: Limits::sensible(),
+                checkpoints: Some(folder.into()),
+            }
+        }
+    }
+
+    fn checkpoint_failure(path: &str, why: &std::io::Error) -> Diagnostic {
+        Diagnostic::new(
+            "W6003",
+            Severity::Warning,
+            FailureClass::Recoverable,
+            "core.scheduler",
+            "The steps this node has passed could not be written down.",
+        )
+        .with_context(format!("Path: {path}"))
+        .with_context(format!("Reason: {why}"))
+        .with_suggestion(
+            "The build carries on. Nothing is lost except the chance to resume \
+             this node where it stopped, so a later run starts it over.",
+        )
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Checkpoint {
+        path: Option<String>,
+        stamp: String,
+        held: Vec<String>,
+        made: Option<Digest>,
+        done: bool,
+        resumed: usize,
+    }
+
+    impl Checkpoint {
+        pub fn none() -> Checkpoint {
+            Checkpoint::default()
+        }
+
+        pub fn under(folder: &str, node: &NodeId, stamp: Digest) -> Checkpoint {
+            let path = format!("{folder}/{}{CHECKPOINT_SUFFIX}", node.as_str());
+            let mut out = Checkpoint {
+                path: Some(path.clone()),
+                stamp: stamp.to_hex(),
+                ..Checkpoint::default()
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return out;
+            };
+            let mut lines = text.lines();
+            if lines.next() != Some(out.stamp.as_str()) {
+                return out;
+            }
+            for line in lines {
+                if let Some(step) = line.strip_prefix(STEP_LINE) {
+                    if !step.is_empty() && !out.held.iter().any(|one| one == step) {
+                        out.held.push(step.to_string());
+                    }
+                } else if let Some(made) = line.strip_prefix(DONE_LINE) {
+                    out.done = true;
+                    out.made = Digest::from_hex(made);
+                }
+            }
+            out
+        }
+
+        pub fn watching(&self) -> bool {
+            self.path.is_some()
+        }
+
+        pub fn passed(&self, step: &str) -> bool {
+            self.held.iter().any(|one| one == step)
+        }
+
+        pub fn steps(&self) -> &[String] {
+            &self.held
+        }
+
+        pub fn resumed(&self) -> usize {
+            self.resumed
+        }
+
+        pub fn is_done(&self) -> bool {
+            self.done
+        }
+
+        pub fn made(&self) -> Option<Digest> {
+            self.made
+        }
+
+        pub fn skip(&mut self, step: &str) -> bool {
+            if self.passed(step) {
+                self.resumed += 1;
+                return true;
+            }
+            false
+        }
+
+        pub fn keep(&mut self, step: &str) -> Result<(), Diagnostic> {
+            if !self.held.iter().any(|one| one == step) {
+                self.held.push(step.to_string());
+            }
+            self.write()
+        }
+
+        pub fn finish(&mut self, made: Option<Digest>) -> Result<(), Diagnostic> {
+            self.done = true;
+            self.made = made;
+            self.write()
+        }
+
+        fn encode(&self) -> String {
+            let mut out = self.stamp.clone();
+            out.push('\n');
+            for step in &self.held {
+                out.push_str(STEP_LINE);
+                out.push_str(step);
+                out.push('\n');
+            }
+            if self.done {
+                out.push_str(DONE_LINE);
+                out.push_str(
+                    &self
+                        .made
+                        .map(|digest| digest.to_hex())
+                        .unwrap_or_else(|| NOTHING_MADE.to_string()),
+                );
+                out.push('\n');
+            }
+            out
+        }
+
+        fn write(&self) -> Result<(), Diagnostic> {
+            let Some(path) = &self.path else {
+                return Ok(());
+            };
+            if let Some(folder) = std::path::Path::new(path).parent() {
+                if let Err(why) = std::fs::create_dir_all(folder) {
+                    return Err(checkpoint_failure(path, &why));
+                }
+            }
+            let beside = format!("{path}.part");
+            if let Err(why) = std::fs::write(&beside, self.encode().as_bytes()) {
+                return Err(checkpoint_failure(path, &why));
+            }
+            if let Err(why) = std::fs::rename(&beside, path) {
+                let _ = std::fs::remove_file(&beside);
+                return Err(checkpoint_failure(path, &why));
+            }
+            Ok(())
+        }
+
+        pub fn forget(&self) {
+            if let Some(path) = &self.path {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
     pub trait NodeExecutor {
-        fn execute(&mut self, node: &Node, ctx: &mut Context<'_>)
-            -> Result<NodeResult, Diagnostic>;
+        fn execute(
+            &mut self,
+            node: &Node,
+            ctx: &mut Context<'_>,
+            resume: &mut Checkpoint,
+        ) -> Result<NodeResult, Diagnostic>;
+    }
+
+    pub trait Crew: Sync {
+        fn hand(&self) -> Box<dyn NodeExecutor + Send>;
     }
 
     pub struct PluginRegistryExecutor {
@@ -24647,6 +25133,7 @@ pub mod scheduler {
             &mut self,
             node: &Node,
             ctx: &mut Context<'_>,
+            _resume: &mut Checkpoint,
         ) -> Result<NodeResult, Diagnostic> {
             let Some(plugin) = self.registry.find(node.plugin()) else {
                 return Err(Diagnostic::new(
@@ -24665,6 +25152,15 @@ pub mod scheduler {
             };
 
             plugin.execute(ctx).map(|_| NodeResult::default())
+        }
+    }
+
+    #[derive(Clone, Copy, Default)]
+    pub struct PluginCrew;
+
+    impl Crew for PluginCrew {
+        fn hand(&self) -> Box<dyn NodeExecutor + Send> {
+            Box::new(PluginRegistryExecutor::new())
         }
     }
 
@@ -24692,24 +25188,61 @@ pub mod scheduler {
         pub outcome: Outcome,
         pub succeeded: u64,
         pub cache_hits: u64,
+        pub resumed: u64,
         pub failed: u64,
         pub skipped: u64,
         pub cancelled: u64,
         pub order: Vec<NodeId>,
         pub duration_micros: u64,
+        pub wall_micros: u64,
+        pub lanes: usize,
+        pub throttled: bool,
+        pub conditions: Conditions,
     }
 
     impl Report {
+        pub fn nothing(outcome: Outcome) -> Report {
+            Report {
+                outcome,
+                succeeded: 0,
+                cache_hits: 0,
+                resumed: 0,
+                failed: 0,
+                skipped: 0,
+                cancelled: 0,
+                order: Vec::new(),
+                duration_micros: 0,
+                wall_micros: 0,
+                lanes: 1,
+                throttled: false,
+                conditions: Conditions::unknown(),
+            }
+        }
+
+        pub fn settled(&self) -> u64 {
+            self.succeeded
+                + self.cache_hits
+                + self.resumed
+                + self.failed
+                + self.skipped
+                + self.cancelled
+        }
+
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("outcome", self.outcome.as_str());
             w.field_u64("succeeded", self.succeeded);
             w.field_u64("cacheHits", self.cache_hits);
+            w.field_u64("resumed", self.resumed);
             w.field_u64("failed", self.failed);
             w.field_u64("skipped", self.skipped);
             w.field_u64("cancelled", self.cancelled);
             w.field_u64("durationMicros", self.duration_micros);
-            w.field_bool("parallel", false);
+            w.field_u64("wallMicros", self.wall_micros);
+            w.field_u64("lanes", self.lanes as u64);
+            w.field_bool("parallel", self.lanes > 1);
+            w.field_bool("throttled", self.throttled);
+            self.conditions.write_json(w, "conditions");
             w.begin_array(Some("order"));
             for id in &self.order {
                 w.element_str(id.as_str());
@@ -24719,6 +25252,413 @@ pub mod scheduler {
         }
     }
 
+    struct Job {
+        at: usize,
+        node: Node,
+        resume: Checkpoint,
+    }
+
+    struct Done {
+        at: usize,
+        result: Result<NodeResult, Diagnostic>,
+        said: Vec<Diagnostic>,
+        audited: Vec<AuditRecord>,
+        elapsed: u64,
+    }
+
+    #[derive(PartialEq, Eq, Debug)]
+    enum Standing {
+        Ready,
+        Waiting,
+        Blocked(Vec<String>),
+    }
+
+    fn work(hand: &mut dyn NodeExecutor, job: Job, grants: &Policy) -> Done {
+        let Job {
+            at,
+            node,
+            mut resume,
+        } = job;
+        let mut policy = grants.clone();
+        let base = policy.audit().len();
+        let mut sink = Sink::new();
+        let started = Instant::now();
+        let result = {
+            let mut ctx = Context {
+                policy: &mut policy,
+                diagnostics: &mut sink,
+            };
+            hand.execute(&node, &mut ctx, &mut resume)
+        };
+        let elapsed = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let mut said = sink.entries().to_vec();
+        if let Ok(made) = &result {
+            if let Err(why) = resume.finish(made.artifact_digest) {
+                said.push(why);
+            }
+        }
+        Done {
+            at,
+            result,
+            said,
+            audited: policy.audit()[base..].to_vec(),
+            elapsed,
+        }
+    }
+
+    struct Board {
+        order: Vec<NodeId>,
+        held: Vec<Node>,
+        deps: Vec<Vec<usize>>,
+        state: Vec<Status>,
+        measured: Vec<Measurements>,
+        made: Vec<Option<Digest>>,
+        said: Vec<Vec<Diagnostic>>,
+        audited: Vec<Vec<AuditRecord>>,
+        codes: Vec<Vec<String>>,
+        waiting: Vec<usize>,
+        report: Report,
+    }
+
+    impl Board {
+        fn of(graph: &Graph, order: Vec<NodeId>) -> Board {
+            let held: Vec<Node> = order
+                .iter()
+                .filter_map(|id| graph.node(id).cloned())
+                .collect();
+            let order: Vec<NodeId> = held.iter().map(|node| node.id().clone()).collect();
+            let deps: Vec<Vec<usize>> = held
+                .iter()
+                .map(|node| {
+                    node.dependencies()
+                        .iter()
+                        .filter_map(|want| order.iter().position(|id| id == want))
+                        .collect()
+                })
+                .collect();
+            let count = held.len();
+            let mut report = Report::nothing(Outcome::Completed);
+            report.order = order.clone();
+            Board {
+                order,
+                held,
+                deps,
+                state: vec![Status::Pending; count],
+                measured: vec![Measurements::default(); count],
+                made: vec![None; count],
+                said: vec![Vec::new(); count],
+                audited: vec![Vec::new(); count],
+                codes: vec![Vec::new(); count],
+                waiting: (0..count).collect(),
+                report,
+            }
+        }
+
+        fn standing(&self, index: usize) -> Standing {
+            let mut blocked: Vec<String> = Vec::new();
+            let mut waiting = false;
+            for dependency in &self.deps[index] {
+                let status = self.state[*dependency];
+                if status.produced_its_outputs() {
+                    continue;
+                }
+                if status.is_finished() {
+                    blocked.push(self.order[*dependency].as_str().to_string());
+                } else {
+                    waiting = true;
+                }
+            }
+            if !blocked.is_empty() {
+                Standing::Blocked(blocked)
+            } else if waiting {
+                Standing::Waiting
+            } else {
+                Standing::Ready
+            }
+        }
+
+        fn settle(&mut self, cancelled: bool) {
+            let mut moved = true;
+            while moved {
+                moved = false;
+                let mut at = 0;
+                while at < self.waiting.len() {
+                    let index = self.waiting[at];
+                    if cancelled {
+                        self.waiting.remove(at);
+                        self.state[index] = Status::Cancelled;
+                        self.report.cancelled += 1;
+                        moved = true;
+                        continue;
+                    }
+                    let Standing::Blocked(blocked) = self.standing(index) else {
+                        at += 1;
+                        continue;
+                    };
+                    self.waiting.remove(at);
+                    self.state[index] = Status::Skipped;
+                    self.report.skipped += 1;
+                    self.said[index].push(
+                        Diagnostic::new(
+                            "W6002",
+                            Severity::Warning,
+                            FailureClass::Recoverable,
+                            "core.scheduler",
+                            format!("'{}' was skipped.", self.order[index]),
+                        )
+                        .with_context(format!("Waiting on: {}", blocked.join(", ")))
+                        .with_suggestion(
+                            "Fix what those nodes reported. This node has no problem of \
+                             its own.",
+                        ),
+                    );
+                    moved = true;
+                }
+            }
+        }
+
+        fn ready(&self) -> Option<usize> {
+            self.waiting
+                .iter()
+                .copied()
+                .find(|index| self.standing(*index) == Standing::Ready)
+        }
+
+        fn take(&mut self, index: usize) {
+            self.waiting.retain(|held| *held != index);
+        }
+
+        fn draw(&mut self, settings: &Settings) -> Option<Job> {
+            loop {
+                let index = self.ready()?;
+                let resume = match settings.checkpoints.as_deref() {
+                    Some(folder) => {
+                        Checkpoint::under(folder, &self.order[index], self.held[index].stamp())
+                    }
+                    None => Checkpoint::none(),
+                };
+                if resume.is_done() {
+                    self.take(index);
+                    self.state[index] = Status::CacheHit;
+                    self.made[index] = resume.made();
+                    self.report.resumed += 1;
+                    continue;
+                }
+                self.take(index);
+                self.state[index] = Status::Running;
+                return Some(Job {
+                    at: index,
+                    node: self.held[index].clone(),
+                    resume,
+                });
+            }
+        }
+
+        fn finish(&mut self, done: Done) {
+            let at = done.at;
+            self.report.duration_micros += done.elapsed;
+            self.audited[at] = done.audited;
+            let mut codes: Vec<String> = done.said.iter().map(|one| one.code.clone()).collect();
+            self.said[at] = done.said;
+            match done.result {
+                Ok(made) => {
+                    self.state[at] = if made.from_cache {
+                        self.report.cache_hits += 1;
+                        Status::CacheHit
+                    } else {
+                        self.report.succeeded += 1;
+                        Status::Succeeded
+                    };
+                    self.measured[at] = Measurements {
+                        duration_micros: done.elapsed,
+                        peak_memory_bytes: made.peak_memory_bytes,
+                    };
+                    self.made[at] = made.artifact_digest;
+                }
+                Err(error) => {
+                    codes.push(error.code.clone());
+                    self.said[at].push(error);
+                    self.state[at] = Status::Failed;
+                    self.measured[at] = Measurements {
+                        duration_micros: done.elapsed,
+                        peak_memory_bytes: 0,
+                    };
+                    self.report.failed += 1;
+                }
+            }
+            self.codes[at] = codes;
+        }
+
+        fn close(mut self, graph: &mut Graph, policy: &mut Policy, sink: &mut Sink) -> Report {
+            for index in 0..self.order.len() {
+                graph.finish(
+                    &self.order[index],
+                    self.state[index],
+                    self.measured[index],
+                    self.made[index],
+                    std::mem::take(&mut self.codes[index]),
+                );
+                policy.absorb(std::mem::take(&mut self.audited[index]));
+                for said in std::mem::take(&mut self.said[index]) {
+                    sink.emit(said);
+                }
+            }
+            self.report.outcome = if self.report.cancelled > 0 {
+                Outcome::Cancelled
+            } else if self.report.failed > 0 || self.report.skipped > 0 {
+                Outcome::Failed
+            } else {
+                Outcome::Completed
+            };
+            self.report
+        }
+    }
+
+    enum Hands<'a> {
+        One(&'a mut dyn NodeExecutor),
+        Many(&'a dyn Crew),
+    }
+
+    fn conduct(
+        graph: &mut Graph,
+        hands: Hands<'_>,
+        policy: &mut Policy,
+        sink: &mut Sink,
+        cancellation: &Cancellation,
+        settings: &Settings,
+    ) -> Report {
+        let order = match graph.plan() {
+            Ok(order) => order,
+            Err(error) => {
+                sink.emit(error);
+                return Report::nothing(Outcome::Rejected);
+            }
+        };
+
+        let conditions = Conditions::read();
+        let wanted = match &hands {
+            Hands::One(_) => 1,
+            Hands::Many(_) => settings.limits.lanes_under(&conditions),
+        };
+
+        let mut board = Board::of(graph, order);
+        board.report.conditions = conditions;
+        board.report.lanes = wanted;
+
+        let grants = policy.clone();
+        let opened = Instant::now();
+
+        match hands {
+            Hands::One(executor) => {
+                in_one_lane(&mut board, executor, cancellation, settings, &grants)
+            }
+            Hands::Many(crew) if wanted <= 1 => {
+                let mut hand = crew.hand();
+                in_one_lane(&mut board, hand.as_mut(), cancellation, settings, &grants)
+            }
+            Hands::Many(crew) => {
+                in_many_lanes(&mut board, crew, cancellation, settings, &grants, wanted)
+            }
+        }
+
+        board.report.wall_micros = opened.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        board.close(graph, policy, sink)
+    }
+
+    fn in_one_lane(
+        board: &mut Board,
+        executor: &mut dyn NodeExecutor,
+        cancellation: &Cancellation,
+        settings: &Settings,
+        grants: &Policy,
+    ) {
+        loop {
+            board.settle(cancellation.is_cancelled());
+            let Some(job) = board.draw(settings) else {
+                break;
+            };
+            let done = work(executor, job, grants);
+            board.finish(done);
+        }
+    }
+
+    fn in_many_lanes(
+        board: &mut Board,
+        crew: &dyn Crew,
+        cancellation: &Cancellation,
+        settings: &Settings,
+        grants: &Policy,
+        lanes: usize,
+    ) {
+        std::thread::scope(|scope| {
+            let (give, take) = mpsc::channel::<Job>();
+            let (tell, heard) = mpsc::channel::<Done>();
+            let take = Arc::new(Mutex::new(take));
+
+            for _ in 0..lanes {
+                let take = Arc::clone(&take);
+                let tell = tell.clone();
+                scope.spawn(move || {
+                    let mut hand = crew.hand();
+                    loop {
+                        let job = {
+                            let Ok(held) = take.lock() else {
+                                break;
+                            };
+                            held.recv()
+                        };
+                        let Ok(job) = job else {
+                            break;
+                        };
+                        if tell.send(work(hand.as_mut(), job, grants)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tell);
+
+            let mut allowed = lanes;
+            let mut flying = 0usize;
+            let mut looked = Instant::now();
+            let hold = Duration::from_millis(CONDITIONS_HOLD_MILLIS);
+
+            loop {
+                board.settle(cancellation.is_cancelled());
+
+                while flying < allowed {
+                    let Some(job) = board.draw(settings) else {
+                        break;
+                    };
+                    if give.send(job).is_err() {
+                        break;
+                    }
+                    flying += 1;
+                }
+
+                if flying == 0 {
+                    break;
+                }
+
+                let Ok(done) = heard.recv() else {
+                    break;
+                };
+                flying -= 1;
+                board.finish(done);
+
+                if looked.elapsed() >= hold {
+                    looked = Instant::now();
+                    allowed = settings.limits.lanes_under(&Conditions::read()).min(lanes);
+                    if allowed < lanes {
+                        board.report.throttled = true;
+                    }
+                }
+            }
+
+            drop(give);
+        });
+    }
+
     pub fn run(
         graph: &mut Graph,
         executor: &mut dyn NodeExecutor,
@@ -24726,161 +25666,50 @@ pub mod scheduler {
         sink: &mut Sink,
         cancellation: &Cancellation,
     ) -> Report {
-        let order = match graph.plan() {
-            Ok(order) => order,
-            Err(error) => {
-                sink.emit(error);
-                return Report {
-                    outcome: Outcome::Rejected,
-                    succeeded: 0,
-                    cache_hits: 0,
-                    failed: 0,
-                    skipped: 0,
-                    cancelled: 0,
-                    order: Vec::new(),
-                    duration_micros: 0,
-                };
-            }
-        };
+        conduct(
+            graph,
+            Hands::One(executor),
+            policy,
+            sink,
+            cancellation,
+            &Settings::sequential(),
+        )
+    }
 
-        let mut report = Report {
-            outcome: Outcome::Completed,
-            succeeded: 0,
-            cache_hits: 0,
-            failed: 0,
-            skipped: 0,
-            cancelled: 0,
-            order: order.clone(),
-            duration_micros: 0,
-        };
+    pub fn run_with(
+        graph: &mut Graph,
+        executor: &mut dyn NodeExecutor,
+        policy: &mut Policy,
+        sink: &mut Sink,
+        cancellation: &Cancellation,
+        settings: &Settings,
+    ) -> Report {
+        conduct(
+            graph,
+            Hands::One(executor),
+            policy,
+            sink,
+            cancellation,
+            settings,
+        )
+    }
 
-        for id in &order {
-            if cancellation.is_cancelled() {
-                graph.finish(
-                    id,
-                    Status::Cancelled,
-                    Measurements::default(),
-                    None,
-                    Vec::new(),
-                );
-                report.cancelled += 1;
-                report.outcome = Outcome::Cancelled;
-                continue;
-            }
-
-            let Some(node) = graph.node(id).cloned() else {
-                continue;
-            };
-
-            let blocked: Vec<String> = node
-                .dependencies()
-                .iter()
-                .filter(|dependency| {
-                    graph
-                        .node(dependency)
-                        .map(|d| !d.status().produced_its_outputs())
-                        .unwrap_or(true)
-                })
-                .map(|dependency| dependency.as_str().to_string())
-                .collect();
-
-            if !blocked.is_empty() {
-                sink.emit(
-                    Diagnostic::new(
-                        "W6002",
-                        Severity::Warning,
-                        FailureClass::Recoverable,
-                        "core.scheduler",
-                        format!("'{}' was skipped.", node.id()),
-                    )
-                    .with_context(format!("Waiting on: {}", blocked.join(", ")))
-                    .with_suggestion(
-                        "Fix what those nodes reported. This node has no problem of \
-                         its own.",
-                    ),
-                );
-                graph.finish(
-                    id,
-                    Status::Skipped,
-                    Measurements::default(),
-                    None,
-                    Vec::new(),
-                );
-                report.skipped += 1;
-                if report.outcome == Outcome::Completed {
-                    report.outcome = Outcome::Failed;
-                }
-                continue;
-            }
-
-            graph.finish(
-                id,
-                Status::Running,
-                Measurements::default(),
-                None,
-                Vec::new(),
-            );
-
-            let before = sink.len();
-            let started = Instant::now();
-            let result = {
-                let mut ctx = Context {
-                    policy,
-                    diagnostics: sink,
-                };
-                executor.execute(&node, &mut ctx)
-            };
-            let elapsed = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-            report.duration_micros += elapsed;
-
-            let codes: Vec<String> = sink.entries()[before..]
-                .iter()
-                .map(|d| d.code.clone())
-                .collect();
-
-            match result {
-                Ok(node_result) => {
-                    let status = if node_result.from_cache {
-                        report.cache_hits += 1;
-                        Status::CacheHit
-                    } else {
-                        report.succeeded += 1;
-                        Status::Succeeded
-                    };
-                    graph.finish(
-                        id,
-                        status,
-                        Measurements {
-                            duration_micros: elapsed,
-                            peak_memory_bytes: node_result.peak_memory_bytes,
-                        },
-                        node_result.artifact_digest,
-                        codes,
-                    );
-                }
-                Err(error) => {
-                    let mut codes = codes;
-                    codes.push(error.code.clone());
-                    sink.emit(error);
-                    graph.finish(
-                        id,
-                        Status::Failed,
-                        Measurements {
-                            duration_micros: elapsed,
-                            peak_memory_bytes: 0,
-                        },
-                        None,
-                        codes,
-                    );
-                    report.failed += 1;
-                    if report.outcome == Outcome::Completed {
-                        report.outcome = Outcome::Failed;
-                    }
-                }
-            }
-        }
-
-        report
+    pub fn run_across(
+        graph: &mut Graph,
+        crew: &dyn Crew,
+        policy: &mut Policy,
+        sink: &mut Sink,
+        cancellation: &Cancellation,
+        settings: &Settings,
+    ) -> Report {
+        conduct(
+            graph,
+            Hands::Many(crew),
+            policy,
+            sink,
+            cancellation,
+            settings,
+        )
     }
 }
 
@@ -74523,6 +75352,7 @@ class Screen
             &mut self,
             node: &Node,
             _ctx: &mut super::plugin::Context<'_>,
+            _resume: &mut super::scheduler::Checkpoint,
         ) -> Result<super::scheduler::NodeResult, Diagnostic> {
             let id = node.id().as_str().to_string();
             self.ran.push(id.clone());
@@ -74812,6 +75642,482 @@ class Screen
         assert!(document.contains("\"acyclic\":true"));
         assert!(document.contains("\"outcome\":\"FAILED\""));
         assert!(document.contains("\"status\":\"SKIPPED\""));
+    }
+
+    const AT_ONCE: usize = 4;
+
+    const NODE_STEPS: [&str; 4] = ["read", "compile", "link", "write"];
+
+    fn fan_graph(width: usize) -> Graph {
+        let mut graph = Graph::new();
+        graph.add(node("root", NodeKind::SourceAnalysis)).unwrap();
+        for index in 0..width {
+            graph
+                .add(
+                    node(&format!("leaf{index}"), NodeKind::CompilerIr)
+                        .after(NodeId::new("root").unwrap()),
+                )
+                .unwrap();
+        }
+        let mut join = node("join", NodeKind::Package);
+        for index in 0..width {
+            join = join.after(NodeId::new(format!("leaf{index}")).unwrap());
+        }
+        graph.add(join).unwrap();
+        graph
+    }
+
+    struct Together {
+        inside: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        most: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl super::scheduler::NodeExecutor for Together {
+        fn execute(
+            &mut self,
+            _node: &Node,
+            _ctx: &mut super::plugin::Context<'_>,
+            _resume: &mut super::scheduler::Checkpoint,
+        ) -> Result<super::scheduler::NodeResult, Diagnostic> {
+            use std::sync::atomic::Ordering;
+            let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.most.load(Ordering::SeqCst) < AT_ONCE && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+            Ok(super::scheduler::NodeResult::default())
+        }
+    }
+
+    struct TogetherCrew {
+        inside: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        most: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl super::scheduler::Crew for TogetherCrew {
+        fn hand(&self) -> Box<dyn super::scheduler::NodeExecutor + Send> {
+            Box::new(Together {
+                inside: std::sync::Arc::clone(&self.inside),
+                most: std::sync::Arc::clone(&self.most),
+            })
+        }
+    }
+
+    #[test]
+    fn work_that_waits_on_nothing_runs_at_the_same_time() {
+        let mut graph = fan_graph(AT_ONCE);
+        let crew = TogetherCrew {
+            inside: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            most: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let report = super::scheduler::run_across(
+            &mut graph,
+            &crew,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+            &super::scheduler::Settings {
+                limits: super::scheduler::Limits::as_wide_as(AT_ONCE),
+                checkpoints: None,
+            },
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Completed);
+        assert_eq!(report.succeeded as usize, AT_ONCE + 2);
+        assert_eq!(report.lanes, AT_ONCE);
+        assert_eq!(
+            crew.most.load(std::sync::atomic::Ordering::SeqCst),
+            AT_ONCE,
+            "the leaves depend on nothing but the root, so they must overlap"
+        );
+    }
+
+    #[derive(Clone)]
+    struct Chatty {
+        failing: Vec<String>,
+    }
+
+    impl super::scheduler::NodeExecutor for Chatty {
+        fn execute(
+            &mut self,
+            node: &Node,
+            ctx: &mut super::plugin::Context<'_>,
+            _resume: &mut super::scheduler::Checkpoint,
+        ) -> Result<super::scheduler::NodeResult, Diagnostic> {
+            let id = node.id().as_str().to_string();
+            ctx.require(&id, Capability::FsRead);
+            ctx.diagnostics.emit(Diagnostic::new(
+                "I6100",
+                Severity::Info,
+                FailureClass::Recoverable,
+                "test",
+                format!("{id} looked at the disk."),
+            ));
+            if self.failing.contains(&id) {
+                return Err(Diagnostic::new(
+                    "E9999",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "test",
+                    "scripted failure",
+                ));
+            }
+            Ok(super::scheduler::NodeResult {
+                artifact_digest: Some(super::hash::sha256(id.as_bytes())),
+                from_cache: false,
+                peak_memory_bytes: 0,
+            })
+        }
+    }
+
+    impl super::scheduler::Crew for Chatty {
+        fn hand(&self) -> Box<dyn super::scheduler::NodeExecutor + Send> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn a_wide_run_and_a_narrow_one_say_exactly_the_same_thing() {
+        let crew = Chatty {
+            failing: vec!["leaf1".to_string()],
+        };
+
+        let told = |lanes: usize| {
+            let mut graph = fan_graph(AT_ONCE);
+            let mut policy = policy_with(&[Capability::FsRead]);
+            let mut sink = Sink::new();
+            let report = super::scheduler::run_across(
+                &mut graph,
+                &crew,
+                &mut policy,
+                &mut sink,
+                &Cancellation::new(),
+                &super::scheduler::Settings {
+                    limits: super::scheduler::Limits::as_wide_as(lanes),
+                    checkpoints: None,
+                },
+            );
+            let statuses: Vec<(String, NodeStatus)> = report
+                .order
+                .iter()
+                .map(|id| (id.as_str().to_string(), graph.node(id).unwrap().status()))
+                .collect();
+            (
+                report.outcome,
+                report.succeeded,
+                report.failed,
+                report.skipped,
+                report.order.clone(),
+                statuses,
+                sink.entries().to_vec(),
+                policy.audit().to_vec(),
+            )
+        };
+
+        let narrow = told(1);
+        let wide = told(AT_ONCE);
+
+        assert_eq!(narrow.0, SchedulerOutcome::Failed);
+        assert_eq!(narrow.1, 4);
+        assert_eq!(narrow.2, 1);
+        assert_eq!(narrow.3, 1);
+        assert_eq!(
+            narrow, wide,
+            "a build that spreads out must report what a build that does not reports"
+        );
+    }
+
+    struct Stepper {
+        stop_at: Option<&'static str>,
+        did: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl super::scheduler::NodeExecutor for Stepper {
+        fn execute(
+            &mut self,
+            node: &Node,
+            _ctx: &mut super::plugin::Context<'_>,
+            resume: &mut super::scheduler::Checkpoint,
+        ) -> Result<super::scheduler::NodeResult, Diagnostic> {
+            let id = node.id().as_str().to_string();
+            for step in NODE_STEPS {
+                if resume.skip(step) {
+                    continue;
+                }
+                if let Ok(mut held) = self.did.lock() {
+                    held.push(format!("{id}:{step}"));
+                }
+                if self.stop_at == Some(step) {
+                    return Err(Diagnostic::new(
+                        "E9998",
+                        Severity::Error,
+                        FailureClass::InternalError,
+                        "test",
+                        "the power went out",
+                    ));
+                }
+                resume.keep(step)?;
+            }
+            Ok(super::scheduler::NodeResult {
+                artifact_digest: Some(super::hash::sha256(id.as_bytes())),
+                from_cache: false,
+                peak_memory_bytes: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn a_node_picks_up_at_the_step_the_last_run_stopped_at() {
+        let folder = temp_directory("scheduler-resume");
+        let under = folder.to_str().unwrap().to_string();
+        let did = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let run = |stop_at: Option<&'static str>| {
+            let mut graph = Graph::new();
+            graph.add(node("compile", NodeKind::CompilerIr)).unwrap();
+            let mut executor = Stepper {
+                stop_at,
+                did: std::sync::Arc::clone(&did),
+            };
+            let mut policy = Policy::new("build");
+            let mut sink = Sink::new();
+            let report = super::scheduler::run_with(
+                &mut graph,
+                &mut executor,
+                &mut policy,
+                &mut sink,
+                &Cancellation::new(),
+                &super::scheduler::Settings::resuming_under(&under),
+            );
+            let status = graph
+                .node(&NodeId::new("compile").unwrap())
+                .unwrap()
+                .status();
+            let taken: Vec<String> = did.lock().unwrap().drain(..).collect();
+            (report, status, taken)
+        };
+
+        let (report, status, taken) = run(Some("link"));
+        assert_eq!(report.failed, 1);
+        assert_eq!(status, NodeStatus::Failed);
+        assert_eq!(
+            taken,
+            ["compile:read", "compile:compile", "compile:link"],
+            "the first run gets as far as the step that stops it"
+        );
+
+        let (report, status, taken) = run(None);
+        assert_eq!(report.succeeded, 1);
+        assert_eq!(report.resumed, 0);
+        assert_eq!(status, NodeStatus::Succeeded);
+        assert_eq!(
+            taken,
+            ["compile:link", "compile:write"],
+            "the steps the first run wrote down are not done twice"
+        );
+
+        let (report, status, taken) = run(None);
+        assert_eq!(report.resumed, 1);
+        assert_eq!(report.succeeded, 0);
+        assert_eq!(status, NodeStatus::CacheHit);
+        assert!(
+            taken.is_empty(),
+            "a node a previous run finished is not run again"
+        );
+        assert_eq!(
+            graph_digest_of(&under, "compile"),
+            Some(super::hash::sha256(b"compile")),
+            "what the node made is remembered beside the steps"
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    fn graph_digest_of(under: &str, node: &str) -> Option<Digest> {
+        let text = std::fs::read_to_string(format!(
+            "{under}/{node}{}",
+            super::scheduler::CHECKPOINT_SUFFIX
+        ))
+        .ok()?;
+        text.lines()
+            .find_map(|line| line.strip_prefix(super::scheduler::DONE_LINE))
+            .and_then(Digest::from_hex)
+    }
+
+    #[test]
+    fn a_node_whose_work_changed_does_not_resume_the_old_work() {
+        let folder = temp_directory("scheduler-restamp");
+        let under = folder.to_str().unwrap().to_string();
+        let did = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let run = |plugin: &str| {
+            let mut graph = Graph::new();
+            graph
+                .add(Node::new(
+                    NodeId::new("compile").unwrap(),
+                    NodeKind::CompilerIr,
+                    plugin,
+                    digests(),
+                ))
+                .unwrap();
+            let mut executor = Stepper {
+                stop_at: None,
+                did: std::sync::Arc::clone(&did),
+            };
+            let mut policy = Policy::new("build");
+            let mut sink = Sink::new();
+            let report = super::scheduler::run_with(
+                &mut graph,
+                &mut executor,
+                &mut policy,
+                &mut sink,
+                &Cancellation::new(),
+                &super::scheduler::Settings::resuming_under(&under),
+            );
+            let taken: Vec<String> = did.lock().unwrap().drain(..).collect();
+            (report, taken)
+        };
+
+        let (report, taken) = run("omni.plugin.kotlin");
+        assert_eq!(report.succeeded, 1);
+        assert_eq!(taken.len(), NODE_STEPS.len());
+
+        let (report, taken) = run("omni.plugin.kotlin");
+        assert_eq!(report.resumed, 1);
+        assert!(taken.is_empty());
+
+        let (report, taken) = run("omni.plugin.java");
+        assert_eq!(report.resumed, 0);
+        assert_eq!(report.succeeded, 1);
+        assert_eq!(
+            taken.len(),
+            NODE_STEPS.len(),
+            "a node that is not the node the checkpoint was written for starts over"
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn how_wide_a_build_spreads_answers_to_memory_battery_and_heat() {
+        use super::scheduler::{Conditions, Limits};
+
+        let plenty = Conditions {
+            processors: 8,
+            free_memory_bytes: 64 * 1024 * 1024 * 1024,
+            battery_percent: Some(100),
+            on_power: true,
+            hottest_millidegrees: Some(30_000),
+        };
+        let limits = Limits::sensible();
+        assert_eq!(limits.lanes_under(&plenty), 8);
+
+        let tight = Conditions {
+            free_memory_bytes: 1024 * 1024 * 1024,
+            ..plenty
+        };
+        assert_eq!(
+            limits.lanes_under(&tight),
+            2,
+            "a gigabyte free is two lanes of half a gigabyte"
+        );
+
+        let starved = Conditions {
+            free_memory_bytes: 1024,
+            ..plenty
+        };
+        assert_eq!(
+            limits.lanes_under(&starved),
+            1,
+            "a build never narrows to nothing"
+        );
+
+        let dying = Conditions {
+            battery_percent: Some(9),
+            on_power: false,
+            ..plenty
+        };
+        assert_eq!(limits.lanes_under(&dying), 1);
+
+        let dying_but_plugged = Conditions {
+            on_power: true,
+            ..dying
+        };
+        assert_eq!(
+            limits.lanes_under(&dying_but_plugged),
+            8,
+            "a low battery on a charger is not a reason to slow down"
+        );
+
+        let warm = Conditions {
+            hottest_millidegrees: Some(super::scheduler::HOT_MILLIDEGREES),
+            ..plenty
+        };
+        assert_eq!(limits.lanes_under(&warm), 4);
+
+        let scalding = Conditions {
+            hottest_millidegrees: Some(super::scheduler::SCALDING_MILLIDEGREES + 1),
+            ..plenty
+        };
+        assert_eq!(limits.lanes_under(&scalding), 1);
+
+        let unknown = Conditions::unknown();
+        assert_eq!(limits.lanes_under(&unknown), 1);
+        assert_eq!(Limits::as_wide_as(6).lanes_under(&unknown), 6);
+        assert_eq!(Limits::one_lane().lanes_under(&plenty), 1);
+    }
+
+    #[test]
+    fn what_the_machine_says_about_itself_is_believable() {
+        let seen = super::scheduler::Conditions::read();
+        assert!(seen.processors >= 1);
+        assert!(seen.processors <= super::scheduler::MOST_LANES * 64);
+        if let Some(percent) = seen.battery_percent {
+            assert!(percent <= 100);
+        }
+        if let Some(heat) = seen.hottest_millidegrees {
+            assert!((0..=super::scheduler::HOTTEST_BELIEVABLE_MILLIDEGREES).contains(&heat));
+        }
+        assert!(super::scheduler::Limits::sensible().lanes_under(&seen) >= 1);
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        seen.write_json(&mut w, "conditions");
+        w.end_object();
+        let document = w.finish();
+        assert!(is_structurally_valid(&document), "{document}");
+    }
+
+    #[test]
+    fn every_node_in_the_plan_is_accounted_for_once() {
+        for failing in [None, Some("leaf2")] {
+            let mut graph = fan_graph(AT_ONCE);
+            let crew = Chatty {
+                failing: failing.into_iter().map(|id| id.to_string()).collect(),
+            };
+            let mut policy = policy_with(&[Capability::FsRead]);
+            let mut sink = Sink::new();
+            let report = super::scheduler::run_across(
+                &mut graph,
+                &crew,
+                &mut policy,
+                &mut sink,
+                &Cancellation::new(),
+                &super::scheduler::Settings::default(),
+            );
+            assert_eq!(
+                report.settled() as usize,
+                report.order.len(),
+                "the report must add up to the plan"
+            );
+            assert!(report.lanes >= 1);
+            assert!(report.wall_micros > 0 || report.duration_micros == 0);
+        }
     }
 
     const DIRECTIVE_MANIFEST: &str = r#"
