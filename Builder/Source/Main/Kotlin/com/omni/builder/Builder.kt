@@ -80,7 +80,6 @@ import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
-import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -6649,7 +6648,7 @@ class BuilderActivity : Activity() {
                 getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
                 getString(R.string.omni_action_confirm) to { it: AlertDialog ->
                     val held = CharArray(field.text.length)
-                    field.text.getChars(0, field.text.length, held, 0)
+                    android.text.TextUtils.getChars(field.text, 0, field.text.length, held, 0)
                     field.text.clear()
                     it.dismiss()
                     onChosen(held)
@@ -8200,8 +8199,7 @@ class BuilderActivity : Activity() {
         }
         view.setOnClickListener {
             view.requestFocus()
-            val keyboard = getSystemService(InputMethodManager::class.java)
-            keyboard?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+            view.windowInsetsController?.show(WindowInsets.Type.ime())
         }
 
         if (shellHandle < 0) {
@@ -14366,7 +14364,7 @@ class BuilderActivity : Activity() {
     private fun readSecret(view: EditText?): CharArray {
         val editable = view?.text ?: return CharArray(0)
         val chars = CharArray(editable.length)
-        editable.getChars(0, editable.length, chars, 0)
+        android.text.TextUtils.getChars(editable, 0, editable.length, chars, 0)
         return chars
     }
 
