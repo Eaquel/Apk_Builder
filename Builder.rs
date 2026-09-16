@@ -349,7 +349,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &[
             "The multiplication under the ladder is not constant-time: how long it takes still depends on the numbers going into it. For a private key the blinding in front of it means those numbers are drawn fresh every time and correlate with nothing; for a public one there is nothing secret to leak. Neither of those is the same as fixing the arithmetic.",
             "No primality testing and no key generation: a key is read, never made.",
-            "Karatsuba above a hundred and twenty-eight limbs and schoolbook below it, a crossover measured on this code rather than assumed: at thirty-two limbs the split cost more than it saved and made two-thousand-and-forty-eight-bit work slower. There is still no Montgomery form, so a modular exponentiation pays a division for every reduction.",
+            "Karatsuba above a hundred and twenty-eight limbs and schoolbook below it, a crossover measured on this code rather than assumed. Montgomery form is used for an odd modulus, which is every RSA one, and an even modulus still takes the dividing path. The Montgomery multiply is a full multiplication followed by a reduction rather than the two interleaved, so it saves the division and not the pass over the limbs.",
         ],
     },
     Subsystem {
@@ -33852,6 +33852,79 @@ pub mod bignum {
             Ok(true)
         }
 
+        fn limb_inverse(value: u32) -> u32 {
+            let mut guess = 1u32;
+            for _ in 0..5 {
+                guess = guess.wrapping_mul(2u32.wrapping_sub(value.wrapping_mul(guess)));
+            }
+            guess
+        }
+
+        fn redc(&self, modulus: &Natural, folded: u32) -> Natural {
+            let width = modulus.limbs.len();
+            let mut limbs = self.limbs.clone();
+            limbs.resize(width * 2 + 1, 0);
+
+            for step in 0..width {
+                let factor = limbs[step].wrapping_mul(folded);
+                let mut carry = 0u64;
+                for (offset, limb) in modulus.limbs.iter().enumerate() {
+                    let at = step + offset;
+                    let product =
+                        u64::from(factor) * u64::from(*limb) + u64::from(limbs[at]) + carry;
+                    limbs[at] = product as u32;
+                    carry = product >> 32;
+                }
+                let mut at = step + width;
+                while carry > 0 && at < limbs.len() {
+                    let sum = u64::from(limbs[at]) + carry;
+                    limbs[at] = sum as u32;
+                    carry = sum >> 32;
+                    at += 1;
+                }
+            }
+
+            let mut out = Natural {
+                limbs: limbs[width..].to_vec(),
+            };
+            out.trim();
+            if out.compare(modulus) != Ordering::Less {
+                if let Ok(reduced) = out.sub(modulus) {
+                    out = reduced;
+                }
+            }
+            out
+        }
+
+        fn mont_mul(&self, other: &Natural, modulus: &Natural, folded: u32) -> Natural {
+            self.mul(other).redc(modulus, folded)
+        }
+
+        fn mod_pow_montgomery(
+            &self,
+            exponent: &Natural,
+            modulus: &Natural,
+        ) -> Result<Natural, Diagnostic> {
+            let width = modulus.limbs.len();
+            let folded = Self::limb_inverse(modulus.limbs[0]).wrapping_neg();
+
+            let one = Natural::one();
+            let shifted = one.shl_limbs(width).modulus(modulus)?;
+            let squared = one.shl_limbs(width * 2).modulus(modulus)?;
+
+            let base = self.modulus(modulus)?.mont_mul(&squared, modulus, folded);
+            let mut rungs = [shifted, base];
+            for index in (0..exponent.bit_len()).rev() {
+                let bit = usize::from(exponent.bit(index));
+                let product = rungs[0].mont_mul(&rungs[1], modulus, folded);
+                let square = rungs[bit].mont_mul(&rungs[bit], modulus, folded);
+                rungs[1 - bit] = product;
+                rungs[bit] = square;
+            }
+            let [result, _] = rungs;
+            Ok(result.redc(modulus, folded))
+        }
+
         pub fn mod_pow(
             &self,
             exponent: &Natural,
@@ -33869,6 +33942,10 @@ pub mod bignum {
             }
             if modulus.compare(&Natural::one()) == Ordering::Equal {
                 return Ok(Natural::zero());
+            }
+
+            if modulus.limbs[0] & 1 == 1 {
+                return self.mod_pow_montgomery(exponent, modulus);
             }
 
             let base = self.modulus(modulus)?;
@@ -75589,6 +75666,150 @@ Viewbinding   = false
 
         assert!(Natural::zero().mul(&ones).is_zero());
         assert_eq!(ones.mul(&one), ones);
+    }
+
+    #[test]
+    fn an_odd_modulus_and_an_even_one_come_to_the_same_answer() {
+        use super::bignum::Natural;
+
+        let mut seed = 0x0bad_c0de_dead_10ccu64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        };
+
+        for width in [4usize, 16, 64, 132] {
+            let mut room = vec![0u8; width * 4];
+            for slot in room.iter_mut() {
+                *slot = next();
+            }
+            room[0] |= 0x80;
+
+            let mut odd = room.clone();
+            let last = odd.len() - 1;
+            odd[last] |= 1;
+            let mut even = odd.clone();
+            even[last] &= 0xfe;
+
+            let modulus_odd = Natural::from_bytes_be(&odd);
+            let modulus_even = Natural::from_bytes_be(&even);
+
+            let mut base_bytes = vec![0u8; width * 4];
+            for slot in base_bytes.iter_mut() {
+                *slot = next();
+            }
+            base_bytes[0] &= 0x3f;
+            let base = Natural::from_bytes_be(&base_bytes);
+
+            for exponent in [1u32, 2, 3, 17, 65537] {
+                let power = Natural::from_u32(exponent);
+
+                let by_ladder = base
+                    .mod_pow(&power, &modulus_even)
+                    .expect("an even modulus takes the long way");
+                let mut by_hand = Natural::one();
+                for _ in 0..exponent {
+                    by_hand = by_hand
+                        .mod_mul(&base, &modulus_even)
+                        .expect("multiplying it out");
+                }
+                assert_eq!(
+                    by_ladder, by_hand,
+                    "the even path is wrong at {width} limbs"
+                );
+
+                let by_montgomery = base
+                    .mod_pow(&power, &modulus_odd)
+                    .expect("an odd modulus takes the short way");
+                let mut by_hand_odd = Natural::one();
+                for _ in 0..exponent {
+                    by_hand_odd = by_hand_odd
+                        .mod_mul(&base, &modulus_odd)
+                        .expect("multiplying it out");
+                }
+                assert_eq!(
+                    by_montgomery, by_hand_odd,
+                    "the odd path is wrong at {width} limbs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modular_exponentiation_agrees_with_an_independent_implementation() {
+        use super::bignum::Natural;
+
+        if !python_available() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_POW_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_POW_CONFORMANCE is set but no independent arithmetic is here"
+            );
+            eprintln!("bignum: no independent arithmetic is available here");
+            return;
+        }
+
+        let mut seed = 0x5eed_1234_9876_fedcu64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        };
+
+        for width in [2usize, 8, 33, 64] {
+            for odd in [true, false] {
+                let mut modulus_bytes = vec![0u8; width * 4];
+                let mut base_bytes = vec![0u8; width * 4];
+                let mut exponent_bytes = vec![0u8; 8];
+                for slot in modulus_bytes.iter_mut() {
+                    *slot = next();
+                }
+                for slot in base_bytes.iter_mut() {
+                    *slot = next();
+                }
+                for slot in exponent_bytes.iter_mut() {
+                    *slot = next();
+                }
+                modulus_bytes[0] |= 0x80;
+                let last = modulus_bytes.len() - 1;
+                if odd {
+                    modulus_bytes[last] |= 1;
+                } else {
+                    modulus_bytes[last] &= 0xfe;
+                }
+
+                let modulus = Natural::from_bytes_be(&modulus_bytes);
+                let base = Natural::from_bytes_be(&base_bytes);
+                let exponent = Natural::from_bytes_be(&exponent_bytes);
+                let got = base.mod_pow(&exponent, &modulus).expect("it raises");
+
+                let program = format!(
+                    "print(format(pow(0x{}, 0x{}, 0x{}), 'x'))",
+                    to_hex(&base_bytes),
+                    to_hex(&exponent_bytes),
+                    to_hex(&modulus_bytes),
+                );
+                let run = std::process::Command::new("python3")
+                    .arg("-c")
+                    .arg(&program)
+                    .output()
+                    .expect("python runs");
+                assert!(run.status.success(), "{run:?}");
+                let said = String::from_utf8(run.stdout).unwrap().trim().to_string();
+
+                let wide = got.bit_len().div_ceil(8).max(1);
+                let mine = to_hex(&got.to_bytes_be(wide).expect("it fits"));
+                let mine = mine.trim_start_matches('0');
+                let said = said.trim_start_matches('0');
+                assert_eq!(
+                    if mine.is_empty() { "0" } else { mine },
+                    if said.is_empty() { "0" } else { said },
+                    "{width} limbs, odd={odd} does not agree with the reference"
+                );
+            }
+        }
     }
 
     fn hex_bytes(text: &str) -> Vec<u8> {
