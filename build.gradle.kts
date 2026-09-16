@@ -6,12 +6,12 @@ val omniPinnedVersions = mapOf(
     "agp" to "9.3.0",
     "gradle" to "9.7.0",
     "ndk" to "29.0.14206865",
-    "androidApi" to "36",
-    "buildTools" to "36.0.0",
+    "androidApi" to "37",
+    "buildTools" to "37.0.0",
     "cmake" to "4.4.2",
     "kotlin" to "2.4.10",
-    "minSdk" to "28",
-    "targetSdk" to "36",
+    "minSdk" to "30",
+    "targetSdk" to "37",
     "rust" to "1.97.1",
 )
 

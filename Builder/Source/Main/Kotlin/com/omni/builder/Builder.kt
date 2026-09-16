@@ -2663,7 +2663,7 @@ internal class Mark(
         const val STROKE = 1.7f
         const val GLOW_STEPS = 3
         const val GLOW_SWELL = 2.1f
-        const val ART_SHARE = 0.59f
+        const val ART_SHARE = 0.63f
         const val ART_HEFT = 0.04f
         val CLEARING = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
     }

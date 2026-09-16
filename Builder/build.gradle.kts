@@ -12,11 +12,11 @@ plugins {
 }
 
 val omniNdkVersion = "29.0.14206865"
-val omniBuildToolsVersion = "36.0.0"
+val omniBuildToolsVersion = "37.0.0"
 val omniCmakeVersion = "4.4.2"
-val omniCompileSdk = 36
+val omniCompileSdk = 37
 val omniMinSdk = 30
-val omniTargetSdk = 36
+val omniTargetSdk = 37
 
 val omniAbis = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
@@ -172,7 +172,7 @@ android {
         minSdk = omniMinSdk
         targetSdk = omniTargetSdk
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "1.0.0"
 
         ndk {
             abiFilters += omniAbis.keys

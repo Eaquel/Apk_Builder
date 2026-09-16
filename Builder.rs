@@ -19906,9 +19906,9 @@ pub mod toolchain {
         Pin {
             id: "androidApi",
             display_name: "Android API (compileSdk)",
-            pinned: "36",
+            pinned: "37",
             requirement: Requirement::Exact,
-            source: "Android SDK package platforms;android-36",
+            source: "Android SDK package platforms;android-37",
             checksum: None,
             observable_on_device: false,
             note: "Compile-time platform. Distinct from the device API level.",
@@ -19916,9 +19916,9 @@ pub mod toolchain {
         Pin {
             id: "buildTools",
             display_name: "Android Build Tools",
-            pinned: "36.0.0",
+            pinned: "37.0.0",
             requirement: Requirement::Exact,
-            source: "Android SDK package build-tools;36.0.0",
+            source: "Android SDK package build-tools;37.0.0",
             checksum: None,
             observable_on_device: false,
             note: "Supplies aapt2, d8 and zipalign for the bootstrap build.",
@@ -19942,7 +19942,7 @@ pub mod toolchain {
         Pin {
             id: "minSdk",
             display_name: "minSdk",
-            pinned: "28",
+            pinned: "30",
             requirement: Requirement::Exact,
             source: "Omni_Builder build configuration",
             checksum: None,
@@ -19952,7 +19952,7 @@ pub mod toolchain {
         Pin {
             id: "targetSdk",
             display_name: "targetSdk",
-            pinned: "36",
+            pinned: "37",
             requirement: Requirement::Exact,
             source: "Omni_Builder build configuration",
             checksum: None,
@@ -59070,7 +59070,7 @@ mod tests {
     #[test]
     fn a_matching_observation_produces_no_diagnostic_for_that_pin() {
         let mut sink = Sink::new();
-        let observation = Observation::parse("minSdk=28;targetSdk=36", &mut sink);
+        let observation = Observation::parse("minSdk=30;targetSdk=37", &mut sink);
         let findings = toolchain::verify(&observation, &mut sink);
 
         let min_sdk = findings.iter().find(|f| f.pin.id == "minSdk").unwrap();
@@ -59098,7 +59098,7 @@ mod tests {
         assert!(diagnostic
             .context
             .iter()
-            .any(|c| c.contains("Expected: 28")));
+            .any(|c| c.contains("Expected: 30")));
         assert!(diagnostic.context.iter().any(|c| c.contains("Found: 21")));
         assert!(diagnostic.suggestion.is_some());
     }
@@ -80253,7 +80253,7 @@ Viewbinding   = false
 
     #[test]
     fn the_abi_round_trips_an_observation() {
-        let input = std::ffi::CString::new("minSdk=28;targetSdk=36").unwrap();
+        let input = std::ffi::CString::new("minSdk=30;targetSdk=37").unwrap();
         let ptr = unsafe { super::ffi::omni_state_report(input.as_ptr()) };
         assert!(!ptr.is_null());
         let report = unsafe { std::ffi::CStr::from_ptr(ptr) }
