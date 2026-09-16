@@ -524,16 +524,13 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
     },
     Subsystem {
         name: "DEX reader",
-        status: Status::Partial,
+        status: Status::Beta,
         directive_section: 21,
-        summary: "A classes.dex read down to its class definitions, with modified \
-                  UTF-8 decoded properly and the file's own checksum and \
-                  signature recomputed -- matched field for field against dexdump.",
+        summary: "A classes.dex read down to the instructions in every method, with modified UTF-8 decoded properly and the file's own checksum and signature recomputed --- matched field for field against dexdump. The class data behind each definition gives the fields and methods a class declares and what each one is allowed to do; the code item behind each method gives its registers, the range each try covers and what each catch takes, and the instruction stream is walked by the whole instruction set, all two hundred and twenty-four opcodes, the three payload tables a switch or an array filler points at included, so that stepping through a body lands on instruction boundaries rather than guessing at them. An instruction that names something resolves it while it is read: a string to its text, a type to its name, a field to the class and type it belongs to, a method to its whole signature, so the reader can say what a method reads, writes and calls rather than only that a body is there. That is what lets a build check its own output: every instruction the writer emits is read back as the one it wrote, at the same stride, with the same registers.",
         missing: &[
-            "No code item is read, so nothing here can say what a method does.",
             "Debug information, annotations and encoded arrays are located \
              through the map but not parsed.",
-            "It reads a dex down to its class definitions and no further, so it cannot check the code the writer emitted; the round trip that does is the dex writer's own.",
+            "A body that cannot be walked is reported where it is and left out, which keeps one damaged method from hiding a whole file but means the count of bodies read is the honest answer to how much of the code was understood, not a guarantee that all of it was.",
             "Randomised robustness testing only; not coverage-guided fuzzing.",
         ],
     },
@@ -1399,9 +1396,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Bir blok, biçimin izin vermediği bir uzunluk bildiriyor."),
         ("A chunk claims more bytes than the file holds.", "Bir blok, dosyanın taşıdığından çok bayt bildiriyor."),
         ("A chunk does not match its own checksum.", "Bir blok kendi sağlama toplamıyla uyuşmuyor."),
+        ("A class declares more members than this reader accepts.", "Bir sınıf, bu okuyucunun kabul ettiğinden çok üye bildiriyor."),
         ("A class has no constructor taking that many arguments.", "Bir sınıfın o sayıda argüman alan bir kurucusu yok."),
         ("A class has no field of that name that this compilation knows.", "Bir sınıfın, bu derlemenin bildiği o adda bir alanı yok."),
         ("A class has no method of that name and arity that this compilation knows.", "Bir sınıfın, bu derlemenin bildiği o ad ve argüman sayısında bir yöntemi yok."),
+        ("A class names a field that is not in the pool.", "Bir sınıf, havuzda bulunmayan bir alanı adlandırıyor."),
+        ("A class names a method that is not in the pool.", "Bir sınıf, havuzda bulunmayan bir yöntemi adlandırıyor."),
         ("A class or an interface was expected, or the file declares nothing.", "Bir sınıf ya da arayüz bekleniyordu, ya da bu dosya hiçbir şey bildirmiyor."),
         ("A class reference names nothing.", "Bir sınıf başvurusu hiçbir şeyi adlandırmıyor."),
         ("A class reference points at no class.", "Bir sınıf başvurusu hiçbir sınıfı göstermiyor."),
@@ -1515,8 +1515,11 @@ pub mod speech {
         ("A member has no name.", "Bir üyenin adı yok."),
         ("A member reference has no name and type.", "Bir üye başvurusunun adı ve türü yok."),
         ("A member reference points at no member.", "Bir üye başvurusu hiçbir üyeyi göstermiyor."),
+        ("A method body could not be read, so the rest of the file is described without it.", "Bir yöntemin gövdesi okunamadı, bu yüzden dosyanın geri kalanı onsuz anlatılıyor."),
         ("A method body was opened and never closed.", "Bir yöntem gövdesi açıldı ve hiç kapatılmadı."),
         ("A method can reach its end without returning a value.", "Bir yöntem, değer döndürmeden sonuna ulaşabiliyor."),
+        ("A method declares more code than the file holds.", "Bir yöntem, dosyanın taşıdığından çok kod bildiriyor."),
+        ("A method declares more code than this reader accepts.", "Bir yöntem, bu okuyucunun kabul ettiğinden çok kod bildiriyor."),
         ("A method descriptor could not be read.", "Bir yöntem tanımlayıcısı okunamadı."),
         ("A method has no body and is not marked abstract.", "Bir yöntemin gövdesi yok ve abstract olarak işaretlenmemiş."),
         ("A method needs more registers than its instructions can name.", "Bir yöntem, komutlarının adlandırabileceğinden çok yazmaç gerektiriyor."),
@@ -1696,6 +1699,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "var ile yazılan bir değişkenin türünü alacağı bir şey yok."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Verity özeti, bir fs-verity Merkle ağacının köküdür; bu yapının hesapladığı parçalı özetten farklı bir kurgudur. İddia ne doğrulanır ne çürütülür; hiçbir şeyle karşılaştırılmaz."),
         ("A yield is not inside a switch used for its value.", "Bir yield, değeri için kullanılan bir switch'in içinde değil."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Üst baytı sıfır olmayan bir sıfır işlem kodu, bir dallanmanın ya da bir dizi doldurucusunun gösterdiği üç tablodan biridir ve bu, onlardan hiçbiri değil."),
         ("A zlib header fails its own check.", "Bir zlib başlığı kendi denetiminden geçemiyor."),
         ("A zlib stream ends before the checksum that closes it.", "Bir zlib akışı, kendisini kapatan sağlama toplamından önce bitiyor."),
         ("A zlib stream is shorter than its own header and check.", "Bir zlib akışı kendi başlığı ve denetiminden kısa."),
@@ -1767,6 +1771,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Bir örnek üyesine static bir yöntemden ya da sınıf adı üzerinden erişildi."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Olmayan bir örnek adlandırıldı ya da kapsayan bir örneğe ulaşılamıyor."),
         ("An instruction is not translated to Dalvik here.", "Bir komut burada Dalvik'e çevrilmiyor."),
+        ("An instruction runs past the end of the code it is in.", "Bir komut, içinde bulunduğu kodun sonunu aşıyor."),
         ("An instruction says to fill in a unit it does not have.", "Bir komut, sahip olmadığı bir birimi doldurmayı söylüyor."),
         ("An integer has no content.", "Bir tamsayının içeriği yok."),
         ("An integer is padded, so it is not in its shortest form.", "Bir tamsayı dolgulanmış, yani en kısa biçiminde değil."),
@@ -1831,6 +1836,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Platformun dağıttığı her tanımlayıcı bu yapıya yazılıdır. Bunların arasında olmayan bir ad, hiçbir cihazda bulunmayan bir addır."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Diğer her yerel ayar, geri düşülen ayarın çevirisidir. Dili seçilenlerden hiçbiri olmayan bir cihaz o klasörü okur; dolayısıyla onu dışarıda bırakmak, dünyadaki telefonların çoğunda adsız bir uygulama yayımlamak olurdu."),
         ("Every resource is declared as <type name=\"…\">.", "Her kaynak <tür name=\"…\"> olarak bildirilir."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Bu gövdenin dışındaki her şey yine de okunur. Yürünemeyen bir gövde, tüm dosya geri çevrilmek yerine bulunduğu yerde bildirilir."),
         ("Fix what those nodes reported. This node has no problem of its own.", "O düğümlerin bildirdiklerini giderin. Bu düğümün kendine ait bir sorunu yok."),
         ("Give the class a body for that method, or mark the class abstract.", "O yönteme sınıfta bir gövde ver ya da sınıfı abstract olarak işaretle."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Buna başka bir ad verin. Buraya yazmak, ikinci bir projenin dosyalarını birincininkilerin arasına koyar ve birinciyi adlandıran bildirimin üzerine yazılırdı."),
@@ -2068,6 +2074,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "Seçilen Android API'si, buranın derlediği aralığın dışında."),
         ("The ciphertext is not a whole number of blocks.", "Şifreli metin tam sayıda blok değil."),
         ("The class file version predates the format.", "Sınıf dosyası sürümü biçimden eski."),
+        ("The code holds a payload the format does not define.", "Kod, biçimin tanımlamadığı bir yük taşıyor."),
         ("The colour type and bit depth are not a pair the format allows.", "Renk türü ile bit derinliği, biçimin izin verdiği bir ikili değil."),
         ("The compressed stream ends before the data it promised.", "Sıkıştırılmış akış, söz verdiği veriden önce bitiyor."),
         ("The constant pool count is zero.", "Sabit havuzu sayısı sıfır."),
@@ -2370,6 +2377,7 @@ pub mod speech {
         ("Asked for", "İstenen"),
         ("At entry", "Girdide"),
         ("At offset", "Konumda"),
+        ("At unit", "Birimde"),
         ("Attribute", "Öznitelik"),
         ("Available", "Mevcut"),
         ("Bit depth", "Bit derinliği"),
@@ -2416,6 +2424,7 @@ pub mod speech {
         ("Expected", "Beklenen"),
         ("Falls back to", "Geri düşülen"),
         ("Field", "Alan"),
+        ("Fields", "Alanlar"),
         ("File", "Dosya"),
         ("Files", "Dosyalar"),
         ("Filter", "Süzgeç"),
@@ -2454,12 +2463,14 @@ pub mod speech {
         ("Library", "Kütüphane"),
         ("Limit", "Sınır"),
         ("Line", "Satır"),
+        ("List", "Liste"),
         ("Listed", "Listelenen"),
         ("Literals", "Sabitler"),
         ("Local header", "Yerel başlık"),
         ("Longest", "En uzun"),
         ("Major", "Ana sürüm"),
         ("Method", "Yöntem"),
+        ("Methods", "Yöntemler"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "En az"),
         ("Missing", "Eksik"),
@@ -2623,9 +2634,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Ein Block gibt eine Länge an, die das Format nicht zulässt."),
         ("A chunk claims more bytes than the file holds.", "Ein Block gibt mehr Byte an, als die Datei enthält."),
         ("A chunk does not match its own checksum.", "Ein Block stimmt nicht mit seiner eigenen Prüfsumme überein."),
+        ("A class declares more members than this reader accepts.", "Eine Klasse deklariert mehr Mitglieder, als dieser Leser annimmt."),
         ("A class has no constructor taking that many arguments.", "Eine Klasse hat keinen Konstruktor mit so vielen Argumenten."),
         ("A class has no field of that name that this compilation knows.", "Eine Klasse hat kein Feld dieses Namens, das diese Übersetzung kennt."),
         ("A class has no method of that name and arity that this compilation knows.", "Eine Klasse hat keine Methode dieses Namens und dieser Stelligkeit, die diese Übersetzung kennt."),
+        ("A class names a field that is not in the pool.", "Eine Klasse nennt ein Feld, das nicht im Vorrat steht."),
+        ("A class names a method that is not in the pool.", "Eine Klasse nennt eine Methode, die nicht im Vorrat steht."),
         ("A class or an interface was expected, or the file declares nothing.", "Eine Klasse oder ein Interface wurde erwartet, oder die Datei deklariert nichts."),
         ("A class reference names nothing.", "Ein Klassenverweis benennt nichts."),
         ("A class reference points at no class.", "Ein Klassenverweis zeigt auf keine Klasse."),
@@ -2739,8 +2753,11 @@ pub mod speech {
         ("A member has no name.", "Ein Mitglied hat keinen Namen."),
         ("A member reference has no name and type.", "Ein Mitgliedsverweis hat keinen Namen und Typ."),
         ("A member reference points at no member.", "Ein Mitgliedsverweis zeigt auf kein Mitglied."),
+        ("A method body could not be read, so the rest of the file is described without it.", "Der Rumpf einer Methode ließ sich nicht lesen, daher wird der Rest der Datei ohne ihn beschrieben."),
         ("A method body was opened and never closed.", "Ein Methodenrumpf wurde geöffnet und nie geschlossen."),
         ("A method can reach its end without returning a value.", "Eine Methode kann ihr Ende erreichen, ohne einen Wert zurückzugeben."),
+        ("A method declares more code than the file holds.", "Eine Methode deklariert mehr Code, als die Datei enthält."),
+        ("A method declares more code than this reader accepts.", "Eine Methode deklariert mehr Code, als dieser Leser annimmt."),
         ("A method descriptor could not be read.", "Ein Methodendeskriptor konnte nicht gelesen werden."),
         ("A method has no body and is not marked abstract.", "Eine Methode hat keinen Rumpf und ist nicht als abstract markiert."),
         ("A method needs more registers than its instructions can name.", "Eine Methode braucht mehr Register, als ihre Befehle benennen können."),
@@ -2920,6 +2937,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Eine mit var geschriebene Variable hat nichts, woher sie ihren Typ nimmt."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Eine Verity-Prüfsumme ist die Wurzel eines fs-verity-Merkle-Baums und damit eine andere Konstruktion als die blockweise Prüfsumme, die dieser Build berechnet. Die Angabe wird weder bestätigt noch bestritten; sie wird mit nichts verglichen."),
         ("A yield is not inside a switch used for its value.", "Ein yield steht nicht in einem switch, der für seinen Wert benutzt wird."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Ein Null-Opcode mit einem oberen Byte ungleich null ist eine der drei Tabellen, auf die eine Verzweigung oder ein Feldfüller zeigt, und dies ist keine davon."),
         ("A zlib header fails its own check.", "Ein zlib-Kopf besteht seine eigene Prüfung nicht."),
         ("A zlib stream ends before the checksum that closes it.", "Ein zlib-Strom endet vor der Prüfsumme, die ihn schließt."),
         ("A zlib stream is shorter than its own header and check.", "Ein zlib-Strom ist kürzer als sein eigener Kopf und seine Prüfung."),
@@ -2991,6 +3009,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Auf ein Instanzglied wurde aus einer statischen Methode oder über den Klassennamen zugegriffen."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Eine Instanz wurde benannt, wo es keine gibt, oder eine umgebende ist nicht erreichbar."),
         ("An instruction is not translated to Dalvik here.", "Ein Befehl wird hier nicht nach Dalvik übersetzt."),
+        ("An instruction runs past the end of the code it is in.", "Ein Befehl läuft über das Ende des Codes hinaus, in dem er steht."),
         ("An instruction says to fill in a unit it does not have.", "Ein Befehl verlangt, eine Einheit zu füllen, die er nicht hat."),
         ("An integer has no content.", "Eine Ganzzahl hat keinen Inhalt."),
         ("An integer is padded, so it is not in its shortest form.", "Eine Ganzzahl ist aufgefüllt und damit nicht in ihrer kürzesten Form."),
@@ -3055,6 +3074,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Jeder Bezeichner, den die Plattform vergibt, steht in diesem Build. Ein Name, der nicht darunter ist, ist einer, den kein Gerät hat."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Jedes andere Gebietsschema ist eine Übersetzung des Rückfalls. Ein Gerät, dessen Sprache keine der gewählten ist, liest jenen Ordner; ihn wegzulassen lieferte auf den meisten Telefonen der Welt eine Anwendung ohne Namen aus."),
         ("Every resource is declared as <type name=\"…\">.", "Jede Ressource wird als <typ name=\"…\"> deklariert."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Alles außerhalb dieses Rumpfes wird weiterhin gelesen. Ein Rumpf, der nicht begangen werden kann, wird dort gemeldet, wo er steht, statt die ganze Datei abzulehnen."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Beheben Sie, was jene Knoten gemeldet haben. Dieser Knoten hat kein eigenes Problem."),
         ("Give the class a body for that method, or mark the class abstract.", "Gib der Klasse einen Rumpf für diese Methode, oder markiere die Klasse als abstract."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Geben Sie diesem einen anderen Namen. Hierher zu schreiben legte die Dateien eines zweiten Projekts zwischen die des ersten, und das Manifest, das das erste benennt, würde ersetzt."),
@@ -3292,6 +3312,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "Die gewählte Android-API liegt außerhalb dessen, wofür dies baut."),
         ("The ciphertext is not a whole number of blocks.", "Der Geheimtext ist keine ganze Zahl von Blöcken."),
         ("The class file version predates the format.", "Die Version der Klassendatei liegt vor dem Format."),
+        ("The code holds a payload the format does not define.", "Der Code enthält eine Nutzlast, die das Format nicht definiert."),
         ("The colour type and bit depth are not a pair the format allows.", "Farbtyp und Bittiefe sind kein Paar, das das Format zulässt."),
         ("The compressed stream ends before the data it promised.", "Der komprimierte Strom endet vor den Daten, die er zugesagt hat."),
         ("The constant pool count is zero.", "Die Zahl der Einträge im Konstantenpool ist null."),
@@ -3594,6 +3615,7 @@ pub mod speech {
         ("Asked for", "Angefordert"),
         ("At entry", "Bei Eintrag"),
         ("At offset", "An Position"),
+        ("At unit", "Bei Einheit"),
         ("Attribute", "Attribut"),
         ("Available", "Verfügbar"),
         ("Bit depth", "Bittiefe"),
@@ -3640,6 +3662,7 @@ pub mod speech {
         ("Expected", "Erwartet"),
         ("Falls back to", "Rückfall auf"),
         ("Field", "Feld"),
+        ("Fields", "Felder"),
         ("File", "Datei"),
         ("Files", "Dateien"),
         ("Filter", "Filter"),
@@ -3678,12 +3701,14 @@ pub mod speech {
         ("Library", "Bibliothek"),
         ("Limit", "Grenze"),
         ("Line", "Zeile"),
+        ("List", "Liste"),
         ("Listed", "Aufgeführt"),
         ("Literals", "Literale"),
         ("Local header", "Lokaler Kopf"),
         ("Longest", "Längstens"),
         ("Major", "Hauptversion"),
         ("Method", "Methode"),
+        ("Methods", "Methoden"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Mindestens"),
         ("Missing", "Fehlt"),
@@ -3847,9 +3872,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Un bloque declara una longitud que el formato no permite."),
         ("A chunk claims more bytes than the file holds.", "Un bloque declara más bytes de los que contiene el archivo."),
         ("A chunk does not match its own checksum.", "Un bloque no coincide con su propia suma de verificación."),
+        ("A class declares more members than this reader accepts.", "Una clase declara más miembros de los que este lector acepta."),
         ("A class has no constructor taking that many arguments.", "Una clase no tiene ningún constructor que tome ese número de argumentos."),
         ("A class has no field of that name that this compilation knows.", "Una clase no tiene ningún campo con ese nombre que esta compilación conozca."),
         ("A class has no method of that name and arity that this compilation knows.", "Una clase no tiene ningún método con ese nombre y aridad que esta compilación conozca."),
+        ("A class names a field that is not in the pool.", "Una clase nombra un campo que no está en el depósito."),
+        ("A class names a method that is not in the pool.", "Una clase nombra un método que no está en el depósito."),
         ("A class or an interface was expected, or the file declares nothing.", "Se esperaba una clase o una interfaz, o el archivo no declara nada."),
         ("A class reference names nothing.", "Una referencia de clase no nombra nada."),
         ("A class reference points at no class.", "Una referencia de clase no apunta a ninguna clase."),
@@ -3963,8 +3991,11 @@ pub mod speech {
         ("A member has no name.", "Un miembro no tiene nombre."),
         ("A member reference has no name and type.", "Una referencia a un miembro no tiene nombre ni tipo."),
         ("A member reference points at no member.", "Una referencia a un miembro no apunta a ningún miembro."),
+        ("A method body could not be read, so the rest of the file is described without it.", "El cuerpo de un método no se pudo leer, así que el resto del archivo se describe sin él."),
         ("A method body was opened and never closed.", "Se abrió el cuerpo de un método y nunca se cerró."),
         ("A method can reach its end without returning a value.", "Un método puede llegar a su final sin devolver un valor."),
+        ("A method declares more code than the file holds.", "Un método declara más código del que el archivo contiene."),
+        ("A method declares more code than this reader accepts.", "Un método declara más código del que este lector acepta."),
         ("A method descriptor could not be read.", "No se pudo leer un descriptor de método."),
         ("A method has no body and is not marked abstract.", "Un método no tiene cuerpo y no está marcado como abstract."),
         ("A method needs more registers than its instructions can name.", "Un método necesita más registros de los que pueden nombrar sus instrucciones."),
@@ -4144,6 +4175,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Una variable escrita con var no tiene de dónde tomar su tipo."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Un resumen verity es la raíz de un árbol Merkle de fs-verity, una construcción distinta del resumen por bloques que calcula esta compilación. La afirmación ni se confirma ni se desmiente; no se compara con nada."),
         ("A yield is not inside a switch used for its value.", "Un yield no está dentro de un switch usado por su valor."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Un código de operación cero con un byte alto distinto de cero es una de las tres tablas a las que apunta una bifurcación o un rellenador de arreglos, y esta no es ninguna de ellas."),
         ("A zlib header fails its own check.", "Una cabecera zlib no supera su propia comprobación."),
         ("A zlib stream ends before the checksum that closes it.", "Un flujo zlib termina antes que la suma de comprobación que lo cierra."),
         ("A zlib stream is shorter than its own header and check.", "Un flujo zlib es más corto que su propia cabecera y comprobación."),
@@ -4215,6 +4247,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Se alcanzó un miembro de instancia desde un método estático o a través del nombre de la clase."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Se nombró una instancia donde no hay ninguna, o no se puede alcanzar una envolvente."),
         ("An instruction is not translated to Dalvik here.", "Aquí una instrucción no se traduce a Dalvik."),
+        ("An instruction runs past the end of the code it is in.", "Una instrucción se pasa del final del código en el que está."),
         ("An instruction says to fill in a unit it does not have.", "Una instrucción manda rellenar una unidad que no tiene."),
         ("An integer has no content.", "Un entero no tiene contenido."),
         ("An integer is padded, so it is not in its shortest form.", "Un entero está rellenado, así que no está en su forma más corta."),
@@ -4279,6 +4312,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Todos los identificadores que reparte la plataforma están escritos en esta compilación. Un nombre que no esté entre ellos es uno que ningún dispositivo tiene."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Cada otro ajuste regional es una traducción del de reserva. Un dispositivo cuyo idioma no es ninguno de los elegidos lee esa carpeta, así que dejarla fuera entregaría una aplicación sin nombre en la mayoría de los teléfonos del mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Cada recurso se declara como <tipo name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Todo lo que está fuera de este cuerpo se sigue leyendo. Un cuerpo que no se puede recorrer se informa donde está en vez de rechazar el archivo entero."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Corrija lo que informaron esos nodos. Este nodo no tiene ningún problema propio."),
         ("Give the class a body for that method, or mark the class abstract.", "Da a la clase un cuerpo para ese método, o marca la clase como abstract."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dé otro nombre a este. Escribir aquí pondría los archivos de un segundo proyecto entre los del primero, y se sustituiría el manifiesto que nombra al primero."),
@@ -4516,6 +4550,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "La API de Android elegida está fuera de aquello para lo que esto compila."),
         ("The ciphertext is not a whole number of blocks.", "El texto cifrado no es un número entero de bloques."),
         ("The class file version predates the format.", "La versión del archivo de clase es anterior al formato."),
+        ("The code holds a payload the format does not define.", "El código lleva una carga que el formato no define."),
         ("The colour type and bit depth are not a pair the format allows.", "El tipo de color y la profundidad de bits no son una pareja que el formato permita."),
         ("The compressed stream ends before the data it promised.", "El flujo comprimido termina antes de los datos que prometió."),
         ("The constant pool count is zero.", "El número de entradas del grupo de constantes es cero."),
@@ -4818,6 +4853,7 @@ pub mod speech {
         ("Asked for", "Solicitado"),
         ("At entry", "En la entrada"),
         ("At offset", "En la posición"),
+        ("At unit", "En la unidad"),
         ("Attribute", "Atributo"),
         ("Available", "Disponible"),
         ("Bit depth", "Profundidad de bits"),
@@ -4864,6 +4900,7 @@ pub mod speech {
         ("Expected", "Esperado"),
         ("Falls back to", "Recurre a"),
         ("Field", "Campo"),
+        ("Fields", "Campos"),
         ("File", "Archivo"),
         ("Files", "Archivos"),
         ("Filter", "Filtro"),
@@ -4902,12 +4939,14 @@ pub mod speech {
         ("Library", "Biblioteca"),
         ("Limit", "Límite"),
         ("Line", "Línea"),
+        ("List", "Lista"),
         ("Listed", "Listado"),
         ("Literals", "Literales"),
         ("Local header", "Cabecera local"),
         ("Longest", "Más largo"),
         ("Major", "Versión mayor"),
         ("Method", "Método"),
+        ("Methods", "Métodos"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Mínimo"),
         ("Missing", "Falta"),
@@ -5071,9 +5110,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Un bloc annonce une longueur que le format n'autorise pas."),
         ("A chunk claims more bytes than the file holds.", "Un bloc annonce plus d'octets que le fichier n'en contient."),
         ("A chunk does not match its own checksum.", "Un bloc ne correspond pas à sa propre somme de contrôle."),
+        ("A class declares more members than this reader accepts.", "Une classe déclare plus de membres que ce lecteur n'accepte."),
         ("A class has no constructor taking that many arguments.", "Une classe n'a aucun constructeur prenant ce nombre d'arguments."),
         ("A class has no field of that name that this compilation knows.", "Une classe n'a aucun champ de ce nom que cette compilation connaisse."),
         ("A class has no method of that name and arity that this compilation knows.", "Une classe n'a aucune méthode de ce nom et de cette arité que cette compilation connaisse."),
+        ("A class names a field that is not in the pool.", "Une classe nomme un champ qui n'est pas dans le réservoir."),
+        ("A class names a method that is not in the pool.", "Une classe nomme une méthode qui n'est pas dans le réservoir."),
         ("A class or an interface was expected, or the file declares nothing.", "Une classe ou une interface était attendue, ou le fichier ne déclare rien."),
         ("A class reference names nothing.", "Une référence de classe ne nomme rien."),
         ("A class reference points at no class.", "Une référence de classe ne pointe vers aucune classe."),
@@ -5187,8 +5229,11 @@ pub mod speech {
         ("A member has no name.", "Un membre n'a pas de nom."),
         ("A member reference has no name and type.", "Une référence de membre n'a pas de nom et type."),
         ("A member reference points at no member.", "Une référence de membre ne pointe vers aucun membre."),
+        ("A method body could not be read, so the rest of the file is described without it.", "Le corps d'une méthode n'a pas pu être lu, le reste du fichier est donc décrit sans lui."),
         ("A method body was opened and never closed.", "Un corps de méthode a été ouvert et jamais fermé."),
         ("A method can reach its end without returning a value.", "Une méthode peut atteindre sa fin sans renvoyer de valeur."),
+        ("A method declares more code than the file holds.", "Une méthode déclare plus de code que le fichier n'en contient."),
+        ("A method declares more code than this reader accepts.", "Une méthode déclare plus de code que ce lecteur n'accepte."),
         ("A method descriptor could not be read.", "Un descripteur de méthode n'a pas pu être lu."),
         ("A method has no body and is not marked abstract.", "Une méthode n'a pas de corps et n'est pas marquée abstract."),
         ("A method needs more registers than its instructions can name.", "Une méthode a besoin de plus de registres que ses instructions ne peuvent en nommer."),
@@ -5368,6 +5413,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Une variable écrite avec var n'a rien d'où tirer son type."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Une empreinte verity est la racine d'un arbre de Merkle fs-verity, qui est une construction différente de l'empreinte par blocs que cette compilation calcule. L'affirmation n'est ni confirmée ni contestée ; elle n'est comparée à rien."),
         ("A yield is not inside a switch used for its value.", "Un yield n'est pas dans un switch utilisé pour sa valeur."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Un code d'opération nul dont l'octet haut n'est pas nul est l'une des trois tables que désignent un branchement ou un remplisseur de tableau, et ce n'en est aucune."),
         ("A zlib header fails its own check.", "Un en-tête zlib échoue à sa propre vérification."),
         ("A zlib stream ends before the checksum that closes it.", "Un flux zlib se termine avant la somme de contrôle qui le ferme."),
         ("A zlib stream is shorter than its own header and check.", "Un flux zlib est plus court que son propre en-tête et sa vérification."),
@@ -5439,6 +5485,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Un membre d'instance a été atteint depuis une méthode statique ou via le nom de la classe."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Une instance a été nommée là où il n'y en a pas, ou une englobante est hors d'atteinte."),
         ("An instruction is not translated to Dalvik here.", "Une instruction n'est pas traduite en Dalvik ici."),
+        ("An instruction runs past the end of the code it is in.", "Une instruction dépasse la fin du code où elle se trouve."),
         ("An instruction says to fill in a unit it does not have.", "Une instruction dit de remplir une unité qu'elle n'a pas."),
         ("An integer has no content.", "Un entier n'a pas de contenu."),
         ("An integer is padded, so it is not in its shortest form.", "Un entier est complété, il n'est donc pas sous sa forme la plus courte."),
@@ -5503,6 +5550,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Chaque identifiant que la plateforme distribue est inscrit dans cette compilation. Un nom qui n'en fait pas partie est un nom qu'aucun appareil n'a."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toute autre locale est une traduction de la locale de repli. Un appareil dont la langue n'est aucune des langues choisies lit ce dossier ; l'omettre livrerait donc une application sans nom sur la plupart des téléphones du monde."),
         ("Every resource is declared as <type name=\"…\">.", "Chaque ressource est déclarée sous la forme <type name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Tout ce qui est hors de ce corps est lu quand même. Un corps que l'on ne peut parcourir est signalé là où il est plutôt que de refuser le fichier entier."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Corrigez ce que ces nœuds ont signalé. Ce nœud n'a aucun problème propre."),
         ("Give the class a body for that method, or mark the class abstract.", "Donnez à la classe un corps pour cette méthode, ou marquez la classe comme abstract."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Donnez-lui un autre nom. Écrire ici mettrait les fichiers d'un second projet parmi ceux du premier, et le manifeste qui nomme le premier serait celui qu'on remplace."),
@@ -5740,6 +5788,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "L'API Android choisie est en dehors de ce pour quoi ceci compile."),
         ("The ciphertext is not a whole number of blocks.", "Le texte chiffré n'est pas un nombre entier de blocs."),
         ("The class file version predates the format.", "La version du fichier class est antérieure au format."),
+        ("The code holds a payload the format does not define.", "Le code porte une charge que le format ne définit pas."),
         ("The colour type and bit depth are not a pair the format allows.", "Le type de couleur et la profondeur de bits ne forment pas un couple que le format autorise."),
         ("The compressed stream ends before the data it promised.", "Le flux compressé se termine avant les données qu'il a promises."),
         ("The constant pool count is zero.", "Le nombre d'entrées du pool de constantes est zéro."),
@@ -6042,6 +6091,7 @@ pub mod speech {
         ("Asked for", "Demandé"),
         ("At entry", "À l'entrée"),
         ("At offset", "À la position"),
+        ("At unit", "À l'unité"),
         ("Attribute", "Attribut"),
         ("Available", "Disponible"),
         ("Bit depth", "Profondeur de bits"),
@@ -6088,6 +6138,7 @@ pub mod speech {
         ("Expected", "Attendu"),
         ("Falls back to", "Se rabat sur"),
         ("Field", "Champ"),
+        ("Fields", "Champs"),
         ("File", "Fichier"),
         ("Files", "Fichiers"),
         ("Filter", "Filtre"),
@@ -6129,12 +6180,14 @@ pub mod speech {
         ("Library", "Bibliothèque"),
         ("Limit", "Limite"),
         ("Line", "Ligne"),
+        ("List", "Liste"),
         ("Listed", "Répertorié"),
         ("Literals", "Littéraux"),
         ("Local header", "En-tête local"),
         ("Longest", "Le plus long"),
         ("Major", "Version majeure"),
         ("Method", "Méthode"),
+        ("Methods", "Méthodes"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Minimum"),
         ("Missing", "Manquant"),
@@ -6298,9 +6351,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Un blocco dichiara una lunghezza che il formato non consente."),
         ("A chunk claims more bytes than the file holds.", "Un blocco dichiara più byte di quanti il file ne contenga."),
         ("A chunk does not match its own checksum.", "Un blocco non corrisponde alla propria somma di controllo."),
+        ("A class declares more members than this reader accepts.", "Una classe dichiara più membri di quanti questo lettore ne accetti."),
         ("A class has no constructor taking that many arguments.", "Una classe non ha alcun costruttore che prenda quel numero di argomenti."),
         ("A class has no field of that name that this compilation knows.", "Una classe non ha alcun campo con quel nome che questa compilazione conosca."),
         ("A class has no method of that name and arity that this compilation knows.", "Una classe non ha alcun metodo con quel nome e quell'arità che questa compilazione conosca."),
+        ("A class names a field that is not in the pool.", "Una classe nomina un campo che non è nella riserva."),
+        ("A class names a method that is not in the pool.", "Una classe nomina un metodo che non è nella riserva."),
         ("A class or an interface was expected, or the file declares nothing.", "Era attesa una classe o un'interfaccia, oppure il file non dichiara nulla."),
         ("A class reference names nothing.", "Un riferimento di classe non nomina nulla."),
         ("A class reference points at no class.", "Un riferimento di classe non punta ad alcuna classe."),
@@ -6414,8 +6470,11 @@ pub mod speech {
         ("A member has no name.", "Un membro non ha nome."),
         ("A member reference has no name and type.", "Un riferimento a un membro non ha nome e tipo."),
         ("A member reference points at no member.", "Un riferimento a un membro non punta ad alcun membro."),
+        ("A method body could not be read, so the rest of the file is described without it.", "Il corpo di un metodo non si è potuto leggere, quindi il resto del file viene descritto senza di esso."),
         ("A method body was opened and never closed.", "Il corpo di un metodo è stato aperto e mai chiuso."),
         ("A method can reach its end without returning a value.", "Un metodo può raggiungere la sua fine senza restituire un valore."),
+        ("A method declares more code than the file holds.", "Un metodo dichiara più codice di quanto il file ne contenga."),
+        ("A method declares more code than this reader accepts.", "Un metodo dichiara più codice di quanto questo lettore ne accetti."),
         ("A method descriptor could not be read.", "Non è stato possibile leggere un descrittore di metodo."),
         ("A method has no body and is not marked abstract.", "Un metodo non ha corpo e non è segnato come abstract."),
         ("A method needs more registers than its instructions can name.", "Un metodo ha bisogno di più registri di quanti le sue istruzioni ne possano nominare."),
@@ -6595,6 +6654,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Una variabile scritta con var non ha nulla da cui prendere il suo tipo."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Un'impronta verity è la radice di un albero di Merkle fs-verity, che è una costruzione diversa dall'impronta a blocchi che questa compilazione calcola. L'affermazione non è né confermata né contestata; non è confrontata con nulla."),
         ("A yield is not inside a switch used for its value.", "Uno yield non è dentro uno switch usato per il suo valore."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Un codice operativo zero con il byte alto diverso da zero è una delle tre tabelle a cui puntano una diramazione o un riempitore di vettori, e questa non è nessuna di quelle."),
         ("A zlib header fails its own check.", "Un'intestazione zlib non supera il proprio controllo."),
         ("A zlib stream ends before the checksum that closes it.", "Un flusso zlib finisce prima della somma di controllo che lo chiude."),
         ("A zlib stream is shorter than its own header and check.", "Un flusso zlib è più corto della propria intestazione e del proprio controllo."),
@@ -6666,6 +6726,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Un membro di istanza è stato raggiunto da un metodo statico o attraverso il nome della classe."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "È stata nominata un'istanza dove non ce n'è, o una racchiudente non è raggiungibile."),
         ("An instruction is not translated to Dalvik here.", "Un'istruzione non è tradotta in Dalvik qui."),
+        ("An instruction runs past the end of the code it is in.", "Una istruzione oltrepassa la fine del codice in cui si trova."),
         ("An instruction says to fill in a unit it does not have.", "Un'istruzione dice di riempire un'unità che non ha."),
         ("An integer has no content.", "Un intero non ha contenuto."),
         ("An integer is padded, so it is not in its shortest form.", "Un intero è riempito, quindi non è nella sua forma più corta."),
@@ -6730,6 +6791,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Ogni identificatore che la piattaforma distribuisce è scritto dentro questa compilazione. Un nome che non è tra quelli è un nome che nessun dispositivo ha."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Ogni altra locale è una traduzione di quella di ripiego. Un dispositivo la cui lingua non è nessuna di quelle scelte legge quella cartella, quindi ometterla distribuirebbe un'applicazione senza nome sulla maggior parte dei telefoni del mondo."),
         ("Every resource is declared as <type name=\"…\">.", "Ogni risorsa è dichiarata come <tipo name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Tutto ciò che sta fuori da questo corpo viene letto lo stesso. Un corpo che non si può percorrere viene segnalato dove si trova invece di rifiutare l'intero file."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Correggete ciò che quei nodi hanno segnalato. Questo nodo non ha alcun problema proprio."),
         ("Give the class a body for that method, or mark the class abstract.", "Dai alla classe un corpo per quel metodo, oppure segna la classe come abstract."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Date a questo un altro nome. Scrivere qui metterebbe i file di un secondo progetto tra quelli del primo, e il manifesto che nomina il primo sarebbe quello sostituito."),
@@ -6967,6 +7029,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "L'API Android scelta è fuori da ciò per cui questo compila."),
         ("The ciphertext is not a whole number of blocks.", "Il testo cifrato non è un numero intero di blocchi."),
         ("The class file version predates the format.", "La versione del file class precede il formato."),
+        ("The code holds a payload the format does not define.", "Il codice porta un carico che il formato non definisce."),
         ("The colour type and bit depth are not a pair the format allows.", "Il tipo di colore e la profondità di bit non sono una coppia che il formato consenta."),
         ("The compressed stream ends before the data it promised.", "Il flusso compresso finisce prima dei dati che aveva promesso."),
         ("The constant pool count is zero.", "Il numero di voci dell'insieme delle costanti è zero."),
@@ -7269,6 +7332,7 @@ pub mod speech {
         ("Asked for", "Richiesto"),
         ("At entry", "Alla voce"),
         ("At offset", "Alla posizione"),
+        ("At unit", "All'unità"),
         ("Attribute", "Attributo"),
         ("Available", "Disponibile"),
         ("Bit depth", "Profondità di bit"),
@@ -7315,6 +7379,7 @@ pub mod speech {
         ("Expected", "Atteso"),
         ("Falls back to", "Ripiega su"),
         ("Field", "Campo"),
+        ("Fields", "Campi"),
         ("File", "File"),
         ("Files", "File"),
         ("Filter", "Filtro"),
@@ -7356,12 +7421,14 @@ pub mod speech {
         ("Library", "Libreria"),
         ("Limit", "Limite"),
         ("Line", "Riga"),
+        ("List", "Elenco"),
         ("Listed", "Elencato"),
         ("Literals", "Letterali"),
         ("Local header", "Intestazione locale"),
         ("Longest", "Il più lungo"),
         ("Major", "Versione principale"),
         ("Method", "Metodo"),
+        ("Methods", "Metodi"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Minimo"),
         ("Missing", "Mancante"),
@@ -7525,9 +7592,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Um bloco declara um comprimento que o formato não permite."),
         ("A chunk claims more bytes than the file holds.", "Um bloco declara mais bytes do que o arquivo contém."),
         ("A chunk does not match its own checksum.", "Um bloco não confere com sua própria soma de verificação."),
+        ("A class declares more members than this reader accepts.", "Uma classe declara mais membros do que este leitor aceita."),
         ("A class has no constructor taking that many arguments.", "Uma classe não tem nenhum construtor que receba esse número de argumentos."),
         ("A class has no field of that name that this compilation knows.", "Uma classe não tem nenhum campo com esse nome que esta compilação conheça."),
         ("A class has no method of that name and arity that this compilation knows.", "Uma classe não tem nenhum método com esse nome e aridade que esta compilação conheça."),
+        ("A class names a field that is not in the pool.", "Uma classe nomeia um campo que não está no conjunto."),
+        ("A class names a method that is not in the pool.", "Uma classe nomeia um método que não está no conjunto."),
         ("A class or an interface was expected, or the file declares nothing.", "Era esperada uma classe ou uma interface, ou o ficheiro não declara nada."),
         ("A class reference names nothing.", "Uma referência de classe não nomeia nada."),
         ("A class reference points at no class.", "Uma referência de classe não aponta para nenhuma classe."),
@@ -7641,8 +7711,11 @@ pub mod speech {
         ("A member has no name.", "Um membro não tem nome."),
         ("A member reference has no name and type.", "Uma referência a membro não tem nome e tipo."),
         ("A member reference points at no member.", "Uma referência a membro não aponta para nenhum membro."),
+        ("A method body could not be read, so the rest of the file is described without it.", "O corpo de um método não pôde ser lido, pelo que o resto do ficheiro é descrito sem ele."),
         ("A method body was opened and never closed.", "O corpo de um método foi aberto e nunca fechado."),
         ("A method can reach its end without returning a value.", "Um método pode chegar ao fim sem devolver um valor."),
+        ("A method declares more code than the file holds.", "Um método declara mais código do que o ficheiro contém."),
+        ("A method declares more code than this reader accepts.", "Um método declara mais código do que este leitor aceita."),
         ("A method descriptor could not be read.", "Não foi possível ler um descritor de método."),
         ("A method has no body and is not marked abstract.", "Um método não tem corpo e não está marcado como abstract."),
         ("A method needs more registers than its instructions can name.", "Um método precisa de mais registradores do que suas instruções conseguem nomear."),
@@ -7822,6 +7895,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Uma variável escrita com var não tem de onde tirar o seu tipo."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Um resumo verity é a raiz de uma árvore de Merkle fs-verity, que é uma construção diferente do resumo em blocos que esta compilação calcula. A alegação não é confirmada nem contestada; não é comparada com nada."),
         ("A yield is not inside a switch used for its value.", "Um yield não está dentro de um switch usado pelo seu valor."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Um código de operação zero com o byte alto diferente de zero é uma das três tabelas para que aponta uma ramificação ou um enchedor de vetores, e esta não é nenhuma delas."),
         ("A zlib header fails its own check.", "Um cabeçalho zlib falha na sua própria verificação."),
         ("A zlib stream ends before the checksum that closes it.", "Um fluxo zlib termina antes da soma de verificação que o fecha."),
         ("A zlib stream is shorter than its own header and check.", "Um fluxo zlib é mais curto que o seu próprio cabeçalho e a sua verificação."),
@@ -7893,6 +7967,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Um membro de instância foi alcançado a partir de um método estático ou pelo nome da classe."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Foi nomeada uma instância onde não há nenhuma, ou uma envolvente não é alcançável."),
         ("An instruction is not translated to Dalvik here.", "Uma instrução não é traduzida para Dalvik aqui."),
+        ("An instruction runs past the end of the code it is in.", "Uma instrução passa além do fim do código em que está."),
         ("An instruction says to fill in a unit it does not have.", "Uma instrução manda preencher uma unidade que não tem."),
         ("An integer has no content.", "Um inteiro não tem conteúdo."),
         ("An integer is padded, so it is not in its shortest form.", "Um inteiro está preenchido, portanto não está na sua forma mais curta."),
@@ -7957,6 +8032,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Cada identificador que a plataforma distribui está escrito dentro desta compilação. Um nome que não está entre eles é um nome que nenhum dispositivo tem."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toda outra localidade é uma tradução da de recurso. Um dispositivo cujo idioma não é nenhum dos escolhidos lê essa pasta, então omiti-la entregaria um aplicativo sem nome na maioria dos telefones do mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Cada recurso é declarado como <tipo name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Tudo o que está fora deste corpo continua a ser lido. Um corpo que não se pode percorrer é relatado onde está em vez de recusar o ficheiro inteiro."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Corrija o que aqueles nós relataram. Este nó não tem problema próprio."),
         ("Give the class a body for that method, or mark the class abstract.", "Dê à classe um corpo para esse método, ou marque a classe como abstract."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dê a este outro nome. Escrever aqui poria os arquivos de um segundo projeto entre os do primeiro, e o manifesto que nomeia o primeiro seria o substituído."),
@@ -8194,6 +8270,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "A API Android escolhida está fora do que isto compila."),
         ("The ciphertext is not a whole number of blocks.", "O texto cifrado não é um número inteiro de blocos."),
         ("The class file version predates the format.", "A versão do arquivo class é anterior ao formato."),
+        ("The code holds a payload the format does not define.", "O código leva uma carga que o formato não define."),
         ("The colour type and bit depth are not a pair the format allows.", "O tipo de cor e a profundidade de bits não são um par que o formato permita."),
         ("The compressed stream ends before the data it promised.", "O fluxo comprimido termina antes dos dados que prometeu."),
         ("The constant pool count is zero.", "A contagem do conjunto de constantes é zero."),
@@ -8496,6 +8573,7 @@ pub mod speech {
         ("Asked for", "Solicitado"),
         ("At entry", "Na entrada"),
         ("At offset", "Na posição"),
+        ("At unit", "Na unidade"),
         ("Attribute", "Atributo"),
         ("Available", "Disponível"),
         ("Bit depth", "Profundidade de bits"),
@@ -8542,6 +8620,7 @@ pub mod speech {
         ("Expected", "Esperado"),
         ("Falls back to", "Recorre a"),
         ("Field", "Campo"),
+        ("Fields", "Campos"),
         ("File", "Arquivo"),
         ("Files", "Arquivos"),
         ("Filter", "Filtro"),
@@ -8580,12 +8659,14 @@ pub mod speech {
         ("Library", "Biblioteca"),
         ("Limit", "Limite"),
         ("Line", "Linha"),
+        ("List", "Lista"),
         ("Listed", "Listado"),
         ("Literals", "Literais"),
         ("Local header", "Cabeçalho local"),
         ("Longest", "O mais longo"),
         ("Major", "Versão principal"),
         ("Method", "Método"),
+        ("Methods", "Métodos"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Mínimo"),
         ("Missing", "Faltando"),
@@ -8749,9 +8830,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Блок заявляет длину, которую формат не допускает."),
         ("A chunk claims more bytes than the file holds.", "Блок заявляет больше байт, чем содержит файл."),
         ("A chunk does not match its own checksum.", "Блок не сходится с собственной контрольной суммой."),
+        ("A class declares more members than this reader accepts.", "Класс объявляет больше членов, чем принимает этот читатель."),
         ("A class has no constructor taking that many arguments.", "У класса нет конструктора с таким числом аргументов."),
         ("A class has no field of that name that this compilation knows.", "У класса нет поля с таким именем, известного этой компиляции."),
         ("A class has no method of that name and arity that this compilation knows.", "У класса нет метода с таким именем и арностью, известного этой компиляции."),
+        ("A class names a field that is not in the pool.", "Класс называет поле, которого нет в наборе."),
+        ("A class names a method that is not in the pool.", "Класс называет метод, которого нет в наборе."),
         ("A class or an interface was expected, or the file declares nothing.", "Ожидался класс или интерфейс, либо файл ничего не объявляет."),
         ("A class reference names nothing.", "Ссылка на класс ничего не называет."),
         ("A class reference points at no class.", "Ссылка на класс не указывает ни на один класс."),
@@ -8865,8 +8949,11 @@ pub mod speech {
         ("A member has no name.", "У члена нет имени."),
         ("A member reference has no name and type.", "У ссылки на член нет имени и типа."),
         ("A member reference points at no member.", "Ссылка на член не указывает ни на один член."),
+        ("A method body could not be read, so the rest of the file is described without it.", "Тело метода не удалось прочитать, поэтому остальная часть файла описывается без него."),
         ("A method body was opened and never closed.", "Тело метода открыто и не закрыто."),
         ("A method can reach its end without returning a value.", "Метод может дойти до конца, не вернув значения."),
+        ("A method declares more code than the file holds.", "Метод объявляет больше кода, чем содержит файл."),
+        ("A method declares more code than this reader accepts.", "Метод объявляет больше кода, чем принимает этот читатель."),
         ("A method descriptor could not be read.", "Не удалось прочитать дескриптор метода."),
         ("A method has no body and is not marked abstract.", "У метода нет тела, и он не помечен как abstract."),
         ("A method needs more registers than its instructions can name.", "Методу нужно больше регистров, чем могут назвать его инструкции."),
@@ -9046,6 +9133,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Переменной, записанной через var, неоткуда взять свой тип."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Отпечаток verity — это корень дерева Меркла fs-verity, а это иная конструкция, чем поблочный отпечаток, который вычисляет эта сборка. Заявление не подтверждается и не оспаривается; оно ни с чем не сравнивается."),
         ("A yield is not inside a switch used for its value.", "yield находится не внутри switch, используемого ради значения."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Нулевой код операции с ненулевым старшим байтом — это одна из трёх таблиц, на которые указывают ветвление или заполнитель массива, а это ни одна из них."),
         ("A zlib header fails its own check.", "Заголовок zlib не проходит собственную проверку."),
         ("A zlib stream ends before the checksum that closes it.", "Поток zlib обрывается раньше контрольной суммы, которая его замыкает."),
         ("A zlib stream is shorter than its own header and check.", "Поток zlib короче собственного заголовка и проверки."),
@@ -9117,6 +9205,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "К члену экземпляра обратились из статического метода или через имя класса."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Назван экземпляр там, где его нет, либо до охватывающего не добраться."),
         ("An instruction is not translated to Dalvik here.", "Инструкция здесь не переводится в Dalvik."),
+        ("An instruction runs past the end of the code it is in.", "Команда выходит за конец кода, в котором она находится."),
         ("An instruction says to fill in a unit it does not have.", "Инструкция велит заполнить единицу, которой у неё нет."),
         ("An integer has no content.", "У целого числа нет содержимого."),
         ("An integer is padded, so it is not in its shortest form.", "Целое число дополнено, поэтому оно не в кратчайшей форме."),
@@ -9181,6 +9270,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Каждый идентификатор, который выдаёт платформа, вписан в эту сборку. Имя, которого среди них нет, — это имя, которого нет ни у одного устройства."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Каждая другая локаль — перевод запасной. Устройство, язык которого не входит в выбранные, читает эту папку, поэтому её пропуск выпустил бы приложение без имени на большинстве телефонов мира."),
         ("Every resource is declared as <type name=\"…\">.", "Каждый ресурс объявляется как <тип name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Всё, что вне этого тела, всё равно читается. Тело, которое не удаётся пройти, отмечается на своём месте, а не отвергает весь файл."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Исправьте то, о чём сообщили те узлы. У этого узла собственной проблемы нет."),
         ("Give the class a body for that method, or mark the class abstract.", "Дайте классу тело для этого метода или пометьте класс как abstract."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Дайте этому другое имя. Запись сюда положила бы файлы второго проекта среди файлов первого, а манифест, называющий первый, оказался бы заменённым."),
@@ -9418,6 +9508,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "Выбранный Android API вне того, для чего это собирает."),
         ("The ciphertext is not a whole number of blocks.", "Шифротекст не является целым числом блоков."),
         ("The class file version predates the format.", "Версия файла class старше формата."),
+        ("The code holds a payload the format does not define.", "Код несёт нагрузку, которой формат не определяет."),
         ("The colour type and bit depth are not a pair the format allows.", "Тип цвета и разрядность не составляют пары, которую допускает формат."),
         ("The compressed stream ends before the data it promised.", "Сжатый поток обрывается раньше данных, которые обещал."),
         ("The constant pool count is zero.", "Число записей пула констант равно нулю."),
@@ -9720,6 +9811,7 @@ pub mod speech {
         ("Asked for", "Запрошено"),
         ("At entry", "В записи"),
         ("At offset", "По смещению"),
+        ("At unit", "На единице"),
         ("Attribute", "Атрибут"),
         ("Available", "Доступно"),
         ("Bit depth", "Разрядность"),
@@ -9766,6 +9858,7 @@ pub mod speech {
         ("Expected", "Ожидалось"),
         ("Falls back to", "Откат к"),
         ("Field", "Поле"),
+        ("Fields", "Поля"),
         ("File", "Файл"),
         ("Files", "Файлы"),
         ("Filter", "Фильтр"),
@@ -9804,12 +9897,14 @@ pub mod speech {
         ("Library", "Библиотека"),
         ("Limit", "Предел"),
         ("Line", "Строка"),
+        ("List", "Список"),
         ("Listed", "Перечислено"),
         ("Literals", "Литералы"),
         ("Local header", "Локальный заголовок"),
         ("Longest", "Самое длинное"),
         ("Major", "Основная версия"),
         ("Method", "Метод"),
+        ("Methods", "Методы"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Минимум"),
         ("Missing", "Отсутствует"),
@@ -9973,9 +10068,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "كتلة تدّعي طولًا لا يسمح به التنسيق."),
         ("A chunk claims more bytes than the file holds.", "كتلة تدّعي بايتات أكثر مما يحويه الملف."),
         ("A chunk does not match its own checksum.", "كتلة لا تطابق مجموع تحققها الخاص."),
+        ("A class declares more members than this reader accepts.", "صنف يعلن عن أعضاء أكثر مما يقبله هذا القارئ."),
         ("A class has no constructor taking that many arguments.", "ليس للصنف بانٍ يأخذ هذا العدد من الوسائط."),
         ("A class has no field of that name that this compilation knows.", "ليس للصنف حقل بهذا الاسم تعرفه هذه الترجمة."),
         ("A class has no method of that name and arity that this compilation knows.", "ليس للصنف طريقة بهذا الاسم وهذا العدد تعرفها هذه الترجمة."),
+        ("A class names a field that is not in the pool.", "صنف يسمي حقلا ليس في المجموعة."),
+        ("A class names a method that is not in the pool.", "صنف يسمي طريقة ليست في المجموعة."),
         ("A class or an interface was expected, or the file declares nothing.", "كان يُتوقع صنف أو واجهة، أو أن الملف لا يعلن شيئًا."),
         ("A class reference names nothing.", "مرجع صنف لا يسمّي شيئًا."),
         ("A class reference points at no class.", "مرجع صنف لا يشير إلى أي صنف."),
@@ -10089,8 +10187,11 @@ pub mod speech {
         ("A member has no name.", "عضو بلا اسم."),
         ("A member reference has no name and type.", "مرجع عضو بلا اسم ونوع."),
         ("A member reference points at no member.", "مرجع عضو لا يشير إلى أي عضو."),
+        ("A method body could not be read, so the rest of the file is described without it.", "تعذرت قراءة جسم طريقة، لذا يوصف باقي الملف من دونه."),
         ("A method body was opened and never closed.", "فُتح جسم طريقة ولم يُغلق أبدًا."),
         ("A method can reach its end without returning a value.", "قد تبلغ الطريقة نهايتها دون أن تُرجع قيمة."),
+        ("A method declares more code than the file holds.", "طريقة تعلن عن شفرة أكثر مما يحمله الملف."),
+        ("A method declares more code than this reader accepts.", "طريقة تعلن عن شفرة أكثر مما يقبله هذا القارئ."),
         ("A method descriptor could not be read.", "تعذّرت قراءة واصف طريقة."),
         ("A method has no body and is not marked abstract.", "طريقة بلا جسم ولم تُعلَّم بأنها abstract."),
         ("A method needs more registers than its instructions can name.", "الطريقة تحتاج سجلات أكثر مما تستطيع تعليماتها تسميته."),
@@ -10270,6 +10371,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "متغير مكتوب بـ var ليس له ما يأخذ منه نوعه."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "بصمة verity هي جذر شجرة ميركل لـ fs-verity، وهي بنية مختلفة عن البصمة المقطّعة التي يحسبها هذا البناء. والادعاء لا يُؤكَّد ولا يُنازَع؛ ولا يُقارن بشيء."),
         ("A yield is not inside a switch used for its value.", "yield ليس داخل switch مستعمل من أجل قيمته."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "رمز عملية صفري ببايت أعلى غير صفري هو أحد الجداول الثلاثة التي يشير إليها تفرع أو مالئ مصفوفة، وهذا ليس أيا منها."),
         ("A zlib header fails its own check.", "ترويسة zlib ترسب في تحققها الخاص."),
         ("A zlib stream ends before the checksum that closes it.", "ينتهي تدفق zlib قبل مجموع التحقق الذي يغلقه."),
         ("A zlib stream is shorter than its own header and check.", "تدفق zlib أقصر من ترويسته وتحققه."),
@@ -10341,6 +10443,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "وُصل إلى عضو كائن من طريقة ساكنة أو عبر اسم الصنف."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "سُمّي كائن حيث لا كائن، أو أن الكائن المحيط لا يُبلغ إليه."),
         ("An instruction is not translated to Dalvik here.", "لا تُترجم هذه التعليمة إلى Dalvik هنا."),
+        ("An instruction runs past the end of the code it is in.", "تعليمة تتجاوز نهاية الشفرة التي هي فيها."),
         ("An instruction says to fill in a unit it does not have.", "تعليمة تأمر بملء وحدة ليست لديها."),
         ("An integer has no content.", "عدد صحيح بلا محتوى."),
         ("An integer is padded, so it is not in its shortest form.", "عدد صحيح محشو، فهو ليس في أقصر صورة له."),
@@ -10405,6 +10508,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "كل معرّف تمنحه المنصة مكتوب داخل هذا البناء. والاسم الذي ليس بينها اسم لا يملكه أي جهاز."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "كل لغة محلية أخرى ترجمة للغة الاحتياطية. والجهاز الذي لا تكون لغته من المختارة يقرأ ذلك المجلد، فحذفه سيطرح تطبيقًا بلا اسم على أكثر هواتف العالم."),
         ("Every resource is declared as <type name=\"…\">.", "يُعلن كل مورد على صورة <نوع name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "كل ما هو خارج هذا الجسم يقرأ على أي حال. الجسم الذي لا يمكن السير فيه يبلغ عنه في موضعه بدل رفض الملف كله."),
         ("Fix what those nodes reported. This node has no problem of its own.", "أصلح ما أبلغت عنه تلك العقد. وليست لهذه العقدة مشكلة خاصة بها."),
         ("Give the class a body for that method, or mark the class abstract.", "امنح الصنف جسمًا لتلك الطريقة، أو ضع علامة abstract على الصنف."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "أعطِ هذا اسمًا آخر. الكتابة هنا ستضع ملفات مشروع ثانٍ بين ملفات الأول، والبيان الذي يسمّي الأول هو الذي سيُستبدل."),
@@ -10642,6 +10746,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "واجهة أندرويد البرمجية المختارة خارج ما يبني له هذا."),
         ("The ciphertext is not a whole number of blocks.", "النص المشفّر ليس عددًا صحيحًا من الكتل."),
         ("The class file version predates the format.", "إصدار ملف class أقدم من التنسيق."),
+        ("The code holds a payload the format does not define.", "الشفرة تحمل حمولة لا يعرفها النسق."),
         ("The colour type and bit depth are not a pair the format allows.", "نوع اللون وعمق البتات ليسا زوجًا يسمح به التنسيق."),
         ("The compressed stream ends before the data it promised.", "التدفق المضغوط ينتهي قبل البيانات التي وعد بها."),
         ("The constant pool count is zero.", "عدد مدخلات مجمّع الثوابت صفر."),
@@ -10944,6 +11049,7 @@ pub mod speech {
         ("Asked for", "المطلوب"),
         ("At entry", "عند المدخل"),
         ("At offset", "عند الإزاحة"),
+        ("At unit", "عند الوحدة"),
         ("Attribute", "السمة"),
         ("Available", "متاح"),
         ("Bit depth", "عمق البتات"),
@@ -10990,6 +11096,7 @@ pub mod speech {
         ("Expected", "المتوقع"),
         ("Falls back to", "يرجع إلى"),
         ("Field", "الحقل"),
+        ("Fields", "الحقول"),
         ("File", "الملف"),
         ("Files", "الملفات"),
         ("Filter", "المرشّح"),
@@ -11028,12 +11135,14 @@ pub mod speech {
         ("Library", "المكتبة"),
         ("Limit", "الحد"),
         ("Line", "السطر"),
+        ("List", "القائمة"),
         ("Listed", "المدرج"),
         ("Literals", "الحرفيات"),
         ("Local header", "الترويسة المحلية"),
         ("Longest", "الأطول"),
         ("Major", "الإصدار الرئيسي"),
         ("Method", "الطريقة"),
+        ("Methods", "الطرق"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "الحد الأدنى"),
         ("Missing", "مفقود"),
@@ -11197,9 +11306,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "一个块声称的长度是格式不允许的。"),
         ("A chunk claims more bytes than the file holds.", "一个块声称的字节多于文件所含。"),
         ("A chunk does not match its own checksum.", "一个块与自己的校验和不符。"),
+        ("A class declares more members than this reader accepts.", "一个类声明的成员多于本读取器所接受的数量。"),
         ("A class has no constructor taking that many arguments.", "这个类没有接受这么多参数的构造器。"),
         ("A class has no field of that name that this compilation knows.", "这个类没有本次编译认识的该名字的字段。"),
         ("A class has no method of that name and arity that this compilation knows.", "这个类没有本次编译认识的该名字与参数个数的方法。"),
+        ("A class names a field that is not in the pool.", "一个类指名了一个不在池中的字段。"),
+        ("A class names a method that is not in the pool.", "一个类指名了一个不在池中的方法。"),
         ("A class or an interface was expected, or the file declares nothing.", "这里应当是类或接口，或者这个文件什么也没有声明。"),
         ("A class reference names nothing.", "一个类引用没有指名任何东西。"),
         ("A class reference points at no class.", "一个类引用不指向任何类。"),
@@ -11313,8 +11425,11 @@ pub mod speech {
         ("A member has no name.", "某个成员没有名称。"),
         ("A member reference has no name and type.", "某个成员引用没有名称与类型。"),
         ("A member reference points at no member.", "某个成员引用不指向任何成员。"),
+        ("A method body could not be read, so the rest of the file is described without it.", "某个方法的方法体读不出来，因此文件的其余部分在不含它的情况下被描述。"),
         ("A method body was opened and never closed.", "方法体只开不闭。"),
         ("A method can reach its end without returning a value.", "方法可能走到末尾而没有返回值。"),
+        ("A method declares more code than the file holds.", "一个方法声明的代码多于文件所包含的。"),
+        ("A method declares more code than this reader accepts.", "一个方法声明的代码多于本读取器所接受的数量。"),
         ("A method descriptor could not be read.", "无法读取某个方法描述符。"),
         ("A method has no body and is not marked abstract.", "方法没有方法体，也没有标记为 abstract。"),
         ("A method needs more registers than its instructions can name.", "某个方法需要的寄存器多于它的指令所能指名的数量。"),
@@ -11494,6 +11609,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "用 var 写的变量没有可以取得类型的来源。"),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity 摘要是 fs-verity 默克尔树的根，和此构建计算的分块摘要是不同的构造。该主张既不被确认也不被反驳；它没有和任何东西比对。"),
         ("A yield is not inside a switch used for its value.", "yield 不在一个取值用的 switch 里面。"),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "高位字节不为零的零操作码，是分支或数组填充所指向的三种表之一，而这个不属于其中任何一种。"),
         ("A zlib header fails its own check.", "某个 zlib 头没有通过它自己的校验。"),
         ("A zlib stream ends before the checksum that closes it.", "某个 zlib 流在封闭它的校验和之前就结束了。"),
         ("A zlib stream is shorter than its own header and check.", "某个 zlib 流比它自己的头和校验还短。"),
@@ -11565,6 +11681,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "从静态方法或通过类名访问了实例成员。"),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "在没有实例的地方指名了实例，或者外围实例够不着。"),
         ("An instruction is not translated to Dalvik here.", "此处不把这条指令翻译成 Dalvik。"),
+        ("An instruction runs past the end of the code it is in.", "一条指令越过了它所在代码的末尾。"),
         ("An instruction says to fill in a unit it does not have.", "某条指令要求填充一个它并不拥有的单元。"),
         ("An integer has no content.", "某个整数没有内容。"),
         ("An integer is padded, so it is not in its shortest form.", "某个整数带有填充，因而不是它最短的形式。"),
@@ -11629,6 +11746,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "平台发放的每个标识符都写在此构建里。不在其中的名称，是任何设备都没有的名称。"),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "其余每个区域设置都是回退区域设置的译文。语言不在所选之列的设备读的正是那个文件夹，所以略去它，就等于在世界上多数手机上交付一个没有名字的应用。"),
         ("Every resource is declared as <type name=\"…\">.", "每个资源都声明为 <类型 name=\"…\">。"),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "这个方法体之外的一切照常读取。走不通的方法体会在它所在之处被报告，而不是拒绝整个文件。"),
         ("Fix what those nodes reported. This node has no problem of its own.", "请修好那些节点报告的问题。这个节点本身没有问题。"),
         ("Give the class a body for that method, or mark the class abstract.", "给这个类为该方法写一个方法体，或把这个类标记为 abstract。"),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "请给这个另取一个名字。写到这里会把第二个项目的文件混进第一个项目里，而被替换掉的正是指名第一个项目的那份清单。"),
@@ -11866,6 +11984,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "所选的 Android API 在此处所构建的范围之外。"),
         ("The ciphertext is not a whole number of blocks.", "密文不是整数个分组。"),
         ("The class file version predates the format.", "class 文件的版本早于该格式。"),
+        ("The code holds a payload the format does not define.", "代码中带有该格式未定义的载荷。"),
         ("The colour type and bit depth are not a pair the format allows.", "颜色类型与位深不是格式允许的组合。"),
         ("The compressed stream ends before the data it promised.", "压缩流在它所承诺的数据之前就结束了。"),
         ("The constant pool count is zero.", "常量池的计数为零。"),
@@ -12168,6 +12287,7 @@ pub mod speech {
         ("Asked for", "请求"),
         ("At entry", "在条目"),
         ("At offset", "在偏移"),
+        ("At unit", "位于单元"),
         ("Attribute", "属性"),
         ("Available", "可用"),
         ("Bit depth", "位深"),
@@ -12214,6 +12334,7 @@ pub mod speech {
         ("Expected", "期望"),
         ("Falls back to", "回退到"),
         ("Field", "字段"),
+        ("Fields", "字段"),
         ("File", "文件"),
         ("Files", "文件"),
         ("Filter", "过滤器"),
@@ -12252,12 +12373,14 @@ pub mod speech {
         ("Library", "库"),
         ("Limit", "上限"),
         ("Line", "行"),
+        ("List", "列表"),
         ("Listed", "已列出"),
         ("Literals", "字面量"),
         ("Local header", "本地头部"),
         ("Longest", "最长"),
         ("Major", "主版本"),
         ("Method", "方法"),
+        ("Methods", "方法"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "最小"),
         ("Missing", "缺少"),
@@ -12421,9 +12544,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "チャンクが、形式の許さない長さを主張しています。"),
         ("A chunk claims more bytes than the file holds.", "チャンクが、ファイルにあるより多くのバイトを主張しています。"),
         ("A chunk does not match its own checksum.", "チャンクが自らのチェックサムと合いません。"),
+        ("A class declares more members than this reader accepts.", "あるクラスが、この読み手の受け取る数より多くの要素を宣言しています。"),
         ("A class has no constructor taking that many arguments.", "クラスに、その数の引数を取るコンストラクタがありません。"),
         ("A class has no field of that name that this compilation knows.", "クラスに、この翻訳が知るその名前のフィールドがありません。"),
         ("A class has no method of that name and arity that this compilation knows.", "クラスに、この翻訳が知るその名前と引数の数のメソッドがありません。"),
+        ("A class names a field that is not in the pool.", "あるクラスが、一覧にない欄を名指ししています。"),
+        ("A class names a method that is not in the pool.", "あるクラスが、一覧にないメソッドを名指ししています。"),
         ("A class or an interface was expected, or the file declares nothing.", "クラスかインターフェイスが要るところです。あるいはファイルが何も宣言していません。"),
         ("A class reference names nothing.", "クラス参照が何も名指ししていません。"),
         ("A class reference points at no class.", "クラス参照がどのクラスも指していません。"),
@@ -12537,8 +12663,11 @@ pub mod speech {
         ("A member has no name.", "メンバーに名前がありません。"),
         ("A member reference has no name and type.", "メンバー参照に名前と型がありません。"),
         ("A member reference points at no member.", "メンバー参照がどのメンバーも指していません。"),
+        ("A method body could not be read, so the rest of the file is described without it.", "あるメソッドの中身が読めなかったので、ファイルの残りはそれを除いて述べます。"),
         ("A method body was opened and never closed.", "メソッド本体が開かれたまま閉じられていません。"),
         ("A method can reach its end without returning a value.", "メソッドが、値を返さないまま末尾に達しうる形になっています。"),
+        ("A method declares more code than the file holds.", "あるメソッドが、ファイルの持つ量より多くの命令を宣言しています。"),
+        ("A method declares more code than this reader accepts.", "あるメソッドが、この読み手の受け取る量より多くの命令を宣言しています。"),
         ("A method descriptor could not be read.", "メソッドの記述子を読めませんでした。"),
         ("A method has no body and is not marked abstract.", "メソッドに本体がなく、abstract の印もありません。"),
         ("A method needs more registers than its instructions can name.", "メソッドが、その命令の名指しできる数より多くのレジスタを必要としています。"),
@@ -12718,6 +12847,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "var で書いた変数に、型を得る先がありません。"),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity の要約は fs-verity のマークル木の根であり、このビルドの計算する分割要約とは別の作りです。その主張は肯定も否定もされません。何とも突き合わせていないからです。"),
         ("A yield is not inside a switch used for its value.", "yield が、値のために使う switch の中にありません。"),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "上位バイトが零でない零命令は、分岐か配列の詰め物が指す三つの表のいずれかですが、これはそのどれでもありません。"),
         ("A zlib header fails its own check.", "zlib のヘッダーが自らの検査に落ちています。"),
         ("A zlib stream ends before the checksum that closes it.", "zlib の流れが、それを閉じる検査和より前で終わっています。"),
         ("A zlib stream is shorter than its own header and check.", "zlib の流れが、自らのヘッダーと検査より短くなっています。"),
@@ -12789,6 +12919,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "インスタンスのメンバーに、静的メソッドから、あるいはクラス名を通して届こうとしています。"),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "インスタンスが存在しない場所で名指しされたか、囲むインスタンスに届きません。"),
         ("An instruction is not translated to Dalvik here.", "その命令は、ここでは Dalvik へ翻訳しません。"),
+        ("An instruction runs past the end of the code it is in.", "命令が、それの入っている命令列の終わりを越えています。"),
         ("An instruction says to fill in a unit it does not have.", "命令が、持たない単位を埋めよと言っています。"),
         ("An integer has no content.", "整数に中身がありません。"),
         ("An integer is padded, so it is not in its shortest form.", "整数に詰め物があり、最短の形になっていません。"),
@@ -12853,6 +12984,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "プラットフォームの配る識別子はすべてこのビルドに書き込まれています。その中にない名前は、どの端末も持たない名前です。"),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "ほかのロケールはすべて、後退先のロケールの翻訳です。言語が選ばれたもののどれでもない端末はそのフォルダーを読みます。ですからそれを外せば、世界の大半の電話で名前のないアプリケーションを配ることになります。"),
         ("Every resource is declared as <type name=\"…\">.", "リソースはすべて <type name=\"…\"> として宣言します。"),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "この中身の外側はそのまま読みます。たどれない中身は、ファイル全体を退けるのではなく、その場で報告します。"),
         ("Fix what those nodes reported. This node has no problem of its own.", "それらのノードの報告した内容を直してください。このノード自身に問題はありません。"),
         ("Give the class a body for that method, or mark the class abstract.", "そのメソッドの本体をクラスに与えるか、クラスを abstract と印してください。"),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "こちらには別の名前を付けてください。ここに書くと、二つ目のプロジェクトのファイルが一つ目のものに混ざり、一つ目を名指ししているマニフェストのほうが置き換えられます。"),
@@ -13090,6 +13222,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "選ばれた Android API が、ここで組める範囲の外にあります。"),
         ("The ciphertext is not a whole number of blocks.", "暗号文がブロックの整数個になっていません。"),
         ("The class file version predates the format.", "クラスファイルの版が、形式より前のものです。"),
+        ("The code holds a payload the format does not define.", "命令列に、この形式が定めていない荷が入っています。"),
         ("The colour type and bit depth are not a pair the format allows.", "色種別とビット深度が、形式の許す組み合わせではありません。"),
         ("The compressed stream ends before the data it promised.", "圧縮された流れが、約束したデータより前に終わっています。"),
         ("The constant pool count is zero.", "定数プールの数が零です。"),
@@ -13392,6 +13525,7 @@ pub mod speech {
         ("Asked for", "求められたもの"),
         ("At entry", "項目位置"),
         ("At offset", "位置"),
+        ("At unit", "単位位置"),
         ("Attribute", "属性"),
         ("Available", "利用できるもの"),
         ("Bit depth", "ビット深度"),
@@ -13438,6 +13572,7 @@ pub mod speech {
         ("Expected", "期待される値"),
         ("Falls back to", "戻り先"),
         ("Field", "フィールド"),
+        ("Fields", "フィールド"),
         ("File", "ファイル"),
         ("Files", "ファイル"),
         ("Filter", "フィルター"),
@@ -13476,12 +13611,14 @@ pub mod speech {
         ("Library", "ライブラリ"),
         ("Limit", "上限"),
         ("Line", "行"),
+        ("List", "一覧"),
         ("Listed", "並び"),
         ("Literals", "リテラル"),
         ("Local header", "ローカルヘッダー"),
         ("Longest", "最長"),
         ("Major", "メジャー"),
         ("Method", "メソッド"),
+        ("Methods", "メソッド"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "最小"),
         ("Missing", "欠けているもの"),
@@ -13645,9 +13782,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "덩이가 형식이 허락하지 않는 길이를 주장합니다."),
         ("A chunk claims more bytes than the file holds.", "덩이가 파일에 든 것보다 많은 바이트를 주장합니다."),
         ("A chunk does not match its own checksum.", "덩이가 제 검사합과 맞지 않습니다."),
+        ("A class declares more members than this reader accepts.", "한 클래스가 이 판독기가 받아들이는 것보다 많은 구성원을 선언합니다."),
         ("A class has no constructor taking that many arguments.", "클래스에 그만큼의 인자를 받는 생성자가 없습니다."),
         ("A class has no field of that name that this compilation knows.", "클래스에 이 번역이 아는 그 이름의 필드가 없습니다."),
         ("A class has no method of that name and arity that this compilation knows.", "클래스에 이 번역이 아는 그 이름과 인자 수의 메서드가 없습니다."),
+        ("A class names a field that is not in the pool.", "한 클래스가 모음에 없는 필드를 이름으로 부릅니다."),
+        ("A class names a method that is not in the pool.", "한 클래스가 모음에 없는 메서드를 이름으로 부릅니다."),
         ("A class or an interface was expected, or the file declares nothing.", "클래스나 인터페이스가 있어야 할 자리이거나, 파일이 아무것도 선언하지 않습니다."),
         ("A class reference names nothing.", "클래스 참조가 아무것도 가리키지 않습니다."),
         ("A class reference points at no class.", "클래스 참조가 어떤 클래스도 가리키지 않습니다."),
@@ -13761,8 +13901,11 @@ pub mod speech {
         ("A member has no name.", "멤버에 이름이 없습니다."),
         ("A member reference has no name and type.", "멤버 참조에 이름과 형이 없습니다."),
         ("A member reference points at no member.", "멤버 참조가 어떤 멤버도 가리키지 않습니다."),
+        ("A method body could not be read, so the rest of the file is described without it.", "어떤 메서드의 본문을 읽지 못했으므로, 파일의 나머지는 그것 없이 서술됩니다."),
         ("A method body was opened and never closed.", "메서드 본문을 열어 두고 닫지 않았습니다."),
         ("A method can reach its end without returning a value.", "메서드가 값을 돌려주지 않은 채 끝에 닿을 수 있습니다."),
+        ("A method declares more code than the file holds.", "한 메서드가 파일이 담고 있는 것보다 많은 코드를 선언합니다."),
+        ("A method declares more code than this reader accepts.", "한 메서드가 이 판독기가 받아들이는 것보다 많은 코드를 선언합니다."),
         ("A method descriptor could not be read.", "메서드 기술자를 읽지 못했습니다."),
         ("A method has no body and is not marked abstract.", "메서드에 본문이 없는데 abstract 표시도 없습니다."),
         ("A method needs more registers than its instructions can name.", "메서드가 그 명령들이 가리킬 수 있는 것보다 많은 레지스터를 필요로 합니다."),
@@ -13942,6 +14085,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "var로 적은 변수가 형을 얻어 올 데가 없습니다."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity 요약은 fs-verity 머클 트리의 뿌리로, 이 빌드가 셈하는 조각 요약과는 다른 얼개입니다. 그 주장은 맞다고도 아니라고도 하지 않습니다. 무엇과도 견주지 않았기 때문입니다."),
         ("A yield is not inside a switch used for its value.", "yield가 값을 얻으려고 쓰는 switch 안에 있지 않습니다."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "윗바이트가 영이 아닌 영 연산 부호는 분기나 배열 채우개가 가리키는 세 가지 표 가운데 하나인데, 이것은 그 어느 것도 아닙니다."),
         ("A zlib header fails its own check.", "zlib 머리말이 제 살핌을 통과하지 못합니다."),
         ("A zlib stream ends before the checksum that closes it.", "zlib 흐름이 그것을 닫는 검사합보다 먼저 끝납니다."),
         ("A zlib stream is shorter than its own header and check.", "zlib 흐름이 제 머리말과 살핌보다 짧습니다."),
@@ -14013,6 +14157,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "인스턴스 멤버에 정적 메서드에서, 또는 클래스 이름을 거쳐 닿으려 했습니다."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "인스턴스가 없는 자리에서 인스턴스를 가리켰거나, 감싸는 인스턴스에 닿을 수 없습니다."),
         ("An instruction is not translated to Dalvik here.", "그 명령은 여기서 Dalvik으로 옮기지 않습니다."),
+        ("An instruction runs past the end of the code it is in.", "한 명령이 그것이 들어 있는 코드의 끝을 넘어갑니다."),
         ("An instruction says to fill in a unit it does not have.", "명령이 저에게 없는 단위를 채우라고 합니다."),
         ("An integer has no content.", "정수에 알맹이가 없습니다."),
         ("An integer is padded, so it is not in its shortest form.", "정수에 채움이 붙어 있어 가장 짧은 꼴이 아닙니다."),
@@ -14077,6 +14222,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "플랫폼이 내주는 식별자는 모두 이 빌드에 적혀 있습니다. 그 가운데 없는 이름은 어느 기기도 갖지 않은 이름입니다."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "다른 로캘은 모두 되돌아갈 로캘의 번역입니다. 말이 고른 것 가운데 하나도 아닌 기기는 그 폴더를 읽습니다. 그러니 그것을 빼면 세상 대부분의 전화에서 이름 없는 앱을 내놓게 됩니다."),
         ("Every resource is declared as <type name=\"…\">.", "자원은 모두 <type name=\"…\">으로 선언합니다."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "이 본문 바깥의 모든 것은 그대로 읽습니다. 지나갈 수 없는 본문은 파일 전체를 물리는 대신 그 자리에서 알립니다."),
         ("Fix what those nodes reported. This node has no problem of its own.", "그 마디들이 알린 것을 고치십시오. 이 마디 자체에는 문제가 없습니다."),
         ("Give the class a body for that method, or mark the class abstract.", "그 메서드의 본문을 클래스에 주거나, 클래스를 abstract로 표시하십시오."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "이쪽에는 다른 이름을 주십시오. 여기에 쓰면 둘째 프로젝트의 파일이 첫째 것 사이에 놓이고, 첫째를 가리키던 매니페스트가 갈아 치워집니다."),
@@ -14314,6 +14460,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "고른 Android API가 여기서 엮는 범위 밖에 있습니다."),
         ("The ciphertext is not a whole number of blocks.", "암호문이 온전한 덩이 수만큼이 아닙니다."),
         ("The class file version predates the format.", "클래스 파일 판이 형식보다 앞섭니다."),
+        ("The code holds a payload the format does not define.", "코드가 이 형식이 정하지 않은 짐을 지니고 있습니다."),
         ("The colour type and bit depth are not a pair the format allows.", "색 종류와 비트 깊이가 형식이 허락하는 짝이 아닙니다."),
         ("The compressed stream ends before the data it promised.", "눌린 흐름이 약속한 자료보다 먼저 끝납니다."),
         ("The constant pool count is zero.", "상수 풀 수가 0입니다."),
@@ -14616,6 +14763,7 @@ pub mod speech {
         ("Asked for", "요청한 것"),
         ("At entry", "항목 자리"),
         ("At offset", "자리"),
+        ("At unit", "단위 위치"),
         ("Attribute", "속성"),
         ("Available", "쓸 수 있는 것"),
         ("Bit depth", "비트 깊이"),
@@ -14662,6 +14810,7 @@ pub mod speech {
         ("Expected", "바라던 것"),
         ("Falls back to", "되돌아갈 곳"),
         ("Field", "필드"),
+        ("Fields", "필드"),
         ("File", "파일"),
         ("Files", "파일"),
         ("Filter", "거르개"),
@@ -14700,12 +14849,14 @@ pub mod speech {
         ("Library", "라이브러리"),
         ("Limit", "한도"),
         ("Line", "줄"),
+        ("List", "목록"),
         ("Listed", "적힌 것"),
         ("Literals", "리터럴"),
         ("Local header", "지역 머리말"),
         ("Longest", "가장 긴 것"),
         ("Major", "주 번호"),
         ("Method", "메서드"),
+        ("Methods", "메서드"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "최소"),
         ("Missing", "빠진 것"),
@@ -14869,9 +15020,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "एक खंड ऐसी लंबाई का दावा करता है जिसकी प्रारूप अनुमति नहीं देता।"),
         ("A chunk claims more bytes than the file holds.", "एक खंड फ़ाइल में मौजूद से अधिक बाइटों का दावा करता है।"),
         ("A chunk does not match its own checksum.", "एक खंड अपने ही परिकलन-योग से मेल नहीं खाता।"),
+        ("A class declares more members than this reader accepts.", "एक वर्ग इस पाठक के स्वीकार करने से अधिक सदस्य घोषित करता है।"),
         ("A class has no constructor taking that many arguments.", "वर्ग में उतने तर्क लेने वाला कोई निर्माता नहीं है।"),
         ("A class has no field of that name that this compilation knows.", "वर्ग में उस नाम का कोई क्षेत्र नहीं जिसे यह संकलन जानता हो।"),
         ("A class has no method of that name and arity that this compilation knows.", "वर्ग में उस नाम और उतने तर्कों की कोई विधि नहीं जिसे यह संकलन जानता हो।"),
+        ("A class names a field that is not in the pool.", "एक वर्ग ऐसे क्षेत्र का नाम लेता है जो संचय में नहीं है।"),
+        ("A class names a method that is not in the pool.", "एक वर्ग ऐसी विधि का नाम लेता है जो संचय में नहीं है।"),
         ("A class or an interface was expected, or the file declares nothing.", "यहाँ एक वर्ग या एक अंतरापृष्ठ अपेक्षित था, या फ़ाइल कुछ भी घोषित नहीं करती।"),
         ("A class reference names nothing.", "एक वर्ग-संदर्भ किसी का नाम नहीं लेता।"),
         ("A class reference points at no class.", "एक वर्ग-संदर्भ किसी वर्ग की ओर इशारा नहीं करता।"),
@@ -14985,8 +15139,11 @@ pub mod speech {
         ("A member has no name.", "एक सदस्य का कोई नाम नहीं है।"),
         ("A member reference has no name and type.", "एक सदस्य-संदर्भ का कोई नाम और प्रकार नहीं है।"),
         ("A member reference points at no member.", "एक सदस्य-संदर्भ किसी सदस्य की ओर इशारा नहीं करता।"),
+        ("A method body could not be read, so the rest of the file is described without it.", "एक विधि का शरीर पढ़ा नहीं जा सका, इसलिए संचिका का शेष भाग उसके बिना बताया जाता है।"),
         ("A method body was opened and never closed.", "एक विधि का शरीर खोला गया और कभी बंद नहीं हुआ।"),
         ("A method can reach its end without returning a value.", "एक विधि बिना कोई मान लौटाए अपने अंत तक पहुँच सकती है।"),
+        ("A method declares more code than the file holds.", "एक विधि संचिका में रखे से अधिक संहिता घोषित करती है।"),
+        ("A method declares more code than this reader accepts.", "एक विधि इस पाठक के स्वीकार करने से अधिक संहिता घोषित करती है।"),
         ("A method descriptor could not be read.", "एक विधि का विवरक पढ़ा नहीं जा सका।"),
         ("A method has no body and is not marked abstract.", "एक विधि का कोई शरीर नहीं है और उस पर अमूर्त का चिह्न भी नहीं।"),
         ("A method needs more registers than its instructions can name.", "एक विधि को उससे अधिक रजिस्टर चाहिए जितने उसके निर्देश नाम दे सकते हैं।"),
@@ -15166,6 +15323,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "var से लिखे चर के पास अपना प्रकार लेने को कुछ नहीं है।"),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "verity सारांश एक fs-verity मर्कल वृक्ष की जड़ है, जो इस बनावट के गिने खंडित सारांश से अलग रचना है। उस दावे की न पुष्टि होती है न खंडन; उसकी किसी से तुलना नहीं की जाती।"),
         ("A yield is not inside a switch used for its value.", "एक yield ऐसे switch के भीतर नहीं है जिसका मान लिया जाता हो।"),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "शून्य संक्रिया संकेत जिसका ऊपरी बाइट शून्य नहीं है, वह उन तीन तालिकाओं में से एक होता है जिनकी ओर कोई शाखा या सरणी भरनेवाला इशारा करता है, और यह उनमें से कोई नहीं।"),
         ("A zlib header fails its own check.", "एक zlib शीर्षक अपनी ही जाँच में विफल है।"),
         ("A zlib stream ends before the checksum that closes it.", "एक zlib धारा उस जाँच योग से पहले समाप्त हो जाती है जो उसे बंद करता है।"),
         ("A zlib stream is shorter than its own header and check.", "एक zlib धारा अपने ही शीर्षक और जाँच से छोटी है।"),
@@ -15237,6 +15395,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "किसी उदाहरण के सदस्य तक एक स्थैतिक विधि से या वर्ग के नाम से पहुँचा गया।"),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "जहाँ कोई उदाहरण नहीं वहाँ एक का नाम लिया गया, या घेरने वाले उदाहरण तक नहीं पहुँचा जा सकता।"),
         ("An instruction is not translated to Dalvik here.", "वह निर्देश यहाँ Dalvik में अनूदित नहीं होता।"),
+        ("An instruction runs past the end of the code it is in.", "एक निर्देश उस संहिता के अंत से आगे निकल जाता है जिसमें वह है।"),
         ("An instruction says to fill in a unit it does not have.", "एक निर्देश ऐसी इकाई भरने को कहता है जो उसके पास नहीं है।"),
         ("An integer has no content.", "एक पूर्णांक में कोई सामग्री नहीं है।"),
         ("An integer is padded, so it is not in its shortest form.", "एक पूर्णांक में भराव है, इसलिए वह अपने सबसे छोटे रूप में नहीं है।"),
@@ -15301,6 +15460,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "मंच जो भी पहचानकर्ता बाँटता है वह इस बनावट में लिखा है। जो नाम उनमें नहीं, वह ऐसा नाम है जो किसी उपकरण के पास नहीं है।"),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "हर दूसरा लोकेल उसी लोकेल का अनुवाद है जिस पर लौटा जाता है। जिस उपकरण की भाषा चुनी हुई भाषाओं में से कोई नहीं, वह उसी फ़ोल्डर को पढ़ता है, इसलिए उसे छोड़ देने का अर्थ होगा दुनिया के अधिकांश फ़ोनों पर बिना नाम का ऐप्लिकेशन भेजना।"),
         ("Every resource is declared as <type name=\"…\">.", "हर संसाधन <type name=\"…\"> के रूप में घोषित होता है।"),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "इस शरीर के बाहर का सब कुछ फिर भी पढ़ा जाता है। जिस शरीर पर चला नहीं जा सकता उसे पूरी संचिका ठुकराने के बजाय वहीं बताया जाता है।"),
         ("Fix what those nodes reported. This node has no problem of its own.", "उन गाँठों ने जो बताया उसे ठीक कीजिए। इस गाँठ की अपनी कोई समस्या नहीं।"),
         ("Give the class a body for that method, or mark the class abstract.", "उस विधि के लिए वर्ग को एक शरीर दीजिए, या वर्ग को अमूर्त चिह्नित कीजिए।"),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "इसे कोई दूसरा नाम दीजिए। यहाँ लिखने से दूसरी परियोजना की फ़ाइलें पहली की फ़ाइलों के बीच आ जाएँगी, और जो मैनिफ़ेस्ट पहली का नाम लेता है वही बदल जाएगा।"),
@@ -15538,6 +15698,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "चुना गया Android API उससे बाहर है जिसके लिए यह बनाता है।"),
         ("The ciphertext is not a whole number of blocks.", "गूढ़पाठ खंडों की पूरी संख्या में नहीं है।"),
         ("The class file version predates the format.", "वर्ग-फ़ाइल का संस्करण प्रारूप से पहले का है।"),
+        ("The code holds a payload the format does not define.", "संहिता ऐसा भार रखती है जिसे यह प्रारूप परिभाषित नहीं करता।"),
         ("The colour type and bit depth are not a pair the format allows.", "रंग-प्रकार और बिट-गहराई ऐसी जोड़ी नहीं जिसकी प्रारूप अनुमति देता हो।"),
         ("The compressed stream ends before the data it promised.", "संपीडित धारा उन आँकड़ों से पहले ही समाप्त हो जाती है जिनका उसने वादा किया था।"),
         ("The constant pool count is zero.", "अचर-कुंड की गिनती शून्य है।"),
@@ -15840,6 +16001,7 @@ pub mod speech {
         ("Asked for", "जो माँगा गया"),
         ("At entry", "प्रविष्टि पर"),
         ("At offset", "खिसकाव पर"),
+        ("At unit", "इकाई पर"),
         ("Attribute", "गुण"),
         ("Available", "उपलब्ध"),
         ("Bit depth", "बिट गहराई"),
@@ -15886,6 +16048,7 @@ pub mod speech {
         ("Expected", "अपेक्षित"),
         ("Falls back to", "किस पर लौटता है"),
         ("Field", "क्षेत्र"),
+        ("Fields", "क्षेत्र"),
         ("File", "फ़ाइल"),
         ("Files", "फ़ाइलें"),
         ("Filter", "छन्ना"),
@@ -15924,12 +16087,14 @@ pub mod speech {
         ("Library", "पुस्तकालय"),
         ("Limit", "सीमा"),
         ("Line", "पंक्ति"),
+        ("List", "सूची"),
         ("Listed", "सूचीबद्ध"),
         ("Literals", "शाब्दिक"),
         ("Local header", "स्थानीय शीर्षक"),
         ("Longest", "सबसे लंबा"),
         ("Major", "मुख्य"),
         ("Method", "विधि"),
+        ("Methods", "विधियाँ"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "न्यूनतम"),
         ("Missing", "अनुपस्थित"),
@@ -16093,9 +16258,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Sebuah bongkah mengaku panjang yang tidak diizinkan format."),
         ("A chunk claims more bytes than the file holds.", "Sebuah bongkah mengaku lebih banyak bita daripada yang dimuat berkas."),
         ("A chunk does not match its own checksum.", "Sebuah bongkah tidak cocok dengan sidik jumlahnya sendiri."),
+        ("A class declares more members than this reader accepts.", "Sebuah kelas menyatakan lebih banyak anggota daripada yang diterima pembaca ini."),
         ("A class has no constructor taking that many arguments.", "Sebuah kelas tidak punya konstruktor yang menerima sebanyak itu argumen."),
         ("A class has no field of that name that this compilation knows.", "Sebuah kelas tidak punya ruas bernama itu yang dikenal kompilasi ini."),
         ("A class has no method of that name and arity that this compilation knows.", "Sebuah kelas tidak punya metode bernama itu dengan jumlah argumen itu yang dikenal kompilasi ini."),
+        ("A class names a field that is not in the pool.", "Sebuah kelas menyebut bidang yang tidak ada dalam kumpulan."),
+        ("A class names a method that is not in the pool.", "Sebuah kelas menyebut metode yang tidak ada dalam kumpulan."),
         ("A class or an interface was expected, or the file declares nothing.", "Sebuah kelas atau antarmuka diharapkan di sini, atau berkas itu tidak menyatakan apa pun."),
         ("A class reference names nothing.", "Sebuah rujukan kelas tidak menamai apa pun."),
         ("A class reference points at no class.", "Sebuah rujukan kelas tidak menunjuk kelas mana pun."),
@@ -16209,8 +16377,11 @@ pub mod speech {
         ("A member has no name.", "Sebuah anggota tidak punya nama."),
         ("A member reference has no name and type.", "Sebuah rujukan anggota tidak punya nama dan jenis."),
         ("A member reference points at no member.", "Sebuah rujukan anggota tidak menunjuk anggota mana pun."),
+        ("A method body could not be read, so the rest of the file is described without it.", "Tubuh sebuah metode tidak dapat dibaca, sehingga sisa berkas diuraikan tanpa itu."),
         ("A method body was opened and never closed.", "Sebuah badan metode dibuka dan tidak pernah ditutup."),
         ("A method can reach its end without returning a value.", "Sebuah metode bisa mencapai ujungnya tanpa mengembalikan nilai."),
+        ("A method declares more code than the file holds.", "Sebuah metode menyatakan lebih banyak kode daripada yang dimuat berkas."),
+        ("A method declares more code than this reader accepts.", "Sebuah metode menyatakan lebih banyak kode daripada yang diterima pembaca ini."),
         ("A method descriptor could not be read.", "Sebuah deskriptor metode tidak bisa dibaca."),
         ("A method has no body and is not marked abstract.", "Sebuah metode tidak punya badan dan tidak ditandai abstrak."),
         ("A method needs more registers than its instructions can name.", "Sebuah metode butuh lebih banyak register daripada yang bisa disebut instruksi-instruksinya."),
@@ -16390,6 +16561,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Variabel yang ditulis dengan var tidak punya tempat untuk mengambil jenisnya."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Sidik verity adalah akar pohon Merkle fs-verity, yang merupakan bangunan berbeda dari sidik berbongkah yang dihitung bangunan ini. Klaim itu tidak dibenarkan maupun dibantah; ia tidak dibandingkan dengan apa pun."),
         ("A yield is not inside a switch used for its value.", "Sebuah yield tidak berada di dalam switch yang dipakai untuk nilainya."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Kode operasi nol dengan bita atas bukan nol adalah salah satu dari tiga tabel yang ditunjuk oleh percabangan atau pengisi larik, dan ini bukan salah satunya."),
         ("A zlib header fails its own check.", "Sebuah kepala zlib gagal pemeriksaannya sendiri."),
         ("A zlib stream ends before the checksum that closes it.", "Sebuah arus zlib berakhir sebelum jumlah periksa yang menutupnya."),
         ("A zlib stream is shorter than its own header and check.", "Sebuah arus zlib lebih pendek daripada kepala dan pemeriksaannya sendiri."),
@@ -16461,6 +16633,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Anggota instans dijangkau dari metode statis atau lewat nama kelas."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Sebuah instans disebut di tempat yang tidak punya instans, atau instans yang melingkupinya tidak terjangkau."),
         ("An instruction is not translated to Dalvik here.", "Sebuah instruksi tidak diterjemahkan ke Dalvik di sini."),
+        ("An instruction runs past the end of the code it is in.", "Sebuah instruksi melewati akhir kode tempatnya berada."),
         ("An instruction says to fill in a unit it does not have.", "Sebuah instruksi menyuruh mengisi unit yang tidak dimilikinya."),
         ("An integer has no content.", "Sebuah bilangan bulat tidak punya isi."),
         ("An integer is padded, so it is not in its shortest form.", "Sebuah bilangan bulat diberi ganjal, jadi ia tidak dalam bentuk terpendeknya."),
@@ -16525,6 +16698,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Setiap pengenal yang dibagikan platform tertulis di dalam bangunan ini. Nama yang tidak ada di antaranya adalah nama yang tidak dimiliki perangkat mana pun."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Setiap lokal lain adalah terjemahan dari lokal cadangan. Perangkat yang bahasanya bukan salah satu yang dipilih membaca map itu, jadi menghilangkannya berarti mengirim aplikasi tanpa nama ke sebagian besar ponsel di dunia."),
         ("Every resource is declared as <type name=\"…\">.", "Setiap sumber daya dinyatakan sebagai <type name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Segala sesuatu di luar tubuh ini tetap dibaca. Tubuh yang tidak dapat dilalui dilaporkan di tempatnya alih-alih menolak seluruh berkas."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Betulkan apa yang dilaporkan simpul-simpul itu. Simpul ini sendiri tidak bermasalah."),
         ("Give the class a body for that method, or mark the class abstract.", "Beri kelas itu badan untuk metode tersebut, atau tandai kelasnya abstrak."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Beri yang ini nama lain. Menulis di sini akan menaruh berkas proyek kedua di antara berkas proyek pertama, dan manifes yang menyebut yang pertama itulah yang tergantikan."),
@@ -16762,6 +16936,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "API Android yang dipilih di luar yang dibangun di sini."),
         ("The ciphertext is not a whole number of blocks.", "Teks sandi bukan kelipatan utuh bongkah."),
         ("The class file version predates the format.", "Versi berkas kelas lebih tua daripada formatnya."),
+        ("The code holds a payload the format does not define.", "Kode membawa muatan yang tidak didefinisikan oleh format ini."),
         ("The colour type and bit depth are not a pair the format allows.", "Jenis warna dan kedalaman bit bukan pasangan yang diizinkan format."),
         ("The compressed stream ends before the data it promised.", "Arus termampat berakhir sebelum data yang dijanjikannya."),
         ("The constant pool count is zero.", "Cacah kolam tetapan adalah nol."),
@@ -17064,6 +17239,7 @@ pub mod speech {
         ("Asked for", "Yang diminta"),
         ("At entry", "Pada entri"),
         ("At offset", "Pada offset"),
+        ("At unit", "Pada unit"),
         ("Attribute", "Atribut"),
         ("Available", "Tersedia"),
         ("Bit depth", "Kedalaman bit"),
@@ -17110,6 +17286,7 @@ pub mod speech {
         ("Expected", "Yang diharapkan"),
         ("Falls back to", "Berbalik ke"),
         ("Field", "Ruas"),
+        ("Fields", "Bidang"),
         ("File", "Berkas"),
         ("Files", "Berkas"),
         ("Filter", "Saringan"),
@@ -17148,12 +17325,14 @@ pub mod speech {
         ("Library", "Pustaka"),
         ("Limit", "Batas"),
         ("Line", "Baris"),
+        ("List", "Daftar"),
         ("Listed", "Yang terdaftar"),
         ("Literals", "Literal"),
         ("Local header", "Kepala lokal"),
         ("Longest", "Terpanjang"),
         ("Major", "Mayor"),
         ("Method", "Metode"),
+        ("Methods", "Metode"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Terkecil"),
         ("Missing", "Yang hilang"),
@@ -17317,9 +17496,12 @@ pub mod speech {
         ("A chunk claims a length the format does not allow.", "Um bloco alega um comprimento que o formato não permite."),
         ("A chunk claims more bytes than the file holds.", "Um bloco alega mais bytes do que o arquivo guarda."),
         ("A chunk does not match its own checksum.", "Um bloco não bate com a própria soma de verificação."),
+        ("A class declares more members than this reader accepts.", "Uma classe declara mais membros do que este leitor aceita."),
         ("A class has no constructor taking that many arguments.", "Uma classe não tem construtor que receba essa quantidade de argumentos."),
         ("A class has no field of that name that this compilation knows.", "Uma classe não tem campo com esse nome que esta compilação conheça."),
         ("A class has no method of that name and arity that this compilation knows.", "Uma classe não tem método com esse nome e aridade que esta compilação conheça."),
+        ("A class names a field that is not in the pool.", "Uma classe nomeia um campo que não está no conjunto de referências."),
+        ("A class names a method that is not in the pool.", "Uma classe nomeia um método que não está no conjunto de referências."),
         ("A class or an interface was expected, or the file declares nothing.", "Esperava-se uma classe ou uma interface, ou o arquivo não declara nada."),
         ("A class reference names nothing.", "Uma referência de classe não nomeia nada."),
         ("A class reference points at no class.", "Uma referência de classe não aponta para classe nenhuma."),
@@ -17433,8 +17615,11 @@ pub mod speech {
         ("A member has no name.", "Um membro não tem nome."),
         ("A member reference has no name and type.", "Uma referência de membro não tem nome nem tipo."),
         ("A member reference points at no member.", "Uma referência de membro não aponta para membro nenhum."),
+        ("A method body could not be read, so the rest of the file is described without it.", "O corpo de um método não pôde ser lido, então o resto do arquivo é descrito sem ele."),
         ("A method body was opened and never closed.", "O corpo de um método foi aberto e nunca fechado."),
         ("A method can reach its end without returning a value.", "Um método pode chegar ao fim sem devolver um valor."),
+        ("A method declares more code than the file holds.", "Um método declara mais código do que o arquivo contém."),
+        ("A method declares more code than this reader accepts.", "Um método declara mais código do que este leitor aceita."),
         ("A method descriptor could not be read.", "Não deu para ler o descritor de um método."),
         ("A method has no body and is not marked abstract.", "Um método não tem corpo e não está marcado como abstrato."),
         ("A method needs more registers than its instructions can name.", "Um método precisa de mais registradores do que suas instruções conseguem nomear."),
@@ -17614,6 +17799,7 @@ pub mod speech {
         ("A variable written with var has nothing to take its type from.", "Uma variável escrita com var não tem de onde tirar o tipo."),
         ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Um resumo verity é a raiz de uma árvore de Merkle do fs-verity, que é uma construção diferente do resumo em blocos que esta compilação calcula. A alegação não é confirmada nem contestada; ela não é comparada com nada."),
         ("A yield is not inside a switch used for its value.", "Um yield não está dentro de um switch usado pelo seu valor."),
+        ("A zero opcode with a non-zero upper byte is one of the three tables a switch or an array filler points at, and this is none of them.", "Um código de operação zero com o byte alto diferente de zero é uma das três tabelas para as quais aponta uma ramificação ou um preenchedor de vetores, e esta não é nenhuma delas."),
         ("A zlib header fails its own check.", "Um cabeçalho zlib falha na própria conferência."),
         ("A zlib stream ends before the checksum that closes it.", "Um fluxo zlib termina antes da soma de verificação que o fecha."),
         ("A zlib stream is shorter than its own header and check.", "Um fluxo zlib é mais curto que o próprio cabeçalho e a conferência."),
@@ -17685,6 +17871,7 @@ pub mod speech {
         ("An instance member was reached from a static method or through the class name.", "Chegou-se a um membro de instância a partir de um método estático ou pelo nome da classe."),
         ("An instance was named where there is none, or an enclosing one cannot be reached.", "Nomeou-se uma instância onde não há nenhuma, ou não dá para alcançar a que envolve."),
         ("An instruction is not translated to Dalvik here.", "Uma instrução não é traduzida para Dalvik aqui."),
+        ("An instruction runs past the end of the code it is in.", "Uma instrução passa do fim do código em que está."),
         ("An instruction says to fill in a unit it does not have.", "Uma instrução manda preencher uma unidade que ela não tem."),
         ("An integer has no content.", "Um inteiro não tem conteúdo."),
         ("An integer is padded, so it is not in its shortest form.", "Um inteiro está preenchido, então não está na forma mais curta."),
@@ -17749,6 +17936,7 @@ pub mod speech {
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Todo identificador que a plataforma distribui está escrito nesta compilação. Um nome que não esteja entre eles é um que aparelho nenhum tem."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toda outra localidade é uma tradução da de recuo. Um aparelho cujo idioma não seja nenhum dos escolhidos lê aquela pasta, então deixá-la de fora seria publicar um aplicativo sem nome na maioria dos celulares do mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Todo recurso é declarado como <type name=\"…\">."),
+        ("Everything outside this body is still read. A body that cannot be walked is reported where it is rather than refusing the whole file.", "Tudo o que está fora deste corpo continua sendo lido. Um corpo que não se pode percorrer é relatado onde está em vez de recusar o arquivo inteiro."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Conserte o que aqueles nós relataram. Este nó não tem problema próprio."),
         ("Give the class a body for that method, or mark the class abstract.", "Dê à classe um corpo para esse método, ou marque a classe como abstrata."),
         ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dê outro nome a este. Escrever aqui poria os arquivos de um segundo projeto entre os do primeiro, e o manifesto que nomeia o primeiro seria o substituído."),
@@ -17986,6 +18174,7 @@ pub mod speech {
         ("The chosen Android API is outside what this builds for.", "A API Android escolhida está fora do que isto compila."),
         ("The ciphertext is not a whole number of blocks.", "O texto cifrado não é um número inteiro de blocos."),
         ("The class file version predates the format.", "A versão do arquivo de classe é anterior ao formato."),
+        ("The code holds a payload the format does not define.", "O código carrega uma carga que o formato não define."),
         ("The colour type and bit depth are not a pair the format allows.", "O tipo de cor e a profundidade de bits não são um par que o formato permita."),
         ("The compressed stream ends before the data it promised.", "O fluxo comprimido termina antes dos dados que prometeu."),
         ("The constant pool count is zero.", "A contagem do reservatório de constantes é zero."),
@@ -18288,6 +18477,7 @@ pub mod speech {
         ("Asked for", "Pedido"),
         ("At entry", "Na entrada"),
         ("At offset", "No deslocamento"),
+        ("At unit", "Na unidade"),
         ("Attribute", "Atributo"),
         ("Available", "Disponível"),
         ("Bit depth", "Profundidade de bits"),
@@ -18334,6 +18524,7 @@ pub mod speech {
         ("Expected", "Esperado"),
         ("Falls back to", "Recai em"),
         ("Field", "Campo"),
+        ("Fields", "Campos"),
         ("File", "Arquivo"),
         ("Files", "Arquivos"),
         ("Filter", "Filtro"),
@@ -18372,12 +18563,14 @@ pub mod speech {
         ("Library", "Biblioteca"),
         ("Limit", "Limite"),
         ("Line", "Linha"),
+        ("List", "Lista"),
         ("Listed", "Listado"),
         ("Literals", "Literais"),
         ("Local header", "Cabeçalho local"),
         ("Longest", "Mais longo"),
         ("Major", "Maior"),
         ("Method", "Método"),
+        ("Methods", "Métodos"),
         ("Min_sdk", "Min_sdk"),
         ("Minimum", "Mínimo"),
         ("Missing", "Faltando"),
@@ -25927,6 +26120,36 @@ pub mod binary {
                                 "The same number has a shorter encoding. Two \
                                  spellings of one value make a format ambiguous.",
                             ));
+                    }
+                    return Ok(value);
+                }
+            }
+
+            Err(fail("E7007", "A LEB128 value has no end.")
+                .with_context(format!("Source: {}", self.origin))
+                .with_context(format!("At offset: {}", self.position))
+                .with_suggestion("Every byte had its continuation bit set."))
+        }
+
+        pub fn sleb128(&mut self) -> Result<i64, Diagnostic> {
+            let mut value: i64 = 0;
+            let mut shift = 0u32;
+
+            for _ in 0..10 {
+                let byte = self.u8()?;
+
+                if shift >= 64 {
+                    return Err(fail("E7005", "A LEB128 value does not fit in 64 bits.")
+                        .with_context(format!("Source: {}", self.origin))
+                        .with_context(format!("At offset: {}", self.position)));
+                }
+
+                value |= i64::from(byte & 0x7f) << shift;
+                shift += 7;
+
+                if byte & 0x80 == 0 {
+                    if shift < 64 && byte & 0x40 != 0 {
+                        value |= -1i64 << shift;
                     }
                     return Ok(value);
                 }
@@ -33511,6 +33734,8 @@ pub mod dex {
 
     pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
+    pub const NO_INDEX: u32 = 0xffff_ffff;
+
     const MAX_POOL_ENTRIES: u32 = 16 * 1024 * 1024;
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -33587,6 +33812,26 @@ pub mod dex {
         pub superclass: Option<String>,
         pub interfaces: Vec<String>,
         pub source_file: Option<String>,
+        pub static_fields: Vec<Member>,
+        pub instance_fields: Vec<Member>,
+        pub direct_methods: Vec<Body>,
+        pub virtual_methods: Vec<Body>,
+    }
+
+    impl Class {
+        pub fn methods(&self) -> impl Iterator<Item = &Body> {
+            self.direct_methods
+                .iter()
+                .chain(self.virtual_methods.iter())
+        }
+
+        pub fn method(&self, name: &str) -> Option<&Body> {
+            self.methods().find(|held| held.name == name)
+        }
+
+        pub fn fields(&self) -> impl Iterator<Item = &Member> {
+            self.static_fields.iter().chain(self.instance_fields.iter())
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -33594,6 +33839,20 @@ pub mod dex {
         pub class: String,
         pub name: String,
         pub shorty: String,
+        pub return_type: String,
+        pub parameters: Vec<String>,
+    }
+
+    impl Method {
+        pub fn signature(&self) -> String {
+            format!(
+                "{}.{}({}) {}",
+                self.class,
+                self.name,
+                self.parameters.join(", "),
+                self.return_type
+            )
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -33609,6 +33868,7 @@ pub mod dex {
         pub map: Vec<MapEntry>,
         pub strings: Vec<String>,
         pub types: Vec<String>,
+        pub protos: Vec<Proto>,
         pub classes: Vec<Class>,
         pub methods: Vec<Method>,
         pub fields: Vec<Field>,
@@ -33626,6 +33886,31 @@ pub mod dex {
             self.classes.iter().any(|class| class.name == name)
         }
 
+        pub fn class(&self, name: &str) -> Option<&Class> {
+            self.classes.iter().find(|class| class.name == name)
+        }
+
+        pub fn body(&self, class: &str, method: &str) -> Option<&Body> {
+            self.class(class).and_then(|held| held.method(method))
+        }
+
+        pub fn bodies_read(&self) -> usize {
+            self.classes
+                .iter()
+                .flat_map(|class| class.methods())
+                .filter(|held| held.code.is_some())
+                .count()
+        }
+
+        pub fn instructions(&self) -> usize {
+            self.classes
+                .iter()
+                .flat_map(|class| class.methods())
+                .filter_map(|held| held.code.as_ref())
+                .map(|code| code.instructions.len())
+                .sum()
+        }
+
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("version", &self.header.version);
@@ -33635,6 +33920,8 @@ pub mod dex {
             w.field_u64("classes", self.classes.len() as u64);
             w.field_u64("methods", self.methods.len() as u64);
             w.field_u64("fields", self.fields.len() as u64);
+            w.field_u64("bodiesRead", self.bodies_read() as u64);
+            w.field_u64("instructions", self.instructions() as u64);
             w.begin_array(Some("map"));
             for entry in &self.map {
                 w.begin_object(None);
@@ -33853,8 +34140,7 @@ pub mod dex {
         let map = read_map(data, map_off)?;
         let strings = read_strings(data, string_ids_off, string_ids_size)?;
         let types = read_types(data, type_ids_off, type_ids_size, &strings)?;
-        let (protos, proto_shorties) =
-            read_protos(data, proto_ids_off, proto_ids_size, &strings, &types)?;
+        let protos = read_protos(data, proto_ids_off, proto_ids_size, &strings, &types)?;
         let fields = read_fields(data, field_ids_off, field_ids_size, &strings, &types)?;
         let methods = read_methods(
             data,
@@ -33862,11 +34148,22 @@ pub mod dex {
             method_ids_size,
             &strings,
             &types,
-            &proto_shorties,
+            &protos,
         )?;
-        let classes = read_classes(data, class_defs_off, class_defs_size, &strings, &types)?;
-
-        let _ = protos;
+        let classes = read_classes(
+            data,
+            class_defs_off,
+            class_defs_size,
+            &strings,
+            &Pools {
+                strings: &strings,
+                types: &types,
+                protos: &protos,
+                fields: &fields,
+                methods: &methods,
+            },
+            sink,
+        )?;
 
         match integrity(data) {
             Ok(result) => {
@@ -33912,11 +34209,1565 @@ pub mod dex {
             map,
             strings,
             types,
+            protos,
             classes,
             methods,
             fields,
         })
     }
+
+    pub const MOST_SHOWN: usize = 48;
+
+    pub const MAX_CODE_UNITS: u32 = 1 << 22;
+
+    pub const MAX_MEMBERS: u64 = 1 << 20;
+
+    pub const PACKED_SWITCH_PAYLOAD: u16 = 0x0100;
+
+    pub const SPARSE_SWITCH_PAYLOAD: u16 = 0x0200;
+
+    pub const ARRAY_DATA_PAYLOAD: u16 = 0x0300;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Shape {
+        pub name: &'static str,
+        pub format: &'static str,
+    }
+
+    pub const fn shape_of(opcode: u8) -> Shape {
+        OPCODES[opcode as usize]
+    }
+
+    pub const fn units_of(format: &str) -> usize {
+        (format.as_bytes()[0] - b'0') as usize
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Points {
+        Nowhere,
+        Strings,
+        Types,
+        Fields,
+        Methods,
+        Prototypes,
+    }
+
+    pub const fn points_at(opcode: u8) -> Points {
+        match opcode {
+            0x1a | 0x1b => Points::Strings,
+            0x1c | 0x1f | 0x20 | 0x22 | 0x23 | 0x24 | 0x25 => Points::Types,
+            0x52..=0x6d => Points::Fields,
+            0x6e..=0x72 | 0x74..=0x78 | 0xfa | 0xfb => Points::Methods,
+            0xff => Points::Prototypes,
+            _ => Points::Nowhere,
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Instruction {
+        pub address: u32,
+        pub opcode: u8,
+        pub name: &'static str,
+        pub format: &'static str,
+        pub units: Vec<u16>,
+        pub about: Option<String>,
+    }
+
+    impl Instruction {
+        pub fn is_invoke(&self) -> bool {
+            matches!(self.opcode, 0x6e..=0x72 | 0x74..=0x78 | 0xfa | 0xfb)
+        }
+
+        pub fn is_return(&self) -> bool {
+            matches!(self.opcode, 0x0e..=0x11)
+        }
+
+        pub fn to_text(&self) -> String {
+            let mut out = format!("{:04x}: {}", self.address, self.name);
+            if let Some(about) = &self.about {
+                out.push(' ');
+                out.push_str(about);
+            }
+            out
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Catch {
+        pub kind: Option<String>,
+        pub address: u32,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct TryRange {
+        pub start: u32,
+        pub units: u16,
+        pub catches: Vec<Catch>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Default)]
+    pub struct Code {
+        pub registers: u16,
+        pub inputs: u16,
+        pub outputs: u16,
+        pub debug_info_off: u32,
+        pub units: u32,
+        pub instructions: Vec<Instruction>,
+        pub tries: Vec<TryRange>,
+    }
+
+    impl Code {
+        pub fn calls(&self) -> Vec<&str> {
+            self.instructions
+                .iter()
+                .filter(|one| one.is_invoke())
+                .filter_map(|one| one.about.as_deref())
+                .collect()
+        }
+
+        pub fn to_text(&self) -> String {
+            let mut out = String::new();
+            for one in &self.instructions {
+                out.push_str(&one.to_text());
+                out.push('\n');
+            }
+            out
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Body {
+        pub name: String,
+        pub shorty: String,
+        pub return_type: String,
+        pub parameters: Vec<String>,
+        pub access_flags: u32,
+        pub code: Option<Code>,
+    }
+
+    impl Body {
+        pub fn signature(&self) -> String {
+            format!(
+                "{}({}) {}",
+                self.name,
+                self.parameters.join(", "),
+                self.return_type
+            )
+        }
+
+        pub fn is_abstract_or_native(&self) -> bool {
+            self.access_flags & (ACC_ABSTRACT | ACC_NATIVE) != 0
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Members {
+        pub static_fields: Vec<Member>,
+        pub instance_fields: Vec<Member>,
+        pub direct_methods: Vec<Body>,
+        pub virtual_methods: Vec<Body>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Member {
+        pub name: String,
+        pub type_name: String,
+        pub access_flags: u32,
+    }
+
+    pub const ACC_STATIC: u32 = 0x0008;
+
+    pub const ACC_NATIVE: u32 = 0x0100;
+
+    pub const ACC_ABSTRACT: u32 = 0x0400;
+
+    #[derive(Clone, Debug)]
+    pub struct Proto {
+        pub shorty: String,
+        pub return_type: String,
+        pub parameters: Vec<String>,
+    }
+
+    impl Proto {
+        pub fn to_text(&self) -> String {
+            format!("({}) {}", self.parameters.join(", "), self.return_type)
+        }
+    }
+
+    struct Pools<'a> {
+        strings: &'a [String],
+        types: &'a [String],
+        protos: &'a [Proto],
+        fields: &'a [Field],
+        methods: &'a [Method],
+    }
+
+    fn shown(text: &str) -> String {
+        let mut out: String = text.chars().take(MOST_SHOWN).collect();
+        if out.chars().count() < text.chars().count() {
+            out.push('~');
+        }
+        out
+    }
+
+    impl Pools<'_> {
+        fn about(&self, opcode: u8, index: u32) -> Option<String> {
+            let at = index as usize;
+            match points_at(opcode) {
+                Points::Nowhere => None,
+                Points::Strings => self.strings.get(at).map(|held| shown(held)),
+                Points::Types => self.types.get(at).cloned(),
+                Points::Fields => self
+                    .fields
+                    .get(at)
+                    .map(|held| format!("{}.{} {}", held.class, held.name, held.type_name)),
+                Points::Methods => self.methods.get(at).map(|held| held.signature()),
+                Points::Prototypes => self.protos.get(at).map(|held| held.to_text()),
+            }
+        }
+    }
+
+    fn index_of(format: &str, units: &[u16]) -> Option<u32> {
+        if units.len() < 2 {
+            return None;
+        }
+        if format == "31c" {
+            if units.len() < 3 {
+                return None;
+            }
+            return Some(u32::from(units[1]) | (u32::from(units[2]) << 16));
+        }
+        Some(u32::from(units[1]))
+    }
+
+    fn payload_width(units: &[u16], at: usize) -> Result<(usize, &'static str), Diagnostic> {
+        let unit = units[at];
+        let header = match unit {
+            PACKED_SWITCH_PAYLOAD | SPARSE_SWITCH_PAYLOAD => 2usize,
+            ARRAY_DATA_PAYLOAD => 4,
+            _ => 1,
+        };
+        if at + header > units.len() {
+            return Err(fail(
+                "EX032",
+                "An instruction runs past the end of the code it is in.",
+            )
+            .with_context(format!("At unit: {at}"))
+            .with_context(format!("Units: {}", units.len())));
+        }
+        match unit {
+            PACKED_SWITCH_PAYLOAD => {
+                Ok((usize::from(units[at + 1]) * 2 + 4, "packed-switch-payload"))
+            }
+            SPARSE_SWITCH_PAYLOAD => {
+                Ok((usize::from(units[at + 1]) * 4 + 2, "sparse-switch-payload"))
+            }
+            ARRAY_DATA_PAYLOAD => {
+                let element = u64::from(units[at + 1]);
+                let count = u64::from(units[at + 2]) | (u64::from(units[at + 3]) << 16);
+                let bytes = element.saturating_mul(count);
+                Ok(((bytes.div_ceil(2) + 4) as usize, "array-data-payload"))
+            }
+            other => Err(fail(
+                "EX033",
+                "The code holds a payload the format does not define.",
+            )
+            .with_context(format!("Found: 0x{other:04x}"))
+            .with_context(format!("At unit: {at}"))
+            .with_suggestion(
+                "A zero opcode with a non-zero upper byte is one of the three \
+                     tables a switch or an array filler points at, and this is none \
+                     of them.",
+            )),
+        }
+    }
+
+    fn decode(units: &[u16], pools: &Pools<'_>) -> Result<Vec<Instruction>, Diagnostic> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < units.len() {
+            let unit = units[at];
+            let opcode = (unit & 0xff) as u8;
+            let shape = shape_of(opcode);
+            let (width, name) = if opcode == 0 && unit != 0 {
+                payload_width(units, at)?
+            } else {
+                (units_of(shape.format), shape.name)
+            };
+            if width == 0 || at + width > units.len() {
+                return Err(fail(
+                    "EX032",
+                    "An instruction runs past the end of the code it is in.",
+                )
+                .with_context(format!("Instruction: {name}"))
+                .with_context(format!("At unit: {at}"))
+                .with_context(format!("Units: {}", units.len())));
+            }
+            let held = units[at..at + width].to_vec();
+            let about = if opcode == 0 && unit != 0 {
+                None
+            } else {
+                index_of(shape.format, &held).and_then(|index| pools.about(opcode, index))
+            };
+            out.push(Instruction {
+                address: at as u32,
+                opcode,
+                name,
+                format: shape.format,
+                units: held,
+                about,
+            });
+            at += width;
+        }
+        Ok(out)
+    }
+
+    fn read_code(
+        data: &[u8],
+        offset: u32,
+        pools: &Pools<'_>,
+        what: &str,
+    ) -> Result<Code, Diagnostic> {
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+
+        let registers = reader.u16()?;
+        let inputs = reader.u16()?;
+        let outputs = reader.u16()?;
+        let tries_size = reader.u16()?;
+        let debug_info_off = reader.u32()?;
+        let insns_size = reader.u32()?;
+
+        if insns_size > MAX_CODE_UNITS {
+            return Err(fail(
+                "EX034",
+                "A method declares more code than this reader accepts.",
+            )
+            .with_context(format!("Method: {what}"))
+            .with_context(format!("Declared: {insns_size} units"))
+            .with_context(format!("Limit: {MAX_CODE_UNITS} units")));
+        }
+        if u64::from(insns_size) * 2 > reader.remaining() as u64 {
+            return Err(
+                fail("EX034", "A method declares more code than the file holds.")
+                    .with_context(format!("Method: {what}"))
+                    .with_context(format!("Declared: {insns_size} units"))
+                    .with_context(format!("Bytes left: {}", reader.remaining())),
+            );
+        }
+
+        let mut units = Vec::with_capacity(insns_size as usize);
+        for _ in 0..insns_size {
+            units.push(reader.u16()?);
+        }
+
+        let instructions = decode(&units, pools)?;
+
+        let mut tries = Vec::new();
+        if tries_size > 0 {
+            if insns_size % 2 == 1 {
+                let _padding = reader.u16()?;
+            }
+            let mut ranges = Vec::with_capacity(usize::from(tries_size));
+            for _ in 0..tries_size {
+                let start = reader.u32()?;
+                let count = reader.u16()?;
+                let handler_off = reader.u16()?;
+                ranges.push((start, count, handler_off));
+            }
+
+            let handlers_at = reader.position() as u64;
+            for (start, count, handler_off) in ranges {
+                let mut handler = Reader::new(data, Endian::Little, "classes.dex");
+                handler.seek(handlers_at + u64::from(handler_off))?;
+                let size = handler.sleb128()?;
+                let named = size.unsigned_abs().min(MAX_MEMBERS);
+                let mut catches = Vec::new();
+                for _ in 0..named {
+                    let kind = handler.uleb128()?;
+                    let address = handler.uleb128()?;
+                    catches.push(Catch {
+                        kind: Some(type_at(
+                            pools.types,
+                            kind.min(u64::from(u32::MAX)) as u32,
+                            "catch",
+                        )?),
+                        address: address.min(u64::from(u32::MAX)) as u32,
+                    });
+                }
+                if size <= 0 {
+                    let address = handler.uleb128()?;
+                    catches.push(Catch {
+                        kind: None,
+                        address: address.min(u64::from(u32::MAX)) as u32,
+                    });
+                }
+                tries.push(TryRange {
+                    start,
+                    units: count,
+                    catches,
+                });
+            }
+        }
+
+        Ok(Code {
+            registers,
+            inputs,
+            outputs,
+            debug_info_off,
+            units: insns_size,
+            instructions,
+            tries,
+        })
+    }
+
+    fn members_of(
+        data: &[u8],
+        offset: u32,
+        pools: &Pools<'_>,
+        class: &str,
+        sink: &mut Sink,
+    ) -> Result<Members, Diagnostic> {
+        if offset == 0 {
+            return Ok(Members::default());
+        }
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+
+        let mut counts = [0u64; 4];
+        for (which, slot) in counts.iter_mut().enumerate() {
+            let count = reader.uleb128()?;
+            if count > MAX_MEMBERS {
+                return Err(fail(
+                    "EX035",
+                    "A class declares more members than this reader accepts.",
+                )
+                .with_context(format!("Class: {class}"))
+                .with_context(format!("List: {which}"))
+                .with_context(format!("Declared: {count}"))
+                .with_context(format!("Limit: {MAX_MEMBERS}")));
+            }
+            *slot = count;
+        }
+
+        let fields = |reader: &mut Reader<'_>, count: u64| -> Result<Vec<Member>, Diagnostic> {
+            let mut out = Vec::with_capacity(count as usize);
+            let mut index = 0u64;
+            for _ in 0..count {
+                index += reader.uleb128()?;
+                let access_flags = reader.uleb128()? as u32;
+                let held = pools.fields.get(index as usize).ok_or_else(|| {
+                    fail("EX036", "A class names a field that is not in the pool.")
+                        .with_context(format!("Class: {class}"))
+                        .with_context(format!("Index: {index}"))
+                        .with_context(format!("Fields: {}", pools.fields.len()))
+                })?;
+                out.push(Member {
+                    name: held.name.clone(),
+                    type_name: held.type_name.clone(),
+                    access_flags,
+                });
+            }
+            Ok(out)
+        };
+
+        let static_fields = fields(&mut reader, counts[0])?;
+        let instance_fields = fields(&mut reader, counts[1])?;
+
+        let mut methods = |reader: &mut Reader<'_>, count: u64| -> Result<Vec<Body>, Diagnostic> {
+            let mut out = Vec::with_capacity(count as usize);
+            let mut index = 0u64;
+            for _ in 0..count {
+                index += reader.uleb128()?;
+                let access_flags = reader.uleb128()? as u32;
+                let code_off = reader.uleb128()?;
+                let held = pools.methods.get(index as usize).ok_or_else(|| {
+                    fail("EX037", "A class names a method that is not in the pool.")
+                        .with_context(format!("Class: {class}"))
+                        .with_context(format!("Index: {index}"))
+                        .with_context(format!("Methods: {}", pools.methods.len()))
+                })?;
+                let named = format!("{}.{}", class, held.name);
+                let code = if code_off == 0 {
+                    None
+                } else {
+                    match read_code(
+                        data,
+                        code_off.min(u64::from(u32::MAX)) as u32,
+                        pools,
+                        &named,
+                    ) {
+                        Ok(code) => Some(code),
+                        Err(why) => {
+                            sink.emit(
+                                Diagnostic::new(
+                                    "EX038",
+                                    Severity::Warning,
+                                    FailureClass::Corruption,
+                                    "core.dex",
+                                    "A method body could not be read, so the rest of the file is described without it.",
+                                )
+                                .with_context(format!("Method: {named}"))
+                                .with_context(format!("Reason: {}", why.message))
+                                .with_suggestion(
+                                    "Everything outside this body is still read. A \
+                                     body that cannot be walked is reported where it \
+                                     is rather than refusing the whole file.",
+                                ),
+                            );
+                            None
+                        }
+                    }
+                };
+                out.push(Body {
+                    name: held.name.clone(),
+                    shorty: held.shorty.clone(),
+                    return_type: held.return_type.clone(),
+                    parameters: held.parameters.clone(),
+                    access_flags,
+                    code,
+                });
+            }
+            Ok(out)
+        };
+
+        let direct_methods = methods(&mut reader, counts[2])?;
+        let virtual_methods = methods(&mut reader, counts[3])?;
+
+        Ok(Members {
+            static_fields,
+            instance_fields,
+            direct_methods,
+            virtual_methods,
+        })
+    }
+
+    pub const OPCODES: [Shape; 256] = [
+        Shape {
+            name: "nop",
+            format: "10x",
+        },
+        Shape {
+            name: "move",
+            format: "12x",
+        },
+        Shape {
+            name: "move/from16",
+            format: "22x",
+        },
+        Shape {
+            name: "move/16",
+            format: "32x",
+        },
+        Shape {
+            name: "move-wide",
+            format: "12x",
+        },
+        Shape {
+            name: "move-wide/from16",
+            format: "22x",
+        },
+        Shape {
+            name: "move-wide/16",
+            format: "32x",
+        },
+        Shape {
+            name: "move-object",
+            format: "12x",
+        },
+        Shape {
+            name: "move-object/from16",
+            format: "22x",
+        },
+        Shape {
+            name: "move-object/16",
+            format: "32x",
+        },
+        Shape {
+            name: "move-result",
+            format: "11x",
+        },
+        Shape {
+            name: "move-result-wide",
+            format: "11x",
+        },
+        Shape {
+            name: "move-result-object",
+            format: "11x",
+        },
+        Shape {
+            name: "move-exception",
+            format: "11x",
+        },
+        Shape {
+            name: "return-void",
+            format: "10x",
+        },
+        Shape {
+            name: "return",
+            format: "11x",
+        },
+        Shape {
+            name: "return-wide",
+            format: "11x",
+        },
+        Shape {
+            name: "return-object",
+            format: "11x",
+        },
+        Shape {
+            name: "const/4",
+            format: "11n",
+        },
+        Shape {
+            name: "const/16",
+            format: "21s",
+        },
+        Shape {
+            name: "const",
+            format: "31i",
+        },
+        Shape {
+            name: "const/high16",
+            format: "21h",
+        },
+        Shape {
+            name: "const-wide/16",
+            format: "21s",
+        },
+        Shape {
+            name: "const-wide/32",
+            format: "31i",
+        },
+        Shape {
+            name: "const-wide",
+            format: "51l",
+        },
+        Shape {
+            name: "const-wide/high16",
+            format: "21h",
+        },
+        Shape {
+            name: "const-string",
+            format: "21c",
+        },
+        Shape {
+            name: "const-string/jumbo",
+            format: "31c",
+        },
+        Shape {
+            name: "const-class",
+            format: "21c",
+        },
+        Shape {
+            name: "monitor-enter",
+            format: "11x",
+        },
+        Shape {
+            name: "monitor-exit",
+            format: "11x",
+        },
+        Shape {
+            name: "check-cast",
+            format: "21c",
+        },
+        Shape {
+            name: "instance-of",
+            format: "22c",
+        },
+        Shape {
+            name: "array-length",
+            format: "12x",
+        },
+        Shape {
+            name: "new-instance",
+            format: "21c",
+        },
+        Shape {
+            name: "new-array",
+            format: "22c",
+        },
+        Shape {
+            name: "filled-new-array",
+            format: "35c",
+        },
+        Shape {
+            name: "filled-new-array/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "fill-array-data",
+            format: "31t",
+        },
+        Shape {
+            name: "throw",
+            format: "11x",
+        },
+        Shape {
+            name: "goto",
+            format: "10t",
+        },
+        Shape {
+            name: "goto/16",
+            format: "20t",
+        },
+        Shape {
+            name: "goto/32",
+            format: "30t",
+        },
+        Shape {
+            name: "packed-switch",
+            format: "31t",
+        },
+        Shape {
+            name: "sparse-switch",
+            format: "31t",
+        },
+        Shape {
+            name: "cmpl-float",
+            format: "23x",
+        },
+        Shape {
+            name: "cmpg-float",
+            format: "23x",
+        },
+        Shape {
+            name: "cmpl-double",
+            format: "23x",
+        },
+        Shape {
+            name: "cmpg-double",
+            format: "23x",
+        },
+        Shape {
+            name: "cmp-long",
+            format: "23x",
+        },
+        Shape {
+            name: "if-eq",
+            format: "22t",
+        },
+        Shape {
+            name: "if-ne",
+            format: "22t",
+        },
+        Shape {
+            name: "if-lt",
+            format: "22t",
+        },
+        Shape {
+            name: "if-ge",
+            format: "22t",
+        },
+        Shape {
+            name: "if-gt",
+            format: "22t",
+        },
+        Shape {
+            name: "if-le",
+            format: "22t",
+        },
+        Shape {
+            name: "if-eqz",
+            format: "21t",
+        },
+        Shape {
+            name: "if-nez",
+            format: "21t",
+        },
+        Shape {
+            name: "if-ltz",
+            format: "21t",
+        },
+        Shape {
+            name: "if-gez",
+            format: "21t",
+        },
+        Shape {
+            name: "if-gtz",
+            format: "21t",
+        },
+        Shape {
+            name: "if-lez",
+            format: "21t",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "aget",
+            format: "23x",
+        },
+        Shape {
+            name: "aget-wide",
+            format: "23x",
+        },
+        Shape {
+            name: "aget-object",
+            format: "23x",
+        },
+        Shape {
+            name: "aget-boolean",
+            format: "23x",
+        },
+        Shape {
+            name: "aget-byte",
+            format: "23x",
+        },
+        Shape {
+            name: "aget-char",
+            format: "23x",
+        },
+        Shape {
+            name: "aget-short",
+            format: "23x",
+        },
+        Shape {
+            name: "aput",
+            format: "23x",
+        },
+        Shape {
+            name: "aput-wide",
+            format: "23x",
+        },
+        Shape {
+            name: "aput-object",
+            format: "23x",
+        },
+        Shape {
+            name: "aput-boolean",
+            format: "23x",
+        },
+        Shape {
+            name: "aput-byte",
+            format: "23x",
+        },
+        Shape {
+            name: "aput-char",
+            format: "23x",
+        },
+        Shape {
+            name: "aput-short",
+            format: "23x",
+        },
+        Shape {
+            name: "iget",
+            format: "22c",
+        },
+        Shape {
+            name: "iget-wide",
+            format: "22c",
+        },
+        Shape {
+            name: "iget-object",
+            format: "22c",
+        },
+        Shape {
+            name: "iget-boolean",
+            format: "22c",
+        },
+        Shape {
+            name: "iget-byte",
+            format: "22c",
+        },
+        Shape {
+            name: "iget-char",
+            format: "22c",
+        },
+        Shape {
+            name: "iget-short",
+            format: "22c",
+        },
+        Shape {
+            name: "iput",
+            format: "22c",
+        },
+        Shape {
+            name: "iput-wide",
+            format: "22c",
+        },
+        Shape {
+            name: "iput-object",
+            format: "22c",
+        },
+        Shape {
+            name: "iput-boolean",
+            format: "22c",
+        },
+        Shape {
+            name: "iput-byte",
+            format: "22c",
+        },
+        Shape {
+            name: "iput-char",
+            format: "22c",
+        },
+        Shape {
+            name: "iput-short",
+            format: "22c",
+        },
+        Shape {
+            name: "sget",
+            format: "21c",
+        },
+        Shape {
+            name: "sget-wide",
+            format: "21c",
+        },
+        Shape {
+            name: "sget-object",
+            format: "21c",
+        },
+        Shape {
+            name: "sget-boolean",
+            format: "21c",
+        },
+        Shape {
+            name: "sget-byte",
+            format: "21c",
+        },
+        Shape {
+            name: "sget-char",
+            format: "21c",
+        },
+        Shape {
+            name: "sget-short",
+            format: "21c",
+        },
+        Shape {
+            name: "sput",
+            format: "21c",
+        },
+        Shape {
+            name: "sput-wide",
+            format: "21c",
+        },
+        Shape {
+            name: "sput-object",
+            format: "21c",
+        },
+        Shape {
+            name: "sput-boolean",
+            format: "21c",
+        },
+        Shape {
+            name: "sput-byte",
+            format: "21c",
+        },
+        Shape {
+            name: "sput-char",
+            format: "21c",
+        },
+        Shape {
+            name: "sput-short",
+            format: "21c",
+        },
+        Shape {
+            name: "invoke-virtual",
+            format: "35c",
+        },
+        Shape {
+            name: "invoke-super",
+            format: "35c",
+        },
+        Shape {
+            name: "invoke-direct",
+            format: "35c",
+        },
+        Shape {
+            name: "invoke-static",
+            format: "35c",
+        },
+        Shape {
+            name: "invoke-interface",
+            format: "35c",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "invoke-virtual/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "invoke-super/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "invoke-direct/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "invoke-static/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "invoke-interface/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "neg-int",
+            format: "12x",
+        },
+        Shape {
+            name: "not-int",
+            format: "12x",
+        },
+        Shape {
+            name: "neg-long",
+            format: "12x",
+        },
+        Shape {
+            name: "not-long",
+            format: "12x",
+        },
+        Shape {
+            name: "neg-float",
+            format: "12x",
+        },
+        Shape {
+            name: "neg-double",
+            format: "12x",
+        },
+        Shape {
+            name: "int-to-long",
+            format: "12x",
+        },
+        Shape {
+            name: "int-to-float",
+            format: "12x",
+        },
+        Shape {
+            name: "int-to-double",
+            format: "12x",
+        },
+        Shape {
+            name: "long-to-int",
+            format: "12x",
+        },
+        Shape {
+            name: "long-to-float",
+            format: "12x",
+        },
+        Shape {
+            name: "long-to-double",
+            format: "12x",
+        },
+        Shape {
+            name: "float-to-int",
+            format: "12x",
+        },
+        Shape {
+            name: "float-to-long",
+            format: "12x",
+        },
+        Shape {
+            name: "float-to-double",
+            format: "12x",
+        },
+        Shape {
+            name: "double-to-int",
+            format: "12x",
+        },
+        Shape {
+            name: "double-to-long",
+            format: "12x",
+        },
+        Shape {
+            name: "double-to-float",
+            format: "12x",
+        },
+        Shape {
+            name: "int-to-byte",
+            format: "12x",
+        },
+        Shape {
+            name: "int-to-char",
+            format: "12x",
+        },
+        Shape {
+            name: "int-to-short",
+            format: "12x",
+        },
+        Shape {
+            name: "add-int",
+            format: "23x",
+        },
+        Shape {
+            name: "sub-int",
+            format: "23x",
+        },
+        Shape {
+            name: "mul-int",
+            format: "23x",
+        },
+        Shape {
+            name: "div-int",
+            format: "23x",
+        },
+        Shape {
+            name: "rem-int",
+            format: "23x",
+        },
+        Shape {
+            name: "and-int",
+            format: "23x",
+        },
+        Shape {
+            name: "or-int",
+            format: "23x",
+        },
+        Shape {
+            name: "xor-int",
+            format: "23x",
+        },
+        Shape {
+            name: "shl-int",
+            format: "23x",
+        },
+        Shape {
+            name: "shr-int",
+            format: "23x",
+        },
+        Shape {
+            name: "ushr-int",
+            format: "23x",
+        },
+        Shape {
+            name: "add-long",
+            format: "23x",
+        },
+        Shape {
+            name: "sub-long",
+            format: "23x",
+        },
+        Shape {
+            name: "mul-long",
+            format: "23x",
+        },
+        Shape {
+            name: "div-long",
+            format: "23x",
+        },
+        Shape {
+            name: "rem-long",
+            format: "23x",
+        },
+        Shape {
+            name: "and-long",
+            format: "23x",
+        },
+        Shape {
+            name: "or-long",
+            format: "23x",
+        },
+        Shape {
+            name: "xor-long",
+            format: "23x",
+        },
+        Shape {
+            name: "shl-long",
+            format: "23x",
+        },
+        Shape {
+            name: "shr-long",
+            format: "23x",
+        },
+        Shape {
+            name: "ushr-long",
+            format: "23x",
+        },
+        Shape {
+            name: "add-float",
+            format: "23x",
+        },
+        Shape {
+            name: "sub-float",
+            format: "23x",
+        },
+        Shape {
+            name: "mul-float",
+            format: "23x",
+        },
+        Shape {
+            name: "div-float",
+            format: "23x",
+        },
+        Shape {
+            name: "rem-float",
+            format: "23x",
+        },
+        Shape {
+            name: "add-double",
+            format: "23x",
+        },
+        Shape {
+            name: "sub-double",
+            format: "23x",
+        },
+        Shape {
+            name: "mul-double",
+            format: "23x",
+        },
+        Shape {
+            name: "div-double",
+            format: "23x",
+        },
+        Shape {
+            name: "rem-double",
+            format: "23x",
+        },
+        Shape {
+            name: "add-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "sub-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "mul-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "div-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "rem-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "and-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "or-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "xor-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "shl-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "shr-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "ushr-int/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "add-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "sub-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "mul-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "div-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "rem-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "and-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "or-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "xor-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "shl-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "shr-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "ushr-long/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "add-float/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "sub-float/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "mul-float/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "div-float/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "rem-float/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "add-double/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "sub-double/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "mul-double/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "div-double/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "rem-double/2addr",
+            format: "12x",
+        },
+        Shape {
+            name: "add-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "rsub-int",
+            format: "22s",
+        },
+        Shape {
+            name: "mul-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "div-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "rem-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "and-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "or-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "xor-int/lit16",
+            format: "22s",
+        },
+        Shape {
+            name: "add-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "rsub-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "mul-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "div-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "rem-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "and-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "or-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "xor-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "shl-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "shr-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "ushr-int/lit8",
+            format: "22b",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "unused",
+            format: "10x",
+        },
+        Shape {
+            name: "invoke-polymorphic",
+            format: "45cc",
+        },
+        Shape {
+            name: "invoke-polymorphic/range",
+            format: "4rcc",
+        },
+        Shape {
+            name: "invoke-custom",
+            format: "35c",
+        },
+        Shape {
+            name: "invoke-custom/range",
+            format: "3rc",
+        },
+        Shape {
+            name: "const-method-handle",
+            format: "21c",
+        },
+        Shape {
+            name: "const-method-type",
+            format: "21c",
+        },
+    ];
 
     fn read_map(data: &[u8], offset: u32) -> Result<Vec<MapEntry>, Diagnostic> {
         if offset == 0 {
@@ -34040,24 +35891,31 @@ pub mod dex {
         count: u32,
         strings: &[String],
         types: &[String],
-    ) -> Result<(Vec<String>, Vec<String>), Diagnostic> {
+    ) -> Result<Vec<Proto>, Diagnostic> {
         if count == 0 {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Vec::new());
         }
         pool_fits(data, offset, count, 12, "prototype")?;
 
         let mut reader = Reader::new(data, Endian::Little, "classes.dex");
         reader.seek(u64::from(offset))?;
-        let mut returns = Vec::with_capacity(count as usize);
-        let mut shorties = Vec::with_capacity(count as usize);
+        let mut held = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let shorty_index = reader.u32()?;
             let return_index = reader.u32()?;
-            let _parameters_off = reader.u32()?;
-            shorties.push(string_at(strings, shorty_index, "prototype")?);
-            returns.push(type_at(types, return_index, "prototype return")?);
+            let parameters_off = reader.u32()?;
+            held.push((shorty_index, return_index, parameters_off));
         }
-        Ok((returns, shorties))
+
+        let mut protos = Vec::with_capacity(count as usize);
+        for (shorty_index, return_index, parameters_off) in held {
+            protos.push(Proto {
+                shorty: string_at(strings, shorty_index, "prototype")?,
+                return_type: type_at(types, return_index, "prototype return")?,
+                parameters: read_type_list(data, parameters_off, types)?,
+            });
+        }
+        Ok(protos)
     }
 
     fn read_fields(
@@ -34094,7 +35952,7 @@ pub mod dex {
         count: u32,
         strings: &[String],
         types: &[String],
-        shorties: &[String],
+        protos: &[Proto],
     ) -> Result<Vec<Method>, Diagnostic> {
         if count == 0 {
             return Ok(Vec::new());
@@ -34108,14 +35966,16 @@ pub mod dex {
             let class_index = u32::from(reader.u16()?);
             let proto_index = usize::from(reader.u16()?);
             let name_index = reader.u32()?;
-            let shorty = shorties.get(proto_index).cloned().ok_or_else(|| {
+            let proto = protos.get(proto_index).ok_or_else(|| {
                 fail("EX016", "A method refers to a prototype that is not there.")
                     .with_context(format!("Index: {proto_index}"))
             })?;
             methods.push(Method {
                 class: type_at(types, class_index, "method class")?,
                 name: string_at(strings, name_index, "method name")?,
-                shorty,
+                shorty: proto.shorty.clone(),
+                return_type: proto.return_type.clone(),
+                parameters: proto.parameters.clone(),
             });
         }
         Ok(methods)
@@ -34126,8 +35986,10 @@ pub mod dex {
         offset: u32,
         count: u32,
         strings: &[String],
-        types: &[String],
+        pools: &Pools<'_>,
+        sink: &mut Sink,
     ) -> Result<Vec<Class>, Diagnostic> {
+        let types = pools.types;
         if count == 0 {
             return Ok(Vec::new());
         }
@@ -34143,13 +36005,14 @@ pub mod dex {
             let interfaces_off = reader.u32()?;
             let source_file_index = reader.u32()?;
             let _annotations_off = reader.u32()?;
-            let _class_data_off = reader.u32()?;
+            let class_data_off = reader.u32()?;
             let _static_values_off = reader.u32()?;
 
-            const NO_INDEX: u32 = 0xffff_ffff;
+            let name = type_at(types, class_index, "class")?;
+            let held = members_of(data, class_data_off, pools, &name, sink)?;
 
             classes.push(Class {
-                name: type_at(types, class_index, "class")?,
+                name,
                 access_flags,
                 superclass: if superclass_index == NO_INDEX {
                     None
@@ -34162,6 +36025,10 @@ pub mod dex {
                 } else {
                     Some(string_at(strings, source_file_index, "source file")?)
                 },
+                static_fields: held.static_fields,
+                instance_fields: held.instance_fields,
+                direct_methods: held.direct_methods,
+                virtual_methods: held.virtual_methods,
             });
         }
         Ok(classes)
@@ -57510,6 +59377,29 @@ mod tests {
     }
 
     #[test]
+    fn sleb128_reads_the_signed_values_the_dex_format_writes() {
+        let cases: &[(&[u8], i64)] = &[
+            (&[0x00], 0),
+            (&[0x01], 1),
+            (&[0x7f], -1),
+            (&[0x3f], 63),
+            (&[0x40], -64),
+            (&[0x80, 0x01], 128),
+            (&[0x80, 0x7f], -128),
+            (&[0xff, 0x00], 127),
+            (&[0xff, 0x7f], -1),
+            (&[0x80, 0x80, 0x80, 0x80, 0x78], i64::from(i32::MIN)),
+            (&[0xff, 0xff, 0xff, 0xff, 0x07], i64::from(i32::MAX)),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(reader(bytes).sleb128().unwrap(), *expected, "{bytes:?}");
+        }
+
+        assert_eq!(reader(&[0x80]).sleb128().unwrap_err().code, "E7003");
+        assert_eq!(reader(&[0x80; 10]).sleb128().unwrap_err().code, "E7007");
+    }
+
+    #[test]
     fn a_string_without_a_terminator_is_refused() {
         let mut r = reader(b"omni\0rest");
         assert_eq!(r.cstring().unwrap(), b"omni");
@@ -65523,6 +67413,375 @@ public final class MainActivity extends Activity {
         for odd in ["", "Ljava/lang/String", "Q", "L;x"] {
             assert_eq!(dex::descriptor_to_source(odd), odd, "{odd:?}");
         }
+    }
+
+    const WALKS_ITS_OWN_CODE: &str = r#"
+package com.omni.probe;
+
+public class Walk {
+    private int taps;
+    private static final String LABEL = "walk";
+
+    public int classify(int value) {
+        switch (value) {
+            case 0: return 10;
+            case 1: return 11;
+            case 2: return 12;
+            default: return -1;
+        }
+    }
+
+    public String guarded(String text) {
+        try {
+            return text.substring(0, 2);
+        } catch (IndexOutOfBoundsException e) {
+            return LABEL;
+        } finally {
+            taps++;
+        }
+    }
+
+    public String describe() {
+        StringBuilder out = new StringBuilder();
+        for (int one : counts()) {
+            out.append(one);
+            out.append(' ');
+        }
+        return LABEL + taps + " of " + out.toString();
+    }
+
+    private int[] counts() {
+        int[] found = new int[3];
+        for (int i = 0; i < found.length; i++) {
+            found[i] = i * taps;
+        }
+        return found;
+    }
+}
+"#;
+
+    fn walked_dex() -> (Vec<crate::dexwrite::Class>, Vec<u8>) {
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut written: Vec<crate::dexwrite::Class> = Vec::new();
+        for (name, bytes) in
+            crate::compilers::java::compile(WALKS_ITS_OWN_CODE, &classpath).expect("it compiles")
+        {
+            let class = crate::jvm::read(&bytes)
+                .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+            written.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+        }
+        let dex = crate::dexwrite::write(&written, &[]).expect("it writes");
+        (written, dex)
+    }
+
+    #[test]
+    fn every_instruction_this_build_writes_reads_back_as_the_one_it_wrote() {
+        let (written, dex) = walked_dex();
+        let mut sink = Sink::new();
+        let read = dex::read(&dex, &mut sink).expect("it reads");
+        assert!(
+            !sink.entries().iter().any(|one| one.code == "EX038"),
+            "every body must walk: {:?}",
+            sink.entries()
+        );
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let mut checked = 0usize;
+        let mut instructions = 0usize;
+        for source in &written {
+            let name = dex::descriptor_to_source(&source.descriptor);
+            let held = read
+                .class(&name)
+                .unwrap_or_else(|| panic!("{name} is not in the file"));
+            for method in source
+                .direct_methods
+                .iter()
+                .chain(source.virtual_methods.iter())
+            {
+                let called = &method.reference.name;
+                let body = held
+                    .methods()
+                    .find(|one| one.name == *called && one.shorty == method.reference.shorty())
+                    .unwrap_or_else(|| panic!("{name}.{called} is not in the file"));
+                if method.instructions.is_empty() {
+                    assert!(
+                        body.code.is_none(),
+                        "{name}.{called} has code it did not write"
+                    );
+                    continue;
+                }
+                let code = body
+                    .code
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{name}.{called} came back without a body"));
+                let wanted: Vec<u8> = method
+                    .instructions
+                    .iter()
+                    .map(|one| (one.units[0] & 0xff) as u8)
+                    .collect();
+                let got: Vec<u8> = code.instructions.iter().map(|one| one.opcode).collect();
+                assert_eq!(got, wanted, "{name}.{called} does not read back");
+                let widths: Vec<usize> =
+                    method.instructions.iter().map(|one| one.width()).collect();
+                let read_widths: Vec<usize> = code
+                    .instructions
+                    .iter()
+                    .map(|one| one.units.len())
+                    .collect();
+                assert_eq!(
+                    read_widths, widths,
+                    "{name}.{called} is walked at the wrong stride"
+                );
+                assert_eq!(
+                    code.registers, method.registers,
+                    "{name}.{called} registers"
+                );
+                assert_eq!(code.inputs, method.inputs, "{name}.{called} inputs");
+                assert_eq!(code.outputs, method.outputs, "{name}.{called} outputs");
+                assert_eq!(
+                    code.units as usize,
+                    widths.iter().sum::<usize>(),
+                    "{name}.{called} length"
+                );
+                checked += 1;
+                instructions += got.len();
+            }
+        }
+        assert!(checked >= 5, "only {checked} bodies were checked");
+        assert!(
+            instructions >= 60,
+            "only {instructions} instructions were checked"
+        );
+        assert_eq!(read.instructions(), instructions);
+        assert_eq!(read.bodies_read(), checked);
+    }
+
+    #[test]
+    fn a_method_body_says_what_it_reaches_for() {
+        let (_, dex) = walked_dex();
+        let mut sink = Sink::new();
+        let read = dex::read(&dex, &mut sink).expect("it reads");
+
+        let describe = read
+            .body("com.omni.probe.Walk", "describe")
+            .expect("the class carries describe");
+        let code = describe.code.as_ref().expect("with a body");
+        let calls = code.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|one| one.contains("java.lang.StringBuilder.append")),
+            "the loop appends: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|one| one.contains("com.omni.probe.Walk.counts")),
+            "and calls the method that makes the array: {calls:?}"
+        );
+        assert_eq!(describe.return_type, "java.lang.String");
+        assert!(describe.parameters.is_empty());
+        assert_eq!(describe.signature(), "describe() java.lang.String");
+
+        let held: Vec<&str> = code
+            .instructions
+            .iter()
+            .filter(|one| one.name.starts_with("const-string") || one.name.starts_with("sget"))
+            .filter_map(|one| one.about.as_deref())
+            .collect();
+        assert!(
+            held.contains(&"com.omni.probe.Walk.LABEL java.lang.String"),
+            "the static it reads: {held:?}"
+        );
+        assert!(held.contains(&" of "), "and the text it holds: {held:?}");
+
+        let counts = read
+            .body("com.omni.probe.Walk", "counts")
+            .expect("the class carries counts");
+        let code = counts.code.as_ref().expect("with a body");
+        assert_eq!(counts.return_type, "int[]");
+        let touched: Vec<&str> = code
+            .instructions
+            .iter()
+            .filter(|one| one.name.starts_with("iget") || one.name.starts_with("iput"))
+            .filter_map(|one| one.about.as_deref())
+            .collect();
+        assert!(
+            touched.contains(&"com.omni.probe.Walk.taps int"),
+            "the field it reads: {touched:?}"
+        );
+        assert!(
+            code.instructions.iter().any(|one| one.name == "new-array"),
+            "and the array it makes:\n{}",
+            code.to_text()
+        );
+
+        let classify = read
+            .body("com.omni.probe.Walk", "classify")
+            .expect("the class carries classify");
+        let code = classify.code.as_ref().expect("with a body");
+        assert!(
+            code.instructions
+                .iter()
+                .any(|one| one.name == "packed-switch"),
+            "a switch over three near values is packed:\n{}",
+            code.to_text()
+        );
+        assert!(
+            code.instructions
+                .iter()
+                .any(|one| one.name == "packed-switch-payload"),
+            "and the table it points at is walked as one instruction:\n{}",
+            code.to_text()
+        );
+        assert_eq!(classify.parameters, ["int"]);
+
+        let guarded = read
+            .body("com.omni.probe.Walk", "guarded")
+            .expect("the class carries guarded");
+        let code = guarded.code.as_ref().expect("with a body");
+        assert!(!code.tries.is_empty(), "a try is a range the file records");
+        let caught: Vec<String> = code
+            .tries
+            .iter()
+            .flat_map(|one| one.catches.iter())
+            .map(|one| one.kind.clone().unwrap_or_else(|| "everything".to_string()))
+            .collect();
+        assert!(
+            caught
+                .iter()
+                .any(|one| one.contains("IndexOutOfBoundsException")),
+            "what it catches: {caught:?}"
+        );
+        assert!(
+            code.instructions
+                .iter()
+                .any(|one| one.name == "move-exception"),
+            "and the handler starts by taking the exception:\n{}",
+            code.to_text()
+        );
+    }
+
+    #[test]
+    fn every_opcode_has_a_name_and_a_stride() {
+        let mut named = 0usize;
+        for byte in 0..=255u8 {
+            let shape = dex::shape_of(byte);
+            let units = dex::units_of(shape.format);
+            assert!(
+                (1..=5).contains(&units),
+                "0x{byte:02x} is {units} units wide"
+            );
+            assert!(!shape.name.is_empty());
+            if shape.name != "unused" {
+                named += 1;
+            }
+        }
+        assert_eq!(named, 224, "the instruction set this reader knows");
+
+        for (byte, name, units) in [
+            (0x00u8, "nop", 1usize),
+            (0x0e, "return-void", 1),
+            (0x18, "const-wide", 5),
+            (0x1a, "const-string", 2),
+            (0x1b, "const-string/jumbo", 3),
+            (0x6e, "invoke-virtual", 3),
+            (0x74, "invoke-virtual/range", 3),
+            (0xfa, "invoke-polymorphic", 4),
+            (0xfb, "invoke-polymorphic/range", 4),
+            (0xff, "const-method-type", 2),
+        ] {
+            let shape = dex::shape_of(byte);
+            assert_eq!(shape.name, name, "0x{byte:02x}");
+            assert_eq!(dex::units_of(shape.format), units, "0x{byte:02x}");
+        }
+
+        for gone in [0x3eu8, 0x43, 0x73, 0x79, 0x7a, 0xe3, 0xf9] {
+            assert_eq!(dex::shape_of(gone).name, "unused", "0x{gone:02x}");
+        }
+
+        assert_eq!(dex::points_at(0x1a), dex::Points::Strings);
+        assert_eq!(dex::points_at(0x22), dex::Points::Types);
+        assert_eq!(dex::points_at(0x52), dex::Points::Fields);
+        assert_eq!(dex::points_at(0x71), dex::Points::Methods);
+        assert_eq!(dex::points_at(0xff), dex::Points::Prototypes);
+        assert_eq!(dex::points_at(0x01), dex::Points::Nowhere);
+    }
+
+    #[test]
+    fn a_body_that_cannot_be_walked_is_reported_where_it_is_rather_than_refusing_the_file() {
+        let (_, dex) = walked_dex();
+        let mut sink = Sink::new();
+        let whole = dex::read(&dex, &mut sink).expect("it reads");
+        let wanted = whole.bodies_read();
+        assert!(wanted > 0);
+
+        let mut bent = None;
+        for at in 0..dex.len() - 1 {
+            let mut copy = dex.clone();
+            copy[at] ^= 0xff;
+            let mut sink = Sink::new();
+            let Ok(read) = dex::read(&copy, &mut sink) else {
+                continue;
+            };
+            if sink.entries().iter().any(|one| one.code == "EX038") {
+                bent = Some((read, sink));
+                break;
+            }
+        }
+
+        let (read, sink) = bent.expect("one flipped byte somewhere lands inside a body");
+        let said = sink
+            .entries()
+            .iter()
+            .find(|one| one.code == "EX038")
+            .expect("the warning");
+        assert_eq!(said.severity, Severity::Warning);
+        assert!(
+            said.context.iter().any(|line| line.starts_with("Method: ")),
+            "the warning names the body it could not walk: {:?}",
+            said.context
+        );
+        assert!(
+            !read.class_names().is_empty(),
+            "the rest of the file is still described"
+        );
+    }
+
+    #[test]
+    fn the_prototype_pool_carries_what_a_method_takes_as_well_as_what_it_returns() {
+        let (_, dex) = walked_dex();
+        let mut sink = Sink::new();
+        let read = dex::read(&dex, &mut sink).expect("it reads");
+
+        let held = read
+            .methods
+            .iter()
+            .find(|one| one.class == "java.lang.String" && one.name == "substring")
+            .expect("the file names String.substring");
+        assert_eq!(held.parameters, ["int", "int"]);
+        assert_eq!(held.return_type, "java.lang.String");
+        assert_eq!(held.shorty, "LII");
+        assert_eq!(
+            held.signature(),
+            "java.lang.String.substring(int, int) java.lang.String"
+        );
+
+        assert!(
+            read.protos
+                .iter()
+                .any(|one| one.to_text() == "(int, int) java.lang.String"),
+            "the prototype is in the pool in its own right"
+        );
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        read.write_json(&mut w, "dex");
+        w.end_object();
+        let document = w.finish();
+        assert!(is_structurally_valid(&document), "{document}");
+        assert!(document.contains("\"bodiesRead\":"));
+        assert!(document.contains("\"instructions\":"));
     }
 
     #[test]
