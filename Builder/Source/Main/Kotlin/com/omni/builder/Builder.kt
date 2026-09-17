@@ -2619,7 +2619,7 @@ internal class Mark(
         STOP(R.drawable.omni_icon_stop),
         SEND(R.drawable.omni_icon_send),
         LINK(R.drawable.omni_icon_link),
-        ADD(R.drawable.omni_icon_add),
+        SPARK(R.drawable.omni_icon_spark),
         SHIELD(R.drawable.omni_icon_shield),
         MAIL(0),
         BOLT(0),
@@ -2640,7 +2640,6 @@ internal class Mark(
         COPY(R.drawable.omni_icon_copy),
         EXPORT(R.drawable.omni_icon_export),
         INFO_FILL(R.drawable.omni_icon_info_fill),
-        HELP_FILL(0),
         PAGE_ADD(R.drawable.omni_icon_page_add),
         FOLDER_OPEN(R.drawable.omni_icon_folder_open),
         PEOPLE(R.drawable.omni_icon_people),
@@ -2649,7 +2648,6 @@ internal class Mark(
         STAR_LINE(R.drawable.omni_icon_star_line),
         BRAIN(R.drawable.omni_icon_brain),
         SCREEN(R.drawable.omni_icon_screen),
-        SHIELD_FILL(0),
         NOTE_FILL(R.drawable.omni_icon_note_fill),
         MAIL_FILL(R.drawable.omni_icon_mail_fill),
         PERSON_FILL(R.drawable.omni_icon_person_fill),
@@ -2883,22 +2881,6 @@ internal class Mark(
                 path.lineTo(20f, 16f)
                 canvas.drawPath(path, paint)
             }
-            Shape.HELP_FILL -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 12f, 9f, paint)
-                paint.xfermode = CLEARING
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2.2f
-                path.moveTo(9.2f, 9.6f)
-                path.cubicTo(9.2f, 6.4f, 15f, 6.4f, 15f, 9.9f)
-                path.cubicTo(15f, 12.5f, 12f, 12.5f, 12f, 15f)
-                canvas.drawPath(path, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 18f, 1.3f, paint)
-                paint.xfermode = null
-                canvas.restore()
-            }
             Shape.MAIL -> {
                 paint.style = Paint.Style.STROKE
                 path.addRoundRect(3.5f, 5.8f, 20.5f, 18.2f, 1.6f, 1.6f, Path.Direction.CW)
@@ -2945,28 +2927,6 @@ internal class Mark(
                 path.moveTo(10.4f, 21f)
                 path.lineTo(13.6f, 21f)
                 canvas.drawPath(path, paint)
-            }
-            Shape.SHIELD_FILL -> {
-                canvas.saveLayer(0f, 0f, GRID, GRID, null)
-                paint.style = Paint.Style.FILL
-                path.moveTo(12f, 3f)
-                path.lineTo(20.2f, 6.6f)
-                path.lineTo(20.2f, 12.4f)
-                path.cubicTo(20.2f, 17.2f, 16.4f, 19.8f, 12f, 21.4f)
-                path.cubicTo(7.6f, 19.8f, 3.8f, 17.2f, 3.8f, 12.4f)
-                path.lineTo(3.8f, 6.6f)
-                path.close()
-                canvas.drawPath(path, paint)
-                paint.xfermode = CLEARING
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2f
-                path.rewind()
-                path.moveTo(8.6f, 12.2f)
-                path.lineTo(11f, 14.6f)
-                path.lineTo(15.6f, 9.6f)
-                canvas.drawPath(path, paint)
-                paint.xfermode = null
-                canvas.restore()
             }
             Shape.HEART_FILL -> {
                 paint.style = Paint.Style.FILL
@@ -4882,7 +4842,7 @@ class BuilderActivity : Activity() {
                     setColor(Ink.hot(palette.raised, 0.12f))
                 }
                 foreground = Mark(
-                    if (raised) Mark.Shape.CLOSE else Mark.Shape.ADD,
+                    if (raised) Mark.Shape.CLOSE else Mark.Shape.PAGE_ADD,
                     palette.foreground,
                 )
                 val squeeze = gap(3)
@@ -4939,7 +4899,7 @@ class BuilderActivity : Activity() {
             getString(R.string.omni_menu_logcat),
             parted = true,
         ) { go(Screen.Logcat) }
-        rows += MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_menu_assistant)) {
+        rows += MenuChoice(Mark.Shape.SPARK, getString(R.string.omni_menu_assistant)) {
             go(Screen.Assistant)
         }
         rows += MenuChoice(Mark.Shape.BRUSH, getString(R.string.omni_menu_theme)) {
@@ -4953,7 +4913,7 @@ class BuilderActivity : Activity() {
             ) { sortMenu(under) }
         }
         rows += MenuChoice(
-            Mark.Shape.HELP_FILL,
+            Mark.Shape.HELP,
             getString(R.string.omni_menu_help),
             parted = true,
         ) { go(Screen.Help) }
@@ -5299,7 +5259,7 @@ class BuilderActivity : Activity() {
         )
         list.addView(drawerSection(getString(R.string.omni_menu_making)))
         list.addView(
-            drawerRow(Mark.Shape.ROBOT, R.string.omni_menu_assistant, here is Screen.Assistant) {
+            drawerRow(Mark.Shape.SPARK, R.string.omni_menu_assistant, here is Screen.Assistant) {
                 leaveFor(Screen.Assistant)
             }
         )
@@ -5929,7 +5889,7 @@ class BuilderActivity : Activity() {
                 addView(
                     View(context).apply {
                         foreground = Mark(
-                            if (terms) Mark.Shape.NOTE_FILL else Mark.Shape.SHIELD_FILL,
+                            if (terms) Mark.Shape.NOTE_FILL else Mark.Shape.SHIELD,
                             if (terms) 0xFFB06BFF.toInt() else palette.accent,
                         )
                     },
@@ -8509,7 +8469,7 @@ class BuilderActivity : Activity() {
         anchoredMenu(
             under,
             listOf(
-                MenuChoice(Mark.Shape.BROOM, getString(R.string.omni_talk_clear)) {
+                MenuChoice(Mark.Shape.TRASH, getString(R.string.omni_talk_clear)) {
                     talkHeld.clear()
                     render(false)
                 },
@@ -8528,7 +8488,7 @@ class BuilderActivity : Activity() {
                     )
                 },
                 MenuChoice(
-                    Mark.Shape.HELP_FILL,
+                    Mark.Shape.HELP,
                     getString(R.string.omni_help_title),
                     parted = true,
                 ) { go(Screen.Help) },
@@ -8538,7 +8498,7 @@ class BuilderActivity : Activity() {
 
     private fun talkAttach(under: View) {
         val named = listOf(
-            Mark.Shape.NOTE to R.string.omni_talk_add_file,
+            Mark.Shape.FILE to R.string.omni_talk_add_file,
             Mark.Shape.IMAGE to R.string.omni_talk_add_picture,
             Mark.Shape.LINK to R.string.omni_talk_add_link,
         )
@@ -9408,7 +9368,7 @@ class BuilderActivity : Activity() {
                         act(Builder.nativeManifestSet(root, "package", asked.trim()), "set")
                     }
                 },
-                MenuChoice(Mark.Shape.INFO_FILL, getString(R.string.omni_facts_title)) {
+                MenuChoice(Mark.Shape.INFO, getString(R.string.omni_facts_title)) {
                     showProjectFacts(root)
                 },
                 MenuChoice(
@@ -9416,7 +9376,7 @@ class BuilderActivity : Activity() {
                     getString(R.string.omni_project_clear),
                     parted = true,
                 ) { clearProjectCache(root) },
-                MenuChoice(Mark.Shape.EXPORT, getString(R.string.omni_project_export)) {
+                MenuChoice(Mark.Shape.ARCHIVE, getString(R.string.omni_project_export)) {
                     exportProject(root)
                 },
                 MenuChoice(Mark.Shape.SHARE, getString(R.string.omni_project_share)) {
@@ -9719,7 +9679,7 @@ class BuilderActivity : Activity() {
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
                 addView(
-                    markControl(Mark.Shape.NOTE, R.string.omni_action_copy) {
+                    markControl(Mark.Shape.COPY, R.string.omni_action_copy) {
                         copyOut(heldLog(), getString(R.string.omni_menu_logcat))
                     },
                     LinearLayout.LayoutParams(gap(8), gap(8)),
@@ -11020,7 +10980,7 @@ class BuilderActivity : Activity() {
     private fun helpMark(topic: Int): Pair<Mark.Shape, Int> = when (topic) {
         0 -> Mark.Shape.FOLDER to 0xFF2C7BE5.toInt()
         1 -> Mark.Shape.HOME to 0xFF8B5CF6.toInt()
-        2 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
+        2 -> Mark.Shape.PAGE_ADD to 0xFF1FC77A.toInt()
         3 -> Mark.Shape.CODE to 0xFFF08A24.toInt()
         4 -> Mark.Shape.PACKAGE to 0xFFEC4899.toInt()
         5 -> Mark.Shape.SHIELD to 0xFF06B6D4.toInt()
@@ -11715,7 +11675,7 @@ class BuilderActivity : Activity() {
         val rows = card()
         rows.addView(
             aboutRow(
-                Mark.Shape.SHIELD_FILL,
+                Mark.Shape.SHIELD,
                 palette.accent,
                 getString(R.string.omni_about_policy),
                 getString(R.string.omni_about_policy_note),
@@ -12481,7 +12441,7 @@ class BuilderActivity : Activity() {
 
     private fun docMark(at: Int): Pair<Mark.Shape, Int> = when (at) {
         0 -> Mark.Shape.HOME to 0xFF2C7BE5.toInt()
-        1 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
+        1 -> Mark.Shape.PAGE_ADD to 0xFF1FC77A.toInt()
         2 -> Mark.Shape.CODE to 0xFF8B5CF6.toInt()
         3 -> Mark.Shape.FOLDER to 0xFFF08A24.toInt()
         4 -> Mark.Shape.PLAY to 0xFFEC4899.toInt()
@@ -13166,7 +13126,7 @@ class BuilderActivity : Activity() {
         4 -> mockPanel(
             listOf(
                 mockLine(
-                    Mark.Shape.BROOM,
+                    Mark.Shape.TRASH,
                     palette.error,
                     getString(R.string.omni_talk_clear),
                 ),
