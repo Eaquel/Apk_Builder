@@ -2580,8 +2580,6 @@ internal class Mark(
         FILE(R.drawable.omni_icon_file),
         MORE(R.drawable.omni_icon_more),
         CLOSE(R.drawable.omni_icon_close),
-        AWAY(0),
-        BACK(0),
         GEAR(0),
         SAVE(R.drawable.omni_icon_save),
         FIND(R.drawable.omni_icon_find),
@@ -2621,10 +2619,13 @@ internal class Mark(
         LINK(R.drawable.omni_icon_link),
         SPARK(R.drawable.omni_icon_spark),
         ADD(R.drawable.omni_icon_add),
+        CHEVRON_UP(R.drawable.omni_icon_chevron_up),
+        CHEVRON_DOWN(R.drawable.omni_icon_chevron_down),
+        CHEVRON_LEFT(R.drawable.omni_icon_chevron_left),
+        CHEVRON_RIGHT(R.drawable.omni_icon_chevron_right),
         SHIELD(R.drawable.omni_icon_shield),
         MAIL(0),
         BOLT(0),
-        FORWARD(0),
         SWAP(0),
         HEART(R.drawable.omni_icon_heart),
         CLOCK(R.drawable.omni_icon_clock),
@@ -2757,22 +2758,6 @@ internal class Mark(
                 canvas.drawPath(path, paint)
                 paint.style = Paint.Style.STROKE
                 canvas.drawLine(5f, 20.6f, 17f, 20.6f, paint)
-            }
-            Shape.AWAY -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(10f, 7f)
-                path.lineTo(15f, 12f)
-                path.lineTo(10f, 17f)
-                canvas.drawPath(path, paint)
-            }
-            Shape.BACK -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(20.4f, 12f)
-                path.lineTo(4.4f, 12f)
-                path.moveTo(11.2f, 5.2f)
-                path.lineTo(4.4f, 12f)
-                path.lineTo(11.2f, 18.8f)
-                canvas.drawPath(path, paint)
             }
             Shape.GEAR -> {
                 paint.style = Paint.Style.STROKE
@@ -2937,13 +2922,6 @@ internal class Mark(
                 path.cubicTo(12f, 5.9f, 13.1f, 4.6f, 14.8f, 4.6f)
                 path.cubicTo(20.2f, 4.6f, 22.4f, 13.9f, 12f, 20.8f)
                 path.close()
-                canvas.drawPath(path, paint)
-            }
-            Shape.FORWARD -> {
-                paint.style = Paint.Style.STROKE
-                path.moveTo(9f, 5f)
-                path.lineTo(16f, 12f)
-                path.lineTo(9f, 19f)
                 canvas.drawPath(path, paint)
             }
             Shape.SWAP -> {
@@ -4481,7 +4459,7 @@ class BuilderActivity : Activity() {
             }
         } else {
             crown.addView(
-                markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() },
+                markControl(Mark.Shape.CHEVRON_LEFT, R.string.omni_action_back) { stepBack() },
                 each,
             )
             if (here is Screen.Terminal) {
@@ -4741,11 +4719,11 @@ class BuilderActivity : Activity() {
         val backable = if (paneRight) besideBefore.isNotEmpty() else wentBefore.isNotEmpty()
         val onward = if (paneRight) besideAfter.isNotEmpty() else wentAfter.isNotEmpty()
         footer.addView(
-            footControl(Mark.Shape.BACK, R.string.omni_action_back, backable) { stepPane(-1) },
+            footControl(Mark.Shape.CHEVRON_LEFT, R.string.omni_action_back, backable) { stepPane(-1) },
             holds,
         )
         footer.addView(
-            footControl(Mark.Shape.FORWARD, R.string.omni_action_forward, onward) { stepPane(1) },
+            footControl(Mark.Shape.CHEVRON_RIGHT, R.string.omni_action_forward, onward) { stepPane(1) },
             LinearLayout.LayoutParams(0, gap(10), 1f),
         )
         footer.addView(
@@ -5011,7 +4989,7 @@ class BuilderActivity : Activity() {
                     if (row.onward) {
                         addView(
                             View(context).apply {
-                                foreground = Mark(Mark.Shape.FORWARD, palette.muted)
+                                foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.muted)
                                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                             },
                             LinearLayout.LayoutParams(gap(6), gap(6)).apply {
@@ -5685,7 +5663,7 @@ class BuilderActivity : Activity() {
                 View(context).apply {
                     if (entry.folder) {
                         foreground = Mark(
-                            if (open) Mark.Shape.DOWN else Mark.Shape.FORWARD,
+                            if (open) Mark.Shape.CHEVRON_DOWN else Mark.Shape.CHEVRON_RIGHT,
                             palette.foreground,
                             1.9f,
                         )
@@ -8092,7 +8070,7 @@ class BuilderActivity : Activity() {
                 setBackgroundColor(SHELL_BAR)
                 addView(
                     View(context).apply {
-                        foreground = Mark(Mark.Shape.BACK, Color.WHITE)
+                        foreground = Mark(Mark.Shape.CHEVRON_LEFT, Color.WHITE)
                         val squeeze = gap(3) / 2
                         setPadding(squeeze, squeeze, squeeze, squeeze)
                         isClickable = true
@@ -8620,7 +8598,7 @@ class BuilderActivity : Activity() {
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
                 addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.DOWN, palette.muted) },
+                    View(context).apply { foreground = Mark(Mark.Shape.CHEVRON_DOWN, palette.muted) },
                     LinearLayout.LayoutParams(gap(6), gap(6)),
                 )
             }
@@ -8790,7 +8768,7 @@ class BuilderActivity : Activity() {
                     addView(value, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                     addView(
                         View(context).apply {
-                            foreground = Mark(Mark.Shape.DOWN, palette.muted)
+                            foreground = Mark(Mark.Shape.CHEVRON_DOWN, palette.muted)
                         },
                         LinearLayout.LayoutParams(gap(6), gap(6)),
                     )
@@ -9886,7 +9864,7 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     View(context).apply {
-                        foreground = Mark(Mark.Shape.FORWARD, palette.foreground)
+                        foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.foreground)
                         background = GradientDrawable().apply {
                             shape = GradientDrawable.OVAL
                             setColor(Ink.fade(edge, 0.12f))
@@ -10276,7 +10254,7 @@ class BuilderActivity : Activity() {
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
             addView(
-                View(context).apply { foreground = Mark(Mark.Shape.FORWARD, palette.muted) },
+                View(context).apply { foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.muted) },
                 LinearLayout.LayoutParams(gap(6), gap(6)),
             )
         }
@@ -11570,7 +11548,7 @@ class BuilderActivity : Activity() {
             )
             addView(
                 View(context).apply {
-                    foreground = Mark(Mark.Shape.FORWARD, palette.accent, 1.2f)
+                    foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.accent, 1.2f)
                 },
                 LinearLayout.LayoutParams(gap(4), gap(4)),
             )
@@ -12118,7 +12096,7 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     View(context).apply {
-                        foreground = Mark(Mark.Shape.FORWARD, palette.accent, 1.15f)
+                        foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.accent, 1.15f)
                     },
                     LinearLayout.LayoutParams(gap(4), gap(4)),
                 )
@@ -12390,7 +12368,7 @@ class BuilderActivity : Activity() {
             )
             addView(
                 View(context).apply {
-                    foreground = Mark(Mark.Shape.FORWARD, palette.accent, 1.15f)
+                    foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.accent, 1.15f)
                 },
                 LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginStart = gap(2) },
             )
@@ -12501,7 +12479,7 @@ class BuilderActivity : Activity() {
                     addView(
                         View(context).apply {
                             foreground = Mark(
-                                if (open) Mark.Shape.AWAY else Mark.Shape.DOWN,
+                                if (open) Mark.Shape.CHEVRON_UP else Mark.Shape.CHEVRON_DOWN,
                                 palette.accent,
                                 1.15f,
                             )
@@ -13267,7 +13245,7 @@ class BuilderActivity : Activity() {
                     setPadding(0, 0, 0, gap(1))
                     addView(
                         View(context).apply {
-                            foreground = Mark(Mark.Shape.BACK, palette.muted)
+                            foreground = Mark(Mark.Shape.CHEVRON_LEFT, palette.muted)
                         },
                         LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
                     )
