@@ -2620,6 +2620,7 @@ internal class Mark(
         SEND(R.drawable.omni_icon_send),
         LINK(R.drawable.omni_icon_link),
         SPARK(R.drawable.omni_icon_spark),
+        ADD(R.drawable.omni_icon_add),
         SHIELD(R.drawable.omni_icon_shield),
         MAIL(0),
         BOLT(0),
@@ -3490,7 +3491,6 @@ class BuilderActivity : Activity() {
         )
 
         const val LARGEST_ICON_EDGE = 512
-        const val PLAIN_LAUNCHER = 0xFF3DDC84.toInt()
 
         const val PROJECT_RES = "Res"
         const val PROJECT_ICON = "Icon.png"
@@ -4842,7 +4842,7 @@ class BuilderActivity : Activity() {
                     setColor(Ink.hot(palette.raised, 0.12f))
                 }
                 foreground = Mark(
-                    if (raised) Mark.Shape.CLOSE else Mark.Shape.PAGE_ADD,
+                    if (raised) Mark.Shape.CLOSE else Mark.Shape.ADD,
                     palette.foreground,
                 )
                 val squeeze = gap(3)
@@ -6436,14 +6436,14 @@ class BuilderActivity : Activity() {
     }
 
     private fun plainLauncher(): View = ImageView(this).apply {
-        setImageResource(R.drawable.omni_brand)
-        scaleType = ImageView.ScaleType.FIT_CENTER
+        setImageResource(R.drawable.omni_art_project)
+        scaleType = ImageView.ScaleType.CENTER_CROP
+        clipToOutline = true
         background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = gap(3).toFloat()
-            setColor(PLAIN_LAUNCHER)
+            setColor(palette.raised)
         }
-        setPadding(gap(2), gap(2), gap(2), gap(2))
     }
 
     private fun fileRow(
@@ -10980,7 +10980,7 @@ class BuilderActivity : Activity() {
     private fun helpMark(topic: Int): Pair<Mark.Shape, Int> = when (topic) {
         0 -> Mark.Shape.FOLDER to 0xFF2C7BE5.toInt()
         1 -> Mark.Shape.HOME to 0xFF8B5CF6.toInt()
-        2 -> Mark.Shape.PAGE_ADD to 0xFF1FC77A.toInt()
+        2 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
         3 -> Mark.Shape.CODE to 0xFFF08A24.toInt()
         4 -> Mark.Shape.PACKAGE to 0xFFEC4899.toInt()
         5 -> Mark.Shape.SHIELD to 0xFF06B6D4.toInt()
@@ -12441,7 +12441,7 @@ class BuilderActivity : Activity() {
 
     private fun docMark(at: Int): Pair<Mark.Shape, Int> = when (at) {
         0 -> Mark.Shape.HOME to 0xFF2C7BE5.toInt()
-        1 -> Mark.Shape.PAGE_ADD to 0xFF1FC77A.toInt()
+        1 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
         2 -> Mark.Shape.CODE to 0xFF8B5CF6.toInt()
         3 -> Mark.Shape.FOLDER to 0xFFF08A24.toInt()
         4 -> Mark.Shape.PLAY to 0xFFEC4899.toInt()
@@ -14941,7 +14941,6 @@ class LauncherPreview(context: Context, private val palette: Palette) : View(con
 
     private companion object {
         const val SHAPES = 3
-        const val PLAIN = 0xFF3DDC84.toInt()
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -14949,7 +14948,7 @@ class LauncherPreview(context: Context, private val palette: Palette) : View(con
     private val box = RectF()
     private var picture: Bitmap? = null
     private val android = ImageView(context).apply {
-        setImageResource(R.drawable.omni_brand)
+        setImageResource(R.drawable.omni_art_project)
     }
 
     fun show(path: String?) {
@@ -14978,7 +14977,7 @@ class LauncherPreview(context: Context, private val palette: Palette) : View(con
 
             val held = picture
             paint.style = Paint.Style.FILL
-            paint.color = if (held == null) PLAIN else palette.raised
+            paint.color = palette.raised
             canvas.drawPath(mask, paint)
 
             if (held != null) {
@@ -14989,12 +14988,11 @@ class LauncherPreview(context: Context, private val palette: Palette) : View(con
             } else {
                 canvas.save()
                 canvas.clipPath(mask)
-                val inset = edge * 0.2f
                 android.drawable.setBounds(
-                    (box.left + inset).toInt(),
-                    (box.top + inset).toInt(),
-                    (box.right - inset).toInt(),
-                    (box.bottom - inset).toInt(),
+                    box.left.toInt(),
+                    box.top.toInt(),
+                    box.right.toInt(),
+                    box.bottom.toInt(),
                 )
                 android.drawable.draw(canvas)
                 canvas.restore()
