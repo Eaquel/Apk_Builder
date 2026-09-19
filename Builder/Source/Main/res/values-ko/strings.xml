@@ -351,6 +351,10 @@
     <string name="omni_editor_run">이 프로젝트 빌드</string>
     <string name="omni_editor_symbols">기호</string>
     <string name="omni_tab_shell">터미널</string>
+    <string name="omni_shell_close">이 터미널 닫기</string>
+    <string name="omni_shell_full">한 번에 여는 터미널은 넷까지입니다.</string>
+    <string name="omni_shell_new">새 터미널</string>
+    <string name="omni_shell_rename">이 터미널에 이름 붙이기</string>
     <string name="omni_shell_refused">여기서 셸을 띄우지 못했습니다.</string>
     <string name="omni_kinds_holds">지원하는 말:</string>
     <string name="omni_kinds_holds_web">지원하는 웹 기술:</string>

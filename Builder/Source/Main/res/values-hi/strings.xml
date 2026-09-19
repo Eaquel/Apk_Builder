@@ -351,6 +351,10 @@
     <string name="omni_editor_run">यह परियोजना बनाएँ</string>
     <string name="omni_editor_symbols">प्रतीक</string>
     <string name="omni_tab_shell">टर्मिनल</string>
+    <string name="omni_shell_close">यह टर्मिनल बंद करें</string>
+    <string name="omni_shell_full">एक बार में चार टर्मिनल ही खुलते हैं।</string>
+    <string name="omni_shell_new">नया टर्मिनल</string>
+    <string name="omni_shell_rename">इस टर्मिनल को नाम दें</string>
     <string name="omni_shell_refused">यहाँ शेल शुरू नहीं हो सका।</string>
     <string name="omni_kinds_holds">समर्थित भाषाएँ:</string>
     <string name="omni_kinds_holds_web">समर्थित वेब तकनीकें:</string>

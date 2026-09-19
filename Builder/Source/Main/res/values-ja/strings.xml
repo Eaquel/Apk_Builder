@@ -351,6 +351,10 @@
     <string name="omni_editor_run">このプロジェクトを組む</string>
     <string name="omni_editor_symbols">記号</string>
     <string name="omni_tab_shell">ターミナル</string>
+    <string name="omni_shell_close">この端末を閉じる</string>
+    <string name="omni_shell_full">一度に開けるのは端末四つまでです。</string>
+    <string name="omni_shell_new">新しい端末</string>
+    <string name="omni_shell_rename">この端末に名前を付ける</string>
     <string name="omni_shell_refused">ここでは殻を起こせませんでした。</string>
     <string name="omni_kinds_holds">対応する言語:</string>
     <string name="omni_kinds_holds_web">対応するウェブ技術:</string>

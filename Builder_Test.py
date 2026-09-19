@@ -30,6 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT / "Tests"
 CORE = ROOT / "Builder.rs"
+SPEECH = ROOT / "Speech.rs"
+CORE_TESTS = ROOT / "Builder_Test.rs"
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
@@ -118,6 +120,8 @@ def check_layout() -> str:
     """The tree is the one this project agreed on."""
     required = [
         CORE,
+        SPEECH,
+        CORE_TESTS,
         ROOT / "Cargo.toml",
         ROOT / "Builder_Test.py",
         ROOT / "build.gradle.kts",
@@ -161,6 +165,20 @@ def check_layout() -> str:
     )
     if stray:
         raise AssertionError(f"tests live in Builder_Test.py alone, found {stray}")
+
+    sources = [CORE, SPEECH, GUARD, ANDROID]
+    sources += sorted(COMPILERS.glob("*.rs"))
+    sources += sorted((COMPILERS / "Java").glob("*.rs"))
+    carried = [
+        str(path.relative_to(ROOT))
+        for path in sources
+        if "#[test]" in path.read_text(encoding="utf-8")
+    ]
+    if carried:
+        raise AssertionError(
+            "a test belongs in Builder_Test.rs, not beside the code it tests: "
+            + ", ".join(carried)
+        )
     return f"{len(required)} files and {len(compilers)} compilers in place"
 
 def check_comments() -> str:
@@ -172,6 +190,8 @@ def check_comments() -> str:
     """
     watched: list[Path] = [
         CORE,
+        SPEECH,
+        CORE_TESTS,
         KOTLIN,
         ROOT / "Builder_Test.py",
         ROOT / "build.gradle.kts",
@@ -675,9 +695,9 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
 
 def spoken_table(name: str) -> dict[str, str]:
     """One of the tables the speech module carries, read back out of it."""
-    text = CORE.read_text(encoding="utf-8")
+    text = SPEECH.read_text(encoding="utf-8")
     opened = text.index(f"const {name}: &[(&str, &str)] = &[")
-    closed = text.index("\n    ];", opened)
+    closed = text.index("\n];", opened)
     body = text[text.index("\n", opened):closed]
     pair = re.compile(r'\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)\s*,')
     said: dict[str, str] = {}

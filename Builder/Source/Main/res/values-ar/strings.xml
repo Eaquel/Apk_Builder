@@ -351,6 +351,10 @@
     <string name="omni_editor_run">ابنِ هذا المشروع</string>
     <string name="omni_editor_symbols">الرموز</string>
     <string name="omni_tab_shell">الطرفية</string>
+    <string name="omni_shell_close">أغلق هذه الطرفية</string>
+    <string name="omni_shell_full">أربع طرفيات هي كل ما يفتحه هذا دفعة واحدة.</string>
+    <string name="omni_shell_new">طرفية جديدة</string>
+    <string name="omni_shell_rename">سمِّ هذه الطرفية</string>
     <string name="omni_shell_refused">تعذّر بدء صدفة هنا.</string>
     <string name="omni_kinds_holds">اللغات المدعومة:</string>
     <string name="omni_kinds_holds_web">تقنيات الويب المدعومة:</string>

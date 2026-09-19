@@ -3215,9 +3215,6 @@ class BuilderActivity : Activity() {
 
         const val CHARSET_SHOWN = "UTF-8"
 
-        const val PASTE_OPENS = "\u001B[200~"
-
-        const val PASTE_CLOSES = "\u001B[201~"
 
         val EDITOR_SYMBOLS = listOf(
             "{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "->", "\u03bb",
@@ -3539,9 +3536,13 @@ class BuilderActivity : Activity() {
 
         const val ROW_UNITS = 10
 
+        const val MOST_SHELLS = 4
+
+        const val SHELL_NAME_MOST = 14
+
         const val ASSISTANT_PATHS = 400
 
-        val SHELL_BAR = 0xFF16181A.toInt()
+        val SHELL_BAR = 0xFF000000.toInt()
 
         val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
@@ -3625,10 +3626,16 @@ class BuilderActivity : Activity() {
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
 
-    private var shellView: TerminalView? = null
-    private var shellHandle = -1
-    private var shellReader: Thread? = null
-    private var shellFolder: String? = null
+    private class Shell(
+        val view: TerminalView,
+        val folder: String,
+        var named: String,
+        var handle: Int = -1,
+        var reader: Thread? = null,
+    )
+
+    private val shells = mutableListOf<Shell>()
+    private var shellAt = 0
     private var shellControl = false
 
     private var logReading = false
@@ -3664,6 +3671,9 @@ class BuilderActivity : Activity() {
     private var talkLeftRequests = -1L
     private var talkLeftTokens = -1L
     private var talkResetsAt = ""
+    private var talkPartial = ""
+    private var talkLive: TextView? = null
+    private val talkStopping = java.util.concurrent.atomic.AtomicBoolean(false)
     private var cloneAddress = ""
 
     private var cloneToken = ""
@@ -4086,7 +4096,6 @@ class BuilderActivity : Activity() {
         }
         if (screen !is Screen.Terminal) {
             closeTheShell()
-            shellView = null
         }
         content.removeAllViews()
         results.removeAllViews()
@@ -8187,14 +8196,112 @@ class BuilderActivity : Activity() {
             setOnClickListener { press() }
         }
 
-    private fun renderTerminal() {
+    private fun shellNow(): Shell? = shells.getOrNull(shellAt)
+
+    private fun shellNamed(at: Int): String =
+        shells.getOrNull(at)?.named.orEmpty().ifEmpty { (at + 1).toString() }
+
+    private fun openAShell(): Shell? {
+        if (shells.size >= MOST_SHELLS) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_shell_full), palette.warning))
+            return null
+        }
         val home = filesDir.absolutePath
         val folder = openProject ?: home
-        val view = shellView?.also { it.repaint(palette) }
-            ?: TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
+        val view = TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
+        val shell = Shell(view, folder, (shells.size + 1).toString())
+        shells.add(shell)
+        shellAt = shells.size - 1
+        startTheShell(shell, home)
+        return shell
+    }
+
+    private fun startTheShell(shell: Shell, home: String) {
+        File(home, "tmp").mkdirs()
+        val handle = runCatching {
+            Builder.nativeShellOpen(
+                shell.folder,
+                home,
+                shell.view.screen.rows,
+                shell.view.screen.columns,
+            )
+        }.getOrDefault(-1)
+        if (handle < 0) {
+            results.addView(notice(getString(R.string.omni_shell_refused), palette.error))
+            return
+        }
+        shell.handle = handle
+        OmniLog.event(LogLevel.INFO, "shell", "A shell was opened.")
+        val reader = Thread {
+            val room = ByteArray(8192)
+            while (!Thread.currentThread().isInterrupted) {
+                val got = runCatching { Builder.nativeShellRead(handle, room, 60) }
+                    .getOrDefault(-1)
+                if (got < 0) {
+                    break
+                }
+                if (got > 0) {
+                    val copy = room.copyOf(got)
+                    runOnUiThread { shell.view.accept(copy, copy.size) }
+                }
+            }
+            runOnUiThread { closeOneShell(shell) }
+        }
+        reader.isDaemon = true
+        shell.reader = reader
+        reader.start()
+    }
+
+    private fun shellTab(at: Int): View = TextView(this).apply {
+        val here = at == shellAt
+        text = shellNamed(at)
+        setTextColor(if (here) Color.BLACK else Color.WHITE)
+        typeface = Type.heading
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        gravity = Gravity.CENTER
+        maxLines = 1
+        minWidth = gap(12)
+        setPadding(gap(3), gap(2), gap(3), gap(2))
+        isClickable = true
+        isFocusable = true
+        contentDescription = said(getString(R.string.omni_tab_shell), shellNamed(at))
+        readAs(Button::class.java.name)
+        background = touchable(
+            pill(if (here) Color.WHITE else Ink.hot(Color.BLACK, 0.16f), gap(2).toFloat()),
+            palette.accent,
+        )
+        setOnClickListener {
+            if (shellAt != at) {
+                shellAt = at
+                render(false)
+            }
+        }
+        setOnLongClickListener {
+            renameTheShell(at)
+            true
+        }
+    }
+
+    private fun renameTheShell(at: Int) {
+        val shell = shells.getOrNull(at) ?: return
+        askForName(getString(R.string.omni_shell_rename), shell.named) { chosen ->
+            shell.named = chosen.take(SHELL_NAME_MOST)
+            render(false)
+        }
+    }
+
+    private fun renderTerminal() {
+        if (shells.isEmpty()) {
+            openAShell()
+        }
+        if (shellAt !in shells.indices) {
+            shellAt = (shells.size - 1).coerceAtLeast(0)
+        }
+        val shell = shellNow() ?: return
+        shell.view.repaint(palette)
+        val view = shell.view
         (view.parent as? ViewGroup)?.removeView(view)
-        shellView = view
-        shellFolder = folder
 
         val frame = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -8222,38 +8329,42 @@ class BuilderActivity : Activity() {
                     LinearLayout.LayoutParams(gap(10), gap(10)),
                 )
                 addView(
-                    TextView(context).apply {
-                        text = getString(R.string.omni_tab_shell)
-                        setTextColor(Color.WHITE)
-                        typeface = Type.heading
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                        maxLines = 1
-                        setPadding(gap(1), 0, 0, 0)
+                    HorizontalScrollView(context).apply {
+                        isHorizontalScrollBarEnabled = false
+                        addView(
+                            LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                shells.indices.forEach { at ->
+                                    addView(
+                                        shellTab(at),
+                                        LinearLayout.LayoutParams(
+                                            WRAP_CONTENT,
+                                            WRAP_CONTENT,
+                                        ).apply { marginStart = gap(1) },
+                                    )
+                                }
+                            },
+                            FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+                        )
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
+                if (shells.size > 1) {
+                    addView(
+                        shellControl(Mark.Shape.CLOSE, R.string.omni_shell_close) {
+                            shellNow()?.let { closeOneShell(it) }
+                            render(false)
+                        },
+                        LinearLayout.LayoutParams(gap(10), gap(10)),
+                    )
+                }
                 addView(
-                    shellControl(Mark.Shape.COPY, R.string.omni_action_copy) { copyTheShell() },
-                    LinearLayout.LayoutParams(gap(10), gap(10)),
-                )
-                addView(
-                    shellControl(Mark.Shape.CLIP, R.string.omni_editor_paste) {
-                        pasteIntoTheShell()
-                    },
-                    LinearLayout.LayoutParams(gap(10), gap(10)),
-                )
-                addView(
-                    View(context).apply {
-                        foreground = Mark(Mark.Shape.HELP, Color.WHITE)
-                        val squeeze = gap(3) / 2
-                        setPadding(squeeze, squeeze, squeeze, squeeze)
-                        isClickable = true
-                        isFocusable = true
-                        contentDescription = getString(R.string.omni_help_title)
-                        readAs(Button::class.java.name)
-                        background = reacting(Color.TRANSPARENT, gap(6).toFloat(), palette.accent)
-                        setOnClickListener { go(Screen.Help) }
-                    },
+                    shellControl(Mark.Shape.ADD, R.string.omni_shell_new) {
+                        if (openAShell() != null) {
+                            render(false)
+                        }
+                    }.apply { alpha = if (shells.size >= MOST_SHELLS) 0.35f else 1f },
                     LinearLayout.LayoutParams(gap(10), gap(10)),
                 )
             },
@@ -8270,62 +8381,28 @@ class BuilderActivity : Activity() {
         )
 
         view.whenResized { rows, columns ->
-            if (shellHandle >= 0) {
-                runCatching { Builder.nativeShellResize(shellHandle, rows, columns) }
+            val held = shellNow() ?: return@whenResized
+            if (held.handle >= 0) {
+                runCatching { Builder.nativeShellResize(held.handle, rows, columns) }
             }
         }
         view.setOnClickListener {
             view.requestFocus()
             view.windowInsetsController?.show(WindowInsets.Type.ime())
         }
-
-        if (shellHandle < 0) {
-            openTheShell(folder, home, view)
-        } else {
-            view.accept(byteArrayOf(), 0)
-        }
-    }
-
-    private fun openTheShell(folder: String, home: String, view: TerminalView) {
-        File(home, "tmp").mkdirs()
-        val handle = runCatching {
-            Builder.nativeShellOpen(folder, home, view.screen.rows, view.screen.columns)
-        }.getOrDefault(-1)
-        if (handle < 0) {
-            results.addView(notice(getString(R.string.omni_shell_refused), palette.error))
-            return
-        }
-        shellHandle = handle
-        OmniLog.event(LogLevel.INFO, "shell", "A shell was opened.")
-        val reader = Thread {
-            val room = ByteArray(8192)
-            while (!Thread.currentThread().isInterrupted) {
-                val got = runCatching { Builder.nativeShellRead(handle, room, 60) }
-                    .getOrDefault(-1)
-                if (got < 0) {
-                    break
-                }
-                if (got > 0) {
-                    val copy = room.copyOf(got)
-                    runOnUiThread { shellView?.accept(copy, copy.size) }
-                }
-            }
-            runOnUiThread { closeTheShell() }
-        }
-        reader.isDaemon = true
-        shellReader = reader
-        reader.start()
+        view.accept(byteArrayOf(), 0)
     }
 
     private fun writeToTheShell(bytes: ByteArray) {
-        if (shellHandle < 0 || bytes.isEmpty()) {
+        val shell = shellNow() ?: return
+        if (shell.handle < 0 || bytes.isEmpty()) {
             return
         }
-        runCatching { Builder.nativeShellWrite(shellHandle, bytes) }
+        runCatching { Builder.nativeShellWrite(shell.handle, bytes) }
     }
 
     private fun sendToTheShell(bytes: ByteArray) {
-        if (shellHandle < 0 || bytes.isEmpty()) {
+        if (bytes.isEmpty()) {
             return
         }
         val said = if (shellControl) {
@@ -8337,52 +8414,37 @@ class BuilderActivity : Activity() {
         writeToTheShell(said)
     }
 
-    private fun pasteIntoTheShell() {
-        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
-        val held = clipboard.primaryClip?.takeIf { it.itemCount > 0 }
-            ?.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
-            .orEmpty()
-        if (held.isEmpty()) {
-            return
-        }
-        val said = held.replace("\r\n", "\n")
-        if (shellView?.screen?.bracketed == true) {
-            writeToTheShell(PASTE_OPENS.toByteArray(Charsets.UTF_8))
-            writeToTheShell(said.toByteArray(Charsets.UTF_8))
-            writeToTheShell(PASTE_CLOSES.toByteArray(Charsets.UTF_8))
-        } else {
-            writeToTheShell(said.toByteArray(Charsets.UTF_8))
-        }
-        shellView?.requestFocus()
-    }
-
-    private fun copyTheShell() {
-        val said = shellView?.screen?.asText().orEmpty()
-        if (said.isEmpty()) {
-            return
-        }
-        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
-        clipboard.setPrimaryClip(
-            ClipData.newPlainText(getString(R.string.omni_tab_shell), said)
-        )
-        flash(
-            getString(R.string.omni_settings_logs_copied),
-            palette.ok,
-            Mark.Shape.COPY,
-        )
-    }
-
-    private fun closeTheShell() {
-        val handle = shellHandle
-        shellHandle = -1
-        shellReader?.interrupt()
-        shellReader = null
+    private fun closeOneShell(shell: Shell) {
+        val handle = shell.handle
+        shell.handle = -1
+        shell.reader?.interrupt()
+        shell.reader = null
         if (handle >= 0) {
             runCatching { Builder.nativeShellClose(handle) }
             OmniLog.event(LogLevel.INFO, "shell", "The shell was closed.")
         }
+        val at = shells.indexOf(shell)
+        if (at >= 0 && shells.size > 1) {
+            shells.removeAt(at)
+            if (shellAt >= shells.size) {
+                shellAt = shells.size - 1
+            }
+        }
+    }
+
+    private fun closeTheShell() {
+        shells.toList().forEach { shell ->
+            val handle = shell.handle
+            shell.handle = -1
+            shell.reader?.interrupt()
+            shell.reader = null
+            if (handle >= 0) {
+                runCatching { Builder.nativeShellClose(handle) }
+            }
+        }
+        shells.clear()
+        shellAt = 0
+        OmniLog.event(LogLevel.INFO, "shell", "Every shell was closed.")
     }
 
     private fun shellKey(view: TerminalView, named: String, press: () -> Unit): View =
@@ -8490,6 +8552,96 @@ class BuilderActivity : Activity() {
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
         }
+
+    private fun blocksIn(said: String): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        val lines = said.lines()
+        var at = 0
+        while (at < lines.size) {
+            val line = lines[at]
+            if (!line.startsWith("```")) {
+                at += 1
+                continue
+            }
+            val head = line.removePrefix("```").trim().split(Regex("\\s+"))
+            val named = head.lastOrNull().orEmpty()
+            var stop = at + 1
+            while (stop < lines.size && !lines[stop].startsWith("```")) {
+                stop += 1
+            }
+            if (head.size >= 2 && named.contains('/') && !named.contains("..")) {
+                out.add(named to lines.subList(at + 1, stop).joinToString("\n"))
+            }
+            at = stop + 1
+        }
+        return out
+    }
+
+    private fun writeTheBlock(named: String, body: String) {
+        val root = talkFolder()
+        results.removeAllViews()
+        if (root == null) {
+            results.addView(notice(getString(R.string.omni_projects_none), palette.warning))
+            return
+        }
+        val answer = runCatching {
+            Builder.nativeWriteFile(root, named, if (body.endsWith("\n")) body else body + "\n")
+        }.getOrElse {
+            results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
+            return
+        }
+        act(answer, "written")
+    }
+
+    private fun liveBubble(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.START
+                setPadding(0, gap(2), 0, gap(1))
+                addView(
+                    ImageView(context).apply {
+                        setImageResource(R.drawable.omni_art_talk_head)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(gap(21), gap(21)),
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(gap(3), gap(3), gap(3), gap(3))
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(5) / 2f
+                            setColor(palette.raised)
+                            setStroke(1, palette.divider)
+                        }
+                        addView(
+                            TextView(context).apply {
+                                text = talkPartial.ifEmpty {
+                                    getString(R.string.omni_talk_thinking)
+                                }
+                                setTextColor(Ink.hot(palette.muted, 0.34f))
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                                setLineSpacing(gap(1) / 2f, 1f)
+                                talkLive = this
+                            }
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
+        addView(
+            subtle(getString(R.string.omni_stage_stop), palette.error) { stopTheAssistant() },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                marginStart = gap(21)
+            },
+        )
+    }
 
     private fun talkFolder(): String? = talkRoot ?: openProject
 
@@ -8643,6 +8795,25 @@ class BuilderActivity : Activity() {
         content.addView(assistantMeter())
         talkHeld.forEachIndexed { at, one ->
             content.addView(talkBubble(one.first, one.second, at == 0 && !one.first))
+            if (!one.first) {
+                blocksIn(one.second).forEach { (named, body) ->
+                    content.addView(
+                        subtle("${getString(R.string.omni_action_save)}  $named",
+                            palette.ok) {
+                            writeTheBlock(named, body)
+                        }.apply {
+                            layoutParams = LinearLayout.LayoutParams(
+                                MATCH_PARENT,
+                                WRAP_CONTENT,
+                            ).apply { marginStart = gap(21) }
+                        }
+                    )
+                }
+            }
+        }
+        talkLive = null
+        if (talkAsking) {
+            content.addView(liveBubble())
         }
         content.addView(
             TextView(this).apply {
@@ -8858,7 +9029,7 @@ class BuilderActivity : Activity() {
                                 append(" / ")
                                 append(countable(model.window))
                                 append("  ")
-                                append("%${'$'}{(filled * 100f).toInt()}")
+                                append("%${(filled * 100f).toInt()}")
                             }
                             setTextColor(palette.muted)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -8897,7 +9068,7 @@ class BuilderActivity : Activity() {
             val said = mutableListOf<String>()
             if (talkLeftRequests >= 0L) {
                 said.add(
-                    "${'$'}{getString(R.string.omni_talk_left)} ${'$'}{countable(talkLeftRequests)}"
+                    "${getString(R.string.omni_talk_left)} ${countable(talkLeftRequests)}"
                 )
             }
             if (talkLeftTokens >= 0L) {
@@ -8907,7 +9078,7 @@ class BuilderActivity : Activity() {
                 said.add(talkResetsAt)
             }
             if (talkSpentIn > 0L || talkSpentOut > 0L) {
-                said.add("↑${'$'}{countable(talkSpentIn)} ↓${'$'}{countable(talkSpentOut)}")
+                said.add("↑${countable(talkSpentIn)} ↓${countable(talkSpentOut)}")
             }
             if (said.isNotEmpty()) {
                 addView(quiet(said.joinToString("  ·  ")))
@@ -8955,7 +9126,7 @@ class BuilderActivity : Activity() {
                             )
                             addView(
                                 TextView(context).apply {
-                                    text = "${'$'}{one.id}  ·  ${'$'}{countable(one.window)}"
+                                    text = "${one.id}  ·  ${countable(one.window)}"
                                     setTextColor(palette.muted)
                                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                                     maxLines = 1
@@ -8982,8 +9153,8 @@ class BuilderActivity : Activity() {
     }
 
     private fun countable(value: Long): String = when {
-        value >= 1_000_000L -> "${'$'}{value / 1_000_000L}M"
-        value >= 1_000L -> "${'$'}{value / 1_000L}K"
+        value >= 1_000_000L -> "${value / 1_000_000L}M"
+        value >= 1_000L -> "${value / 1_000L}K"
         else -> value.toString()
     }
 
@@ -9003,6 +9174,8 @@ class BuilderActivity : Activity() {
         talkHeld.add(true to said)
         talkDraft = ""
         talkAsking = true
+        talkPartial = ""
+        talkStopping.set(false)
         render(false)
 
         val turns = mutableListOf<Brain.Turn>()
@@ -9026,18 +9199,30 @@ class BuilderActivity : Activity() {
                 val system = assistantSystem(where)
                 val opened = Vault.open(key) ?: throw Brain.Refused(R.string.omni_talk_bad_key)
                 try {
-                    Brain.ask(opened, turns, model, effort, system)
+                    Brain.stream(opened, turns, model, effort, system, talkStopping) { part ->
+                        runOnUiThread {
+                            if (isFinishing || isDestroyed) {
+                                return@runOnUiThread
+                            }
+                            talkPartial += part
+                            talkLive?.text = talkPartial
+                        }
+                    }
                 } finally {
                     opened.fill(' ')
                 }
             }
             runOnUiThread {
                 talkAsking = false
+                talkLive = null
                 if (isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
                 answer.fold({ held ->
-                    talkHeld.add(false to held.said.ifEmpty { getString(R.string.omni_refused) })
+                    val spoken = held.said.ifEmpty { talkPartial }
+                    talkHeld.add(
+                        false to spoken.ifEmpty { getString(R.string.omni_refused) }
+                    )
                     if (held.stopped == "max_tokens") {
                         talkHeld.add(false to getString(R.string.omni_talk_cut))
                     }
@@ -9050,6 +9235,9 @@ class BuilderActivity : Activity() {
                         talkResetsAt = held.limits.resetsAt
                     }
                 }) { why ->
+                    if (talkPartial.isNotEmpty()) {
+                        talkHeld.add(false to talkPartial)
+                    }
                     val refused = why as? Brain.Refused
                     val text = if (refused != null) {
                         val head = getString(refused.said)
@@ -9063,9 +9251,17 @@ class BuilderActivity : Activity() {
                     }
                     talkHeld.add(false to text)
                 }
+                talkPartial = ""
                 render(false)
             }
         }.start()
+    }
+
+    private fun stopTheAssistant() {
+        if (!talkAsking) {
+            return
+        }
+        talkStopping.set(true)
     }
 
     private fun assistantSystem(root: String?): String {
@@ -9085,8 +9281,10 @@ class BuilderActivity : Activity() {
         if (tree.isEmpty()) {
             return ""
         }
-        return "The reader is working in an Android project named ${'$'}{here.name}. " +
-            "These are the files it holds:\n${'$'}tree"
+        return "The reader is working in an Android project named ${here.name}. " +
+            "When you hand back a whole file, open its fence with the language and the " +
+            "path inside the project, like ```java Java/com/tr/yt/Main.java, so it can be " +
+            "written where it belongs. These are the files it holds:\n$tree"
     }
 
     private fun logButton(mark: Mark.Shape, named: Int, filled: Boolean, onPress: () -> Unit) =
@@ -17353,6 +17551,8 @@ internal object Brain {
 
     const val MOST_TOKENS = 16_000
 
+    const val MOST_STREAMED = 64_000
+
     class Model(
         val id: String,
         val shown: String,
@@ -17429,6 +17629,18 @@ internal object Brain {
         }
         return asked.toString()
     }
+
+    private fun refusalFor(code: Int): Int = when (code) {
+        401, 403 -> R.string.omni_talk_bad_key
+        404 -> R.string.omni_talk_no_model
+        429 -> R.string.omni_talk_spent
+        529 -> R.string.omni_talk_busy
+        in 500..599 -> R.string.omni_talk_server
+        else -> R.string.omni_talk_refused
+    }
+
+    private fun detailFor(code: Int, limits: Limits, detail: String): String =
+        if (code == 429 && limits.retryAfter > 0) limits.retryAfter.toString() else detail
 
     private fun numbered(link: HttpURLConnection, named: String): Long =
         link.getHeaderField(named)?.trim()?.toLongOrNull() ?: -1L
@@ -17542,21 +17754,7 @@ internal object Brain {
             val detail = runCatching {
                 JSONObject(trouble).optJSONObject("error")?.optString("message").orEmpty()
             }.getOrDefault("")
-            throw Refused(
-                when (code) {
-                    401, 403 -> R.string.omni_talk_bad_key
-                    404 -> R.string.omni_talk_no_model
-                    429 -> R.string.omni_talk_spent
-                    529 -> R.string.omni_talk_busy
-                    in 500..599 -> R.string.omni_talk_server
-                    else -> R.string.omni_talk_refused
-                },
-                if (code == 429 && limits.retryAfter > 0) {
-                    limits.retryAfter.toString()
-                } else {
-                    detail
-                },
-            )
+            throw Refused(refusalFor(code), detailFor(code, limits, detail))
         }
 
         val said = read(link.inputStream)
@@ -17568,6 +17766,125 @@ internal object Brain {
             throw Refused(R.string.omni_talk_declined)
         }
         return Answer(spokenFrom(reply), stopped, spendFrom(reply), limits)
+    }
+
+    fun stream(
+        key: CharArray,
+        turns: List<Turn>,
+        model: String,
+        effort: String,
+        system: String,
+        stopping: java.util.concurrent.atomic.AtomicBoolean,
+        onText: (String) -> Unit,
+    ): Answer {
+        if (key.isEmpty()) {
+            throw Refused(R.string.omni_talk_no_key)
+        }
+        val link = runCatching { URL("$HOST/v1/messages").openConnection() }
+            .getOrNull() as? HttpURLConnection
+            ?: throw Refused(R.string.omni_talk_unreachable)
+        link.requestMethod = "POST"
+        link.connectTimeout = OPEN_MILLIS
+        link.readTimeout = READ_MILLIS
+        link.doOutput = true
+        link.setRequestProperty("x-api-key", String(key))
+        link.setRequestProperty("anthropic-version", DATED)
+        link.setRequestProperty("content-type", "application/json")
+        link.setRequestProperty("accept", "text/event-stream")
+        link.setRequestProperty("User-Agent", "omni-builder")
+
+        val asked = JSONObject(bodyOf(turns, model, effort, system))
+        asked.put("max_tokens", MOST_STREAMED)
+        asked.put("stream", true)
+        runCatching {
+            link.outputStream.use { out -> out.write(asked.toString().toByteArray(Charsets.UTF_8)) }
+        }.getOrElse {
+            link.disconnect()
+            throw Refused(R.string.omni_talk_unreachable)
+        }
+
+        val code = runCatching { link.responseCode }.getOrElse {
+            link.disconnect()
+            throw Refused(R.string.omni_talk_unreachable)
+        }
+        val limits = limitsOf(link)
+        if (code != 200) {
+            val trouble = read(link.errorStream)
+            link.disconnect()
+            val detail = runCatching {
+                JSONObject(trouble).optJSONObject("error")?.optString("message").orEmpty()
+            }.getOrDefault("")
+            throw Refused(refusalFor(code), detailFor(code, limits, detail))
+        }
+
+        val whole = StringBuilder()
+        var stopped = ""
+        var input = 0L
+        var output = 0L
+        var written = 0L
+        var readBack = 0L
+        runCatching {
+            link.inputStream.bufferedReader(Charsets.UTF_8).use { from ->
+                while (true) {
+                    if (stopping.get()) {
+                        stopped = "stopped"
+                        break
+                    }
+                    val line = from.readLine() ?: break
+                    if (!line.startsWith("data:")) {
+                        continue
+                    }
+                    val held = line.removePrefix("data:").trim()
+                    if (held.isEmpty() || held == "[DONE]") {
+                        continue
+                    }
+                    val event = runCatching { JSONObject(held) }.getOrNull() ?: continue
+                    when (event.optString("type")) {
+                        "message_start" -> {
+                            val used = event.optJSONObject("message")?.optJSONObject("usage")
+                            input = used?.optLong("input_tokens") ?: 0L
+                            written = used?.optLong("cache_creation_input_tokens") ?: 0L
+                            readBack = used?.optLong("cache_read_input_tokens") ?: 0L
+                        }
+                        "content_block_delta" -> {
+                            val delta = event.optJSONObject("delta") ?: continue
+                            if (delta.optString("type") != "text_delta") {
+                                continue
+                            }
+                            val part = delta.optString("text")
+                            if (part.isNotEmpty()) {
+                                whole.append(part)
+                                onText(part)
+                            }
+                        }
+                        "message_delta" -> {
+                            stopped = event.optJSONObject("delta")?.optString("stop_reason")
+                                .orEmpty()
+                                .ifEmpty { stopped }
+                            output = event.optJSONObject("usage")?.optLong("output_tokens")
+                                ?: output
+                        }
+                        "error" -> {
+                            val why = event.optJSONObject("error")?.optString("message").orEmpty()
+                            throw Refused(R.string.omni_talk_server, why)
+                        }
+                    }
+                }
+            }
+        }.getOrElse { why ->
+            link.disconnect()
+            throw (why as? Refused ?: Refused(R.string.omni_talk_unreachable))
+        }
+        link.disconnect()
+        if (stopped == "refusal") {
+            throw Refused(R.string.omni_talk_declined)
+        }
+        return Answer(
+            whole.toString(),
+            stopped,
+            Spend(input, output, written, readBack),
+            limits,
+        )
     }
 
     fun count(key: CharArray, turns: List<Turn>, model: String, system: String): Long {
