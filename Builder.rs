@@ -49095,6 +49095,7 @@ pub mod workspace {
     pub struct Built {
         pub name: String,
         pub path: String,
+        pub folder: String,
         pub bytes: u64,
         pub written_at: i64,
         pub bundle: bool,
@@ -49105,6 +49106,7 @@ pub mod workspace {
             w.begin_object(None);
             w.field_str("name", &self.name);
             w.field_str("path", &self.path);
+            w.field_str("folder", &self.folder);
             w.field_u64("bytes", self.bytes);
             w.field_u64("writtenAt", self.written_at.max(0) as u64);
             w.field_bool("bundle", self.bundle);
@@ -49112,35 +49114,65 @@ pub mod workspace {
         }
     }
 
-    pub fn list_built(directory: &str) -> Vec<Built> {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return Vec::new();
+    pub const OUTPUT_FOLDER: &str = "Outputs";
+
+    const OUTPUT_DEPTH: usize = 3;
+
+    fn built_at(path: &std::path::Path, under: &str) -> Option<Built> {
+        let suffix = path.extension().and_then(|value| value.to_str())?;
+        if suffix != PACKAGE_SUFFIX && suffix != BUNDLE_SUFFIX {
+            return None;
+        }
+        let data = std::fs::metadata(path).ok()?;
+        let written_at = data
+            .modified()
+            .ok()
+            .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0);
+        Some(Built {
+            name: path.file_name()?.to_str()?.to_string(),
+            path: path.to_str()?.to_string(),
+            folder: under.to_string(),
+            bytes: data.len(),
+            written_at,
+            bundle: suffix == BUNDLE_SUFFIX,
+        })
+    }
+
+    fn gather_built(here: &std::path::Path, under: &str, left: usize, found: &mut Vec<Built>) {
+        let Ok(entries) = std::fs::read_dir(here) else {
+            return;
         };
-        let mut found: Vec<Built> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .filter_map(|path| {
-                let suffix = path.extension().and_then(|value| value.to_str())?;
-                if suffix != PACKAGE_SUFFIX && suffix != BUNDLE_SUFFIX {
-                    return None;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(made) = built_at(&path, under) {
+                    found.push(made);
                 }
-                let data = std::fs::metadata(&path).ok()?;
-                let written_at = data
-                    .modified()
-                    .ok()
-                    .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|elapsed| elapsed.as_secs() as i64)
-                    .unwrap_or(0);
-                Some(Built {
-                    name: path.file_name()?.to_str()?.to_string(),
-                    path: path.to_str()?.to_string(),
-                    bytes: data.len(),
-                    written_at,
-                    bundle: suffix == BUNDLE_SUFFIX,
-                })
-            })
-            .collect();
+                continue;
+            }
+            if left == 0 || !path.is_dir() {
+                continue;
+            }
+            if path.read_link().is_ok() {
+                continue;
+            }
+            let Some(named) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            gather_built(&path, named, left - 1, found);
+        }
+    }
+
+    pub fn list_built(directory: &str) -> Vec<Built> {
+        let mut found = Vec::new();
+        gather_built(
+            std::path::Path::new(directory),
+            "",
+            OUTPUT_DEPTH,
+            &mut found,
+        );
         found.sort_by(|left, right| {
             right
                 .written_at
@@ -73786,6 +73818,47 @@ public final class MainActivity extends Activity {
         assert_eq!(listed.len(), 2, "{listed:?}");
         assert!(listed.iter().any(|made| made.bundle));
         assert!(listed.iter().any(|made| !made.bundle));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn what_was_built_is_found_in_the_dated_folders_it_was_written_to() {
+        let directory = temp_directory("omni-outputs");
+        let outputs = directory.join(super::workspace::OUTPUT_FOLDER);
+        let first = outputs.join("2026-09-19_10-00-00");
+        let second = outputs.join("2026-09-19_11-30-00");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("Held.apk"), b"one").unwrap();
+        std::fs::write(first.join("Held.aab"), b"two").unwrap();
+        std::fs::write(second.join("Held.apk"), b"three").unwrap();
+        std::fs::write(second.join("Held.apk.idsig"), b"beside").unwrap();
+        std::fs::write(outputs.join("notes.txt"), b"not a package").unwrap();
+
+        let listed = super::workspace::list_built(outputs.to_str().unwrap());
+        assert_eq!(listed.len(), 3, "{listed:?}");
+        assert_eq!(
+            listed.iter().filter(|made| made.bundle).count(),
+            1,
+            "{listed:?}"
+        );
+        assert!(
+            listed
+                .iter()
+                .all(|made| made.folder.starts_with("2026-09-19_")),
+            "each one says which dated folder it came out of: {listed:?}"
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|made| made.folder == "2026-09-19_11-30-00"),
+            "{listed:?}"
+        );
+        assert!(
+            listed.iter().all(|made| !made.name.ends_with(".idsig")),
+            "the side signature is not a package: {listed:?}"
+        );
 
         std::fs::remove_dir_all(&directory).ok();
     }

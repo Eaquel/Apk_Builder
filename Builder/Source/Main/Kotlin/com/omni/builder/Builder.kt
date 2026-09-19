@@ -77,6 +77,7 @@ import android.view.WindowInsetsController
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -104,6 +105,10 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Signature
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -377,36 +382,64 @@ class PackageProvider : ContentProvider() {
         const val BUNDLE_TYPE: String = "application/octet-stream"
         const val FOLDER: String = "Built"
 
+        const val OUTPUTS: String = "Outputs"
+
+        val SERVED: List<String> = listOf(".apk", ".aab", ".idsig")
+
         fun authority(context: Context): String = "${context.packageName}.packages"
 
         fun folder(context: Context): File =
             File(context.getExternalFilesDir(null) ?: context.filesDir, FOLDER)
 
-        fun uriFor(context: Context, file: File): Uri = Uri.Builder()
-            .scheme("content")
-            .authority(authority(context))
-            .appendPath(file.name)
-            .build()
+        fun own(context: Context): File = context.getExternalFilesDir(null) ?: context.filesDir
+
+        fun uriFor(context: Context, file: File): Uri {
+            val root = runCatching { own(context).canonicalPath }.getOrDefault("")
+            val here = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+            val under = if (root.isNotEmpty() && here.startsWith("$root${File.separator}")) {
+                here.substring(root.length + 1)
+            } else {
+                file.name
+            }
+            val built = Uri.Builder().scheme("content").authority(authority(context))
+            under.split(File.separatorChar).filter { it.isNotEmpty() }
+                .forEach { built.appendPath(it) }
+            return built.build()
+        }
     }
 
     override fun onCreate(): Boolean = true
 
     private fun resolve(uri: Uri): File? {
         val here = context ?: return null
-        val name = uri.lastPathSegment ?: return null
-        if (name.isEmpty() || name.contains('/') || name.contains('\\') || name.contains("..")) {
+        val parts = uri.pathSegments ?: return null
+        if (parts.isEmpty() || parts.size > 8) {
             return null
         }
-        val root = folder(here)
-        val file = File(root, name)
+        for (part in parts) {
+            if (part.isEmpty() || part == "." || part == ".." || part.contains('\\')) {
+                return null
+            }
+        }
+        val name = parts.last()
+        if (SERVED.none { name.endsWith(it, ignoreCase = true) }) {
+            return null
+        }
+        val root = own(here)
+        val file = parts.fold(root) { at, part -> File(at, part) }
         val inside = runCatching {
-            file.canonicalPath == File(root.canonicalPath, name).canonicalPath
+            val under = root.canonicalPath + File.separator
+            file.canonicalPath.startsWith(under)
         }.getOrDefault(false)
         return if (inside && file.isFile) file else null
     }
 
     override fun getType(uri: Uri): String =
-        if (uri.lastPathSegment?.endsWith(".apk") == true) PACKAGE_TYPE else BUNDLE_TYPE
+        if (uri.lastPathSegment?.endsWith(".apk", ignoreCase = true) == true) {
+            PACKAGE_TYPE
+        } else {
+            BUNDLE_TYPE
+        }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         if (mode != "r") {
@@ -696,6 +729,7 @@ data class KeySpec(
 data class Built(
     val name: String,
     val path: String,
+    val folder: String,
     val bytes: Long,
     val writtenAt: Long,
     val bundle: Boolean,
@@ -708,6 +742,7 @@ data class Built(
                 Built(
                     name = item.getString("name"),
                     path = item.getString("path"),
+                    folder = item.optString("folder"),
                     bytes = item.optLong("bytes"),
                     writtenAt = item.optLong("writtenAt"),
                     bundle = item.optBoolean("bundle", false),
@@ -1131,6 +1166,9 @@ object Preferences {
     private const val NEW_TARGET_SDK = "new_target_sdk"
     private const val SEARCHES = "searches"
     private const val SEARCHES_KEPT = 40
+    private const val ASSISTANT_KEY = "assistant_key"
+    private const val ASSISTANT_MODEL = "assistant_model"
+    private const val ASSISTANT_EFFORT = "assistant_effort"
 
     val LANGUAGES: List<Triple<String, String, String>> = listOf(
         Triple("tr", "Türkçe", "TR"),
@@ -1154,6 +1192,28 @@ object Preferences {
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
     fun language(context: Context): String = store(context).getString(LANGUAGE, "").orEmpty()
+
+    fun assistantKey(context: Context): String =
+        store(context).getString(ASSISTANT_KEY, "").orEmpty()
+
+    fun setAssistantKey(context: Context, sealed: String) {
+        store(context).edit().putString(ASSISTANT_KEY, sealed).apply()
+    }
+
+    fun assistantModel(context: Context): String =
+        store(context).getString(ASSISTANT_MODEL, "").orEmpty()
+            .ifEmpty { Brain.MODELS.first().id }
+
+    fun setAssistantModel(context: Context, id: String) {
+        store(context).edit().putString(ASSISTANT_MODEL, id).apply()
+    }
+
+    fun assistantEffort(context: Context): String =
+        store(context).getString(ASSISTANT_EFFORT, "").orEmpty().ifEmpty { "high" }
+
+    fun setAssistantEffort(context: Context, named: String) {
+        store(context).edit().putString(ASSISTANT_EFFORT, named).apply()
+    }
 
     fun setLanguage(context: Context, tag: String) {
         store(context).edit().putString(LANGUAGE, tag).apply()
@@ -3475,6 +3535,12 @@ class BuilderActivity : Activity() {
         const val PROJECT_ICON = "Icon.png"
         const val PROJECT_FILE = "Builder.json"
 
+        const val OUTPUT_STAMP = "yyyy-MM-dd_HH-mm-ss"
+
+        const val ROW_UNITS = 10
+
+        const val ASSISTANT_PATHS = 400
+
         val SHELL_BAR = 0xFF16181A.toInt()
 
         val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
@@ -3591,6 +3657,13 @@ class BuilderActivity : Activity() {
 
     private val talkHeld = mutableListOf<Pair<Boolean, String>>()
     private var talkDraft = ""
+    private var talkAsking = false
+    private var talkWindowUsed = 0L
+    private var talkSpentIn = 0L
+    private var talkSpentOut = 0L
+    private var talkLeftRequests = -1L
+    private var talkLeftTokens = -1L
+    private var talkResetsAt = ""
     private var cloneAddress = ""
 
     private var cloneToken = ""
@@ -5300,6 +5373,16 @@ class BuilderActivity : Activity() {
 
     private fun builtFolder() = PackageProvider.folder(this).also { it.mkdirs() }
 
+    private fun outputsFolder(root: String) =
+        File(root, PackageProvider.OUTPUTS).also { it.mkdirs() }
+
+    private fun freshOutput(root: String): File {
+        val stamp = SimpleDateFormat(OUTPUT_STAMP, Locale.US).format(Date())
+        val here = File(outputsFolder(root), stamp)
+        here.mkdirs()
+        return here
+    }
+
     private fun trashFolder() = File(getExternalFilesDir(null) ?: filesDir, "Trash").absolutePath
 
     private fun openHere(root: String) {
@@ -5557,10 +5640,10 @@ class BuilderActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(3), gap(2), gap(2), gap(2))
+            setPadding(gap(3), gap(3), gap(3), gap(3))
             addView(
                 View(context).apply { foreground = Mark(Mark.Shape.FOLDER, palette.marker) },
-                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(2) },
+                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
             )
             addView(
                 LinearLayout(context).apply {
@@ -5631,13 +5714,13 @@ class BuilderActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(7)
-            setPadding(gap(3), 0, gap(2), 0)
+            minimumHeight = gap(ROW_UNITS)
+            setPadding(gap(2), gap(1), gap(3), gap(1))
             isClickable = true
             isFocusable = true
             contentDescription = entry.path.substringAfterLast('/')
             readAs(Button::class.java.name)
-            background = touchable(pill(Color.TRANSPARENT, 0f), palette.accent)
+            pressable()
             setOnClickListener {
                 if (entry.folder) {
                     if (open) opened.remove(entry.path) else opened.add(entry.path)
@@ -5715,24 +5798,23 @@ class BuilderActivity : Activity() {
     private fun upRow(): View = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        minimumHeight = gap(7)
-        setPadding(gap(3), 0, gap(2), 0)
+        minimumHeight = gap(ROW_UNITS)
+        setPadding(gap(3), gap(1), gap(3), gap(1))
         isClickable = true
         isFocusable = true
         contentDescription = ".."
         readAs(Button::class.java.name)
-        background = touchable(pill(Color.TRANSPARENT, 0f), palette.accent)
+        pressable()
         setOnClickListener { go(Screen.Projects) }
-        addView(View(context), LinearLayout.LayoutParams(gap(4), MATCH_PARENT))
         addView(
-            View(context).apply { foreground = Mark(Mark.Shape.FOLDER, palette.marker) },
-            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+            View(context).apply { foreground = Mark(Mark.Shape.CHEVRON_LEFT, palette.marker) },
+            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
         )
         addView(
             TextView(context).apply {
                 text = ".."
                 setTextColor(palette.foreground)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             }
         )
     }
@@ -6439,13 +6521,13 @@ class BuilderActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(7)
-            setPadding(gap(6), 0, gap(2), 0)
+            minimumHeight = gap(ROW_UNITS)
+            setPadding(gap(3), gap(1), gap(3), gap(1))
             isClickable = true
             isFocusable = true
             contentDescription = name
             readAs(Button::class.java.name)
-            background = touchable(pill(Color.TRANSPARENT, 0f), palette.accent)
+            pressable()
             setOnClickListener {
                 if (entry.folder && other != null) {
                     stepPane(root, folder, entry.path)
@@ -6491,14 +6573,14 @@ class BuilderActivity : Activity() {
                         render(false)
                     }
                 },
-                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
             )
 
             addView(
                 TextView(context).apply {
                     text = name
                     setTextColor(palette.foreground)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
                 },
@@ -6675,6 +6757,52 @@ class BuilderActivity : Activity() {
                 },
             ),
             keeper,
+        )
+        editor.requestFocus()
+    }
+
+    private fun askForTheAssistantKey() {
+        val editor = styledField("", getString(R.string.omni_talk_key)).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            typeface = Type.data
+        }
+        dialogShell(
+            getString(R.string.omni_talk_key),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(quiet(getString(R.string.omni_talk_key_note)))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    val held = readSecret(editor)
+                    results.removeAllViews()
+                    if (held.isEmpty()) {
+                        results.addView(
+                            notice(getString(R.string.omni_talk_no_key), palette.warning)
+                        )
+                    } else {
+                        val locked = Vault.seal(held)
+                        held.fill(' ')
+                        editor.text?.clear()
+                        if (locked == null) {
+                            results.addView(
+                                notice(getString(R.string.omni_device_refused), palette.error)
+                            )
+                        } else {
+                            Preferences.setAssistantKey(this, locked)
+                            results.addView(
+                                notice(getString(R.string.omni_talk_key_set), palette.ok)
+                            )
+                        }
+                        it.dismiss()
+                        render(false)
+                    }
+                },
+            ),
         )
         editor.requestFocus()
     }
@@ -7528,7 +7656,7 @@ class BuilderActivity : Activity() {
 
         content.addView(heading(getString(R.string.omni_built_title)))
         val made = runCatching {
-            Built.list(Builder.nativeListBuilt(builtFolder().absolutePath))
+            Built.list(Builder.nativeListBuilt(outputsFolder(root).absolutePath))
         }.getOrDefault(emptyList())
 
         val shelf = card()
@@ -7543,10 +7671,20 @@ class BuilderActivity : Activity() {
             shelf.addView(
                 keyValue(
                     one.name,
-                    "${size(one.bytes)}  ·  ${moment(one.writtenAt)}",
+                    listOf(one.folder, size(one.bytes), moment(one.writtenAt))
+                        .filter { it.isNotEmpty() }
+                        .joinToString("  ·  "),
                     if (one.bundle) "AAB" else "APK",
                     if (one.bundle) palette.muted else palette.ok,
-                )
+                ).apply {
+                    minimumHeight = gap(TOUCH_UNITS)
+                    background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = said(one.name, getString(R.string.omni_action_open))
+                    readAs(Button::class.java.name)
+                    setOnClickListener { openOutside(file) }
+                }
             )
             actionsFor(file, shelf)
             if (!one.bundle) {
@@ -8462,9 +8600,7 @@ class BuilderActivity : Activity() {
                     chooseTalkFolder()
                 },
                 MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_talk_switch)) {
-                    results.addView(
-                        notice(getString(R.string.omni_talk_unwired), palette.warning)
-                    )
+                    chooseTheModel()
                 },
                 MenuChoice(
                     Mark.Shape.HELP,
@@ -8504,6 +8640,7 @@ class BuilderActivity : Activity() {
         if (talkHeld.isEmpty()) {
             talkHeld.add(false to getString(R.string.omni_talk_hello))
         }
+        content.addView(assistantMeter())
         talkHeld.forEachIndexed { at, one ->
             content.addView(talkBubble(one.first, one.second, at == 0 && !one.first))
         }
@@ -8679,15 +8816,277 @@ class BuilderActivity : Activity() {
         )
     }
 
+    private fun assistantMeter(): View {
+        val model = Brain.modelOf(Preferences.assistantModel(this))
+        val filled = if (model.window > 0L) {
+            (talkWindowUsed.toFloat() / model.window.toFloat()).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+        val tint = when {
+            filled >= 0.9f -> palette.error
+            filled >= 0.7f -> palette.warning
+            else -> palette.ok
+        }
+        return card().apply {
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = model.shown
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            isClickable = true
+                            isFocusable = true
+                            contentDescription = getString(R.string.omni_talk_model)
+                            readAs(Button::class.java.name)
+                            setPadding(gap(2), gap(1), gap(2), gap(1))
+                            pressable()
+                            setOnClickListener { chooseTheModel() }
+                        },
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = buildString {
+                                append(getString(R.string.omni_talk_window))
+                                append("  ")
+                                append(countable(talkWindowUsed))
+                                append(" / ")
+                                append(countable(model.window))
+                                append("  ")
+                                append("%${'$'}{(filled * 100f).toInt()}")
+                            }
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            gravity = Gravity.END
+                            maxLines = 1
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+            addView(
+                FrameLayout(context).apply {
+                    background = pill(Ink.fade(palette.divider, 0.6f), gap(1).toFloat())
+                    addView(
+                        View(context).apply { background = pill(tint, gap(1).toFloat()) },
+                        FrameLayout.LayoutParams(0, MATCH_PARENT).apply {
+                            width = 0
+                        },
+                    )
+                    post {
+                        val bar = getChildAt(0) ?: return@post
+                        bar.layoutParams = FrameLayout.LayoutParams(
+                            (width * filled).toInt().coerceAtLeast(if (filled > 0f) 1 else 0),
+                            MATCH_PARENT,
+                        )
+                        bar.requestLayout()
+                    }
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, gap(1)).apply {
+                    topMargin = gap(2)
+                    bottomMargin = gap(1)
+                },
+            )
+            val said = mutableListOf<String>()
+            if (talkLeftRequests >= 0L) {
+                said.add(
+                    "${'$'}{getString(R.string.omni_talk_left)} ${'$'}{countable(talkLeftRequests)}"
+                )
+            }
+            if (talkLeftTokens >= 0L) {
+                said.add(countable(talkLeftTokens))
+            }
+            if (talkResetsAt.isNotEmpty()) {
+                said.add(talkResetsAt)
+            }
+            if (talkSpentIn > 0L || talkSpentOut > 0L) {
+                said.add("↑${'$'}{countable(talkSpentIn)} ↓${'$'}{countable(talkSpentOut)}")
+            }
+            if (said.isNotEmpty()) {
+                addView(quiet(said.joinToString("  ·  ")))
+            }
+            if (talkAsking) {
+                addView(quiet(getString(R.string.omni_talk_thinking)))
+            }
+        }
+    }
+
+    private fun chooseTheModel() {
+        var shown: AlertDialog? = null
+        val here = Preferences.assistantModel(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        Brain.MODELS.forEachIndexed { at, one ->
+            if (at > 0) {
+                list.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+            }
+            list.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = gap(ROW_UNITS)
+                    setPadding(gap(4), gap(2), gap(4), gap(2))
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = one.shown
+                    readAs(Button::class.java.name)
+                    pressable()
+                    setOnClickListener {
+                        Preferences.setAssistantModel(this@BuilderActivity, one.id)
+                        shown?.dismiss()
+                        render(false)
+                    }
+                    addView(
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.VERTICAL
+                            addView(
+                                TextView(context).apply {
+                                    text = one.shown
+                                    setTextColor(palette.foreground)
+                                    typeface = Type.strong
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                                }
+                            )
+                            addView(
+                                TextView(context).apply {
+                                    text = "${'$'}{one.id}  ·  ${'$'}{countable(one.window)}"
+                                    setTextColor(palette.muted)
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                    maxLines = 1
+                                }
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        View(context).apply { background = radioMark(one.id == here) },
+                        LinearLayout.LayoutParams(gap(5), gap(5)),
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        shown = dialogShell(
+            getString(R.string.omni_talk_model),
+            list,
+            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+        )
+        shown.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        shown.show()
+    }
+
+    private fun countable(value: Long): String = when {
+        value >= 1_000_000L -> "${'$'}{value / 1_000_000L}M"
+        value >= 1_000L -> "${'$'}{value / 1_000L}K"
+        else -> value.toString()
+    }
+
     private fun sendToTheAssistant() {
         val said = talkDraft.trim()
-        if (said.isEmpty()) {
+        if (said.isEmpty() || talkAsking) {
+            return
+        }
+        val key = Preferences.assistantKey(this)
+        if (key.isEmpty()) {
+            talkHeld.add(true to said)
+            talkHeld.add(false to getString(R.string.omni_talk_no_key))
+            talkDraft = ""
+            render(false)
             return
         }
         talkHeld.add(true to said)
-        talkHeld.add(false to getString(R.string.omni_talk_unwired))
         talkDraft = ""
+        talkAsking = true
         render(false)
+
+        val turns = mutableListOf<Brain.Turn>()
+        talkHeld.drop(1).forEach { one ->
+            val last = turns.lastOrNull()
+            if (last != null && last.mine == one.first) {
+                turns[turns.size - 1] = Brain.Turn(one.first, last.said + "\n\n" + one.second)
+            } else {
+                turns.add(Brain.Turn(one.first, one.second))
+            }
+        }
+        while (turns.isNotEmpty() && !turns.first().mine) {
+            turns.removeAt(0)
+        }
+        val model = Preferences.assistantModel(this)
+        val effort = Preferences.assistantEffort(this)
+        val where = talkFolder()
+
+        Thread {
+            val answer = runCatching {
+                val system = assistantSystem(where)
+                val opened = Vault.open(key) ?: throw Brain.Refused(R.string.omni_talk_bad_key)
+                try {
+                    Brain.ask(opened, turns, model, effort, system)
+                } finally {
+                    opened.fill(' ')
+                }
+            }
+            runOnUiThread {
+                talkAsking = false
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                answer.fold({ held ->
+                    talkHeld.add(false to held.said.ifEmpty { getString(R.string.omni_refused) })
+                    if (held.stopped == "max_tokens") {
+                        talkHeld.add(false to getString(R.string.omni_talk_cut))
+                    }
+                    talkSpentIn += held.spend.input + held.spend.cacheWritten
+                    talkSpentOut += held.spend.output
+                    talkWindowUsed = held.spend.window() + held.spend.output
+                    if (held.limits.known()) {
+                        talkLeftRequests = held.limits.requestsLeft
+                        talkLeftTokens = held.limits.tokensLeft
+                        talkResetsAt = held.limits.resetsAt
+                    }
+                }) { why ->
+                    val refused = why as? Brain.Refused
+                    val text = if (refused != null) {
+                        val head = getString(refused.said)
+                        if (refused.detail.isEmpty()) {
+                            head
+                        } else {
+                            head + "  (" + refused.detail + ")"
+                        }
+                    } else {
+                        why.message ?: why.javaClass.simpleName
+                    }
+                    talkHeld.add(false to text)
+                }
+                render(false)
+            }
+        }.start()
+    }
+
+    private fun assistantSystem(root: String?): String {
+        if (root == null) {
+            return ""
+        }
+        val here = File(root)
+        if (!here.isDirectory) {
+            return ""
+        }
+        val tree = runCatching {
+            FileEntry.list(Builder.nativeProjectTree(root))
+                .filter { !it.folder }
+                .take(ASSISTANT_PATHS)
+                .joinToString("\n") { it.path }
+        }.getOrDefault("")
+        if (tree.isEmpty()) {
+            return ""
+        }
+        return "The reader is working in an Android project named ${'$'}{here.name}. " +
+            "These are the files it holds:\n${'$'}tree"
     }
 
     private fun logButton(mark: Mark.Shape, named: Int, filled: Boolean, onPress: () -> Unit) =
@@ -9267,6 +9666,11 @@ class BuilderActivity : Activity() {
         val named = File(root).name
         var gone = 0
         runCatching {
+            outputsFolder(root).listFiles()?.forEach { one ->
+                if (one.deleteRecursively()) {
+                    gone += 1
+                }
+            }
             builtFolder().listFiles()?.forEach { one ->
                 if (one.name.startsWith(named) && one.delete()) {
                     gone += 1
@@ -9282,7 +9686,10 @@ class BuilderActivity : Activity() {
         working({
             val into = File(builtFolder(), "${here.name}.zip")
             java.util.zip.ZipOutputStream(FileOutputStream(into)).use { out ->
-                here.walkTopDown().filter { it.isFile }.forEach { one ->
+                val outputs = File(here, PackageProvider.OUTPUTS).absolutePath
+                here.walkTopDown()
+                    .filter { it.isFile && !it.absolutePath.startsWith(outputs) }
+                    .forEach { one ->
                     val at = one.absolutePath.removePrefix(here.absolutePath).trimStart('/')
                     out.putNextEntry(java.util.zip.ZipEntry(at))
                     one.inputStream().use { it.copyTo(out) }
@@ -13548,6 +13955,42 @@ class BuilderActivity : Activity() {
             ) { go(Screen.Trash) }
         )
 
+        content.addView(heading(getString(R.string.omni_talk_key)))
+        val brain = card()
+        val sealed = Preferences.assistantKey(this)
+        brain.addView(
+            keyValue(
+                Brain.modelOf(Preferences.assistantModel(this)).shown,
+                if (sealed.isEmpty()) {
+                    getString(R.string.omni_talk_no_key)
+                } else {
+                    getString(R.string.omni_talk_key_set)
+                },
+                if (Vault.inHardware()) {
+                    getString(R.string.omni_device_hardware)
+                } else {
+                    getString(R.string.omni_device_software)
+                },
+                if (sealed.isEmpty()) palette.muted else palette.ok,
+            )
+        )
+        brain.addView(subtle(getString(R.string.omni_talk_model), palette.accent) {
+            chooseTheModel()
+        })
+        brain.addView(subtle(getString(R.string.omni_action_change), palette.accent) {
+            askForTheAssistantKey()
+        })
+        if (sealed.isNotEmpty()) {
+            brain.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
+                Preferences.setAssistantKey(this, "")
+                results.removeAllViews()
+                results.addView(notice(getString(R.string.omni_talk_key_gone), palette.ok))
+                render(false)
+            })
+        }
+        content.addView(brain)
+        content.addView(quiet(getString(R.string.omni_talk_key_note)))
+
         content.addView(heading(getString(R.string.omni_settings_logs)))
         val transcript = OmniLog.transcript().trimEnd()
         val logging = card()
@@ -13791,10 +14234,9 @@ class BuilderActivity : Activity() {
         }
 
         val name = File(root).name
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        val here = builtFolder()
-        val apk = File(here, "$name-$stamp.apk")
-        val aab = File(here, "$name-$stamp.aab")
+        val here = freshOutput(root)
+        val apk = File(here, "$name.apk")
+        val aab = File(here, "$name.aab")
         val password = readSecret(buildPasswordView)
         val started = System.nanoTime()
 
@@ -13859,10 +14301,9 @@ class BuilderActivity : Activity() {
         val held = DeviceKey.hex(certificate)
 
         val name = File(root).name
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        val here = builtFolder()
-        val apk = File(here, "$name-$stamp.apk")
-        val raw = File(here, "$name-$stamp-unsigned.apk")
+        val here = freshOutput(root)
+        val apk = File(here, "$name.apk")
+        val raw = File(here, "$name-unsigned.apk")
         val started = System.nanoTime()
 
         val learned = Preferences.timings(this)
@@ -14003,6 +14444,12 @@ class BuilderActivity : Activity() {
                 results.addView(notice(getString(R.string.omni_refused), palette.error))
                 showRefusal(Refusal.parse(JSONObject(answer)), results)
                 outcome.findings.forEach { results.addView(quiet(it)) }
+                runCatching {
+                    val here = apk.parentFile
+                    if (here != null && here.isDirectory && here.list()?.isEmpty() == true) {
+                        here.delete()
+                    }
+                }
                 return@finished
             }
 
@@ -14123,7 +14570,23 @@ class BuilderActivity : Activity() {
         )
     }
 
+    private fun openOutside(file: File) {
+        if (!file.isFile) {
+            return
+        }
+        val (uri, type) = handleFor(file)
+        hand(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
     private fun actionsFor(file: File, into: LinearLayout) {
+        into.addView(subtle(getString(R.string.omni_action_open), palette.ok) {
+            openOutside(file)
+        })
         into.addView(subtle(getString(R.string.omni_action_share), palette.accent) {
             shareOutside(file)
         })
@@ -14343,6 +14806,31 @@ class BuilderActivity : Activity() {
 
     private fun touchable(background: GradientDrawable, ripple: Int): Drawable =
         RippleDrawable(ColorStateList.valueOf(ripple), background, null)
+
+    private fun View.pressable(radius: Float = gap(2).toFloat(), depth: Float = 0.97f) {
+        background = touchable(pill(Color.TRANSPARENT, radius), palette.accent)
+        if (Motion.still()) {
+            return
+        }
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> view.animate()
+                    .scaleX(depth).scaleY(depth)
+                    .setDuration(Motion.of(Motion.TAP))
+                    .setInterpolator(DecelerateInterpolator())
+                    .start()
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL,
+                -> view.animate()
+                    .scaleX(1f).scaleY(1f)
+                    .setDuration(Motion.of(Motion.REBOUND))
+                    .setInterpolator(OvershootInterpolator(1.4f))
+                    .start()
+            }
+            false
+        }
+    }
 
     private fun reacting(fill: Int, radius: Float, accent: Int): Drawable {
         val ring = pill(fill, radius).apply {
@@ -16848,6 +17336,346 @@ internal object DeviceKey {
             out[index] = held.toByte()
         }
         return out
+    }
+}
+
+internal object Brain {
+
+    private const val HOST = "https://api.anthropic.com"
+
+    private const val DATED = "2023-06-01"
+
+    private const val OPEN_MILLIS = 20_000
+
+    private const val READ_MILLIS = 180_000
+
+    private const val REPLY_BYTES = 8 * 1024 * 1024
+
+    const val MOST_TOKENS = 16_000
+
+    class Model(
+        val id: String,
+        val shown: String,
+        val window: Long,
+    )
+
+    val MODELS: List<Model> = listOf(
+        Model("claude-opus-5", "Opus 5", 1_000_000L),
+        Model("claude-sonnet-5", "Sonnet 5", 1_000_000L),
+        Model("claude-haiku-4-5", "Haiku 4.5", 200_000L),
+    )
+
+    fun modelOf(id: String): Model = MODELS.firstOrNull { it.id == id } ?: MODELS.first()
+
+    class Turn(val mine: Boolean, val said: String)
+
+    class Limits(
+        val requestsLeft: Long,
+        val tokensLeft: Long,
+        val resetsAt: String,
+        val retryAfter: Long,
+    ) {
+        fun known(): Boolean = requestsLeft >= 0 || tokensLeft >= 0
+    }
+
+    class Spend(
+        val input: Long,
+        val output: Long,
+        val cacheWritten: Long,
+        val cacheRead: Long,
+    ) {
+        fun window(): Long = input + cacheWritten + cacheRead
+    }
+
+    class Answer(
+        val said: String,
+        val stopped: String,
+        val spend: Spend,
+        val limits: Limits,
+    )
+
+    class Refused(val said: Int, val detail: String = "") : Exception()
+
+    private fun bodyOf(turns: List<Turn>, model: String, effort: String, system: String): String {
+        val messages = JSONArray()
+        turns.forEach { one ->
+            messages.put(
+                JSONObject()
+                    .put("role", if (one.mine) "user" else "assistant")
+                    .put("content", one.said)
+            )
+        }
+        val asked = JSONObject()
+            .put("model", model)
+            .put("max_tokens", MOST_TOKENS)
+            .put("messages", messages)
+            .put("thinking", JSONObject().put("type", "adaptive"))
+        if (effort.isNotEmpty()) {
+            asked.put("output_config", JSONObject().put("effort", effort))
+        }
+        if (system.isNotEmpty()) {
+            asked.put(
+                "system",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "text")
+                        .put("text", system)
+                        .put(
+                            "cache_control",
+                            JSONObject().put("type", "ephemeral"),
+                        )
+                )
+            )
+        }
+        return asked.toString()
+    }
+
+    private fun numbered(link: HttpURLConnection, named: String): Long =
+        link.getHeaderField(named)?.trim()?.toLongOrNull() ?: -1L
+
+    private fun limitsOf(link: HttpURLConnection): Limits {
+        var requests = -1L
+        var tokens = -1L
+        var resets = ""
+        link.headerFields?.forEach { (named, values) ->
+            val key = named?.lowercase(Locale.US) ?: return@forEach
+            if (!key.contains("ratelimit")) {
+                return@forEach
+            }
+            val held = values.firstOrNull()?.trim().orEmpty()
+            when {
+                key.endsWith("requests-remaining") -> requests = held.toLongOrNull() ?: requests
+                key.endsWith("tokens-remaining") -> tokens = held.toLongOrNull() ?: tokens
+                key.endsWith("tokens-reset") && resets.isEmpty() -> resets = held
+                key.endsWith("requests-reset") && resets.isEmpty() -> resets = held
+            }
+        }
+        return Limits(requests, tokens, resets, numbered(link, "retry-after"))
+    }
+
+    private fun read(from: java.io.InputStream?): String {
+        if (from == null) {
+            return ""
+        }
+        return runCatching {
+            from.use { held ->
+                val room = ByteArrayOutputStream()
+                val slab = ByteArray(32 * 1024)
+                while (room.size() < REPLY_BYTES) {
+                    val got = held.read(slab)
+                    if (got < 0) {
+                        break
+                    }
+                    room.write(slab, 0, got)
+                }
+                room.toString(Charsets.UTF_8.name())
+            }
+        }.getOrDefault("")
+    }
+
+    private fun spokenFrom(reply: JSONObject): String {
+        val parts = reply.optJSONArray("content") ?: return ""
+        val out = StringBuilder()
+        for (at in 0 until parts.length()) {
+            val one = parts.optJSONObject(at) ?: continue
+            if (one.optString("type") != "text") {
+                continue
+            }
+            if (out.isNotEmpty()) {
+                out.append("\n\n")
+            }
+            out.append(one.optString("text"))
+        }
+        return out.toString()
+    }
+
+    private fun spendFrom(reply: JSONObject): Spend {
+        val used = reply.optJSONObject("usage") ?: JSONObject()
+        return Spend(
+            used.optLong("input_tokens"),
+            used.optLong("output_tokens"),
+            used.optLong("cache_creation_input_tokens"),
+            used.optLong("cache_read_input_tokens"),
+        )
+    }
+
+    fun ask(
+        key: CharArray,
+        turns: List<Turn>,
+        model: String,
+        effort: String,
+        system: String,
+    ): Answer {
+        if (key.isEmpty()) {
+            throw Refused(R.string.omni_talk_no_key)
+        }
+        val link = runCatching { URL("$HOST/v1/messages").openConnection() }
+            .getOrNull() as? HttpURLConnection
+            ?: throw Refused(R.string.omni_talk_unreachable)
+        link.requestMethod = "POST"
+        link.connectTimeout = OPEN_MILLIS
+        link.readTimeout = READ_MILLIS
+        link.doOutput = true
+        link.setRequestProperty("x-api-key", String(key))
+        link.setRequestProperty("anthropic-version", DATED)
+        link.setRequestProperty("content-type", "application/json")
+        link.setRequestProperty("accept", "application/json")
+        link.setRequestProperty("User-Agent", "omni-builder")
+
+        runCatching {
+            link.outputStream.use { out ->
+                out.write(bodyOf(turns, model, effort, system).toByteArray(Charsets.UTF_8))
+            }
+        }.getOrElse {
+            link.disconnect()
+            throw Refused(R.string.omni_talk_unreachable)
+        }
+
+        val code = runCatching { link.responseCode }.getOrElse {
+            link.disconnect()
+            throw Refused(R.string.omni_talk_unreachable)
+        }
+        val limits = limitsOf(link)
+        if (code != 200) {
+            val trouble = read(link.errorStream)
+            link.disconnect()
+            val detail = runCatching {
+                JSONObject(trouble).optJSONObject("error")?.optString("message").orEmpty()
+            }.getOrDefault("")
+            throw Refused(
+                when (code) {
+                    401, 403 -> R.string.omni_talk_bad_key
+                    404 -> R.string.omni_talk_no_model
+                    429 -> R.string.omni_talk_spent
+                    529 -> R.string.omni_talk_busy
+                    in 500..599 -> R.string.omni_talk_server
+                    else -> R.string.omni_talk_refused
+                },
+                if (code == 429 && limits.retryAfter > 0) {
+                    limits.retryAfter.toString()
+                } else {
+                    detail
+                },
+            )
+        }
+
+        val said = read(link.inputStream)
+        link.disconnect()
+        val reply = runCatching { JSONObject(said) }
+            .getOrElse { throw Refused(R.string.omni_talk_refused) }
+        val stopped = reply.optString("stop_reason")
+        if (stopped == "refusal") {
+            throw Refused(R.string.omni_talk_declined)
+        }
+        return Answer(spokenFrom(reply), stopped, spendFrom(reply), limits)
+    }
+
+    fun count(key: CharArray, turns: List<Turn>, model: String, system: String): Long {
+        if (key.isEmpty()) {
+            return -1L
+        }
+        val link = runCatching { URL("$HOST/v1/messages/count_tokens").openConnection() }
+            .getOrNull() as? HttpURLConnection ?: return -1L
+        return runCatching {
+            link.requestMethod = "POST"
+            link.connectTimeout = OPEN_MILLIS
+            link.readTimeout = OPEN_MILLIS
+            link.doOutput = true
+            link.setRequestProperty("x-api-key", String(key))
+            link.setRequestProperty("anthropic-version", DATED)
+            link.setRequestProperty("content-type", "application/json")
+            link.setRequestProperty("User-Agent", "omni-builder")
+            val asked = JSONObject(bodyOf(turns, model, "", system))
+            asked.remove("max_tokens")
+            asked.remove("output_config")
+            link.outputStream.use { out ->
+                out.write(asked.toString().toByteArray(Charsets.UTF_8))
+            }
+            if (link.responseCode != 200) {
+                -1L
+            } else {
+                JSONObject(read(link.inputStream)).optLong("input_tokens", -1L)
+            }
+        }.getOrDefault(-1L).also { link.disconnect() }
+    }
+}
+
+internal object Vault {
+
+    private const val ALIAS = "omni_builder_secrets"
+
+    private const val STORE = "AndroidKeyStore"
+
+    private const val SHAPE = "AES/GCM/NoPadding"
+
+    private const val TAG_BITS = 128
+
+    private const val NONCE_BYTES = 12
+
+    private fun store(): KeyStore = KeyStore.getInstance(STORE).apply { load(null) }
+
+    private fun key(): SecretKey? = runCatching {
+        val held = store()
+        (held.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey ?: make()
+    }.getOrNull()
+
+    private fun make(): SecretKey? = runCatching {
+        val maker = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, STORE)
+        val spec = KeyGenParameterSpec.Builder(
+            ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(false)
+        maker.init(spec.build())
+        maker.generateKey()
+    }.getOrNull()
+
+    fun inHardware(): Boolean = runCatching {
+        val held = key() ?: return false
+        val facts = KeyFactory.getInstance(held.algorithm, STORE)
+        val about = facts.getKeySpec(held, KeyInfo::class.java) as KeyInfo
+        about.securityLevel != KeyProperties.SECURITY_LEVEL_SOFTWARE
+    }.getOrDefault(false)
+
+    fun seal(said: CharArray): String? = runCatching {
+        val held = key() ?: return null
+        val cipher = Cipher.getInstance(SHAPE)
+        cipher.init(Cipher.ENCRYPT_MODE, held)
+        val plain = ByteArray(said.size) { said[it].code.toByte() }
+        val sealed = cipher.doFinal(plain)
+        plain.fill(0)
+        val out = ByteArray(cipher.iv.size + sealed.size)
+        cipher.iv.copyInto(out)
+        sealed.copyInto(out, cipher.iv.size)
+        Base64.encodeToString(out, Base64.NO_WRAP)
+    }.getOrNull()
+
+    fun open(sealed: String): CharArray? = runCatching {
+        if (sealed.isEmpty()) {
+            return null
+        }
+        val held = key() ?: return null
+        val raw = Base64.decode(sealed, Base64.NO_WRAP)
+        if (raw.size <= NONCE_BYTES) {
+            return null
+        }
+        val cipher = Cipher.getInstance(SHAPE)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            held,
+            GCMParameterSpec(TAG_BITS, raw, 0, NONCE_BYTES),
+        )
+        val plain = cipher.doFinal(raw, NONCE_BYTES, raw.size - NONCE_BYTES)
+        val out = CharArray(plain.size) { plain[it].toInt().toChar() }
+        plain.fill(0)
+        out
+    }.getOrNull()
+
+    fun forget() {
+        runCatching { store().deleteEntry(ALIAS) }
     }
 }
 
