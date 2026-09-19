@@ -602,6 +602,7 @@ object Builder {
         certificate: String,
         signatureV2: String,
         signatureV3: String,
+        signatureV31: String,
         minSdk: Int,
         maxSdk: Int,
     ): String
@@ -13915,16 +13916,18 @@ class BuilderActivity : Activity() {
         val signedFirst = DeviceKey.sign(first)
             ?: throw IOException("the device would not sign with its own key")
 
-        val secondText = prepared.optString("toSignV3")
-        val signedSecond = if (secondText.isEmpty()) {
-            ""
-        } else {
-            val second = DeviceKey.bytes(secondText)
-                ?: throw IOException("the Core asked for a signature over nothing")
-            DeviceKey.hex(
-                DeviceKey.sign(second)
-                    ?: throw IOException("the device would not sign with its own key")
-            )
+        val signedWith = { named: String ->
+            val text = prepared.optString(named)
+            if (text.isEmpty()) {
+                ""
+            } else {
+                val held = DeviceKey.bytes(text)
+                    ?: throw IOException("the Core asked for a signature over nothing")
+                DeviceKey.hex(
+                    DeviceKey.sign(held)
+                        ?: throw IOException("the device would not sign with its own key")
+                )
+            }
         }
 
         return Builder.nativeSealPackage(
@@ -13932,7 +13935,8 @@ class BuilderActivity : Activity() {
             apk.absolutePath,
             certificate,
             DeviceKey.hex(signedFirst),
-            signedSecond,
+            signedWith("toSignV3"),
+            signedWith("toSignV31"),
             prepared.optInt("minSdk"),
             prepared.optInt("maxSdk"),
         )

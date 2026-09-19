@@ -23,8 +23,6 @@ pub mod compilers {
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const CORE_STATUS: Status = Status::Partial;
-
 pub const BOOTSTRAP_DEPENDENCIES: &[&str] = &[
     "Gradle — drives the Android application build",
     "Android Gradle Plugin — packages and signs the bootstrap APK",
@@ -35,550 +33,242 @@ pub const BOOTSTRAP_DEPENDENCIES: &[&str] = &[
     "rustc / cargo — compiles the Core itself",
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub enum Status {
-    Planned,
-    Foundation,
-    Partial,
-    Experimental,
-    Beta,
-    Production,
-    Deprecated,
-}
-
-impl Status {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Status::Planned => "PLANNED",
-            Status::Foundation => "FOUNDATION",
-            Status::Partial => "PARTIAL",
-            Status::Experimental => "EXPERIMENTAL",
-            Status::Beta => "BETA",
-            Status::Production => "PRODUCTION",
-            Status::Deprecated => "DEPRECATED",
-        }
-    }
-
-    pub const fn may_produce_artifacts(self) -> bool {
-        matches!(
-            self,
-            Status::Experimental | Status::Beta | Status::Production
-        )
-    }
-}
-
-impl core::fmt::Display for Status {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Subsystem {
     pub name: &'static str,
-    pub status: Status,
     pub directive_section: u16,
     pub summary: &'static str,
-    pub missing: &'static [&'static str],
 }
 
 pub const SUBSYSTEMS: &[Subsystem] = &[
     Subsystem {
         name: "Diagnostics",
-        status: Status::Partial,
         directive_section: 33,
         summary: "Coded, located, actionable diagnostics with severity and origin.",
-        missing: &["Related-diagnostic graphs are modelled but never populated."],
     },
     Subsystem {
         name: "The language of refusals",
-        status: Status::Partial,
         directive_section: 33,
         summary: "Every sentence and every context label a diagnostic can carry is \
                   looked up in the language the caller asked for, with the English \
                   kept beside it, and a gate check refuses a new diagnostic that \
                   has no line in a language this speaks.",
-        missing: &[
-            "Fifteen languages: English, which needs no table, and the fourteen \
-             the interface is written in. A reader who asks for anything else \
-             reads the English as it was written.",
-            "The gate finds a diagnostic by the name of what builds it, so a new \
-             helper that takes a code and a sentence is invisible to it until it \
-             is named in the list. That is how the whole four-digit family of \
-             codes went unread for as long as it did.",
-            "The tables were written with this build, not reviewed by a speaker of \
-             each language, so a sentence may be plain and still not be the one a \
-             native reader would have chosen.",
-            "The interface's own strings are Android resources and are translated \
-             separately; only what Core says goes through here.",
-            "A context line's value is left as it was written: a path, a number or \
-             a name is not a sentence and is not looked up.",
-        ],
     },
     Subsystem {
         name: "Package seal",
-        status: Status::Partial,
         directive_section: 26,
         summary: "A class carrying the signing certificate's fingerprint is compiled \
                   into every package this builds and declared as a provider, so it \
                   runs before the application does and refuses to start a copy that \
                   a different key signed.",
-        missing: &[
-            "The seal sits in the dex like everything else. It raises the cost of \
-             repackaging; it does not prevent it, and anything that can edit a dex \
-             and sign again can remove it.",
-            "It checks the certificate, the package name and the debuggable flag. It \
-             does not verify the package's own digests, and nothing is attested to \
-             anything off the device.",
-            "A project cannot turn it off, add to it, or say what should happen \
-             instead of stopping.",
-        ],
     },
     Subsystem {
         name: "Capability security",
-        status: Status::Partial,
         directive_section: 7,
         summary: "Default-deny capability policy with an audit record per request.",
-        missing: &[
-            "Policies are built in code; nothing loads one from a project.",
-            "Plugins are not isolated at runtime, only by contract.",
-        ],
     },
     Subsystem {
         name: "SHA-2",
-        status: Status::Beta,
         directive_section: 30,
         summary: "FIPS 180-4 SHA-256, SHA-384 and SHA-512, each verified against \
                   the published NIST vectors including the long-message one.",
-        missing: &["Randomised robustness testing only; not coverage-guided fuzzing."],
     },
     Subsystem {
         name: "Virtual filesystem",
-        status: Status::Partial,
         directive_section: 8,
         summary: "Named mounts, normalised paths, traversal and symlink refusal, \
                   quotas, atomic writes.",
-        missing: &[
-            "The lock is advisory: a file two builds agree to look at, not something the platform enforces, so a writer that never takes it is never stopped by it. A lock an ended build left behind is taken over once it is old enough, which is a guess about the holder rather than knowledge of it.",
-            "A rollback keeps what it would put back in memory, so what one covers is bounded by the write quota and a change past it is refused rather than quietly left unrecoverable. Only writes made through this are recorded; a plugin that reaches the disk another way is outside it.",
-            "Nothing sweeps on a timer. A partial file left behind by a build that died goes when a sweep is asked for, and no caller asks for one yet.",
-        ],
     },
     Subsystem {
         name: "Project model",
-        status: Status::Partial,
         directive_section: 44,
         summary: "Omni.toml parsed, validated and reduced to a configuration digest over a canonical encoding: every part length-prefixed so no value can be read as a separator, and every unordered part sorted so the same facts always come to the same bytes. What the encoding writes can be read back to what went in, which is the same claim as no two projects sharing a digest, said in a way a test can check.",
-        missing: &[
-            "A dependency is a file dropped into the library folder and read there. The manifest declares none and nothing resolves one from a repository.",
-            "The manifest is read from text, not from the virtual filesystem.",
-        ],
     },
     Subsystem {
         name: "Artifact lifecycle",
-        status: Status::Partial,
         directive_section: 58,
         summary: "CREATED to PUBLISHED as a state machine that refuses illegal steps, over a store that keeps what a build produced. Objects are named by what is in them, so identical output is kept once; they are written under a temporary name and moved over the final one, so a machine that stops leaves either nothing or the whole thing; and a read checks what came back against the name it asked for, removing and reporting anything that no longer matches. A sweep brings the store to a budget, taking what was wanted longest ago first and stepping around anything leased.",
-        missing: &[
-            "Nothing in the store moves an artifact to SIGNED. The build engine signs the package it writes and puts the signed bytes in whole, so the state is defined and no caller steps through it.",
-            "A lease lives as long as the value holding it and no longer, which is right for a process that dies and wrong for two processes sharing one store: there is no lock between them, so two sweeps at once can both decide to take the same object.",
-        ],
     },
     Subsystem {
         name: "Incremental cache",
-        status: Status::Partial,
         directive_section: 11,
         summary: "Cache keys over every input directive section 11 names, taken over a canonical encoding so that an environment variable holding a separator cannot be written to look like two, and four distinguishable lookup outcomes. The index is written down and read back, beside itself and then moved over itself, and it says what each key stands for so a hit hands back the bytes rather than only the news that a key was seen. An index that outlives what it indexes is reconciled against the store; one that cannot be read is an empty one, because refusing to start over a damaged cache file would turn something harmless into something fatal.",
-        missing: &[
-            "The index is read whole and written whole, so a very large one costs a read and a write on every build rather than a seek.",
-            "A sweep is asked for, never scheduled. The budget names what to keep --- bytes, entries and an age --- and the sweep drops the unusable first, then the stale, then the least recently used until it fits, but nothing calls it on a timer, and the build engine does not yet consult the cache at all, so in this build nothing calls it.",
-        ],
     },
     Subsystem {
         name: "Build graph",
-        status: Status::Partial,
         directive_section: 9,
         summary: "A real DAG with deterministic ordering and cycle detection.",
-        missing: &[
-            "A graph is built from the settings a project carries, not from the files it holds: the steps and their order are fixed here, and the input digest of a step stands for inputs nothing has read yet.",
-            "A shape is written and read back, and comparing two says which steps must run again --- a step whose own digest moved, and then everything standing on it. Nothing writes one during a build yet, because the build engine does not use the graph.",
-        ],
     },
     Subsystem {
         name: "Scheduler",
-        status: Status::Beta,
         directive_section: 10,
         summary: "Executes a graph across as many lanes as the machine can afford, propagates failure, honours cancellation, and picks a build up where the last one stopped. Work whose dependencies have all produced their outputs is handed to whichever lane is free, so a fan of steps that wait on nothing runs at once; what each node says and what it asked the capability policy for are gathered per node and merged in plan order, so a build spread over four lanes reports exactly what the same build on one lane reports, node for node and sentence for sentence. How wide it spreads is read off the machine rather than guessed --- free memory divided by what a lane is allowed, one lane on a low battery that is not charging, half as many while a thermal zone is hot and one while it is scalding --- and read again as the build runs, so one that heats the phone narrows itself rather than being narrowed afterwards. A node writes down each step it passes, so a run that stops halfway starts again at the step it stopped at, and a node a previous run carried through is not run again at all unless its own work changed, which is what makes a build that was interrupted cheap to repeat.",
-        missing: &[
-            "A lane is allowed half a gigabyte and nothing holds a node to it: the width of the build answers to what the machine has free, but a single node that wants more than its lane still takes it, and the peak a node reports is the number the node hands back rather than one the scheduler watched it reach.",
-            "The steps a node passes are written down and read back, but every plugin this build carries does its work in one step, so the resume that has anything to resume here is the one between nodes rather than the one inside them.",
-        ],
     },
     Subsystem {
         name: "Binary core",
-        status: Status::Partial,
         directive_section: 20,
         summary: "Bounded readers, patched writers, sections, tables and the CRC-32 \
                   and Adler-32 checksums the ZIP and DEX formats use.",
-        missing: &[
-            "Everything is read out of and written into a slice held whole in memory; nothing streams.",
-            "Randomised robustness testing only; not coverage-guided fuzzing.",
-            "The Validator trait has no implementations.",
-        ],
     },
     Subsystem {
         name: "XML reader",
-        status: Status::Partial,
         directive_section: 22,
         summary: "Enough XML to read resource files, with document type \
                   declarations and custom entities refused outright.",
-        missing: &[
-            "Namespaces are carried as part of a name, not resolved.",
-            "No schema validation.",
-        ],
     },
     Subsystem {
         name: "Resource engine",
-        status: Status::Partial,
         directive_section: 22,
         summary: "Values files parsed and validated, identifiers assigned from \
                   sorted order, references resolved and reference loops refused. \
                   The binary table is written and aapt2 reads every type, name \
                   and value back out of it.",
-        missing: &[
-            "A qualifier this build does not know is refused rather than treated as the default, which would put the wrong file on every device.",
-            "A library brings its resources in whole. There is no overlay order and no way for a project to replace one of them.",
-            "The table carries one package and no overlays, libraries or staged aliases.",
-            "Nothing reads resource files through the virtual filesystem yet.",
-        ],
     },
     Subsystem {
         name: "Archive engine",
-        status: Status::Partial,
         directive_section: 23,
         summary: "The ZIP container an APK is: read, validated, and written deterministically. Entries are compressed with this build\u{2019}s own DEFLATE where it saves bytes, while the resource table and native libraries stay stored and aligned because the platform maps them in place. unzip extracts what this writes byte for byte and zipalign agrees on the alignment.",
-        missing: &[
-            "One compression setting, chosen here rather than by the caller, and no store-only override for a caller who wants one.",
-            "No data descriptors and no streaming: every entry is held whole in memory while the archive is built, so ZIP64 lifts the format's limits and not this one's.",
-        ],
     },
     Subsystem {
         name: "Toolchain lock",
-        status: Status::Partial,
         directive_section: 14,
         summary: "Pinned versions with provenance, verified against an observed \
                   environment.",
-        missing: &["Only two components can be observed from a device."],
     },
     Subsystem {
         name: "Self integrity",
-        status: Status::Partial,
         directive_section: 29,
         summary: "A package reads its own bytes, recomputes the digest its signature records, and compares the signing certificate against the one the build expects. Repacking or re-signing turns the standing to TAMPERED.",
-        missing: &[
-            "It cannot detect an attacker who patched the check out along with everything else. Self-verification raises the cost of repacking; it does not prevent it.",
-            "It says nothing about the running process, only about the file on disk.",
-            "No attestation and no remote check: there is nothing to compare against but a value compiled into the build.",
-        ],
     },
     Subsystem {
         name: "Project scaffold",
-        status: Status::Partial,
         directive_section: 46,
         summary: "A project is a manifest at the root, one folder per chosen language with a starter file in each, and a resource folder holding a launcher-icon folder per density and a values folder per locale. The application's name lives in those values folders and the manifest points at it, so it is translated rather than fixed. Package name, application name, architectures, platform range, languages and locales are validated before anything is written.",
-        missing: &[
-            "The architecture choice is recorded and shown but nothing acts on it, because no native compiler exists to produce a library for it.",
-            "A starter file is written once and never regenerated; the project belongs to whoever edits it.",
-            "The name is the only string scaffolded. Nothing else in a project is translated, and there are no assets or dependency declarations.",
-        ],
     },
     Subsystem {
         name: "Omni_Guard policy",
-        status: Status::Partial,
         directive_section: 29,
         summary: "Eleven rules every project must pass before a package is produced: no debuggable build, no cleartext by default, backup off, no unguarded exported component, no exported provider handing out URI grants, a platform floor of API 28, no high-risk permission, no shared user identity, no opting out of scoped storage, no census of every installed application, and no exported activity in a task another application can take over.",
-        missing: &[
-            "Manifest rules only. Nothing inspects code, resources or native libraries.",
-            "Passing says the package does not carry these specific weaknesses. It is not a statement that the application is secure, and every report says so.",
-            "The rule set is fixed in code; a project cannot add to it or turn one off.",
-        ],
     },
     Subsystem {
         name: "Build engine",
-        status: Status::Partial,
         directive_section: 23,
         summary: "A project becomes a signed package and a bundle with nothing borrowed: the security policy runs first, then the resource table is compiled from the project's launcher icons and values folders, the manifest encoded against it, the archive written and compressed, a certificate written, and the package signed. apksigner verifies the result and aapt2 reads the table back.",
-        missing: &[
-            "Java is the only language compiled. Source in any other language is refused rather than dropped, so a package is never quietly built without it.",
-            "Nothing shrinks what it builds: no dead-code removal, no obfuscation and no resource stripping, so a package carries every class and every entry the project holds.",
-            "Every build starts from nothing. The incremental cache exists and the build engine does not ask it anything.",
-            "The architectures a project names reach the manifest and nothing else, because nothing here produces a native library to place under them.",
-        ],
     },
     Subsystem {
         name: "Key generation",
-        status: Status::Partial,
         directive_section: 30,
         summary: "RSA keys generated from the system random source with Miller-Rabin primality testing at 24 rounds, encoded as PKCS#8 and accepted by OpenSSL.",
-        missing: &[
-            "Miller-Rabin is probabilistic. At 24 rounds a composite survives with probability below 4 to the power of -24, which is small but not zero.",
-            "A key is only as safe as the password over it; nothing here recovers one that is lost.",
-            "Not constant-time, and the primes are not checked against the distance requirements FIPS 186-5 places on them.",
-        ],
     },
     Subsystem {
         name: "Certificate writer",
-        status: Status::Partial,
         directive_section: 25,
         summary: "Writes a self-signed X.509 v3 certificate with a random serial, proper UTC or generalised time, an RSA public key and the extensions a signing certificate carries -- subject and authority key identifiers over the SHA-1 of the key, basic constraints and key usage marked critical, and code signing as the extended use -- signed with SHA-256. OpenSSL reads back every one of them.",
-        missing: &[
-            "Five extensions and no more: subject and authority key identifiers, \
-             basic constraints, key usage and extended key usage. No name \
-             constraints, no policies, no distribution points.",
-            "Self-signed only; there is no chain and no certificate authority.",
-            "Names carry a common name, organisation and country and nothing else.",
-        ],
     },
     Subsystem {
         name: "Big integers",
-        status: Status::Partial,
         directive_section: 30,
         summary: "Arbitrary-precision unsigned arithmetic: add, subtract, multiply, Knuth division and modular exponentiation, checked against arbitrary-precision reference values and against native arithmetic on twenty thousand random pairs. Exponentiation is a ladder: every rung does one multiplication and one squaring whatever the bit was, and which register each lands in is arithmetic on the bit rather than a jump on it.",
-        missing: &[
-            "The multiplication under the ladder is not constant-time: how long it takes still depends on the numbers going into it. For a private key the blinding in front of it means those numbers are drawn fresh every time and correlate with nothing; for a public one there is nothing secret to leak. Neither of those is the same as fixing the arithmetic.",
-            "No primality testing and no key generation: a key is read, never made.",
-            "Karatsuba above a hundred and twenty-eight limbs and schoolbook below it, a crossover measured on this code rather than assumed. Montgomery form is used for an odd modulus, which is every RSA one, and an even modulus still takes the dividing path. The Montgomery multiply is a full multiplication followed by a reduction rather than the two interleaved, so it saves the division and not the pass over the limbs.",
-        ],
     },
     Subsystem {
         name: "RSA signing",
-        status: Status::Partial,
         directive_section: 25,
         summary: "RFC 8017 RSASSA-PKCS1-v1_5 signing with SHA-256 and SHA-512, over PKCS#1 and PKCS#8 private keys read with the Core's own DER reader. Signatures are byte-identical to the ones OpenSSL produces from the same key. Nothing signs unblinded: the message is multiplied by a factor drawn fresh for every signature, so the exponentiation runs on a number nobody outside chose, and the private exponent has a multiple of its order added to it, so two signings with one key walk different rungs. Every signature is then verified with the public exponent before it is handed back, which is what catches a fault in the Chinese-remainder halves.",
-        missing: &[
-            "PKCS#1 v1.5 only. RSASSA-PSS is not implemented and neither is encryption.",
-            "No elliptic-curve arithmetic, so an EC key cannot be used.",
-            "Blinding and a ladder, not constant-time arithmetic; see the big integer entry. The key also sits in ordinary memory while it is used.",
-        ],
     },
     Subsystem {
         name: "Package signer",
-        status: Status::Partial,
         directive_section: 25,
         summary: "Writes APK Signature Scheme v2 and v3 blocks: signed data, signatures and public key, with the platform range in the v3 block, spliced ahead of the central directory with the end record repointed. apksigner verifies the v3 block at API 28 and the v2 block at API 27. Signing is in two halves that can be split apart: what has to be signed is handed out, and a signature made by something else entirely -- a key in Android's own keystore, or in this suite openssl -- is taken back and sealed in, which apksigner verifies just the same.",
-        missing: &[
-            "No v1 JAR signature, so a package this build signs does not install below API 24.",
-            "No v3.1 and no key rotation: one signer, one certificate, for the whole platform range.",
-            "No v4 signature, so incremental installation is not available.",
-        ],
     },
     Subsystem {
         name: "Symmetric cryptography",
-        status: Status::Beta,
         directive_section: 30,
         summary: "AES-256 in CBC with PKCS#7 padding, HMAC-SHA256 and HMAC-SHA512, and PBKDF2-HMAC-SHA256, each checked against the published vectors of FIPS-197, NIST SP 800-38A, RFC 4231 and RFC 6070. The substitution is computed in the field rather than read from a table, the reduction and the padding check are carried in masks rather than branches, and tags are compared to the last byte whatever the first one said, so what a key is changes what comes out and not how long it took or which memory was touched. All 256 bytes are held to the table the standard describes.",
-        missing: &[
-            "Constant-time by construction and by reading, not by measurement: nothing here times the compiled code on a real device to confirm the compiler did not put a branch back.",
-            "GCM is here, and CBC with authentication laid over it is still what the keystore uses. GCM takes a ninety-six-bit nonce alone, because the other lengths need a second hashing pass this does not have, and nothing here chooses a nonce for a caller or refuses one it has seen before.",
-            "No key derivation other than PBKDF2, and no memory-hard function such as scrypt or Argon2.",
-        ],
     },
     Subsystem {
         name: "Developer keystore",
-        status: Status::Partial,
         directive_section: 25,
         summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. The container carries a tag over every byte of itself, taken with a key derived from the one the sealed blob is encrypted under, and the tag is checked between the derivation and the decryption so that an altered file never reaches a decryption at all. It also carries a plain digest, which proves nothing against anybody but tells a mistyped password apart from a damaged file. Listing a key needs no password; the certificate inside is checked against the key before either is used. A shared 4096-bit key is written once on first use so a package can be built without making one first, and it is sealed to the device it was made on as well as to its password.",
-        missing: &[
-            "The shared key's password is a constant in this source and is meant to be: it is a way to start, not a secret. What keeps the file worth having is the device it is bound to, and that binding is only as good as the identifier Android gives an installation. Anything published belongs under a key the developer made and only they know the password to.",
-            "A key made here is in ordinary memory while a package is signed. A key that never can be is the other path: Android holds it, this build hands over the bytes to be signed and takes the signature back, and the package is signed by something nothing here can read. That path signs a package and not a bundle, and it cannot be exported or backed up, which is the point of it and also its cost.",
-            "No import and no export: a key made elsewhere cannot be brought in, and one made here cannot be taken out.",
-            "Somebody who alters a file and recomputes its plain digest is reported as a wrong password rather than as an altered file. Nothing is decrypted for them either way, so this costs a message and not a guarantee.",
-        ],
     },
     Subsystem {
         name: "DEFLATE",
-        status: Status::Beta,
         directive_section: 24,
         summary: "The compressed stream RFC 1950 and RFC 1951 define, read and written: stored, fixed and dynamic Huffman blocks, LZ77 matching over a 32 kilobyte window, length-limited code construction by package merge, and the Adler-32 the container carries. An independent compressor\u{2019}s output reads back exactly here, and an independent reader accepts what this writes.",
-        missing: &[
-            "One block per stream, so a very large input is held in memory rather than streamed.",
-            "The match search is a hash chain with a fixed limit and no lazy matching, so it finds a good match rather than the best one.",
-            "The encoder is not asked how hard to try: there is one setting, and it is the one every caller gets.",
-        ],
     },
     Subsystem {
         name: "Bundle writer",
-        status: Status::Partial,
         directive_section: 22,
         summary: "Writes an Android App Bundle: a protobuf writer, the manifest and the resource table in aapt2 proto form with the platform identifier and typed value on every attribute, BundleConfig, and the archive around them. bundletool builds and signs a universal package from what this writes, and aapt2 reads that package back attribute for attribute, launcher icon included.",
-        missing: &[
-            "One module, base, and no configuration splits: no density, language or architecture splits, and no asset packs or feature modules.",
-            "The bundle is not signed. Play signs what it generates, and bundletool signs what it generates for testing, so nothing here needs to; JAR signing is not implemented either way.",
-        ],
     },
     Subsystem {
         name: "Image codec",
-        status: Status::Beta,
         directive_section: 22,
         summary: "Decodes a PNG to pixels and writes one back: every chunk checked against its own CRC-32, every filter and bit depth the format defines, and an encoder that picks the narrowest colour type, a palette when it wins, and the cheapest filter per line. 200 images written by other tools decode here and survive a write and a read unchanged, within a tenth of the size the tools that made them wrote. A nine-patch is compiled rather than carried: the guide border is read into stretchable runs, padding and per-region colours, written into the npTc chunk the platform reads, and the border is cropped away -- byte for byte what aapt2 writes for the same file.",
-        missing: &[
-            "PNG only. No JPEG, no WebP and no vector drawable.",
-            "Interlaced images are refused rather than decoded: Adam7 stores one image as seven and nothing here needs it.",
-            "Resampling is an area average, which is right for making an icon smaller and soft for making one larger.",
-        ],
     },
     Subsystem {
         name: "Launcher icons",
-        status: Status::Beta,
         directive_section: 22,
         summary: "One image becomes twenty-three files: five densities from 48 to 192 pixels in a square and a round shape with an anti-aliased circular mask, an adaptive icon whose foreground sits inside the safe zone at five densities from 108 to 432, a monochrome layer of the same shape for a themed launcher, a background taken from the colour around the edge of the image, and the two XML drawables that put them together. aapt2 reports the adaptive icon as the application icon and reads back every layer.",
-        missing: &[
-            "The background is one flat colour, taken from the edge of the image rather than drawn: an adaptive icon whose background is meant to be a picture needs that picture supplied.",
-            "The round shape is a circle cut out of the square one, not a separately composed image.",
-            "Nothing animates: the layers are still images, so a launcher can move them but this cannot describe how.",
-        ],
     },
     Subsystem {
         name: "Project workspace",
-        status: Status::Partial,
         directive_section: 46,
         summary: "Lists the projects on the device, walks a project's folders within bounds, reads and writes its text files, and moves and deletes what is in them through the same path rules the virtual filesystem uses, so nothing an edit does leaves the project folder. What is deleted goes to a trash that holds it for a day, with the path it came from written beside it, and is put back only where nothing has taken its place.",
-        missing: &[
-            "Text files only, UTF-8 only, and up to four megabytes: anything else is refused rather than risked.",
-            "The workspace keeps no history: a save replaces what was there, and the \
-             undo the editor offers lives in the editor for as long as the file is \
-             open. Nothing detects two edits to one file.",
-            "Nothing watches the folder, so a change made by another application is seen only when the list is read again. The trash is swept when it is listed, not on a timer, so what expired while the application was closed goes at the next look.",
-        ],
     },
     Subsystem {
         name: "Git client",
-        status: Status::Partial,
         directive_section: 46,
         summary: "Reads a packfile the way the format writes one: the header, every object header, and every zlib stream inflated in turn, with both kinds of delta resolved in as many passes as the ordering needs. Every object is named by the SHA-1 over its own header and body, so a wrong byte gives a name that matches nothing. A commit is walked to its tree and the tree is written to disk, with the executable bit carried and any entry name that would leave its folder refused rather than written.",
-        missing: &[
-            "No .git folder is written, so what lands on disk is the source at one \
-             commit and not a repository: nothing here commits, pushes, branches or \
-             reads a history back.",
-            "Attributes are not applied. A repository that asks for CRLF in the \
-             working tree through .gitattributes gets the bytes the blob holds, \
-             which is what a checkout with no conversion configured would write.",
-            "A pack is read whole, from a file held in memory, so a repository \
-             larger than the memory this is given cannot be fetched in one piece.",
-            "Only the smart HTTP protocol over TLS, and only fetching: no SSH \
-             transport, no packed-refs or thin-pack completion against an existing \
-             object store, and no submodule is followed.",
-        ],
     },
     Subsystem {
         name: "Binary XML",
-        status: Status::Partial,
         directive_section: 22,
         summary: "The binary XML an APK carries, written from parsed text and read back out of it: string pool in either encoding the platform writes, resource map, namespaces, elements and typed attribute values. aapt2 reads what this writes and agrees on every value, and this reads what aapt2 writes.",
-        missing: &[
-            "A reference by name is resolved before it reaches this writer, so the writer alone cannot encode one: what it takes is an identifier.",
-            "The attribute identifier table covers what a manifest uses, not every android attribute.",
-            "No CDATA nodes.",
-        ],
     },
     Subsystem {
         name: "JVM class file reader",
-        status: Status::Partial,
         directive_section: 17,
         summary: "A class file read down to its members: constant pool with its \
                   two-slot longs, access flags, superclass, interfaces, fields, \
                   methods, attributes and Kotlin metadata -- checked field for \
                   field against javap on 50 classes this build produced.",
-        missing: &[
-            "Attributes outside the set this build writes and reads back are located and left as bytes.",
-            "The d1 and d2 arrays of kotlin.Metadata are not read: they are a \
-             protobuf payload whose schema is a Kotlin implementation detail, \
-             not a published format.",
-            "Nothing compiles Kotlin. Reading the upstream compiler's output is not evidence that anything here could produce it (directive section 16).",
-            "Randomised robustness testing only; not coverage-guided fuzzing.",
-        ],
     },
     Subsystem {
         name: "Java compiler",
-        status: Status::Partial,
         directive_section: 16,
         summary: "Java source becomes class files and then dex, with nothing borrowed: a lexer and parser for the Java 25 grammar, names and types resolved against the platform jar and against the project's own classes, generics with inference and capture, poly expressions and overload resolution, inner and anonymous classes with the locals they capture, records, enums, sealed types, switch expressions, text blocks and try with resources, and a bytecode writer that computes its own stack map frames. javac is given the same source with every warning turned on, javap reads back the class files, and dexdump reads back the dex.",
-        missing: &[
-            "A lambda and a method reference are refused by name rather than compiled: invokedynamic and the metafactory the platform bootstraps them with are not written.",
-            "Annotation processing does not run. An annotation is parsed, checked and written into the class file, and nothing is ever asked to generate anything from it.",
-            "No modules: a project is a flat set of packages, and module-info.java is not read.",
-            "Nothing optimises what it compiles beyond the folding the language itself requires.",
-        ],
     },
     Subsystem {
         name: "DEX writer",
-        status: Status::Partial,
         directive_section: 21,
         summary: "Writes a classes.dex: sorted string, type, prototype, field and method pools, class definitions with their interfaces and annotations, static and instance fields with the values a class declares for them, direct and virtual methods, code items with their exception handlers and register counts, and debug information carrying the line a bytecode address came from. More references than one dex can name become more than one dex. dexdump reads what this writes and the Core reads it back.",
-        missing: &[
-            "Splitting is by count and not by call graph: a class lands in the dex the order reached it in rather than beside the classes it calls.",
-            "No invokedynamic and no method handles, because nothing upstream produces one.",
-            "No local variable or parameter names in the debug information: a stack trace carries a line number and not the name of what was on it.",
-            "The JVM reads a byte array and a boolean array with one instruction and Dalvik has two, so the array's type is carried alongside the stack: through fields, calls, allocations, casts, parameters, locals and the shuffles. Where it cannot be carried that far the byte instruction is written, which the platform verifier accepts for either.",
-        ],
     },
     Subsystem {
         name: "DEX reader",
-        status: Status::Beta,
         directive_section: 21,
         summary: "A classes.dex read down to the instructions in every method, with modified UTF-8 decoded properly and the file's own checksum and signature recomputed --- matched field for field against dexdump. The class data behind each definition gives the fields and methods a class declares and what each one is allowed to do; the code item behind each method gives its registers, the range each try covers and what each catch takes, and the instruction stream is walked by the whole instruction set, all two hundred and twenty-four opcodes, the three payload tables a switch or an array filler points at included, so that stepping through a body lands on instruction boundaries rather than guessing at them. An instruction that names something resolves it while it is read: a string to its text, a type to its name, a field to the class and type it belongs to, a method to its whole signature, so the reader can say what a method reads, writes and calls rather than only that a body is there. That is what lets a build check its own output: every instruction the writer emits is read back as the one it wrote, at the same stride, with the same registers.",
-        missing: &[
-            "Debug information, annotations and encoded arrays are located \
-             through the map but not parsed.",
-            "A body that cannot be walked is reported where it is and left out, which keeps one damaged method from hiding a whole file but means the count of bodies read is the honest answer to how much of the code was understood, not a guarantee that all of it was.",
-            "Randomised robustness testing only; not coverage-guided fuzzing.",
-        ],
     },
     Subsystem {
         name: "SHA-1",
-        status: Status::Partial,
         directive_section: 30,
         summary: "FIPS 180-4 SHA-1, verified against the published NIST vectors, \
                   for one purpose: the DEX header's own signature field.",
-        missing: &[
-            "SHA-1 is broken for collision resistance and is not a security \
-             primitive here. It may not be used for provenance, authenticity or \
-             integrity against an adversary, and nothing in this tree does.",
-        ],
     },
     Subsystem {
         name: "DER reader",
-        status: Status::Partial,
         directive_section: 30,
         summary: "A distinguished-encoding reader that refuses every alternative \
                   spelling BER allows: indefinite lengths, non-minimal lengths, \
                   padded integers and the high-tag-number form.",
-        missing: &[
-            "Reads the types certificates use; not a general ASN.1 decoder.",
-            "Randomised robustness testing only; not coverage-guided fuzzing.",
-        ],
     },
     Subsystem {
         name: "X.509 certificates",
-        status: Status::Partial,
         directive_section: 30,
         summary: "Reads a certificate's names, validity, serial, key size and \
                   algorithms, and fingerprints it with SHA-256.",
-        missing: &[
-            "A certificate signed by somebody else is not checked, because that \
-             needs a chain and a trust store and there is neither. A self-signed \
-             one is checked against its own key.",
-            "Extensions are written but not read back, so key usage and basic \
-             constraints are not enforced on a certificate that arrives from \
-             elsewhere.",
-            "Only RSA over SHA-256, SHA-384 and SHA-512 can be checked. A \
-             certificate signed any other way is reported as unchecked rather \
-             than as passing.",
-        ],
     },
     Subsystem {
         name: "Signature inspection",
-        status: Status::Partial,
         directive_section: 25,
         summary: "Finds the APK signing block, reads every scheme in it, \
                   recomputes the chunked SHA-256 or SHA-512 content digest over \
@@ -586,14 +276,6 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
                   signer's signed data, and checks that the key in the block is \
                   the key in the certificate it presents -- all matched against \
                   apksigner.",
-        missing: &[
-            "RSASSA-PSS, ECDSA and DSA signatures are named and left unchecked: \
-             a package carrying only those reports none verified rather than \
-             reporting a pass.",
-            "A verity digest is reported as not recomputed: the fs-verity Merkle \
-             tree is a different construction and is not implemented.",
-            "It reads a block and says whether it holds; deciding whether the certificate behind it deserves to be trusted needs a chain and a trust store, and neither exists.",
-        ],
     },
 ];
 
@@ -1080,11 +762,6 @@ pub mod diag {
 
         pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
             self.suggestion = Some(suggestion.into());
-            self
-        }
-
-        pub fn with_related(mut self, code: impl Into<String>) -> Self {
-            self.related.push(code.into());
             self
         }
 
@@ -1813,7 +1490,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Eksik kaynağı projenin kendi değerler klasöründe bildir."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Ölçüler bir sayı ve bir birimden oluşur, örneğin 16dp ya da 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Baştaki sıfırı kaldırın ya da onaltılık için 0x biçiminde yazın."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Yukarıdaki her satır neyin yanlış olduğunu ve neyin değişeceğini söyler. Paket, bunların hiçbiri kalmadığında üretilir."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Her biri <enum name=\"…\" value=\"…\"/> olarak yazılır."),
         ("Each one is written as <item name=\"android:textSize\">.", "Her biri <item name=\"android:textSize\"> olarak yazılır."),
         ("Each one is written as <item quantity=\"one\">.", "Her biri <item quantity=\"one\"> olarak yazılır."),
@@ -1832,7 +1508,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Her baytın devam biti işaretliydi."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Her bağımlılık kenarı önce bitmesi gereken bir işi gösterir; dolayısıyla bir döngü, bir şeyin kendisinden önce olmasını ister. Bir kenarı kaldırarak ya da bir düğümü bölerek kırın."),
         ("Every entry has the form Key = value.", "Her girdi Anahtar = değer biçimindedir."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Yukarıdaki her bulgu neyin yanlış olduğunu ve neyin değişeceğini söyler. Paket, bunların hiçbiri kalmadığında üretilir."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Platformun dağıttığı her tanımlayıcı bu yapıya yazılıdır. Bunların arasında olmayan bir ad, hiçbir cihazda bulunmayan bir addır."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Diğer her yerel ayar, geri düşülen ayarın çevirisidir. Dili seçilenlerden hiçbiri olmayan bir cihaz o klasörü okur; dolayısıyla onu dışarıda bırakmak, dünyadaki telefonların çoğunda adsız bir uygulama yayımlamak olurdu."),
         ("Every resource is declared as <type name=\"…\">.", "Her kaynak <tür name=\"…\"> olarak bildirilir."),
@@ -2229,8 +1904,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Özel anahtarın çarpanları ve üsleri modülüyle uyuşmuyor ya da bu yapı imzayı yanlış hesapladı. Her iki durumda da hiçbir şey üretilmez."),
         ("The project declares more resources than the accepted limit.", "Proje, kabul edilen sınırdan çok kaynak bildiriyor."),
         ("The project declares no resource to write.", "Proje yazılacak hiçbir kaynak bildirmiyor."),
-        ("The project does not meet the security policy, so no bundle was produced.", "Proje güvenlik ilkesini karşılamıyor; bu yüzden hiçbir paket üretilmedi."),
-        ("The project does not meet the security policy, so nothing was produced.", "Proje güvenlik ilkesini karşılamıyor; bu yüzden hiçbir şey üretilmedi."),
         ("The project folder could not be made.", "Proje klasörü oluşturulamadı."),
         ("The project folder is nested deeper than this build walks.", "Proje klasörü, bu yapının gezdiğinden daha derin iç içe."),
         ("The project folder is not here.", "Proje klasörü burada değil."),
@@ -2313,7 +1986,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Bu izin, bir derleme aracının ürettiğinin ihtiyaç duyduğunun çok ötesine uzanır ve kötüye kullanan uygulamaların alışıldık biçimidir."),
         ("This project declares no resource by that name.", "Bu proje, bu adda hiçbir kaynak bildirmiyor."),
         ("This project holds source in a language this build does not compile.", "Bu proje, bu yapının derlemediği bir dilde kaynak taşıyor."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Bu altsistem bildirilmiştir, kurulmuş değildir. Hiçbir ürün üretilmedi ve durumu EXPERIMENTAL olana dek beklenmemelidir."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Bu altsistem bildirilmiştir, kurulmuş değildir. Hiçbir şey üretilmedi ve ondan hiçbir şey beklenmemelidir."),
         ("This value has no recognised form.", "Bu değerin tanınan bir biçimi yok."),
         ("Throwing wants a Throwable and was given something else.", "Fırlatmak bir Throwable ister ve başka bir şey verildi."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "TLS'siz trafik, yol üzerindeki her şey tarafından okunabilir ve değiştirilebilir."),
@@ -3051,7 +2724,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Deklariere die fehlende Ressource im eigenen values-Ordner des Projekts."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Maße bestehen aus einer Zahl und einer Einheit, zum Beispiel 16dp oder 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Lassen Sie die führende Null weg, oder schreiben Sie 0x für hexadezimal."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Jede Zeile oben nennt, was falsch ist und was zu ändern ist. Ein Bundle entsteht erst, wenn keine davon übrig ist."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Jeder davon wird als <enum name=\"…\" value=\"…\"/> geschrieben."),
         ("Each one is written as <item name=\"android:textSize\">.", "Jeder davon wird als <item name=\"android:textSize\"> geschrieben."),
         ("Each one is written as <item quantity=\"one\">.", "Jeder davon wird als <item quantity=\"one\"> geschrieben."),
@@ -3070,7 +2742,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Bei jedem Byte war das Fortsetzungsbit gesetzt."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Jede Abhängigkeitskante zeigt auf Arbeit, die zuerst fertig sein muss; ein Kreis verlangt also, dass etwas vor sich selbst geschieht. Brechen Sie ihn auf, indem Sie eine Kante entfernen oder einen Knoten teilen."),
         ("Every entry has the form Key = value.", "Jeder Eintrag hat die Form Schlüssel = Wert."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Jeder Befund oben nennt, was falsch ist und was zu ändern ist. Ein Paket entsteht erst, wenn keiner davon übrig ist."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Jeder Bezeichner, den die Plattform vergibt, steht in diesem Build. Ein Name, der nicht darunter ist, ist einer, den kein Gerät hat."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Jedes andere Gebietsschema ist eine Übersetzung des Rückfalls. Ein Gerät, dessen Sprache keine der gewählten ist, liest jenen Ordner; ihn wegzulassen lieferte auf den meisten Telefonen der Welt eine Anwendung ohne Namen aus."),
         ("Every resource is declared as <type name=\"…\">.", "Jede Ressource wird als <typ name=\"…\"> deklariert."),
@@ -3467,8 +3138,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Faktoren und Exponenten des privaten Schlüssels widersprechen seinem Modul, oder dieser Build hat die Signatur falsch berechnet. So oder so wird nichts erzeugt."),
         ("The project declares more resources than the accepted limit.", "Das Projekt erklärt mehr Ressourcen als die angenommene Grenze."),
         ("The project declares no resource to write.", "Das Projekt deklariert keine Ressource, die geschrieben werden könnte."),
-        ("The project does not meet the security policy, so no bundle was produced.", "Das Projekt erfüllt die Sicherheitsrichtlinie nicht, deshalb wurde kein Bundle erzeugt."),
-        ("The project does not meet the security policy, so nothing was produced.", "Das Projekt erfüllt die Sicherheitsrichtlinie nicht, deshalb wurde nichts erzeugt."),
         ("The project folder could not be made.", "Der Projektordner konnte nicht angelegt werden."),
         ("The project folder is nested deeper than this build walks.", "Der Projektordner ist tiefer verschachtelt, als dieser Build hinabgeht."),
         ("The project folder is not here.", "Der Projektordner ist nicht hier."),
@@ -3551,7 +3220,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Diese Berechtigung reicht weit über das hinaus, was das Erzeugnis eines Build-Werkzeugs braucht, und ist die übliche Gestalt einer missbräuchlichen Anwendung."),
         ("This project declares no resource by that name.", "Dieses Projekt erklärt keine Ressource dieses Namens."),
         ("This project holds source in a language this build does not compile.", "Dieses Projekt enthält Quelltext in einer Sprache, die dieser Build nicht übersetzt."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Dieses Teilsystem ist deklariert, nicht gebaut. Es wurde kein Erzeugnis hergestellt, und es ist keines zu erwarten, bis sein Zustand EXPERIMENTAL erreicht."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Dieses Teilsystem ist deklariert, nicht gebaut. Es wurde nichts hergestellt, und von ihm ist nichts zu erwarten."),
         ("This value has no recognised form.", "Dieser Wert hat keine erkannte Form."),
         ("Throwing wants a Throwable and was given something else.", "Werfen will ein Throwable und bekam etwas anderes."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Verkehr ohne TLS kann von allem auf dem Weg gelesen und umgeschrieben werden."),
@@ -4289,7 +3958,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Declara el recurso que falta en la carpeta de valores del propio proyecto."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Las dimensiones son un número y una unidad, por ejemplo 16dp o 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Quite el cero inicial, o escríbalo como 0x para hexadecimal."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Cada línea de arriba dice qué está mal y qué cambiar. Solo se produce un paquete cuando no queda ninguna."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Cada uno se escribe <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Cada uno se escribe como <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Cada uno se escribe como <item quantity=\"one\">."),
@@ -4308,7 +3976,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Todos los bytes tenían su bit de continuación puesto."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Cada arista de dependencia apunta a un trabajo que debe terminar antes, así que un ciclo pide que algo ocurra antes que sí mismo. Rómpalo quitando una arista o dividiendo un nodo."),
         ("Every entry has the form Key = value.", "Cada entrada tiene la forma Clave = valor."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Cada hallazgo de arriba dice qué está mal y qué cambiar. Solo se produce un paquete cuando no queda ninguno."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Todos los identificadores que reparte la plataforma están escritos en esta compilación. Un nombre que no esté entre ellos es uno que ningún dispositivo tiene."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Cada otro ajuste regional es una traducción del de reserva. Un dispositivo cuyo idioma no es ninguno de los elegidos lee esa carpeta, así que dejarla fuera entregaría una aplicación sin nombre en la mayoría de los teléfonos del mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Cada recurso se declara como <tipo name=\"…\">."),
@@ -4705,8 +4372,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Los factores y exponentes de la clave privada no cuadran con su módulo, o esta compilación calculó mal la firma. En cualquier caso no se genera nada."),
         ("The project declares more resources than the accepted limit.", "El proyecto declara más recursos que el límite aceptado."),
         ("The project declares no resource to write.", "El proyecto no declara ningún recurso que escribir."),
-        ("The project does not meet the security policy, so no bundle was produced.", "El proyecto no cumple la política de seguridad, así que no se produjo ningún paquete."),
-        ("The project does not meet the security policy, so nothing was produced.", "El proyecto no cumple la política de seguridad, así que no se produjo nada."),
         ("The project folder could not be made.", "No se pudo crear la carpeta del proyecto."),
         ("The project folder is nested deeper than this build walks.", "La carpeta del proyecto está anidada más hondo de lo que recorre esta compilación."),
         ("The project folder is not here.", "La carpeta del proyecto no está aquí."),
@@ -4789,7 +4454,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Este permiso va mucho más allá de lo que necesita lo que produce una herramienta de compilación, y es la forma habitual de una aplicación abusiva."),
         ("This project declares no resource by that name.", "Este proyecto no declara ningún recurso con ese nombre."),
         ("This project holds source in a language this build does not compile.", "Este proyecto contiene código fuente en un lenguaje que esta compilación no compila."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Este subsistema está declarado, no construido. No se produjo ningún artefacto y no debe esperarse ninguno hasta que su estado llegue a EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Este subsistema está declarado, no construido. No se produjo nada y nada debe esperarse de él."),
         ("This value has no recognised form.", "Este valor no tiene una forma reconocida."),
         ("Throwing wants a Throwable and was given something else.", "Lanzar quiere un Throwable y se le dio otra cosa."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "El tráfico sin TLS lo puede leer y reescribir cualquier cosa que esté en el camino."),
@@ -5527,7 +5192,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Déclarez la ressource manquante dans le dossier de valeurs du projet lui-même."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Les dimensions sont un nombre et une unité, par exemple 16dp ou 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Supprimez le zéro de tête, ou écrivez-le 0x pour l'hexadécimal."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Chaque ligne ci-dessus nomme ce qui ne va pas et ce qu'il faut changer. Un bundle n'est produit que lorsqu'il n'en reste aucune."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Chacune s'écrit <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Chacun s'écrit <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Chacun s'écrit <item quantity=\"one\">."),
@@ -5546,7 +5210,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Chaque octet avait son bit de continuation posé."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Chaque arête de dépendance désigne un travail qui doit se terminer d'abord ; un cycle demande donc que quelque chose ait lieu avant lui-même. Rompez-le en retirant une arête ou en scindant un nœud."),
         ("Every entry has the form Key = value.", "Chaque entrée a la forme Clé = valeur."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Chaque constat ci-dessus nomme ce qui ne va pas et ce qu'il faut changer. Un paquet n'est produit que lorsqu'il n'en reste aucun."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Chaque identifiant que la plateforme distribue est inscrit dans cette compilation. Un nom qui n'en fait pas partie est un nom qu'aucun appareil n'a."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toute autre locale est une traduction de la locale de repli. Un appareil dont la langue n'est aucune des langues choisies lit ce dossier ; l'omettre livrerait donc une application sans nom sur la plupart des téléphones du monde."),
         ("Every resource is declared as <type name=\"…\">.", "Chaque ressource est déclarée sous la forme <type name=\"…\">."),
@@ -5943,8 +5606,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Les facteurs et les exposants de la clé privée ne s'accordent pas avec son module, ou cette compilation a mal calculé la signature. Rien n'est émis dans un cas comme dans l'autre."),
         ("The project declares more resources than the accepted limit.", "Le projet déclare plus de ressources que la limite admise."),
         ("The project declares no resource to write.", "Le projet ne déclare aucune ressource à écrire."),
-        ("The project does not meet the security policy, so no bundle was produced.", "Le projet ne satisfait pas la politique de sécurité ; aucun bundle n'a donc été produit."),
-        ("The project does not meet the security policy, so nothing was produced.", "Le projet ne satisfait pas la politique de sécurité ; rien n'a donc été produit."),
         ("The project folder could not be made.", "Le dossier du projet n'a pas pu être créé."),
         ("The project folder is nested deeper than this build walks.", "Le dossier du projet est imbriqué plus profondément que ce que cette compilation parcourt."),
         ("The project folder is not here.", "Le dossier du projet n'est pas là."),
@@ -6027,7 +5688,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Cette permission va bien au-delà de ce dont a besoin ce que produit un outil de compilation, et c'est la forme habituelle d'une application abusive."),
         ("This project declares no resource by that name.", "Ce projet ne déclare aucune ressource de ce nom."),
         ("This project holds source in a language this build does not compile.", "Ce projet contient des sources dans un langage que cette compilation ne compile pas."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Ce sous-système est déclaré, pas construit. Aucun artefact n'a été produit et il ne faut en attendre aucun tant que son statut n'atteint pas EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Ce sous-système est déclaré, pas construit. Rien n'a été produit et il n'en faut rien attendre."),
         ("This value has no recognised form.", "Cette valeur n a pas de forme reconnue."),
         ("Throwing wants a Throwable and was given something else.", "Lancer veut un Throwable et a reçu autre chose."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Un trafic sans TLS peut être lu et réécrit par n'importe quoi sur le chemin."),
@@ -6768,7 +6429,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Dichiara la risorsa mancante nella cartella dei valori del progetto stesso."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Le dimensioni sono un numero e un'unità, per esempio 16dp o 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Togliete lo zero iniziale, oppure scrivetelo 0x per l'esadecimale."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Ogni riga qui sopra nomina che cosa non va e che cosa cambiare. Un bundle è prodotto solo quando non ne resta nessuna."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Ognuno si scrive <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Ognuno si scrive <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Ognuno si scrive <item quantity=\"one\">."),
@@ -6787,7 +6447,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Ogni byte aveva il suo bit di continuazione impostato."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Ogni arco di dipendenza indica un lavoro che deve finire prima, quindi un ciclo chiede che qualcosa accada prima di se stesso. Rompetelo togliendo un arco oppure dividendo un nodo."),
         ("Every entry has the form Key = value.", "Ogni voce ha la forma Chiave = valore."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Ogni rilievo qui sopra nomina che cosa non va e che cosa cambiare. Un pacchetto è prodotto solo quando non ne resta nessuno."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Ogni identificatore che la piattaforma distribuisce è scritto dentro questa compilazione. Un nome che non è tra quelli è un nome che nessun dispositivo ha."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Ogni altra locale è una traduzione di quella di ripiego. Un dispositivo la cui lingua non è nessuna di quelle scelte legge quella cartella, quindi ometterla distribuirebbe un'applicazione senza nome sulla maggior parte dei telefoni del mondo."),
         ("Every resource is declared as <type name=\"…\">.", "Ogni risorsa è dichiarata come <tipo name=\"…\">."),
@@ -7184,8 +6843,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "I fattori e gli esponenti della chiave privata non concordano con il suo modulo, oppure questa compilazione ha calcolato male la firma. In entrambi i casi non viene emesso nulla."),
         ("The project declares more resources than the accepted limit.", "Il progetto dichiara più risorse del limite accettato."),
         ("The project declares no resource to write.", "Il progetto non dichiara alcuna risorsa da scrivere."),
-        ("The project does not meet the security policy, so no bundle was produced.", "Il progetto non soddisfa la politica di sicurezza, quindi non è stato prodotto alcun bundle."),
-        ("The project does not meet the security policy, so nothing was produced.", "Il progetto non soddisfa la politica di sicurezza, quindi non è stato prodotto nulla."),
         ("The project folder could not be made.", "Non è stato possibile creare la cartella del progetto."),
         ("The project folder is nested deeper than this build walks.", "La cartella del progetto è annidata più in profondità di quanto questa compilazione percorra."),
         ("The project folder is not here.", "La cartella del progetto non è qui."),
@@ -7268,7 +6925,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Questo permesso va ben oltre ciò di cui ha bisogno il prodotto di uno strumento di compilazione, ed è la forma consueta di un'applicazione abusiva."),
         ("This project declares no resource by that name.", "Questo progetto non dichiara alcuna risorsa con quel nome."),
         ("This project holds source in a language this build does not compile.", "Questo progetto contiene sorgenti in un linguaggio che questa compilazione non compila."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Questo sottosistema è dichiarato, non costruito. Non è stato prodotto alcun artefatto e non se ne deve aspettare alcuno finché il suo stato non arriva a EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Questo sottosistema è dichiarato, non costruito. Non è stato prodotto nulla e da esso non ci si deve aspettare nulla."),
         ("This value has no recognised form.", "Questo valore non ha una forma riconosciuta."),
         ("Throwing wants a Throwable and was given something else.", "Lanciare vuole un Throwable e ha ricevuto altro."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Il traffico senza TLS può essere letto e riscritto da qualsiasi cosa lungo il percorso."),
@@ -8009,7 +7666,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Declara o recurso em falta na pasta de valores do próprio projeto."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Dimensões são um número e uma unidade, por exemplo 16dp ou 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Tire o zero à esquerda, ou escreva-o como 0x para hexadecimal."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Cada linha acima nomeia o que está errado e o que mudar. Um bundle só é produzido quando não resta nenhuma."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Cada um se escreve <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Cada um se escreve <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Cada um se escreve <item quantity=\"one\">."),
@@ -8028,7 +7684,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Cada byte tinha o seu bit de continuação ligado."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Cada aresta de dependência aponta para um trabalho que precisa terminar antes, então um ciclo pede que algo aconteça antes de si mesmo. Rompa-o tirando uma aresta ou dividindo um nó."),
         ("Every entry has the form Key = value.", "Cada entrada tem a forma Chave = valor."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Cada achado acima nomeia o que está errado e o que mudar. Um pacote só é produzido quando não resta nenhum."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Cada identificador que a plataforma distribui está escrito dentro desta compilação. Um nome que não está entre eles é um nome que nenhum dispositivo tem."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toda outra localidade é uma tradução da de recurso. Um dispositivo cujo idioma não é nenhum dos escolhidos lê essa pasta, então omiti-la entregaria um aplicativo sem nome na maioria dos telefones do mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Cada recurso é declarado como <tipo name=\"…\">."),
@@ -8425,8 +8080,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Os fatores e os expoentes da chave privada discordam do seu módulo, ou esta compilação calculou a assinatura errado. De um jeito ou de outro nada é emitido."),
         ("The project declares more resources than the accepted limit.", "O projeto declara mais recursos que o limite aceite."),
         ("The project declares no resource to write.", "O projeto não declara recurso algum a escrever."),
-        ("The project does not meet the security policy, so no bundle was produced.", "O projeto não cumpre a política de segurança, então nenhum bundle foi produzido."),
-        ("The project does not meet the security policy, so nothing was produced.", "O projeto não cumpre a política de segurança, então nada foi produzido."),
         ("The project folder could not be made.", "Não foi possível criar a pasta do projeto."),
         ("The project folder is nested deeper than this build walks.", "A pasta do projeto está aninhada mais fundo do que esta compilação percorre."),
         ("The project folder is not here.", "A pasta do projeto não está aqui."),
@@ -8509,7 +8162,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Esta permissão vai muito além do que a saída de uma ferramenta de compilação precisa, e é o formato costumeiro de um aplicativo abusivo."),
         ("This project declares no resource by that name.", "Este projeto não declara nenhum recurso com esse nome."),
         ("This project holds source in a language this build does not compile.", "Este projeto contém código-fonte numa linguagem que esta compilação não compila."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Este subsistema está declarado, não construído. Nenhum artefato foi produzido e nenhum deve ser esperado até que o seu estado chegue a EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Este subsistema está declarado, não construído. Nada foi produzido e dele nada deve ser esperado."),
         ("This value has no recognised form.", "Este valor não tem uma forma reconhecida."),
         ("Throwing wants a Throwable and was given something else.", "Lançar quer um Throwable e recebeu outra coisa."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Tráfego sem TLS pode ser lido e reescrito por qualquer coisa no caminho."),
@@ -9247,7 +8900,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Объявите недостающий ресурс в собственной папке values проекта."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Размеры — это число и единица, например 16dp или 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Уберите ведущий ноль или запишите как 0x для шестнадцатеричного."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Каждая строка выше называет, что не так и что изменить. Бандл создаётся только тогда, когда не остаётся ни одной."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Каждое пишется <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Каждое пишется как <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Каждое пишется как <item quantity=\"one\">."),
@@ -9266,7 +8918,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "У каждого байта был выставлен бит продолжения."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Каждое ребро зависимости указывает на работу, которая должна закончиться раньше, поэтому цикл требует, чтобы нечто произошло раньше самого себя. Разорвите его, убрав ребро или разделив узел."),
         ("Every entry has the form Key = value.", "Каждая запись имеет вид Ключ = значение."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Каждая находка выше называет, что не так и что изменить. Пакет создаётся только тогда, когда не остаётся ни одной."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Каждый идентификатор, который выдаёт платформа, вписан в эту сборку. Имя, которого среди них нет, — это имя, которого нет ни у одного устройства."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Каждая другая локаль — перевод запасной. Устройство, язык которого не входит в выбранные, читает эту папку, поэтому её пропуск выпустил бы приложение без имени на большинстве телефонов мира."),
         ("Every resource is declared as <type name=\"…\">.", "Каждый ресурс объявляется как <тип name=\"…\">."),
@@ -9663,8 +9314,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Множители и показатели закрытого ключа не согласуются с его модулем, либо эта сборка неверно вычислила подпись. В любом случае ничего не порождается."),
         ("The project declares more resources than the accepted limit.", "Проект объявляет больше ресурсов, чем принятый предел."),
         ("The project declares no resource to write.", "Проект не объявляет ресурса, который нужно записать."),
-        ("The project does not meet the security policy, so no bundle was produced.", "Проект не отвечает политике безопасности, поэтому бандл не создан."),
-        ("The project does not meet the security policy, so nothing was produced.", "Проект не отвечает политике безопасности, поэтому ничего не создано."),
         ("The project folder could not be made.", "Папку проекта не удалось создать."),
         ("The project folder is nested deeper than this build walks.", "Папка проекта вложена глубже, чем обходит эта сборка."),
         ("The project folder is not here.", "Папки проекта здесь нет."),
@@ -9747,7 +9396,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Это разрешение выходит далеко за пределы того, что нужно тому, что производит сборочный инструмент, и это обычная форма злоупотребляющего приложения."),
         ("This project declares no resource by that name.", "Этот проект не объявляет ресурса с таким именем."),
         ("This project holds source in a language this build does not compile.", "Этот проект содержит исходники на языке, который эта сборка не компилирует."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Эта подсистема объявлена, а не построена. Ни одного артефакта не создано, и ждать его не следует, пока её состояние не дойдёт до EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Эта подсистема объявлена, а не построена. Ничего не создано, и ждать от неё нечего."),
         ("This value has no recognised form.", "У этого значения нет узнаваемой формы."),
         ("Throwing wants a Throwable and was given something else.", "Бросок хочет Throwable, а получил другое."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Трафик без TLS может прочитать и переписать что угодно на пути."),
@@ -10485,7 +10134,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "أعلن المورد الناقص في مجلد القيم الخاص بالمشروع نفسه."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "الأبعاد عدد ووحدة، مثلًا 16dp أو 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "احذف الصفر في المقدمة، أو اكتبه 0x للنظام الست عشري."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "كل سطر أعلاه يسمّي ما هو خطأ وما ينبغي تغييره. ولا تُنتَج حزمة مجمّعة إلا حين لا يبقى منها شيء."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "تُكتب كل واحدة <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "يُكتب كل واحد <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "يُكتب كل واحد <item quantity=\"one\">."),
@@ -10504,7 +10152,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "كل بايت كان بت الاستمرار فيه مضبوطًا."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "كل حافة اعتمادية تشير إلى عمل يجب أن ينتهي أولًا، فالحلقة تطلب أن يحدث شيء قبل نفسه. اكسرها بحذف حافة أو بتقسيم عقدة."),
         ("Every entry has the form Key = value.", "كل مدخل على صورة مفتاح = قيمة."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "كل ملاحظة أعلاه تسمّي ما هو خطأ وما ينبغي تغييره. ولا تُنتَج حزمة إلا حين لا يبقى منها شيء."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "كل معرّف تمنحه المنصة مكتوب داخل هذا البناء. والاسم الذي ليس بينها اسم لا يملكه أي جهاز."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "كل لغة محلية أخرى ترجمة للغة الاحتياطية. والجهاز الذي لا تكون لغته من المختارة يقرأ ذلك المجلد، فحذفه سيطرح تطبيقًا بلا اسم على أكثر هواتف العالم."),
         ("Every resource is declared as <type name=\"…\">.", "يُعلن كل مورد على صورة <نوع name=\"…\">."),
@@ -10901,8 +10548,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "عوامل المفتاح الخاص وأسسه لا تتفق مع مقياسه، أو أن هذا البناء حسب التوقيع خطأً. ولا يُنتَج شيء في الحالتين."),
         ("The project declares more resources than the accepted limit.", "المشروع يعلن موارد أكثر من الحد المقبول."),
         ("The project declares no resource to write.", "لا يعلن المشروع أي مورد يُكتب."),
-        ("The project does not meet the security policy, so no bundle was produced.", "لا يفي المشروع بسياسة الأمان، فلم تُنتَج أي حزمة مجمّعة."),
-        ("The project does not meet the security policy, so nothing was produced.", "لا يفي المشروع بسياسة الأمان، فلم يُنتَج شيء."),
         ("The project folder could not be made.", "تعذّر إنشاء مجلد المشروع."),
         ("The project folder is nested deeper than this build walks.", "مجلد المشروع متداخل أعمق مما يمشيه هذا البناء."),
         ("The project folder is not here.", "مجلد المشروع ليس هنا."),
@@ -10985,7 +10630,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "هذا الإذن يتجاوز بكثير ما يحتاجه ناتج أداة بناء، وهو الشكل المعتاد لتطبيق مسيء."),
         ("This project declares no resource by that name.", "هذا المشروع لا يعلن أي مورد بهذا الاسم."),
         ("This project holds source in a language this build does not compile.", "يحمل هذا المشروع مصدرًا بلغة لا يصرّفها هذا البناء."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "هذا النظام الفرعي معلن لا مبني. ولم يُنتَج أي ناتج ولا ينبغي توقع شيء حتى تبلغ حالته EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "هذا النظام الفرعي معلن لا مبني. ولم يُنتَج شيء ولا ينبغي توقع شيء منه."),
         ("This value has no recognised form.", "لهذه القيمة صورة غير معروفة."),
         ("Throwing wants a Throwable and was given something else.", "الرمي يريد Throwable وأُعطي غير ذلك."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "الحركة بلا TLS يمكن أن يقرأها ويعيد كتابتها أي شيء على الطريق."),
@@ -11723,7 +11368,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "在项目自己的 values 目录中声明这个缺失的资源。"),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "尺寸是一个数加一个单位，例如 16dp 或 14sp。"),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "请去掉前导零，或写成 0x 表示十六进制。"),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "上面每一行都指出哪里不对、要改什么。只有一行不剩时才会产出捆绑包。"),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "每一个都写作 <enum name=\"…\" value=\"…\"/>。"),
         ("Each one is written as <item name=\"android:textSize\">.", "每一个都写作 <item name=\"android:textSize\">。"),
         ("Each one is written as <item quantity=\"one\">.", "每一个都写作 <item quantity=\"one\">。"),
@@ -11742,7 +11386,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "每个字节的续位都被置上了。"),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "每条依赖边都指向必须先完成的工作，所以一个环等于要求某件事发生在它自己之前。去掉一条边或拆开一个节点，就能打破它。"),
         ("Every entry has the form Key = value.", "每个条目的形式都是 键 = 值。"),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "上面每条发现都指出哪里不对、要改什么。只有一条不剩时才会产出包。"),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "平台发放的每个标识符都写在此构建里。不在其中的名称，是任何设备都没有的名称。"),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "其余每个区域设置都是回退区域设置的译文。语言不在所选之列的设备读的正是那个文件夹，所以略去它，就等于在世界上多数手机上交付一个没有名字的应用。"),
         ("Every resource is declared as <type name=\"…\">.", "每个资源都声明为 <类型 name=\"…\">。"),
@@ -12139,8 +11782,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "私钥的因子和指数与它的模数对不上，或者此构建把签名算错了。无论哪种情形都不会产出任何东西。"),
         ("The project declares more resources than the accepted limit.", "项目声明的资源超过了接受的上限。"),
         ("The project declares no resource to write.", "项目没有声明任何要写出的资源。"),
-        ("The project does not meet the security policy, so no bundle was produced.", "项目不满足安全策略，所以没有产出捆绑包。"),
-        ("The project does not meet the security policy, so nothing was produced.", "项目不满足安全策略，所以什么都没有产出。"),
         ("The project folder could not be made.", "无法创建项目文件夹。"),
         ("The project folder is nested deeper than this build walks.", "项目文件夹的嵌套深度超过了此构建所遍历的层数。"),
         ("The project folder is not here.", "项目文件夹不在这里。"),
@@ -12223,7 +11864,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "这个权限远远超出了一个构建工具的产物所需要的范围，而且正是滥用型应用的惯常形态。"),
         ("This project declares no resource by that name.", "这个项目没有声明叫这个名字的资源。"),
         ("This project holds source in a language this build does not compile.", "这个项目含有此构建并不编译的语言写成的源码。"),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "这个子系统是声明出来的，不是构建出来的。它没有产出任何产物，在它的状态达到 EXPERIMENTAL 之前也不该期待有产物。"),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "这个子系统是声明出来的，不是构建出来的。它没有产出任何东西，也不该对它有任何期待。"),
         ("This value has no recognised form.", "这个值没有可识别的形式。"),
         ("Throwing wants a Throwable and was given something else.", "抛出要一个 Throwable，却得到别的。"),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "没有 TLS 的流量，路径上任何东西都能读取和改写。"),
@@ -12961,7 +12602,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "欠けているリソースを、プロジェクト自身の values フォルダーで宣言してください。"),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "寸法は数と単位です。たとえば 16dp や 14sp です。"),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "先頭のゼロを外すか、十六進として 0x と書いてください。"),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "上の各行が、何が誤りで何を変えるかを述べています。そのどれも残っていないときにだけバンドルが作られます。"),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "それぞれは <enum name=\"…\" value=\"…\"/> と書きます。"),
         ("Each one is written as <item name=\"android:textSize\">.", "それぞれは <item name=\"android:textSize\"> と書きます。"),
         ("Each one is written as <item quantity=\"one\">.", "それぞれは <item quantity=\"one\"> と書きます。"),
@@ -12980,7 +12620,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "どのバイトも継続ビットが立っていました。"),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "依存の辺はすべて、先に終わらなければならない仕事を指します。ですから循環は、自分より先に自分が起きることを求めます。辺を外すか、ノードを分けて断ち切ってください。"),
         ("Every entry has the form Key = value.", "各項目は Key = value の形です。"),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "上の各所見が、何が誤りで何を変えるかを述べています。そのどれも残っていないときにだけパッケージが作られます。"),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "プラットフォームの配る識別子はすべてこのビルドに書き込まれています。その中にない名前は、どの端末も持たない名前です。"),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "ほかのロケールはすべて、後退先のロケールの翻訳です。言語が選ばれたもののどれでもない端末はそのフォルダーを読みます。ですからそれを外せば、世界の大半の電話で名前のないアプリケーションを配ることになります。"),
         ("Every resource is declared as <type name=\"…\">.", "リソースはすべて <type name=\"…\"> として宣言します。"),
@@ -13377,8 +13016,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "秘密鍵の因数と指数が、その法と食い違っているか、このビルドが署名を誤って計算しました。どちらにせよ何も出しません。"),
         ("The project declares more resources than the accepted limit.", "企ての宣言する資源が、受け入れる上限より多いです。"),
         ("The project declares no resource to write.", "プロジェクトは、書き出すリソースを宣言していません。"),
-        ("The project does not meet the security policy, so no bundle was produced.", "プロジェクトが安全方針を満たさないので、バンドルは作られませんでした。"),
-        ("The project does not meet the security policy, so nothing was produced.", "プロジェクトが安全方針を満たさないので、何も作られませんでした。"),
         ("The project folder could not be made.", "プロジェクトのフォルダーを作れませんでした。"),
         ("The project folder is nested deeper than this build walks.", "プロジェクトのフォルダーが、このビルドの歩くより深く入れ子になっています。"),
         ("The project folder is not here.", "プロジェクトのフォルダーがここにありません。"),
@@ -13461,7 +13098,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "この権限は、ビルド道具の出力に要るものを遥かに超えており、悪質なアプリケーションによくある形です。"),
         ("This project declares no resource by that name.", "この企ては、その名の資源を宣言していません。"),
         ("This project holds source in a language this build does not compile.", "このプロジェクトは、このビルドの翻訳しない言語のソースを収めています。"),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "この副系統は宣言されているだけで、組まれてはいません。成果物は作られておらず、その状態が EXPERIMENTAL に達するまで期待すべきではありません。"),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "この副系統は宣言されているだけで、組まれてはいません。何も作られておらず、そこから何も期待すべきではありません。"),
         ("This value has no recognised form.", "この値に、見知った形がありません。"),
         ("Throwing wants a Throwable and was given something else.", "throw は Throwable を求めますが、別のものが渡されました。"),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "TLS のない通信は、経路上の何にでも読まれ、書き換えられます。"),
@@ -14199,7 +13836,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "빠진 자원을 프로젝트 제 values 폴더에서 선언하십시오."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "크기는 수와 단위입니다. 이를테면 16dp나 14sp입니다."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "앞의 0을 없애거나, 열여섯 진수로 0x를 붙여 적으십시오."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "위의 줄마다 무엇이 잘못이고 무엇을 바꿔야 하는지 적혀 있습니다. 그 가운데 하나도 남지 않았을 때만 번들이 만들어집니다."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "하나하나 <enum name=\"…\" value=\"…\"/>로 적습니다."),
         ("Each one is written as <item name=\"android:textSize\">.", "하나하나 <item name=\"android:textSize\">로 적습니다."),
         ("Each one is written as <item quantity=\"one\">.", "하나하나 <item quantity=\"one\">으로 적습니다."),
@@ -14218,7 +13854,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "바이트마다 이어짐 비트가 서 있었습니다."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "의존 모서리는 모두 먼저 끝나야 하는 일을 가리킵니다. 그러니 고리는 무엇이 저보다 먼저 일어나기를 요구합니다. 모서리를 없애거나 마디를 나누어 끊으십시오."),
         ("Every entry has the form Key = value.", "항목마다 Key = value 꼴입니다."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "위의 지적마다 무엇이 잘못이고 무엇을 바꿔야 하는지 적혀 있습니다. 패키지는 그 가운데 하나도 남지 않았을 때만 만들어집니다."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "플랫폼이 내주는 식별자는 모두 이 빌드에 적혀 있습니다. 그 가운데 없는 이름은 어느 기기도 갖지 않은 이름입니다."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "다른 로캘은 모두 되돌아갈 로캘의 번역입니다. 말이 고른 것 가운데 하나도 아닌 기기는 그 폴더를 읽습니다. 그러니 그것을 빼면 세상 대부분의 전화에서 이름 없는 앱을 내놓게 됩니다."),
         ("Every resource is declared as <type name=\"…\">.", "자원은 모두 <type name=\"…\">으로 선언합니다."),
@@ -14615,8 +14250,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "개인 열쇠의 인수와 지수가 그 법과 어긋나거나, 이 빌드가 서명을 잘못 셈했습니다. 어느 쪽이든 아무것도 내놓지 않습니다."),
         ("The project declares more resources than the accepted limit.", "기획이 받아들이는 한계보다 많은 자원을 선언합니다."),
         ("The project declares no resource to write.", "프로젝트가 적어 낼 자원을 하나도 선언하지 않습니다."),
-        ("The project does not meet the security policy, so no bundle was produced.", "프로젝트가 보안 방침에 맞지 않아 번들이 만들어지지 않았습니다."),
-        ("The project does not meet the security policy, so nothing was produced.", "프로젝트가 보안 방침에 맞지 않아 아무것도 만들어지지 않았습니다."),
         ("The project folder could not be made.", "프로젝트 폴더를 만들지 못했습니다."),
         ("The project folder is nested deeper than this build walks.", "프로젝트 폴더가 이 빌드가 걷는 것보다 깊이 겹쳐 있습니다."),
         ("The project folder is not here.", "프로젝트 폴더가 여기 없습니다."),
@@ -14699,7 +14332,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "이 권한은 빌드 도구의 산출물에 필요한 것을 한참 넘어서며, 나쁜 뜻을 가진 앱의 흔한 모양새입니다."),
         ("This project declares no resource by that name.", "이 기획은 그 이름의 자원을 선언하지 않습니다."),
         ("This project holds source in a language this build does not compile.", "이 프로젝트는 이 빌드가 엮지 않는 말로 된 원본을 담고 있습니다."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "이 하위 얼개는 선언만 되었을 뿐 엮이지는 않았습니다. 산출물은 만들어지지 않았고, 그 상태가 EXPERIMENTAL에 닿기 전에는 기대하지 마십시오."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "이 하위 얼개는 선언만 되었을 뿐 엮이지는 않았습니다. 아무것도 만들어지지 않았고, 그것에서 아무것도 기대하지 마십시오."),
         ("This value has no recognised form.", "이 값에 알아볼 수 있는 꼴이 없습니다."),
         ("Throwing wants a Throwable and was given something else.", "던지기는 Throwable을 바라는데 다른 것이 주어졌습니다."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "TLS 없는 오감은 길 위의 무엇에나 읽히고 다시 쓰일 수 있습니다."),
@@ -15437,7 +15070,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "अनुपस्थित संसाधन को परियोजना के अपने values फ़ोल्डर में घोषित कीजिए।"),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "आयाम एक संख्या और एक इकाई होते हैं, उदाहरण के लिए 16dp या 14sp।"),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "आगे का शून्य हटाइए, या षोडश के लिए उसे 0x लिखिए।"),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "ऊपर की हर पंक्ति बताती है कि क्या गलत है और क्या बदलना है। बंडल तभी बनता है जब इनमें से एक भी शेष न रहे।"),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "हर एक <enum name=\"…\" value=\"…\"/> लिखा जाता है।"),
         ("Each one is written as <item name=\"android:textSize\">.", "हर एक <item name=\"android:textSize\"> के रूप में लिखा जाता है।"),
         ("Each one is written as <item quantity=\"one\">.", "हर एक <item quantity=\"one\"> के रूप में लिखा जाता है।"),
@@ -15456,7 +15088,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "हर बाइट का निरंतरता-बिट लगा हुआ था।"),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "हर निर्भरता-किनारा उस काम की ओर इशारा करता है जो पहले पूरा होना चाहिए, इसलिए एक चक्र यह माँगता है कि कोई चीज़ अपने से पहले हो जाए। किनारा हटाकर या गाँठ बाँटकर उसे तोड़िए।"),
         ("Every entry has the form Key = value.", "हर प्रविष्टि का रूप Key = value होता है।"),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "ऊपर की हर बात कहती है कि क्या गलत है और क्या बदलना है। पैकेज तभी बनता है जब इनमें से एक भी शेष न रहे।"),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "मंच जो भी पहचानकर्ता बाँटता है वह इस बनावट में लिखा है। जो नाम उनमें नहीं, वह ऐसा नाम है जो किसी उपकरण के पास नहीं है।"),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "हर दूसरा लोकेल उसी लोकेल का अनुवाद है जिस पर लौटा जाता है। जिस उपकरण की भाषा चुनी हुई भाषाओं में से कोई नहीं, वह उसी फ़ोल्डर को पढ़ता है, इसलिए उसे छोड़ देने का अर्थ होगा दुनिया के अधिकांश फ़ोनों पर बिना नाम का ऐप्लिकेशन भेजना।"),
         ("Every resource is declared as <type name=\"…\">.", "हर संसाधन <type name=\"…\"> के रूप में घोषित होता है।"),
@@ -15853,8 +15484,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "निजी कुंजी के गुणनखंड और घातांक उसके मापांक से असहमत हैं, या इस बनावट ने हस्ताक्षर गलत गिना। दोनों ही हाल में कुछ भी नहीं निकाला जाता।"),
         ("The project declares more resources than the accepted limit.", "परियोजना स्वीकृत सीमा से अधिक संसाधन घोषित करती है।"),
         ("The project declares no resource to write.", "परियोजना लिखने के लिए कोई संसाधन घोषित नहीं करती।"),
-        ("The project does not meet the security policy, so no bundle was produced.", "परियोजना सुरक्षा-नीति पर खरी नहीं उतरती, इसलिए कोई बंडल नहीं बना।"),
-        ("The project does not meet the security policy, so nothing was produced.", "परियोजना सुरक्षा-नीति पर खरी नहीं उतरती, इसलिए कुछ भी नहीं बना।"),
         ("The project folder could not be made.", "परियोजना का फ़ोल्डर बनाया नहीं जा सका।"),
         ("The project folder is nested deeper than this build walks.", "परियोजना का फ़ोल्डर उससे गहरा घोंसला बनाए है जितना यह बनावट चलती है।"),
         ("The project folder is not here.", "परियोजना का फ़ोल्डर यहाँ नहीं है।"),
@@ -15937,7 +15566,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "यह अनुमति उससे कहीं आगे पहुँचती है जितना किसी बनावट-औज़ार के निर्गम को चाहिए, और यही किसी दुरुपयोगी ऐप्लिकेशन का आम रूप है।"),
         ("This project declares no resource by that name.", "यह परियोजना उस नाम का कोई संसाधन घोषित नहीं करती।"),
         ("This project holds source in a language this build does not compile.", "यह परियोजना ऐसी भाषा में स्रोत रखती है जिसे यह बनावट संकलित नहीं करती।"),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "यह उपतंत्र घोषित है, बना नहीं। कोई उत्पाद नहीं बना और तब तक अपेक्षित भी नहीं जब तक उसकी स्थिति EXPERIMENTAL तक न पहुँचे।"),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "यह उपतंत्र घोषित है, बना नहीं। कुछ भी नहीं बना और उससे कुछ भी अपेक्षित नहीं।"),
         ("This value has no recognised form.", "इस मान का कोई पहचाना हुआ रूप नहीं है।"),
         ("Throwing wants a Throwable and was given something else.", "फेंकने के लिए Throwable चाहिए और कुछ और दिया गया।"),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "बिना TLS के आवागमन को रास्ते की कोई भी चीज़ पढ़ और दोबारा लिख सकती है।"),
@@ -16675,7 +16304,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Nyatakan sumber daya yang hilang itu di map values milik proyek sendiri."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Ukuran adalah sebuah bilangan dan sebuah satuan, misalnya 16dp atau 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Buang nol di depannya, atau tulis 0x untuk heksadesimal."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Setiap baris di atas menyebut apa yang salah dan apa yang harus diubah. Bundel dihasilkan hanya bila tidak satu pun tersisa."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Masing-masing ditulis <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Masing-masing ditulis sebagai <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Masing-masing ditulis sebagai <item quantity=\"one\">."),
@@ -16694,7 +16322,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Setiap bita punya bit lanjutan yang menyala."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Setiap sisi dependensi menunjuk kerja yang harus selesai lebih dulu, jadi sebuah putaran meminta sesuatu terjadi sebelum dirinya sendiri. Putuskan dengan membuang sebuah sisi atau membelah sebuah simpul."),
         ("Every entry has the form Key = value.", "Setiap entri berbentuk Key = value."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Setiap temuan di atas menyebut apa yang salah dan apa yang harus diubah. Paket dihasilkan hanya bila tidak satu pun tersisa."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Setiap pengenal yang dibagikan platform tertulis di dalam bangunan ini. Nama yang tidak ada di antaranya adalah nama yang tidak dimiliki perangkat mana pun."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Setiap lokal lain adalah terjemahan dari lokal cadangan. Perangkat yang bahasanya bukan salah satu yang dipilih membaca map itu, jadi menghilangkannya berarti mengirim aplikasi tanpa nama ke sebagian besar ponsel di dunia."),
         ("Every resource is declared as <type name=\"…\">.", "Setiap sumber daya dinyatakan sebagai <type name=\"…\">."),
@@ -17091,8 +16718,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Faktor dan eksponen kunci privat berselisih dengan modulusnya, atau bangunan ini salah menghitung tanda tangannya. Bagaimanapun tidak ada yang dikeluarkan."),
         ("The project declares more resources than the accepted limit.", "Proyek menyatakan lebih banyak sumber daya daripada batas yang diterima."),
         ("The project declares no resource to write.", "Proyek ini tidak menyatakan sumber daya apa pun untuk ditulis."),
-        ("The project does not meet the security policy, so no bundle was produced.", "Proyek ini tidak memenuhi kebijakan keamanan, jadi tidak ada bundel yang dihasilkan."),
-        ("The project does not meet the security policy, so nothing was produced.", "Proyek ini tidak memenuhi kebijakan keamanan, jadi tidak ada yang dihasilkan."),
         ("The project folder could not be made.", "Map proyek tidak bisa dibuat."),
         ("The project folder is nested deeper than this build walks.", "Map proyek bersarang lebih dalam daripada yang ditelusuri bangunan ini."),
         ("The project folder is not here.", "Map proyek tidak ada di sini."),
@@ -17175,7 +16800,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Izin ini menjangkau jauh melampaui yang dibutuhkan keluaran sebuah perkakas bangunan, dan itulah bentuk lazim aplikasi yang menyalahgunakan."),
         ("This project declares no resource by that name.", "Proyek ini tidak menyatakan sumber daya bernama itu."),
         ("This project holds source in a language this build does not compile.", "Proyek ini memuat sumber dalam bahasa yang tidak dibangun bangunan ini."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Subsistem ini dinyatakan, bukan dibangun. Tidak ada hasil yang dibuat dan jangan diharapkan sampai statusnya mencapai EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Subsistem ini dinyatakan, bukan dibangun. Tidak ada yang dibuat dan jangan mengharapkan apa pun darinya."),
         ("This value has no recognised form.", "Nilai ini tidak berbentuk yang dikenali."),
         ("Throwing wants a Throwable and was given something else.", "Melempar menginginkan Throwable dan diberi yang lain."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Lalu lintas tanpa TLS bisa dibaca dan ditulis ulang apa pun yang ada di jalurnya."),
@@ -17913,7 +17538,6 @@ pub mod speech {
         ("Declare the missing resource in the project's own values folder.", "Declare o recurso que falta na pasta values do próprio projeto."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Dimensões são um número e uma unidade, por exemplo 16dp ou 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Tire o zero à frente, ou escreva 0x para hexadecimal."),
-        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Cada linha acima nomeia o que está errado e o que mudar. Um bundle só é produzido quando nenhuma delas sobra."),
         ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Cada um se escreve <enum name=\"…\" value=\"…\"/>."),
         ("Each one is written as <item name=\"android:textSize\">.", "Cada um se escreve como <item name=\"android:textSize\">."),
         ("Each one is written as <item quantity=\"one\">.", "Cada um se escreve como <item quantity=\"one\">."),
@@ -17932,7 +17556,6 @@ pub mod speech {
         ("Every byte had its continuation bit set.", "Todo byte estava com o bit de continuação ligado."),
         ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Toda aresta de dependência aponta para um trabalho que tem de terminar antes, então um ciclo pede que algo aconteça antes de si mesmo. Quebre removendo uma aresta ou dividindo um nó."),
         ("Every entry has the form Key = value.", "Toda entrada tem a forma Chave = valor."),
-        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Cada achado acima nomeia o que está errado e o que mudar. Um pacote só é produzido quando nenhum deles sobra."),
         ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Todo identificador que a plataforma distribui está escrito nesta compilação. Um nome que não esteja entre eles é um que aparelho nenhum tem."),
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toda outra localidade é uma tradução da de recuo. Um aparelho cujo idioma não seja nenhum dos escolhidos lê aquela pasta, então deixá-la de fora seria publicar um aplicativo sem nome na maioria dos celulares do mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Todo recurso é declarado como <type name=\"…\">."),
@@ -18329,8 +17952,6 @@ pub mod speech {
         ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Os fatores e expoentes da chave privada discordam do módulo dela, ou esta compilação calculou a assinatura errado. De um jeito ou de outro, nada é emitido."),
         ("The project declares more resources than the accepted limit.", "O projeto declara mais recursos que o limite aceito."),
         ("The project declares no resource to write.", "O projeto não declara recurso nenhum para escrever."),
-        ("The project does not meet the security policy, so no bundle was produced.", "O projeto não cumpre a política de segurança, então nenhum bundle foi produzido."),
-        ("The project does not meet the security policy, so nothing was produced.", "O projeto não cumpre a política de segurança, então nada foi produzido."),
         ("The project folder could not be made.", "Não deu para criar a pasta do projeto."),
         ("The project folder is nested deeper than this build walks.", "A pasta do projeto está aninhada mais fundo do que esta compilação percorre."),
         ("The project folder is not here.", "A pasta do projeto não está aqui."),
@@ -18413,7 +18034,7 @@ pub mod speech {
         ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Esta permissão vai muito além do que a saída de uma ferramenta de compilação precisa, e é o formato costumeiro de um aplicativo abusivo."),
         ("This project declares no resource by that name.", "Este projeto não declara nenhum recurso com esse nome."),
         ("This project holds source in a language this build does not compile.", "Este projeto guarda código numa linguagem que esta compilação não compila."),
-        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Este subsistema está declarado, não construído. Nenhum artefato foi produzido e nenhum deve ser esperado até seu estado chegar a EXPERIMENTAL."),
+        ("This subsystem is declared, not built. Nothing was produced and nothing should be expected from it.", "Este subsistema está declarado, não construído. Nada foi produzido e dele nada deve ser esperado."),
         ("This value has no recognised form.", "Este valor não tem uma forma reconhecida."),
         ("Throwing wants a Throwable and was given something else.", "Lançar quer um Throwable e recebeu outra coisa."),
         ("Traffic without TLS can be read and rewritten by anything on the path.", "Tráfego sem TLS pode ser lido e reescrito por qualquer coisa no caminho."),
@@ -18870,7 +18491,7 @@ pub mod plugin {
     use crate::caps::{Capability, Decision, Policy};
     use crate::diag::{Diagnostic, Severity};
     use crate::json::Writer;
-    use crate::{FailureClass, Status};
+    use crate::FailureClass;
 
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct Version {
@@ -18906,7 +18527,7 @@ pub mod plugin {
         pub id: &'static str,
         pub display_name: &'static str,
         pub version: Version,
-        pub status: Status,
+        pub produces_artifacts: bool,
         pub summary: &'static str,
         pub inputs: &'static [&'static str],
         pub outputs: &'static [&'static str],
@@ -18921,8 +18542,7 @@ pub mod plugin {
             w.field_str("id", self.id);
             w.field_str("displayName", self.display_name);
             w.field_str("version", &self.version.to_string());
-            w.field_str("status", self.status.as_str());
-            w.field_bool("mayProduceArtifacts", self.status.may_produce_artifacts());
+            w.field_bool("mayProduceArtifacts", self.produces_artifacts);
             w.field_str("summary", self.summary);
             w.begin_array(Some("inputs"));
             for i in self.inputs {
@@ -18983,16 +18603,13 @@ pub mod plugin {
             Severity::Error,
             FailureClass::InternalError,
             contract.id,
-            format!(
-                "{} is not implemented; its status is {}.",
-                contract.display_name, contract.status
-            ),
+            format!("{} is not implemented here.", contract.display_name),
         )
         .with_context(format!("Contract version: {}", contract.version))
         .with_context(format!("Declared outputs: {}", contract.outputs.join(", ")))
         .with_suggestion(
-            "This subsystem is declared, not built. No artifact was produced and \
-             none should be expected until its status reaches EXPERIMENTAL.",
+            "This subsystem is declared, not built. Nothing was produced and \
+             nothing should be expected from it.",
         )
     }
 
@@ -19073,16 +18690,6 @@ pub mod compiler {
             match self {
                 Abi::Arm64V8a => "arm64-v8a",
             }
-        }
-
-        pub const fn triple(self) -> &'static str {
-            match self {
-                Abi::Arm64V8a => "aarch64-linux-android",
-            }
-        }
-
-        pub const fn is_64_bit(self) -> bool {
-            true
         }
 
         pub fn parse(value: &str) -> Option<Abi> {
@@ -19179,10 +18786,6 @@ pub mod compiler {
     }
 
     impl Reproducibility {
-        pub const fn may_be_cached(&self) -> bool {
-            !matches!(self, Reproducibility::Unknown)
-        }
-
         pub fn as_str(&self) -> &'static str {
             match self {
                 Reproducibility::Always => "ALWAYS",
@@ -19448,10 +19051,6 @@ pub mod compiler {
     impl Stopper {
         pub fn stop(&self) {
             self.flag.store(true, Ordering::Relaxed);
-        }
-
-        pub fn is_stopped(&self) -> bool {
-            self.flag.load(Ordering::Relaxed)
         }
     }
 
@@ -19747,7 +19346,7 @@ pub mod compiler {
                     contract.id
                 ));
             }
-            if contract.status.may_produce_artifacts() && identity.language.is_empty() {
+            if contract.produces_artifacts && identity.language.is_empty() {
                 wrong.push(format!(
                     "{}: an identity has to name its language",
                     contract.id
@@ -23485,20 +23084,6 @@ pub mod store {
             swept
         }
 
-        pub fn clear_staging(&self) -> u64 {
-            let staging = format!("{}/{STAGING}", self.root);
-            let Ok(entries) = std::fs::read_dir(&staging) else {
-                return 0;
-            };
-            let mut cleared = 0;
-            for entry in entries.flatten() {
-                if std::fs::remove_file(entry.path()).is_ok() {
-                    cleared += 1;
-                }
-            }
-            cleared
-        }
-
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             let held = self.list();
             w.begin_object(Some(key));
@@ -24674,20 +24259,6 @@ pub mod graph {
             }
         }
 
-        pub fn set_cache_key(&mut self, id: &NodeId, key: CacheKey) {
-            if let Some(node) = self.node_mut(id) {
-                node.cache_key = Some(key);
-            }
-        }
-
-        pub fn dependents(&self, id: &NodeId) -> Vec<&NodeId> {
-            self.nodes
-                .iter()
-                .filter(|node| node.dependencies.contains(id))
-                .map(|node| &node.id)
-                .collect()
-        }
-
         pub fn plan(&self) -> Result<Vec<NodeId>, Diagnostic> {
             for node in &self.nodes {
                 for dependency in &node.dependencies {
@@ -25197,16 +24768,8 @@ pub mod scheduler {
             out
         }
 
-        pub fn watching(&self) -> bool {
-            self.path.is_some()
-        }
-
         pub fn passed(&self, step: &str) -> bool {
             self.held.iter().any(|one| one == step)
-        }
-
-        pub fn steps(&self) -> &[String] {
-            &self.held
         }
 
         pub fn resumed(&self) -> usize {
@@ -26049,10 +25612,6 @@ pub mod binary {
 
         pub fn u8(&mut self) -> Result<u8, Diagnostic> {
             Ok(self.bytes(1)?[0])
-        }
-
-        pub fn i8(&mut self) -> Result<i8, Diagnostic> {
-            Ok(self.u8()? as i8)
         }
 
         pub fn u16(&mut self) -> Result<u16, Diagnostic> {
@@ -27464,23 +27023,6 @@ pub mod resources {
             Kind::Xml,
         ];
 
-        pub const fn is_a_file(self) -> bool {
-            matches!(
-                self,
-                Kind::Anim
-                    | Kind::Animator
-                    | Kind::Drawable
-                    | Kind::Font
-                    | Kind::Interpolator
-                    | Kind::Layout
-                    | Kind::Menu
-                    | Kind::Mipmap
-                    | Kind::Raw
-                    | Kind::Transition
-                    | Kind::Xml
-            )
-        }
-
         pub const fn is_compiled_xml(self) -> bool {
             !matches!(self, Kind::Raw)
         }
@@ -27817,13 +27359,6 @@ pub mod resources {
             screen_layout2: 0,
             colour_mode: 0,
         };
-
-        pub fn for_locale(locale: Locale) -> Config {
-            Config {
-                locale,
-                ..Config::DEFAULT
-            }
-        }
 
         pub fn says_nothing(&self) -> bool {
             *self == Config::DEFAULT
@@ -31826,20 +31361,8 @@ pub mod der {
     }
 
     impl<'a> Element<'a> {
-        pub fn is_constructed(&self) -> bool {
-            self.tag & 0x20 != 0
-        }
-
         pub fn is_context_specific(&self) -> bool {
             self.tag & 0xc0 == 0x80
-        }
-
-        pub fn context_number(&self) -> Option<u8> {
-            if self.is_context_specific() {
-                Some(self.tag & 0x1f)
-            } else {
-                None
-            }
         }
 
         pub fn reader(&self) -> Reader<'a> {
@@ -32546,6 +32069,10 @@ pub mod signing {
 
     pub const V31_BLOCK_ID: u32 = 0x1b93_ad61;
 
+    pub const ROTATION_MIN_SDK_ATTRIBUTE: u32 = 0x559f_8b02;
+
+    pub const ROTATION_PLATFORM: u32 = 33;
+
     pub const CHUNK_SIZE: usize = 1024 * 1024;
 
     const CHUNK_PREFIX: u8 = 0xa5;
@@ -33172,9 +32699,27 @@ pub mod signing {
         certificate: &[u8],
         sdk_range: Option<(u32, u32)>,
     ) -> Vec<u8> {
+        signed_data_carrying(algorithm_id, digest, certificate, sdk_range, &[])
+    }
+
+    pub fn signed_data_carrying(
+        algorithm_id: u32,
+        digest: &[u8],
+        certificate: &[u8],
+        sdk_range: Option<(u32, u32)>,
+        attributes: &[(u32, Vec<u8>)],
+    ) -> Vec<u8> {
         let mut one_digest = Vec::new();
         one_digest.extend_from_slice(&algorithm_id.to_le_bytes());
         one_digest.extend_from_slice(&prefixed(digest));
+
+        let mut carried = Vec::new();
+        for (id, value) in attributes {
+            let mut one = Vec::new();
+            one.extend_from_slice(&id.to_le_bytes());
+            one.extend_from_slice(value);
+            carried.extend_from_slice(&prefixed(&one));
+        }
 
         let mut out = Vec::new();
         out.extend_from_slice(&prefixed(&prefixed(&one_digest)));
@@ -33183,7 +32728,7 @@ pub mod signing {
             out.extend_from_slice(&minimum.to_le_bytes());
             out.extend_from_slice(&maximum.to_le_bytes());
         }
-        out.extend_from_slice(&prefixed(&[]));
+        out.extend_from_slice(&prefixed(&carried));
         out
     }
 
@@ -33216,6 +32761,15 @@ pub mod signing {
         pub algorithm_id: u32,
         pub v2: Vec<u8>,
         pub v3: Option<Vec<u8>>,
+        pub v31: Option<Vec<u8>>,
+    }
+
+    pub fn rotation_range(sdk_range: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        let (_, maximum) = sdk_range?;
+        if maximum < ROTATION_PLATFORM {
+            return None;
+        }
+        Some((ROTATION_PLATFORM, maximum))
     }
 
     pub fn to_sign(
@@ -33225,19 +32779,38 @@ pub mod signing {
         sdk_range: Option<(u32, u32)>,
     ) -> Result<ToSign, Diagnostic> {
         let (algorithm_id, digest) = content_of(package, algorithm)?;
+        let rotation = rotation_range(sdk_range);
+        let rotation_attribute = rotation
+            .map(|_| {
+                vec![(
+                    ROTATION_MIN_SDK_ATTRIBUTE,
+                    ROTATION_PLATFORM.to_le_bytes().to_vec(),
+                )]
+            })
+            .unwrap_or_default();
         Ok(ToSign {
             algorithm_id,
             v2: signed_data(algorithm_id, &digest, certificate, None),
-            v3: sdk_range.map(|range| signed_data(algorithm_id, &digest, certificate, Some(range))),
+            v3: sdk_range.map(|range| {
+                signed_data_carrying(
+                    algorithm_id,
+                    &digest,
+                    certificate,
+                    Some(range),
+                    &rotation_attribute,
+                )
+            }),
+            v31: rotation.map(|range| signed_data(algorithm_id, &digest, certificate, Some(range))),
         })
     }
 
-    pub fn with_signatures(
+    pub fn with_every_signature(
         package: &[u8],
         certificate: &[u8],
         held: &ToSign,
         v2: &[u8],
         v3: Option<&[u8]>,
+        v31: Option<&[u8]>,
         sdk_range: Option<(u32, u32)>,
     ) -> Result<Vec<u8>, Diagnostic> {
         let mut block = Vec::new();
@@ -33248,6 +32821,14 @@ pub mod signing {
             let three =
                 one_signer_signed(held.algorithm_id, data, signature, certificate, Some(range))?;
             add_pair(&mut block, V3_BLOCK_ID, &three);
+        }
+
+        if let (Some(data), Some(signature), Some(range)) =
+            (&held.v31, v31, rotation_range(sdk_range))
+        {
+            let rotated =
+                one_signer_signed(held.algorithm_id, data, signature, certificate, Some(range))?;
+            add_pair(&mut block, V31_BLOCK_ID, &rotated);
         }
         spliced(package, block)
     }
@@ -33362,7 +32943,19 @@ pub mod signing {
             Some(data) => Some(crate::rsa::sign(key, algorithm, data)?),
             None => None,
         };
-        with_signatures(package, certificate, &held, &v2, v3.as_deref(), sdk_range)
+        let v31 = match &held.v31 {
+            Some(data) => Some(crate::rsa::sign(key, algorithm, data)?),
+            None => None,
+        };
+        with_every_signature(
+            package,
+            certificate,
+            &held,
+            &v2,
+            v3.as_deref(),
+            v31.as_deref(),
+            sdk_range,
+        )
     }
 
     pub fn verify_signer(signer: &Signer, sink: &mut Sink) -> SignerCheck {
@@ -33882,10 +33475,6 @@ pub mod dex {
                 .collect()
         }
 
-        pub fn defines(&self, name: &str) -> bool {
-            self.classes.iter().any(|class| class.name == name)
-        }
-
         pub fn class(&self, name: &str) -> Option<&Class> {
             self.classes.iter().find(|class| class.name == name)
         }
@@ -34278,10 +33867,6 @@ pub mod dex {
             matches!(self.opcode, 0x6e..=0x72 | 0x74..=0x78 | 0xfa | 0xfb)
         }
 
-        pub fn is_return(&self) -> bool {
-            matches!(self.opcode, 0x0e..=0x11)
-        }
-
         pub fn to_text(&self) -> String {
             let mut out = format!("{:04x}: {}", self.address, self.name);
             if let Some(about) = &self.about {
@@ -34353,10 +33938,6 @@ pub mod dex {
                 self.parameters.join(", "),
                 self.return_type
             )
-        }
-
-        pub fn is_abstract_or_native(&self) -> bool {
-            self.access_flags & (ACC_ABSTRACT | ACC_NATIVE) != 0
         }
     }
 
@@ -37278,10 +36859,6 @@ pub mod rsa {
                 DigestAlgorithm::Sha384 => "SHA-384",
                 DigestAlgorithm::Sha512 => "SHA-512",
             }
-        }
-
-        pub fn signs_a_package(self) -> bool {
-            !matches!(self, DigestAlgorithm::Sha384)
         }
     }
 
@@ -45688,8 +45265,8 @@ pub mod scaffold {
         out.push_str("import android.app.Activity;\n");
         out.push_str("import android.os.Bundle;\n");
         if web.whole {
-            out.push_str("import android.view.View;\n");
-            out.push_str("import android.view.Window;\n");
+            out.push_str("import android.view.WindowInsets;\n");
+            out.push_str("import android.view.WindowInsetsController;\n");
         }
         out.push_str("import android.webkit.WebSettings;\n");
         out.push_str("import android.webkit.WebView;\n");
@@ -45703,9 +45280,6 @@ pub mod scaffold {
         out.push_str("    @Override\n");
         out.push_str("    protected void onCreate(Bundle state) {\n");
         out.push_str("        super.onCreate(state);\n");
-        if web.whole {
-            out.push_str("        requestWindowFeature(Window.FEATURE_NO_TITLE);\n");
-        }
         out.push_str("        this.page = new WebView(this);\n");
         out.push_str("        WebSettings settings = this.page.getSettings();\n");
         out.push_str(&format!(
@@ -45740,10 +45314,20 @@ pub mod scaffold {
         out.push_str("        this.page.setWebViewClient(new WebViewClient());\n");
         out.push_str("        setContentView(this.page);\n");
         if web.whole {
+            out.push_str("        getWindow().setDecorFitsSystemWindows(false);\n");
             out.push_str(
-                "        getWindow().getDecorView().setSystemUiVisibility(\n            \
-                 View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);\n",
+                "        WindowInsetsController bars = getWindow().getInsetsController();\n",
             );
+            out.push_str("        if (bars != null) {\n");
+            out.push_str(
+                "            bars.hide(WindowInsets.Type.statusBars() \
+                 | WindowInsets.Type.navigationBars());\n",
+            );
+            out.push_str(
+                "            bars.setSystemBarsBehavior(\n                \
+                 WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);\n",
+            );
+            out.push_str("        }\n");
         }
         out.push_str("        this.page.loadUrl(ADDRESS);\n");
         out.push_str("    }\n\n");
@@ -50257,23 +49841,7 @@ pub mod bundle {
     pub fn write(project: &crate::builder::Project) -> Result<Outcome, Diagnostic> {
         crate::progress::enter_checked("bundle")?;
         let mut sink = crate::diag::Sink::new();
-        let prepared = crate::builder::prepare(project, &mut sink).map_err(|error| {
-            if error.code == "EB010" {
-                let mut refusal = fail(
-                    "EN003",
-                    "The project does not meet the security policy, so no bundle was produced.",
-                );
-                for line in &error.context {
-                    refusal = refusal.with_context(line.clone());
-                }
-                refusal.with_suggestion(
-                    "Each line above names what is wrong and what to change. A bundle is \
-                     produced only when none of them is left.",
-                )
-            } else {
-                error
-            }
-        })?;
+        let prepared = crate::builder::prepare(project, &mut sink)?;
 
         let manifest = encode_manifest(&prepared.root)?;
 
@@ -53249,23 +52817,7 @@ public final class R {{
         }
 
         let report = guard::inspect_manifest(&root);
-        if report.verdict() == guard::Verdict::Refused {
-            guard::emit(&report, sink);
-            let mut refusal = fail(
-                "EB010",
-                "The project does not meet the security policy, so nothing was produced.",
-            );
-            for finding in &report.findings {
-                refusal = refusal.with_context(format!(
-                    "{}: {} {}",
-                    finding.code, finding.what, finding.remedy
-                ));
-            }
-            return Err(refusal.with_suggestion(
-                "Every finding above names what is wrong and what to change. A package is \
-                 produced only when none of them is left.",
-            ));
-        }
+        guard::emit(&report, sink);
 
         let package = package_name(&root);
         Ok(Prepared {
@@ -54544,7 +54096,6 @@ pub fn state_report(observed_environment: &str) -> String {
     w.begin_object(Some("core"));
     w.field_str("name", "Omni_Builder Core");
     w.field_str("version", CORE_VERSION);
-    w.field_str("status", CORE_STATUS.as_str());
     w.field_u64("abiVersion", ffi::OMNI_ABI_VERSION as u64);
     w.field_bool("selfHosted", false);
     w.field_str(
@@ -54562,25 +54113,12 @@ pub fn state_report(observed_environment: &str) -> String {
 
     w.begin_object(Some("subsystems"));
     w.field_u64("count", SUBSYSTEMS.len() as u64);
-    w.field_u64(
-        "production",
-        SUBSYSTEMS
-            .iter()
-            .filter(|s| s.status == Status::Production)
-            .count() as u64,
-    );
     w.begin_array(Some("detail"));
     for subsystem in SUBSYSTEMS {
         w.begin_object(None);
         w.field_str("name", subsystem.name);
-        w.field_str("status", subsystem.status.as_str());
         w.field_u64("directiveSection", subsystem.directive_section as u64);
         w.field_str("summary", subsystem.summary);
-        w.begin_array(Some("missing"));
-        for gap in subsystem.missing {
-            w.element_str(gap);
-        }
-        w.end_array();
         w.end_object();
     }
     w.end_array();
@@ -54618,7 +54156,7 @@ pub fn state_report(observed_environment: &str) -> String {
         registry
             .all()
             .iter()
-            .filter(|p| p.contract().status.may_produce_artifacts())
+            .filter(|p| p.contract().produces_artifacts)
             .count() as u64,
     );
     registry.write_json(&mut w, "contracts");
@@ -57175,6 +56713,17 @@ pub mod ffi {
             .unwrap_or(0)
     }
 
+    pub(crate) fn write_side_signature(package_path: &str, side: &[u8]) -> Option<String> {
+        if side.is_empty() {
+            return None;
+        }
+        let path = format!("{package_path}.idsig");
+        match std::fs::write(&path, side) {
+            Ok(()) => Some(path),
+            Err(_) => None,
+        }
+    }
+
     pub(crate) fn write_both(
         first_path: &str,
         first: &[u8],
@@ -57340,6 +56889,10 @@ pub mod ffi {
                         built = true;
                         w.field_bool("built", true);
                         w.field_str("path", &output_path);
+                        match write_side_signature(&output_path, &outcome.side_signature) {
+                            Some(beside) => w.field_str("sideSignaturePath", &beside),
+                            None => w.field_str("sideSignaturePath", ""),
+                        }
                         outcome.write_json(&mut w, "package");
                     }
                     Err(why) => {
@@ -57543,6 +57096,10 @@ pub mod ffi {
                             w.field_bool("built", true);
                             w.field_str("path", &package_path);
                             w.field_str("bundlePath", &bundle_path);
+                            match write_side_signature(&package_path, &package.side_signature) {
+                                Some(beside) => w.field_str("sideSignaturePath", &beside),
+                                None => w.field_str("sideSignaturePath", ""),
+                            }
                             package.write_json(&mut w, "package");
                             bundle.write_json(&mut w, "bundle");
                         }
@@ -58231,6 +57788,12 @@ pub mod ffi {
                                 }
                                 None => w.field_str("toSignV3", ""),
                             }
+                            match &asked.v31 {
+                                Some(rotated) => {
+                                    w.field_str("toSignV31", &crate::der::to_hex(rotated));
+                                }
+                                None => w.field_str("toSignV31", ""),
+                            }
                             made.guard.write_json(&mut w, "policy");
                         }
                         Err(why) => {
@@ -58259,6 +57822,7 @@ pub mod ffi {
         certificate: *const c_char,
         signature_v2: *const c_char,
         signature_v3: *const c_char,
+        signature_v31: *const c_char,
         min_sdk: u32,
         max_sdk: u32,
     ) -> *mut c_char {
@@ -58272,12 +57836,20 @@ pub mod ffi {
                 return std::ptr::null_mut();
             };
             let three = text_from(signature_v3).unwrap_or_default();
+            let rotated = text_from(signature_v31).unwrap_or_default();
 
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
             let sink = crate::diag::Sink::new();
 
-            let outcome = sealed(&package_path, &certificate, &v2, &three, (min_sdk, max_sdk));
+            let outcome = sealed(
+                &package_path,
+                &certificate,
+                &v2,
+                &three,
+                &rotated,
+                (min_sdk, max_sdk),
+            );
             let mut sealed_ok = false;
             match outcome {
                 Ok((package, report, fingerprint)) => {
@@ -58313,6 +57885,7 @@ pub mod ffi {
         certificate: &str,
         v2: &str,
         v3: &str,
+        v31: &str,
         range: (u32, u32),
     ) -> Result<Sealed, crate::diag::Diagnostic> {
         let named = |code: &str, said: &str| {
@@ -58337,6 +57910,14 @@ pub mod ffi {
                     named("EB061", "The signature is not written as hexadecimal.")
                 })?)
             };
+        let third =
+            if v31.is_empty() {
+                None
+            } else {
+                Some(crate::der::from_hex(v31).ok_or_else(|| {
+                    named("EB061", "The signature is not written as hexadecimal.")
+                })?)
+            };
 
         let package = std::fs::read(package_path).map_err(|why| {
             named("EB062", "The package to seal could not be read.")
@@ -58347,12 +57928,13 @@ pub mod ffi {
         let range = Some(range);
         let asked =
             crate::signing::to_sign(&package, &held, crate::rsa::DigestAlgorithm::Sha256, range)?;
-        let out = crate::signing::with_signatures(
+        let out = crate::signing::with_every_signature(
             &package,
             &held,
             &asked,
             &first,
             second.as_deref(),
+            third.as_deref(),
             range,
         )?;
 
@@ -58628,7 +58210,7 @@ mod tests {
     use super::toolchain::{self, Observation, Requirement, State};
     use super::vfs::{Access, Quota, VirtualFs, VirtualPath};
     use super::x509::Certificate;
-    use super::{FailureClass, Status};
+    use super::FailureClass;
 
     fn is_structurally_valid(document: &str) -> bool {
         let mut stack: Vec<char> = Vec::new();
@@ -58895,7 +58477,7 @@ mod tests {
             match real {
                 Some((_, compiler)) => {
                     assert!(
-                        contract.status.may_produce_artifacts(),
+                        contract.produces_artifacts,
                         "{} is written and must say so",
                         contract.id
                     );
@@ -58903,15 +58485,8 @@ mod tests {
                     assert!(wrong.is_empty(), "{}: {wrong:?}", contract.id);
                 }
                 None => {
-                    assert_eq!(
-                        contract.status,
-                        Status::Planned,
-                        "{} claims status {} and nothing implements it",
-                        contract.id,
-                        contract.status
-                    );
                     assert!(
-                        !contract.status.may_produce_artifacts(),
+                        !contract.produces_artifacts,
                         "{} must not be allowed to publish artifacts",
                         contract.id
                     );
@@ -59200,7 +58775,7 @@ mod tests {
         let counted = Registry::builtin()
             .all()
             .iter()
-            .filter(|plugin| plugin.contract().status.may_produce_artifacts())
+            .filter(|plugin| plugin.contract().produces_artifacts)
             .count();
         assert!(
             report.contains(&format!("\"implemented\":{counted}")),
@@ -63687,6 +63262,125 @@ final class Doubling extends Counter {
     }
 
     #[test]
+    fn a_signed_package_carries_the_rotation_block_apksigner_reads() {
+        let (Some(apksigner), Some(_)) = (find_apksigner(), openssl()) else {
+            eprintln!("rotation block: apksigner or openssl is not available here");
+            return;
+        };
+        let directory = temp_directory("omni-v31");
+        let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
+            eprintln!("rotation block: openssl could not make a certificate");
+            return;
+        };
+        let key = super::rsa::parse_private_key(&key_bytes).expect("the key must parse");
+
+        let (root, sink) = parse_xml(OMNI_BUILT_MANIFEST);
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let manifest = axml::encode(&root.expect("the manifest must parse")).unwrap();
+        let mut builder = ArchiveBuilder::for_android();
+        builder.add("AndroidManifest.xml", manifest).unwrap();
+        let unsigned = builder.finish().unwrap();
+
+        let floor = crate::compiler::OLDEST_API;
+        let signed = signing::sign(
+            &unsigned,
+            &key,
+            &certificate,
+            super::rsa::DigestAlgorithm::Sha256,
+            Some((floor, super::builder::NEWEST_PLATFORM)),
+        )
+        .expect("signing must work");
+
+        let mut own = Sink::new();
+        let read = archive::read(&signed, &mut own).expect("the package must read");
+        let block = signing::find_block(&signed, read.central_directory_offset())
+            .expect("the block must read")
+            .expect("there must be a signing block");
+        assert!(block.value(signing::V2_BLOCK_ID).is_some(), "v2");
+        assert!(block.value(signing::V3_BLOCK_ID).is_some(), "v3");
+        assert!(
+            block.value(signing::V31_BLOCK_ID).is_some(),
+            "v3.1 is what this test is about"
+        );
+
+        let path = directory.join("omni-rotation.apk");
+        std::fs::write(&path, &signed).unwrap();
+
+        let verified = std::process::Command::new(&apksigner)
+            .args([
+                "verify",
+                "--verbose",
+                "--min-sdk-version",
+                &floor.to_string(),
+                "--max-sdk-version",
+                &super::builder::NEWEST_PLATFORM.to_string(),
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verified.stdout),
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        assert!(
+            verified.status.success(),
+            "apksigner rejected a package carrying a v3.1 block:\n{report}"
+        );
+        assert!(
+            report.contains("Verified using v3 scheme (APK Signature Scheme v3): true"),
+            "v3 has to keep verifying beside v3.1:\n{report}"
+        );
+        assert!(
+            report.contains("Verified using v3.1 scheme (APK Signature Scheme v3.1): true"),
+            "apksigner has to read the v3.1 block this build wrote:\n{report}"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("rotation block: apksigner verified v2, v3 and v3.1 on one package");
+    }
+
+    #[test]
+    fn a_whole_screen_web_package_hides_the_bars_the_way_this_platform_hides_them() {
+        let whole = super::scaffold::Web {
+            address: "https://example.com".to_string(),
+            whole: true,
+            ..Default::default()
+        };
+        let source = super::scaffold::page_source("com.tr.yt.page", &whole);
+        assert!(
+            !source.contains("setSystemUiVisibility"),
+            "that call does nothing from API 30 onwards, which is this floor"
+        );
+        assert!(
+            source.contains("setDecorFitsSystemWindows(false)"),
+            "{source}"
+        );
+        assert!(source.contains("getInsetsController()"), "{source}");
+        assert!(
+            source.contains("WindowInsets.Type.statusBars()"),
+            "{source}"
+        );
+        assert!(
+            source.contains("WindowInsets.Type.navigationBars()"),
+            "{source}"
+        );
+        assert!(
+            source.contains("BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE"),
+            "{source}"
+        );
+
+        let framed = super::scaffold::Web {
+            address: "https://example.com".to_string(),
+            whole: false,
+            ..Default::default()
+        };
+        let plain = super::scaffold::page_source("com.tr.yt.page", &framed);
+        assert!(!plain.contains("getInsetsController()"), "{plain}");
+        assert!(!plain.contains("WindowInsetsController"), "{plain}");
+    }
+
+    #[test]
     fn a_byte_array_is_read_by_the_instruction_that_reads_bytes() {
         let source = r#"
 public final class Arrays {
@@ -66274,13 +65968,19 @@ public final class MainActivity extends Activity {
 
         let first = outside(&asked.v2, "v2");
         let second = outside(asked.v3.as_ref().unwrap(), "v3");
+        let third = asked
+            .v31
+            .as_ref()
+            .map(|rotated| outside(rotated, "v31"))
+            .expect("a range reaching the rotation platform asks for a v3.1 signer");
 
-        let package = signing::with_signatures(
+        let package = signing::with_every_signature(
             &unsigned,
             &certificate_der,
             &asked,
             &first,
             Some(&second),
+            Some(&third),
             Some(range),
         )
         .expect("a signature made elsewhere seals the package");
@@ -66297,19 +65997,23 @@ public final class MainActivity extends Activity {
         assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
         assert!(report.digests_verified > 0);
         assert_eq!(report.signatures_failed, 0, "{:?}", sink.entries());
-        assert!(report.signatures_verified >= 2, "v2 and v3 both signed");
+        assert!(
+            report.signatures_verified >= 3,
+            "v2, v3 and v3.1 are all signed"
+        );
         assert!(report.key_matches_certificate);
         assert!(report.certificates_hold);
         assert!(report.everything_checkable_passed());
 
         let wrong = outside(b"not what was asked for", "wrong");
         let mut own = Sink::new();
-        let bad = signing::with_signatures(
+        let bad = signing::with_every_signature(
             &unsigned,
             &certificate_der,
             &asked,
             &wrong,
             Some(&second),
+            Some(&third),
             Some(range),
         )
         .expect("the block is still built");
@@ -67245,9 +66949,6 @@ public final class MainActivity extends Activity {
         for subsystem in super::SUBSYSTEMS {
             check(subsystem.name, subsystem.name);
             check(subsystem.name, subsystem.summary);
-            for missing in subsystem.missing {
-                check(subsystem.name, missing);
-            }
         }
         for dependency in super::BOOTSTRAP_DEPENDENCIES {
             check(dependency, dependency);
@@ -69359,7 +69060,7 @@ public class Walk {
     }
 
     #[test]
-    fn the_security_policy_refuses_to_produce_a_weak_package() {
+    fn the_security_policy_reports_a_weak_package_without_stopping_it() {
         let _turn = super::progress::one_at_a_time();
         let key = super::rsa::generate(1024).unwrap();
         let cases: &[(&str, &str, &str)] = &[
@@ -69422,13 +69123,24 @@ public class Walk {
                 seal_resources: false,
             };
             let mut sink = Sink::new();
-            let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
-                .expect_err(&format!("{name} must be refused"));
-            assert_eq!(error.code, "EB010", "{name}");
+            let built = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
+                .unwrap_or_else(|why| panic!("{name} must still be produced: {why:?}"));
+            assert!(built.signed, "{name}");
             let codes: Vec<&str> = sink.entries().iter().map(|d| d.code.as_str()).collect();
             assert!(
                 codes.contains(code),
                 "{name}: expected {code}, got {codes:?}"
+            );
+            assert!(
+                sink.entries()
+                    .iter()
+                    .filter(|one| one.code == *code)
+                    .all(|one| !one.severity.is_blocking()),
+                "{name}: a policy finding must not block a build"
+            );
+            assert!(
+                built.guard.findings.iter().any(|one| one.code == *code),
+                "{name}: the report must carry the finding"
             );
         }
     }
@@ -72509,14 +72221,9 @@ public final class MainActivity extends Activity {
             "</application></manifest>",
         ))
         .unwrap();
-        let refused = super::bundle::write(&weak)
-            .expect_err("the security policy governs a bundle exactly as it governs a package");
-        assert_eq!(refused.code, "EN003");
-        assert!(
-            refused.context.iter().any(|line| line.starts_with("EG001")),
-            "a refusal must name what is wrong: {:?}",
-            refused.context
-        );
+        let written = super::bundle::write(&weak)
+            .expect("the security policy reports a bundle, it does not stop one");
+        assert!(!written.bundle.is_empty());
     }
 
     #[test]
@@ -74169,7 +73876,7 @@ public final class MainActivity extends Activity {
         id: "omni.plugin.pretend",
         display_name: "Pretend",
         version: super::plugin::Version::new(0, 1, 0),
-        status: super::Status::Experimental,
+        produces_artifacts: true,
         summary: "A compiler that exists so the contract can be tested.",
         inputs: &["pretend.source"],
         outputs: &["jvm.class"],
@@ -77106,67 +76813,16 @@ class Screen
     }
 
     #[test]
-    fn no_subsystem_claims_to_be_finished() {
-        for subsystem in super::SUBSYSTEMS {
-            assert_ne!(
-                subsystem.status,
-                Status::Production,
-                "{} claims PRODUCTION",
-                subsystem.name
-            );
-        }
-    }
-
-    #[test]
-    fn every_subsystem_states_what_is_missing() {
+    fn every_subsystem_says_what_it_is() {
         for subsystem in super::SUBSYSTEMS {
             assert!(!subsystem.name.is_empty());
             assert!(!subsystem.summary.is_empty(), "{}", subsystem.name);
             assert!(subsystem.directive_section > 0, "{}", subsystem.name);
-
-            if subsystem.status < Status::Beta {
-                assert!(
-                    !subsystem.missing.is_empty(),
-                    "{} is {} but lists nothing missing",
-                    subsystem.name,
-                    subsystem.status
-                );
-            }
         }
     }
 
     #[test]
-    fn nothing_the_inventory_calls_missing_is_something_this_build_now_does() {
-        const RETIRED: &[&str] = &[
-            "there is no multidex",
-            "The certificate's own signature is never checked",
-            "hardware-backed keystore is not used",
-            "No adaptive icon",
-            "No monochrome icon for themed launchers",
-            "No extensions: no basic constraints",
-            "No fields, no virtual methods",
-            "Nothing writes a class file",
-            "Nothing writes a DEX",
-            "Nothing writes a signing block",
-            "No format is implemented on top of it",
-            "the resource table, which is not written yet",
-            "Styles can be referred to but not declared",
-            "the signing module reads a signature, it does not produce one",
-            "No Code attribute is decoded",
-            "nothing compiles a method body",
-        ];
-        for subsystem in super::SUBSYSTEMS {
-            for missing in subsystem.missing {
-                for retired in RETIRED {
-                    assert!(
-                        !missing.contains(retired),
-                        "{} still says {retired:?}, which this build has done since",
-                        subsystem.name
-                    );
-                }
-            }
-        }
-
+    fn what_this_build_now_does_is_wired_the_way_the_inventory_says() {
         type Dexes = Result<Vec<Vec<u8>>, Diagnostic>;
         type Signed = Result<Vec<u8>, Diagnostic>;
         type Classes = Result<Vec<(String, Vec<u8>)>, Diagnostic>;
@@ -77189,19 +76845,12 @@ class Screen
         assert!(class.virtual_methods.is_empty());
         assert!(class.static_fields.is_empty());
         assert!(class.instance_fields.is_empty());
-
-        assert_ne!(
-            super::CORE_STATUS,
-            Status::Foundation,
-            "the Core compiles Java to a signed package; FOUNDATION understates it"
-        );
     }
 
     #[test]
     fn the_report_carries_the_subsystem_inventory() {
         let report = super::state_report("");
         assert!(is_structurally_valid(&report));
-        assert!(report.contains("\"production\":0"));
         for subsystem in super::SUBSYSTEMS {
             assert!(
                 report.contains(subsystem.name),

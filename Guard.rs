@@ -432,7 +432,7 @@ pub fn emit(report: &Report, sink: &mut Sink) {
         sink.emit(
             Diagnostic::new(
                 finding.code,
-                Severity::Fatal,
+                Severity::Warning,
                 FailureClass::SecurityFailure,
                 "core.guard",
                 said(finding.code),

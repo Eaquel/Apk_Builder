@@ -89,8 +89,8 @@ char *omni_build_unsigned(const char *root, const char *package_path,
 
 char *omni_seal_package(const char *package_path, const char *sealed_path,
                         const char *certificate, const char *signature_v2,
-                        const char *signature_v3, uint32_t min_sdk,
-                        uint32_t max_sdk);
+                        const char *signature_v3, const char *signature_v31,
+                        uint32_t min_sdk, uint32_t max_sdk);
 
 char *omni_list_built(const char *directory);
 

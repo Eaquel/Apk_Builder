@@ -5,7 +5,6 @@ use crate::compiler::{
 use crate::diag::{Diagnostic, Severity};
 use crate::plugin::{Contract, Version};
 use crate::FailureClass;
-use crate::Status;
 
 pub const ORIGIN: &str = "omni.plugin.java";
 
@@ -19585,7 +19584,7 @@ pub static CONTRACT: Contract = Contract {
     id: "omni.plugin.java",
     display_name: "Java",
     version: Version::new(0, 2, 0),
-    status: Status::Experimental,
+    produces_artifacts: true,
     summary: "Reads Java source and writes class files, without a javac anywhere. \
               A subset of the language, named at the top of Compilers/Java.rs, with \
               everything outside it refused by name and line rather than mis-handled.",
@@ -19847,7 +19846,7 @@ mod tests {
     #[test]
     fn the_contract_says_what_this_is_and_holds_together() {
         assert_eq!(CONTRACT.id, "omni.plugin.java");
-        assert!(CONTRACT.status.may_produce_artifacts());
+        assert!(CONTRACT.produces_artifacts);
         for required in CONTRACT.required_capabilities {
             assert!(!CONTRACT.forbidden_capabilities.contains(required));
         }

@@ -1,13 +1,12 @@
 use crate::caps::Capability;
 use crate::diag::Diagnostic;
 use crate::plugin::{unimplemented_diagnostic, Context, Contract, Outcome, Plugin, Version};
-use crate::Status;
 
 pub static CONTRACT: Contract = Contract {
     id: "omni.plugin.kotlin",
     display_name: "Kotlin",
     version: Version::new(0, 1, 0),
-    status: Status::Planned,
+    produces_artifacts: false,
     summary: "Translates Kotlin source into the Omni compiler intermediate representation.",
     inputs: &["kotlin.source", "project.model", "classpath.index"],
     outputs: &["compiler.ir", "jvm.class", "diagnostics"],
@@ -53,8 +52,7 @@ mod tests {
     #[test]
     fn the_contract_is_self_consistent() {
         assert_eq!(CONTRACT.id, "omni.plugin.kotlin");
-        assert_eq!(CONTRACT.status, Status::Planned);
-        assert!(!CONTRACT.status.may_produce_artifacts());
+        assert!(!CONTRACT.produces_artifacts);
         assert!(!CONTRACT.inputs.is_empty());
         assert!(!CONTRACT.outputs.is_empty());
         assert!(!CONTRACT.non_responsibilities.is_empty());

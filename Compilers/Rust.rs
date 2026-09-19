@@ -1,13 +1,12 @@
 use crate::caps::Capability;
 use crate::diag::Diagnostic;
 use crate::plugin::{unimplemented_diagnostic, Context, Contract, Outcome, Plugin, Version};
-use crate::Status;
 
 pub static CONTRACT: Contract = Contract {
     id: "omni.plugin.rust",
     display_name: "Rust",
     version: Version::new(0, 1, 0),
-    status: Status::Planned,
+    produces_artifacts: false,
     summary: "Compiles Rust crates for Android targets.",
     inputs: &[
         "rust.source",
@@ -60,8 +59,7 @@ mod tests {
     #[test]
     fn the_contract_is_self_consistent() {
         assert_eq!(CONTRACT.id, "omni.plugin.rust");
-        assert_eq!(CONTRACT.status, Status::Planned);
-        assert!(!CONTRACT.status.may_produce_artifacts());
+        assert!(!CONTRACT.produces_artifacts);
         assert!(!CONTRACT.inputs.is_empty());
         assert!(!CONTRACT.outputs.is_empty());
         assert!(!CONTRACT.non_responsibilities.is_empty());
