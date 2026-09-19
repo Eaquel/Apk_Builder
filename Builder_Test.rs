@@ -14080,8 +14080,8 @@ public final class MainActivity extends Activity {
     #[test]
     fn dimensions_are_written_in_the_fixed_point_the_format_defines() {
         use crate::arsc::encode_dimension;
-        use crate::resources::Unit;
         use crate::arsc::encode_fraction;
+        use crate::resources::Unit;
 
         assert_eq!(encode_dimension(1_000, Unit::Dp).unwrap(), 0x0000_0101);
         assert_eq!(encode_dimension(4_000, Unit::Dp).unwrap(), 0x0000_0401);
@@ -22159,7 +22159,7 @@ mod java {
     }
 
     fn dexdump_disassembly(bytes: &[u8]) -> Option<String> {
-        let tool = crate::tests::find_apksigner().and_then(|path| {
+        let tool = crate::tests::core::find_apksigner().and_then(|path| {
             let found = path.parent()?.join("dexdump");
             found.is_file().then_some(found)
         })?;
@@ -32573,7 +32573,7 @@ mod java_diagnostic {
 
     #[test]
     fn every_code_the_java_compiler_raises_is_explained() {
-        let source = include_str!("Java.rs");
+        let source = include_str!("Compilers/Java/Java.rs");
         let mut raised: Vec<String> = Vec::new();
         let held: Vec<char> = source.chars().collect();
         let mut at = 0usize;
@@ -32744,8 +32744,10 @@ mod java_fixer {
                 code: "EB042".to_string(),
                 path: "../outside.xml".to_string(),
                 title: "Write the activity's name out in full.".to_string(),
+                line: 0,
                 before: String::new(),
                 after: "no".to_string(),
+                confidence: Confidence::Likely,
             },
         )
         .expect_err("a path that leaves the project is refused");
@@ -32839,7 +32841,11 @@ mod java_fixer {
         let root = directory.to_str().unwrap();
         let made = repairs_for(root, &refusal);
         assert_eq!(made.len(), 1, "{made:?}");
-        assert!(made[0].after.contains("import com.tr.yt.Helper;"), "{:?}", made[0]);
+        assert!(
+            made[0].after.contains("import com.tr.yt.Helper;"),
+            "{:?}",
+            made[0]
+        );
         apply(root, &made[0]).unwrap();
         let mended = std::fs::read_to_string(directory.join(named)).unwrap();
         assert!(mended.contains("import com.tr.yt.Helper;"), "{mended}");
@@ -32901,10 +32907,11 @@ mod java_fixer {
 }
 
 mod cpp {
-    use crate::compilers::cpp::*;
     use crate::caps::Policy;
+    use crate::compilers::cpp::*;
     use crate::diag::Sink;
     use crate::plugin::Context;
+    use crate::plugin::Plugin;
 
     #[test]
     fn the_contract_is_self_consistent() {
@@ -32929,7 +32936,7 @@ mod cpp {
 
         let error = PLUGIN
             .execute(&mut ctx)
-            .expect_err("a PLANNED plugin must never report success");
+            .expect_err("a plugin that produces nothing must never report success");
 
         assert_eq!(error.code, "E0001");
         assert_eq!(error.origin, "omni.plugin.cpp");
@@ -32939,10 +32946,11 @@ mod cpp {
 }
 
 mod kotlin {
-    use crate::compilers::kotlin::*;
     use crate::caps::Policy;
+    use crate::compilers::kotlin::*;
     use crate::diag::Sink;
     use crate::plugin::Context;
+    use crate::plugin::Plugin;
 
     #[test]
     fn the_contract_is_self_consistent() {
@@ -32967,7 +32975,7 @@ mod kotlin {
 
         let error = PLUGIN
             .execute(&mut ctx)
-            .expect_err("a PLANNED plugin must never report success");
+            .expect_err("a plugin that produces nothing must never report success");
 
         assert_eq!(error.code, "E0001");
         assert_eq!(error.origin, "omni.plugin.kotlin");
@@ -32977,10 +32985,11 @@ mod kotlin {
 }
 
 mod rust {
-    use crate::compilers::rust::*;
     use crate::caps::Policy;
+    use crate::compilers::rust::*;
     use crate::diag::Sink;
     use crate::plugin::Context;
+    use crate::plugin::Plugin;
 
     #[test]
     fn the_contract_is_self_consistent() {
@@ -33005,7 +33014,7 @@ mod rust {
 
         let error = PLUGIN
             .execute(&mut ctx)
-            .expect_err("a PLANNED plugin must never report success");
+            .expect_err("a plugin that produces nothing must never report success");
 
         assert_eq!(error.code, "E0001");
         assert_eq!(error.origin, "omni.plugin.rust");

@@ -7836,7 +7836,7 @@ fn resolve_named_within(
     exists(&in_lang).then_some(in_lang)
 }
 
-const THE_LIBRARY: &[(&str, &str)] = &[
+pub(crate) const THE_LIBRARY: &[(&str, &str)] = &[
     (
         "java.lang",
         r####"

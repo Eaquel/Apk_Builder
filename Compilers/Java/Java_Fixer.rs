@@ -216,9 +216,7 @@ fn mended(
 fn closing_mark(code: &str) -> Option<(&'static str, &'static str)> {
     match code {
         "EJ001" => Some(("*/", "Close the comment that was left open.")),
-        "EJ105" | "EJ107" | "EJ108" | "EJ110" => {
-            Some(("}", "Close the block that was left open."))
-        }
+        "EJ105" | "EJ107" | "EJ108" | "EJ110" => Some(("}", "Close the block that was left open.")),
         _ => None,
     }
 }
@@ -267,7 +265,12 @@ fn number_made_long(line: &str) -> Option<String> {
         if start > 0 && (held[start - 1].is_ascii_alphabetic() || held[start - 1] == b'_') {
             continue;
         }
-        return Some(format!("{}{}L{}", &line[..start], &line[start..at], &line[at..]));
+        return Some(format!(
+            "{}{}L{}",
+            &line[..start],
+            &line[start..at],
+            &line[at..]
+        ));
     }
     None
 }
@@ -343,7 +346,11 @@ fn import_line(source: &str) -> (u32, String, String) {
             last_import = at;
         }
     }
-    let anchor = if last_import > 0 { last_import } else { package_at };
+    let anchor = if last_import > 0 {
+        last_import
+    } else {
+        package_at
+    };
     if anchor == 0 {
         return (0, String::new(), String::new());
     }
@@ -667,7 +674,11 @@ pub fn apply(root: &str, repair: &Repair) -> Result<(), Diagnostic> {
     let written = if repair.line > 0 {
         let mut held: Vec<&str> = source.lines().collect();
         let at = repair.line as usize - 1;
-        if held.get(at).map(|one| *one != repair.before).unwrap_or(true) {
+        if held
+            .get(at)
+            .map(|one| *one != repair.before)
+            .unwrap_or(true)
+        {
             return Err(fail(
                 "EF002",
                 "A repair no longer matches the file it was made for.",
