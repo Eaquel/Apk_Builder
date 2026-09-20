@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">Este provedor não nomeou nada.</string>
     <string name="omni_talk_models_got">%1$d modelos nomeados</string>
     <string name="omni_talk_key_set">A chave está definida.</string>
+    <string name="omni_talk_keyless">Não é preciso nenhuma chave.</string>
+    <string name="omni_talk_agent">Agente</string>
+    <string name="omni_agent_wrote">%1$s escrito</string>
+    <string name="omni_agent_refused">%1$s foi recusado: %2$s</string>
+    <string name="omni_agent_stopped">O agente parou depois de %1$d rodadas.</string>
+    <string name="omni_agent_ready">%1$d arquivos escritos. Construir agora?</string>
+    <string name="omni_agent_sign">Qual chave deve assinar?</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modelo</string>
     <string name="omni_talk_no_key">Nenhuma chave definida, então nada pode ser perguntado.</string>

@@ -1178,6 +1178,7 @@ object Preferences {
     private const val VENDOR_MODELS = "vendor_models"
     private const val ASSISTANT_MODEL = "assistant_model"
     private const val ASSISTANT_EFFORT = "assistant_effort"
+    private const val ASSISTANT_AGENT = "assistant_agent"
 
     val LANGUAGES: List<Triple<String, String, String>> = listOf(
         Triple("tr", "Türkçe", "TR"),
@@ -1264,6 +1265,13 @@ object Preferences {
 
     fun setAssistantEffort(context: Context, named: String) {
         store(context).edit().putString(ASSISTANT_EFFORT, named).apply()
+    }
+
+    fun assistantAgent(context: Context): Boolean =
+        store(context).getBoolean(ASSISTANT_AGENT, true)
+
+    fun setAssistantAgent(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(ASSISTANT_AGENT, on).apply()
     }
 
     fun setLanguage(context: Context, tag: String) {
@@ -3669,6 +3677,42 @@ class BuilderActivity : Activity() {
 
         const val ASSISTANT_PATHS = 400
 
+        const val AGENT_ROUNDS = 12
+
+        const val AGENT_WRITE = "<<<OMNI WRITE "
+
+        const val AGENT_DELETE = "<<<OMNI DELETE "
+
+        const val AGENT_END = ">>>"
+
+        const val AGENT_DONE = "<<<OMNI DONE>>>"
+
+        const val AGENT_CARRY = "Those are written. Carry on with whatever is still " +
+            "missing, or end with the done line if the project now stands on its own."
+
+        val AGENT_RULES = """
+            You are the hand as well as the voice: you write the files yourself, and
+            nothing you say outside a block is written. Answer with blocks and only
+            blocks when there is work to do, one block for each file, the whole file
+            every time, never a patch and never an ellipsis.
+
+            To write a file:
+            <<<OMNI WRITE Java/com/tr/yt/App.java
+            the whole file, from its first line to its last
+            >>>
+
+            To remove one:
+            <<<OMNI DELETE Java/com/tr/yt/Old.java>>>
+
+            Paths are relative to the project root and never climb out of it. The
+            manifest is AndroidManifest.xml, Java classes live under Java, Kotlin
+            under Kotlin, C and C++ under Native, Rust under Rust, pictures and
+            layouts under Res, and the settings live in Builder.json. When the
+            project stands on its own and builds, say what you made in a sentence or
+            two and end your answer with this line and nothing after it:
+            <<<OMNI DONE>>>
+        """.trimIndent()
+
         val LOCKED_THEMES = setOf("hacker", "anime")
 
         val SHELL_BAR = 0xFF000000.toInt()
@@ -3810,6 +3854,9 @@ class BuilderActivity : Activity() {
     private var talkPartial = ""
     private var talkLive: TextView? = null
     private val talkStopping = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var agentRound = 0
+    private var agentWrote = mutableListOf<String>()
+    private var awaitingInstall: File? = null
     private var cloneAddress = ""
 
     private var cloneToken = ""
@@ -4094,6 +4141,14 @@ class BuilderActivity : Activity() {
         showing = true
         Bell.hush(this, Bell.BUILD_NOTE)
         aurora.resumeDrawing()
+        awaitingInstall?.let { waiting ->
+            if (packageManager.canRequestPackageInstalls()) {
+                awaitingInstall = null
+                if (waiting.isFile) {
+                    openOutside(waiting)
+                }
+            }
+        }
         if (Sentry.refused(this)) {
             if (standing != "TAMPERED") {
                 standing = "TAMPERED"
@@ -6893,9 +6948,11 @@ class BuilderActivity : Activity() {
 
     private fun installPackage(file: File) {
         if (!packageManager.canRequestPackageInstalls()) {
+            awaitingInstall = file
             askToAllowInstalling()
             return
         }
+        awaitingInstall = null
         openOutside(file)
     }
 
@@ -6904,7 +6961,10 @@ class BuilderActivity : Activity() {
             getString(R.string.omni_install_needed),
             body(getString(R.string.omni_install_needed_note)),
             listOf(
-                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_cancel) to { it: AlertDialog ->
+                    awaitingInstall = null
+                    it.dismiss()
+                },
                 getString(R.string.omni_action_confirm) to { it: AlertDialog ->
                     it.dismiss()
                     hand(
@@ -7420,10 +7480,11 @@ class BuilderActivity : Activity() {
                         TextView(context).apply {
                             text = buildString {
                                 append(
-                                    if (keyed) {
-                                        getString(R.string.omni_talk_key_set)
-                                    } else {
-                                        getString(R.string.omni_talk_no_key)
+                                    when {
+                                        vendor.keyless ->
+                                            getString(R.string.omni_talk_keyless)
+                                        keyed -> getString(R.string.omni_talk_key_set)
+                                        else -> getString(R.string.omni_talk_no_key)
                                     }
                                 )
                                 if (vendor.free) {
@@ -9322,6 +9383,94 @@ class BuilderActivity : Activity() {
         act(answer, "written")
     }
 
+    private class AgentStep(val path: String, val body: String?)
+
+    private fun agentPath(named: String): Boolean =
+        named.isNotEmpty() &&
+            !named.contains("..") &&
+            !named.startsWith("/") &&
+            !named.contains('\\')
+
+    private fun agentBody(lines: List<String>): String {
+        var held = lines
+        if (held.firstOrNull()?.trim()?.startsWith("```") == true &&
+            held.lastOrNull { it.isNotBlank() }?.trim() == "```"
+        ) {
+            held = held.drop(1).dropLastWhile { it.isBlank() }.dropLast(1)
+        }
+        return held.joinToString("\n")
+    }
+
+    private fun agentSteps(said: String): List<AgentStep> {
+        val out = mutableListOf<AgentStep>()
+        val lines = said.lines()
+        var at = 0
+        while (at < lines.size) {
+            val line = lines[at].trim()
+            when {
+                line.startsWith(AGENT_DELETE) -> {
+                    val named = line.removePrefix(AGENT_DELETE).removeSuffix(AGENT_END).trim()
+                    if (agentPath(named)) {
+                        out.add(AgentStep(named, null))
+                    }
+                    at += 1
+                }
+                line.startsWith(AGENT_WRITE) -> {
+                    val named = line.removePrefix(AGENT_WRITE).removeSuffix(AGENT_END).trim()
+                    var stop = at + 1
+                    while (stop < lines.size && lines[stop].trim() != AGENT_END) {
+                        stop += 1
+                    }
+                    if (agentPath(named)) {
+                        out.add(
+                            AgentStep(named, agentBody(lines.subList(at + 1, min(stop, lines.size))))
+                        )
+                    }
+                    at = stop + 1
+                }
+                else -> at += 1
+            }
+        }
+        return out
+    }
+
+    private fun agentApply(root: String, steps: List<AgentStep>): List<String> {
+        val told = mutableListOf<String>()
+        steps.forEach { one ->
+            val answer = runCatching {
+                if (one.body == null) {
+                    Builder.nativeRemovePath(root, one.path, projectTrash(root))
+                } else {
+                    Builder.nativeWriteFile(
+                        root,
+                        one.path,
+                        if (one.body.endsWith("\n")) one.body else one.body + "\n",
+                    )
+                }
+            }.getOrElse { why -> why.message ?: why.javaClass.simpleName }
+            val document = runCatching { JSONObject(answer) }.getOrNull()
+            val well = document?.optBoolean(if (one.body == null) "removed" else "written", false)
+            if (well == true) {
+                if (one.body != null && !agentWrote.contains(one.path)) {
+                    agentWrote.add(one.path)
+                }
+                told.add(getString(R.string.omni_agent_wrote, one.path))
+            } else {
+                val refusal = document?.let { Refusal.parse(it) }
+                told.add(
+                    getString(
+                        R.string.omni_agent_refused,
+                        one.path,
+                        listOfNotNull(refusal?.code, refusal?.message)
+                            .joinToString("  ")
+                            .ifEmpty { answer.take(200) },
+                    )
+                )
+            }
+        }
+        return told
+    }
+
     private fun liveBubble(): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         addView(
@@ -9482,6 +9631,14 @@ class BuilderActivity : Activity() {
                 },
                 MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_talk_switch)) {
                     chooseTheModel()
+                },
+                MenuChoice(
+                    Mark.Shape.SPARK,
+                    getString(R.string.omni_talk_agent),
+                    picked = Preferences.assistantAgent(this),
+                ) {
+                    Preferences.setAssistantAgent(this, !Preferences.assistantAgent(this))
+                    render(false)
                 },
                 MenuChoice(Mark.Shape.SHIELD, getString(R.string.omni_talk_providers)) {
                     chooseTheVendor()
@@ -9701,7 +9858,7 @@ class BuilderActivity : Activity() {
                         isFocusable = true
                         contentDescription = getString(R.string.omni_talk_send)
                         readAs(Button::class.java.name)
-                        setOnClickListener { sendToTheAssistant() }
+                        setOnClickListener { sendTyped() }
                     },
                     LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginStart = gap(2) },
                 )
@@ -9917,12 +10074,16 @@ class BuilderActivity : Activity() {
     private fun fetchTheModels(vendor: Brain.Vendor) {
         results.removeAllViews()
         val sealed = Preferences.vendorKey(this, vendor.id)
-        if (sealed.isEmpty()) {
+        if (sealed.isEmpty() && !vendor.keyless) {
             askForTheAssistantKey(vendor)
             return
         }
         working({
-            val opened = Vault.open(sealed) ?: return@working ""
+            val opened = if (sealed.isEmpty()) {
+                CharArray(0)
+            } else {
+                Vault.open(sealed) ?: return@working ""
+            }
             val found = try {
                 Brain.listed(vendor, opened)
             } finally {
@@ -9988,6 +10149,12 @@ class BuilderActivity : Activity() {
             refused.said == R.string.omni_talk_no_model
     }
 
+    private fun sendTyped() {
+        agentRound = 0
+        agentWrote = mutableListOf()
+        sendToTheAssistant()
+    }
+
     private fun sendToTheAssistant() {
         val said = talkDraft.trim()
         if (said.isEmpty() || talkAsking) {
@@ -10034,13 +10201,17 @@ class BuilderActivity : Activity() {
             var why: Throwable? = null
             for (vendor in tries) {
                 val locked = sealed[vendor.id].orEmpty()
-                if (locked.isEmpty()) {
+                if (locked.isEmpty() && !vendor.keyless) {
                     continue
                 }
                 talkPartial = ""
                 val outcome = runCatching {
-                    val opened = Vault.open(locked)
-                        ?: throw Brain.Refused(R.string.omni_talk_bad_key)
+                    val opened = if (locked.isEmpty()) {
+                        CharArray(0)
+                    } else {
+                        Vault.open(locked)
+                            ?: throw Brain.Refused(R.string.omni_talk_bad_key)
+                    }
                     try {
                         Brain.stream(
                             vendor,
@@ -10084,6 +10255,7 @@ class BuilderActivity : Activity() {
                 if (isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
+                var replied = ""
                 if (held != null) {
                     if (answered != null && answered.id != chosen) {
                         talkHeld.add(
@@ -10091,6 +10263,7 @@ class BuilderActivity : Activity() {
                         )
                     }
                     val spoken = held.said.ifEmpty { talkPartial }
+                    replied = spoken
                     talkHeld.add(
                         false to spoken.ifEmpty { getString(R.string.omni_refused) }
                     )
@@ -10124,8 +10297,119 @@ class BuilderActivity : Activity() {
                 }
                 talkPartial = ""
                 render(false)
+                if (replied.isNotEmpty()) {
+                    agentFollow(replied)
+                }
             }
         }.start()
+    }
+
+    private fun agentFollow(said: String) {
+        if (!Preferences.assistantAgent(this)) {
+            return
+        }
+        val root = talkFolder() ?: return
+        val steps = agentSteps(said)
+        val told = if (steps.isEmpty()) emptyList() else agentApply(root, steps)
+        val ended = said.contains(AGENT_DONE)
+        agentRound += 1
+        if (steps.isNotEmpty() && !ended && agentRound < AGENT_ROUNDS) {
+            talkDraft = told.joinToString("\n") + "\n\n" + AGENT_CARRY
+            render(false)
+            sendToTheAssistant()
+            return
+        }
+        if (told.isNotEmpty()) {
+            talkHeld.add(false to told.joinToString("\n"))
+        }
+        if (!ended && steps.isNotEmpty()) {
+            talkHeld.add(false to getString(R.string.omni_agent_stopped, agentRound))
+        }
+        val made = agentWrote.toList()
+        agentRound = 0
+        agentWrote = mutableListOf()
+        render(false)
+        if (made.isNotEmpty()) {
+            agentOffersToBuild(root, made.size)
+        }
+    }
+
+    private fun agentOffersToBuild(root: String, many: Int) {
+        dialogShell(
+            getString(R.string.omni_agent_ready, many),
+            body(summaryOf(root)?.label?.ifEmpty { null } ?: File(root).name),
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_build_both) to { it: AlertDialog ->
+                    it.dismiss()
+                    agentAsksForTheKey(root)
+                },
+            ),
+        )
+    }
+
+    private fun agentAsksForTheKey(root: String) {
+        val keys = keysHere()
+        if (keys.isEmpty()) {
+            go(Screen.NewKey)
+            return
+        }
+        val named = keys.map { it.alias } + getString(R.string.omni_device_key)
+        pickOne(getString(R.string.omni_agent_sign), named) { which ->
+            if (which >= keys.size) {
+                go(Screen.Build(root))
+                buildWithTheDeviceKey(root)
+            } else {
+                Preferences.setSigningKey(this, keys[which].path)
+                agentAsksForThePassword(root, keys[which])
+            }
+        }
+    }
+
+    private fun agentAsksForThePassword(root: String, key: SigningKey) {
+        val shared = key.alias == DEFAULT_KEY_ALIAS
+        val editor = styledField(
+            if (shared) DEFAULT_KEY_PASSWORD else "",
+            getString(R.string.omni_build_password),
+            true,
+        ).apply { typeface = Type.data }
+        dialogShell(
+            key.alias,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(
+                    quiet(
+                        if (shared) {
+                            getString(R.string.omni_build_shared_password, DEFAULT_KEY_PASSWORD)
+                        } else {
+                            getString(R.string.omni_build_your_password)
+                        }
+                    )
+                )
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_build_both) to { it: AlertDialog ->
+                    val held = readSecret(editor)
+                    if (held.isEmpty()) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_build_needs_password), palette.warning)
+                        )
+                    } else {
+                        buildSecret = Vault.seal(held)
+                        held.fill(' ')
+                        editor.text?.clear()
+                        it.dismiss()
+                        go(Screen.Build(root))
+                        mendThenBuild(root)
+                    }
+                },
+            ),
+        )
+        editor.requestFocus()
     }
 
     private fun stopTheAssistant() {
@@ -10149,13 +10433,23 @@ class BuilderActivity : Activity() {
                 .take(ASSISTANT_PATHS)
                 .joinToString("\n") { it.path }
         }.getOrDefault("")
-        if (tree.isEmpty()) {
-            return ""
+        val said = StringBuilder()
+        said.append("The reader is working in an Android project named ")
+            .append(here.name)
+            .append(". ")
+        if (Preferences.assistantAgent(this)) {
+            said.append(AGENT_RULES)
+        } else {
+            said.append(
+                "When you hand back a whole file, open its fence with the language and the " +
+                    "path inside the project, like ```java Java/com/tr/yt/Main.java, so it " +
+                    "can be written where it belongs."
+            )
         }
-        return "The reader is working in an Android project named ${here.name}. " +
-            "When you hand back a whole file, open its fence with the language and the " +
-            "path inside the project, like ```java Java/com/tr/yt/Main.java, so it can be " +
-            "written where it belongs. These are the files it holds:\n$tree"
+        if (tree.isNotEmpty()) {
+            said.append("\nThese are the files it already holds:\n").append(tree)
+        }
+        return said.toString()
     }
 
     private fun logButton(mark: Mark.Shape, named: Int, filled: Boolean, onPress: () -> Unit) =
@@ -15905,6 +16199,11 @@ class BuilderActivity : Activity() {
     }
 
     private fun actionsFor(file: File, into: LinearLayout) {
+        if (file.name.lowercase(Locale.US).endsWith(".apk")) {
+            into.addView(subtle(getString(R.string.omni_install_title), palette.ok) {
+                installPackage(file)
+            })
+        }
         into.addView(subtle(getString(R.string.omni_action_open), palette.ok) {
             openOutside(file)
         })
@@ -19151,9 +19450,10 @@ internal object Brain {
         val free: Boolean,
         val where: String,
         val models: List<Model>,
+        val keyless: Boolean = false,
     ) {
         fun keyed(context: Context): Boolean =
-            Preferences.vendorKey(context, id).isNotEmpty()
+            keyless || Preferences.vendorKey(context, id).isNotEmpty()
     }
 
     private val CLAUDE = listOf(
@@ -19164,6 +19464,14 @@ internal object Brain {
     )
 
     val VENDORS: List<Vendor> = listOf(
+        Vendor(
+            "pollinations", "Pollinations", "https://text.pollinations.ai/openai",
+            false, true, "pollinations.ai", listOf(
+                Model("openai", "GPT-OSS 20B", 128_000L),
+                Model("openai-fast", "GPT-OSS 20B fast", 128_000L),
+            ),
+            keyless = true,
+        ),
         Vendor(
             "anthropic", "Anthropic", "https://api.anthropic.com", true, false,
             "console.anthropic.com", CLAUDE,
@@ -19510,11 +19818,14 @@ internal object Brain {
             if (listening) "text/event-stream" else "application/json",
         )
         link.setRequestProperty("User-Agent", "omni-builder")
-        if (vendor.anthropic) {
-            link.setRequestProperty("x-api-key", String(key))
-            link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
-        } else {
-            link.setRequestProperty("authorization", "Bearer " + String(key))
+        when {
+            vendor.anthropic -> {
+                link.setRequestProperty("x-api-key", String(key))
+                link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
+            }
+            key.isNotEmpty() -> {
+                link.setRequestProperty("authorization", "Bearer " + String(key))
+            }
         }
         return link
     }
@@ -19555,7 +19866,7 @@ internal object Brain {
         effort: String,
         system: String,
     ): Answer {
-        if (key.isEmpty()) {
+        if (key.isEmpty() && !vendor.keyless) {
             throw Refused(R.string.omni_talk_no_key)
         }
         val link = opened(vendor, key, if (vendor.anthropic) "/v1/messages" else "/chat/completions", false)
@@ -19587,7 +19898,7 @@ internal object Brain {
     }
 
     fun listed(vendor: Vendor, key: CharArray): List<String> {
-        if (key.isEmpty() || vendor.anthropic) {
+        if ((key.isEmpty() && !vendor.keyless) || vendor.anthropic) {
             return emptyList()
         }
         val link = runCatching { opened(vendor, key, "/models", false) }.getOrNull()
@@ -19681,7 +19992,7 @@ internal object Brain {
         stopping: java.util.concurrent.atomic.AtomicBoolean,
         onText: (String) -> Unit,
     ): Answer {
-        if (key.isEmpty()) {
+        if (key.isEmpty() && !vendor.keyless) {
             throw Refused(R.string.omni_talk_no_key)
         }
         val link = opened(vendor, key, if (vendor.anthropic) "/v1/messages" else "/chat/completions", true)

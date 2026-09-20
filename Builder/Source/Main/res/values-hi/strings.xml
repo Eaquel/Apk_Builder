@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">इस प्रदाता ने कुछ नहीं बताया।</string>
     <string name="omni_talk_models_got">%1$d मॉडल बताए गए</string>
     <string name="omni_talk_key_set">कुंजी तय हो गई।</string>
+    <string name="omni_talk_keyless">किसी कुंजी की ज़रूरत नहीं है।</string>
+    <string name="omni_talk_agent">एजेंट</string>
+    <string name="omni_agent_wrote">%1$s लिखा गया</string>
+    <string name="omni_agent_refused">%1$s अस्वीकार हुआ: %2$s</string>
+    <string name="omni_agent_stopped">एजेंट %1$d चक्रों के बाद रुक गया।</string>
+    <string name="omni_agent_ready">%1$d फ़ाइलें लिखी गईं। अभी बनाएँ?</string>
+    <string name="omni_agent_sign">किस कुंजी से हस्ताक्षर हो?</string>
     <string name="omni_talk_left">शेष</string>
     <string name="omni_talk_model">मॉडल</string>
     <string name="omni_talk_no_key">कोई कुंजी तय नहीं है, इसलिए कुछ पूछा नहीं जा सकता।</string>

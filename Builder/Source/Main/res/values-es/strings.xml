@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">Este proveedor no nombró nada.</string>
     <string name="omni_talk_models_got">%1$d modelos nombrados</string>
     <string name="omni_talk_key_set">La clave está puesta.</string>
+    <string name="omni_talk_keyless">No hace falta ninguna clave.</string>
+    <string name="omni_talk_agent">Agente</string>
+    <string name="omni_agent_wrote">Se escribió %1$s</string>
+    <string name="omni_agent_refused">%1$s fue rechazado: %2$s</string>
+    <string name="omni_agent_stopped">El agente se detuvo tras %1$d rondas.</string>
+    <string name="omni_agent_ready">%1$d archivos escritos. ¿Compilarlo ahora?</string>
+    <string name="omni_agent_sign">¿Con qué clave se firma?</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modelo</string>
     <string name="omni_talk_no_key">No hay clave, así que no se puede preguntar nada.</string>

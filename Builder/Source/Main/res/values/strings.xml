@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">This provider named nothing.</string>
     <string name="omni_talk_models_got">%1$d models named</string>
     <string name="omni_talk_key_set">The key is set.</string>
+    <string name="omni_talk_keyless">No key is needed.</string>
+    <string name="omni_talk_agent">Agent</string>
+    <string name="omni_agent_wrote">Wrote %1$s</string>
+    <string name="omni_agent_refused">%1$s was refused: %2$s</string>
+    <string name="omni_agent_stopped">The agent stopped after %1$d rounds.</string>
+    <string name="omni_agent_ready">%1$d files written. Build it now?</string>
+    <string name="omni_agent_sign">Which key should sign it?</string>
     <string name="omni_talk_left">Left</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">No key is set, so nothing can be asked.</string>

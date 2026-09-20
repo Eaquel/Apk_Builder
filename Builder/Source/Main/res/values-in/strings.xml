@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">Penyedia ini tidak menyebut apa pun.</string>
     <string name="omni_talk_models_got">%1$d model disebut</string>
     <string name="omni_talk_key_set">Kunci telah disetel.</string>
+    <string name="omni_talk_keyless">Tidak perlu kunci.</string>
+    <string name="omni_talk_agent">Agen</string>
+    <string name="omni_agent_wrote">%1$s ditulis</string>
+    <string name="omni_agent_refused">%1$s ditolak: %2$s</string>
+    <string name="omni_agent_stopped">Agen berhenti setelah %1$d putaran.</string>
+    <string name="omni_agent_ready">%1$d berkas ditulis. Bangun sekarang?</string>
+    <string name="omni_agent_sign">Kunci mana yang menandatangani?</string>
     <string name="omni_talk_left">Sisa</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">Tidak ada kunci yang disetel, jadi tidak ada yang bisa ditanyakan.</string>

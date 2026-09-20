@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">이 제공처는 아무것도 대지 않았습니다.</string>
     <string name="omni_talk_models_got">모델 %1$d개를 댔습니다</string>
     <string name="omni_talk_key_set">열쇠가 설정되었습니다.</string>
+    <string name="omni_talk_keyless">키가 필요하지 않습니다.</string>
+    <string name="omni_talk_agent">에이전트</string>
+    <string name="omni_agent_wrote">%1$s 을(를) 썼습니다</string>
+    <string name="omni_agent_refused">%1$s 이(가) 거절되었습니다: %2$s</string>
+    <string name="omni_agent_stopped">에이전트가 %1$d 번 돌고 멈췄습니다.</string>
+    <string name="omni_agent_ready">%1$d 개 파일을 썼습니다. 지금 빌드할까요?</string>
+    <string name="omni_agent_sign">어느 키로 서명할까요?</string>
     <string name="omni_talk_left">남음</string>
     <string name="omni_talk_model">모형</string>
     <string name="omni_talk_no_key">열쇠가 설정되지 않아 아무것도 물을 수 없습니다.</string>

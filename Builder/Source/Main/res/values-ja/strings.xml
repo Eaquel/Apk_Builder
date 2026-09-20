@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">この提供元は何も挙げませんでした。</string>
     <string name="omni_talk_models_got">%1$d 件のモデルが挙がりました</string>
     <string name="omni_talk_key_set">鍵が設定されました。</string>
+    <string name="omni_talk_keyless">鍵は要りません。</string>
+    <string name="omni_talk_agent">エージェント</string>
+    <string name="omni_agent_wrote">%1$s を書きました</string>
+    <string name="omni_agent_refused">%1$s は拒まれました: %2$s</string>
+    <string name="omni_agent_stopped">エージェントは %1$d 巡で止まりました。</string>
+    <string name="omni_agent_ready">%1$d 個のファイルを書きました。いま組み立てますか。</string>
+    <string name="omni_agent_sign">どの鍵で署名しますか。</string>
     <string name="omni_talk_left">残り</string>
     <string name="omni_talk_model">模型</string>
     <string name="omni_talk_no_key">鍵が設定されていないので、何も尋ねられません。</string>

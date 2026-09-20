@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">Этот поставщик ничего не назвал.</string>
     <string name="omni_talk_models_got">названо моделей: %1$d</string>
     <string name="omni_talk_key_set">Ключ задан.</string>
+    <string name="omni_talk_keyless">Ключ не нужен.</string>
+    <string name="omni_talk_agent">Агент</string>
+    <string name="omni_agent_wrote">Записано: %1$s</string>
+    <string name="omni_agent_refused">%1$s отклонён: %2$s</string>
+    <string name="omni_agent_stopped">Агент остановился после %1$d кругов.</string>
+    <string name="omni_agent_ready">Записано файлов: %1$d. Собрать сейчас?</string>
+    <string name="omni_agent_sign">Каким ключом подписать?</string>
     <string name="omni_talk_left">Осталось</string>
     <string name="omni_talk_model">Модель</string>
     <string name="omni_talk_no_key">Ключ не задан, поэтому ничего нельзя спросить.</string>

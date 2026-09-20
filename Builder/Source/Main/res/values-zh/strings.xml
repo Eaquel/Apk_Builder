@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">这个服务方没有说出任何名字。</string>
     <string name="omni_talk_models_got">说出了 %1$d 个模型</string>
     <string name="omni_talk_key_set">密钥已设置。</string>
+    <string name="omni_talk_keyless">不需要密钥。</string>
+    <string name="omni_talk_agent">代理</string>
+    <string name="omni_agent_wrote">已写入 %1$s</string>
+    <string name="omni_agent_refused">%1$s 被拒绝：%2$s</string>
+    <string name="omni_agent_stopped">代理在 %1$d 轮后停下了。</string>
+    <string name="omni_agent_ready">已写入 %1$d 个文件。现在构建吗？</string>
+    <string name="omni_agent_sign">用哪把密钥签名？</string>
     <string name="omni_talk_left">剩余</string>
     <string name="omni_talk_model">模型</string>
     <string name="omni_talk_no_key">没有设置密钥，因此无法提问。</string>

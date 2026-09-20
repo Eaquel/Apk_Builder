@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">Dieser Anbieter nannte nichts.</string>
     <string name="omni_talk_models_got">%1$d Modelle genannt</string>
     <string name="omni_talk_key_set">Der Schlüssel ist gesetzt.</string>
+    <string name="omni_talk_keyless">Es wird kein Schlüssel gebraucht.</string>
+    <string name="omni_talk_agent">Agent</string>
+    <string name="omni_agent_wrote">%1$s geschrieben</string>
+    <string name="omni_agent_refused">%1$s wurde abgelehnt: %2$s</string>
+    <string name="omni_agent_stopped">Der Agent hielt nach %1$d Runden an.</string>
+    <string name="omni_agent_ready">%1$d Dateien geschrieben. Jetzt bauen?</string>
+    <string name="omni_agent_sign">Welcher Schlüssel soll unterschreiben?</string>
     <string name="omni_talk_left">Übrig</string>
     <string name="omni_talk_model">Modell</string>
     <string name="omni_talk_no_key">Es ist kein Schlüssel gesetzt, also lässt sich nichts fragen.</string>

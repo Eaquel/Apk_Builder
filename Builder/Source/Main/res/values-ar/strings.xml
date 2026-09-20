@@ -437,6 +437,13 @@
     <string name="omni_talk_models_none">لم يذكر هذا المزود شيئًا.</string>
     <string name="omni_talk_models_got">ذُكر %1$d نموذجًا</string>
     <string name="omni_talk_key_set">ضُبط المفتاح.</string>
+    <string name="omni_talk_keyless">لا حاجة إلى مفتاح.</string>
+    <string name="omni_talk_agent">وكيل</string>
+    <string name="omni_agent_wrote">تمت كتابة %1$s</string>
+    <string name="omni_agent_refused">%1$s رُفض: %2$s</string>
+    <string name="omni_agent_stopped">توقف الوكيل بعد %1$d جولات.</string>
+    <string name="omni_agent_ready">كُتب %1$d ملفات. أنبنيه الآن؟</string>
+    <string name="omni_agent_sign">بأي مفتاح يُوقَّع؟</string>
     <string name="omni_talk_left">المتبقي</string>
     <string name="omni_talk_model">النموذج</string>
     <string name="omni_talk_no_key">لم يُضبط أي مفتاح، لذا لا يمكن سؤال شيء.</string>
