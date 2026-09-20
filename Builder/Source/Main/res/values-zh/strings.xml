@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">行号</string>
     <string name="omni_editor_size">文字大小</string>
     <string name="omni_editor_size_note">用两指捏合文字也是同样效果。</string>
+    <string name="omni_editor_wrap">折行</string>
+    <string name="omni_editor_complete">边打边提示</string>
+    <string name="omni_editor_strip">去掉注释</string>
+    <string name="omni_editor_stripped">去掉了 %1$d 个字符的注释</string>
+    <string name="omni_editor_strip_none">没有注释可去。</string>
     <string name="omni_editor_find_back">上一个</string>
     <string name="omni_editor_find_next">下一个</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

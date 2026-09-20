@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">행 번호</string>
     <string name="omni_editor_size">글자 크기</string>
     <string name="omni_editor_size_note">두 손가락으로 오므려도 같은 일이 일어납니다.</string>
+    <string name="omni_editor_wrap">줄 바꿈</string>
+    <string name="omni_editor_complete">치는 동안 제안</string>
+    <string name="omni_editor_strip">주석 걷어내기</string>
+    <string name="omni_editor_stripped">주석 %1$d자를 걷어냈습니다</string>
+    <string name="omni_editor_strip_none">걷어낼 주석이 없습니다.</string>
     <string name="omni_editor_find_back">이전</string>
     <string name="omni_editor_find_next">다음</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

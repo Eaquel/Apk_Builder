@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">Nomor baris</string>
     <string name="omni_editor_size">Ukuran teks</string>
     <string name="omni_editor_size_note">Mencubit teks dengan dua jari melakukan hal yang sama.</string>
+    <string name="omni_editor_wrap">Lipat barisnya</string>
+    <string name="omni_editor_complete">Sarankan sambil mengetik</string>
+    <string name="omni_editor_strip">Buang komentarnya</string>
+    <string name="omni_editor_stripped">%1$d aksara komentar dibuang</string>
+    <string name="omni_editor_strip_none">Tidak ada komentar untuk dibuang.</string>
     <string name="omni_editor_find_back">Sebelumnya</string>
     <string name="omni_editor_find_next">Berikutnya</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

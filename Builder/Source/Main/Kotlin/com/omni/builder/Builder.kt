@@ -1326,6 +1326,20 @@ object Preferences {
     }
 
     const val READING = "reading"
+    private const val WRAPPING = "wrapping"
+    private const val COMPLETING = "completing"
+
+    fun wrapping(context: Context): Boolean = store(context).getBoolean(WRAPPING, true)
+
+    fun setWrapping(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(WRAPPING, on).apply()
+    }
+
+    fun completing(context: Context): Boolean = store(context).getBoolean(COMPLETING, true)
+
+    fun setCompleting(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(COMPLETING, on).apply()
+    }
 
     fun reading(context: Context): Float = store(context).getFloat(READING, 13f)
 
@@ -3809,6 +3823,10 @@ class BuilderActivity : Activity() {
     private val wentAfter = mutableListOf<String>()
 
     private var searchFor = ""
+    private var searchHits: List<SearchHit> = emptyList()
+    private var searchAt = -1
+    private var editorColumn = 0
+    private var editorPick = 0
 
     private var editorText = ""
     private var editor: CodeEditor? = null
@@ -3833,7 +3851,7 @@ class BuilderActivity : Activity() {
 
     private var editorRedo: (() -> Unit)? = null
 
-    private var editorMore: (() -> Unit)? = null
+    private var editorMore: ((View) -> Unit)? = null
 
     private var editorDirty = false
     private var findHere = ""
@@ -4487,6 +4505,34 @@ class BuilderActivity : Activity() {
             }
         }
 
+    private fun whereWeAre(named: String, said: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(2), 0, gap(2), 0)
+            addView(
+                TextView(context).apply {
+                    text = named
+                    setTextColor(palette.foreground)
+                    typeface = Type.heading
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+            addView(
+                TextView(context).apply {
+                    text = said
+                    setTextColor(palette.marker)
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.START
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+
     private fun brandBlock(named: String, full: Boolean, note: String = ""): View =
         LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -4638,12 +4684,19 @@ class BuilderActivity : Activity() {
                 markControl(Mark.Shape.MENU, R.string.omni_menu_title) { openTheDrawer() },
                 each,
             )
-            crown.addView(
-                brandBlock(getString(R.string.omni_app_name), wideEnough()),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-            )
             val root = openProject
             val listing = here is Screen.Files
+            if (listing && root != null) {
+                crown.addView(
+                    whereWeAre(File(root).name, "/" + here.folder),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            } else {
+                crown.addView(
+                    brandBlock(getString(R.string.omni_app_name), wideEnough()),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
             if (root != null && listing) {
                 crown.addView(
                     if (building) {
@@ -4739,14 +4792,15 @@ class BuilderActivity : Activity() {
             }
             if (here is Screen.Editor) {
                 val spot = TextView(this).apply {
-                    setTextColor(palette.muted)
+                    setTextColor(palette.marker)
                     typeface = Type.data
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.START
                 }
                 editorSpot = spot
                 crown.addView(
-                    editorHead(here.path, spot),
+                    editorHead(here.root, spot),
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
                 val small = LinearLayout.LayoutParams(gap(9), gap(9))
@@ -4765,12 +4819,9 @@ class BuilderActivity : Activity() {
                 }
                 editorSaveMark = saving
                 crown.addView(saving, small)
-                crown.addView(
-                    markControl(Mark.Shape.MORE, R.string.omni_action_more) {
-                        editorMore?.invoke()
-                    },
-                    small,
-                )
+                val opening = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
+                opening.setOnClickListener { editorMore?.invoke(opening) }
+                crown.addView(opening, small)
                 paintTheSave()
                 paintTheSteps()
                 return
@@ -4843,35 +4894,23 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun editorHead(path: String, spot: TextView): View {
-        val (shape, tint) = markFor(FileEntry(path, false, 0L, 0L))
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+    private fun editorHead(root: String, spot: TextView): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(2), 0, gap(2), 0)
             addView(
-                View(context).apply { foreground = Mark(shape, tint) },
-                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
-            )
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        TextView(context).apply {
-                            text = path.substringAfterLast('/')
-                            setTextColor(palette.foreground)
-                            typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                        },
-                        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
-                    )
-                    addView(spot, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                TextView(context).apply {
+                    text = File(root).name
+                    setTextColor(palette.foreground)
+                    typeface = Type.heading
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
                 },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
             )
+            addView(spot, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
-    }
 
     private fun footControl(mark: Mark.Shape, named: Int, on: Boolean, onPress: () -> Unit): View =
         View(this).apply {
@@ -5407,7 +5446,7 @@ class BuilderActivity : Activity() {
         val most = (COLUMN_DP * resources.displayMetrics.density).toInt()
         val bleeds = screen is Screen.Files || screen is Screen.Terminal
         val side = if (bleeds) {
-            if (screen is Screen.Terminal) 0 else gap(2)
+            if (screen is Screen.Terminal) 0 else gap(1)
         } else {
             ((room - most) / 2).coerceAtLeast(0) + gap(7) / 2
         }
@@ -5661,6 +5700,15 @@ class BuilderActivity : Activity() {
     private fun trashFolder() = File(getExternalFilesDir(null) ?: filesDir, "Trash").absolutePath
 
     private fun openHere(root: String) {
+        if (openProject != root) {
+            secondFolder = ""
+            paneRight = false
+            wentBefore.clear()
+            wentAfter.clear()
+            besideBefore.clear()
+            besideAfter.clear()
+            pickedIn.clear()
+        }
         openProject = root
         go(Screen.Files(root, ""))
     }
@@ -5903,48 +5951,54 @@ class BuilderActivity : Activity() {
     private fun releaseNamed(api: Int): String =
         ANDROID_RELEASES.firstOrNull { it.first == api }?.second ?: api.toString()
 
-    private fun paneHead(root: String, folder: String, tall: Boolean): View =
+    private fun paneHead(root: String, folder: String, side: Boolean): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(3), gap(3), gap(3), gap(3))
+            setPadding(gap(2), gap(2), gap(1), gap(2))
             addView(
-                View(context).apply { foreground = Mark(Mark.Shape.FOLDER, palette.marker) },
-                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                View(context).apply {
+                    foreground = Mark(
+                        if (folder.isEmpty()) Mark.Shape.HOME else Mark.Shape.FOLDER_OPEN,
+                        palette.marker,
+                    )
+                },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
             )
             addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    if (tall) {
-                        addView(
-                            TextView(context).apply {
-                                text = File(root).name
-                                setTextColor(palette.foreground)
-                                typeface = Type.heading
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                                maxLines = 1
-                            }
-                        )
+                TextView(context).apply {
+                    text = "/" + folder
+                    setTextColor(palette.marker)
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.START
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = getString(R.string.omni_action_copy_path)
+                    readAs(Button::class.java.name)
+                    pressable()
+                    setOnClickListener {
+                        copyOut(File(File(root), folder).absolutePath, File(root).name)
                     }
-                    addView(
-                        TextView(context).apply {
-                            text = if (folder.isEmpty()) root else "$root/$folder"
-                            setTextColor(palette.marker)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.START
-                        }
-                    )
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
-            if (tall) {
-                addView(
-                    projectMore(root),
-                    LinearLayout.LayoutParams(gap(8), gap(8)),
-                )
-            }
+            addView(
+                paneMore(root, folder, side),
+                LinearLayout.LayoutParams(gap(8), gap(8)),
+            )
         }
+
+    private fun paneMore(root: String, folder: String, side: Boolean): View {
+        val more = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
+        more.setOnClickListener {
+            paneRight = side
+            markPanes()
+            projectMenu(root, more)
+        }
+        return more
+    }
 
     private fun projectMore(root: String): View {
         val more = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
@@ -6338,6 +6392,72 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private class SearchHit(val path: String, val line: Int, val column: Int)
+
+    private fun goToHit(root: String, one: SearchHit) {
+        val here = screen
+        if (here is Screen.Editor && here.root == root && here.path == one.path) {
+            editor?.showAt(one.line, one.column, searchFor.length)
+            return
+        }
+        editorLine = one.line
+        editorColumn = one.column
+        editorPick = searchFor.length
+        go(Screen.Editor(root, one.path))
+    }
+
+    private fun stepToHit(root: String, by: Int) {
+        if (searchHits.isEmpty()) {
+            return
+        }
+        val many = searchHits.size
+        searchAt = (((searchAt + by) % many) + many) % many
+        goToHit(root, searchHits[searchAt])
+    }
+
+    private fun walkFound(root: String, count: Int): View {
+        val counter = TextView(this).apply {
+            setTextColor(palette.muted)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            gravity = Gravity.CENTER
+        }
+        fun say() {
+            counter.text = (searchAt + 1).coerceAtLeast(0).toString() + " / " + count
+        }
+        say()
+        fun stepper(mark: Mark.Shape, named: Int, by: Int): View =
+            markControl(mark, named) {
+                stepToHit(root, by)
+                say()
+            }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(1), 0, gap(1))
+            addView(
+                TextView(context).apply {
+                    text = searchFor
+                    setTextColor(palette.accent)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                stepper(Mark.Shape.CHEVRON_UP, R.string.omni_editor_find_back, -1),
+                LinearLayout.LayoutParams(gap(9), gap(9)),
+            )
+            addView(counter, LinearLayout.LayoutParams(gap(16), WRAP_CONTENT))
+            addView(
+                stepper(Mark.Shape.CHEVRON_DOWN, R.string.omni_editor_find_next, 1),
+                LinearLayout.LayoutParams(gap(9), gap(9)),
+            )
+        }
+    }
+
     private fun showFound(root: String, result: JSONObject?) {
         if (result == null) {
             return
@@ -6363,6 +6483,19 @@ class BuilderActivity : Activity() {
             )
         }
 
+        val hits = mutableListOf<SearchHit>()
+        for (index in 0 until count) {
+            val one = found?.optJSONObject(index) ?: continue
+            hits.add(
+                SearchHit(one.optString("path"), one.optInt("line"), one.optInt("column"))
+            )
+        }
+        searchHits = hits
+        searchAt = -1
+        if (hits.isNotEmpty()) {
+            results.addView(walkFound(root, hits.size))
+        }
+
         var lastPath = ""
         var card: LinearLayout? = null
         for (index in 0 until count) {
@@ -6381,8 +6514,8 @@ class BuilderActivity : Activity() {
                     one.optInt("line").toString() + ":" + one.optInt("column"),
                     palette.accent,
                 ) {
-                    editorLine = one.optInt("line")
-                    go(Screen.Editor(root, path))
+                    searchAt = index
+                    goToHit(root, hits[index])
                 }
             )
         }
@@ -7438,14 +7571,20 @@ class BuilderActivity : Activity() {
         val editor = CodeEditor(this, palette).apply {
             setPadding(gap(9), gap(2), gap(3), gap(2))
             readAt(Preferences.reading(this@BuilderActivity))
+            wrapAt(Preferences.wrapping(this@BuilderActivity))
             open(path.substringAfterLast('/'), editorText)
             onResized = { size -> Preferences.setReading(this@BuilderActivity, size) }
         }
         this.editor = editor
         this.editorAt = root to path
         if (editorLine > 0) {
-            editor.showLine(editorLine)
+            if (editorPick > 0) {
+                editor.showAt(editorLine, editorColumn, editorPick)
+            } else {
+                editor.showLine(editorLine)
+            }
             editorLine = 0
+            editorPick = 0
         }
 
         editorDirty = draft != null
@@ -7504,8 +7643,8 @@ class BuilderActivity : Activity() {
 
         fun sayWhere() {
             val (line, column) = editor.caretAt()
-            editorSpot?.text = getString(R.string.omni_editor_spot, line, column) +
-                "  " + CHARSET_SHOWN
+            editorSpot?.text = "/" + path + "   " +
+                getString(R.string.omni_editor_spot, line, column) + "  " + CHARSET_SHOWN
         }
         sayWhere()
         editor.onCaret = { _, _ -> sayWhere() }
@@ -7519,7 +7658,7 @@ class BuilderActivity : Activity() {
             editor.redo()
             mark()
         }
-        editorMore = { editorMenu(path, editor) }
+        editorMore = { under -> editorMenu(path, editor, under) }
         paintTheSteps()
 
         if (draft != null) {
@@ -7562,6 +7701,7 @@ class BuilderActivity : Activity() {
                             (from + symbol.length).coerceIn(0, editor.text?.length ?: 0)
                         )
                         mark()
+                        typeInto(editor)
                         press()
                     }
                 },
@@ -7579,27 +7719,66 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun editorMenu(path: String, editor: CodeEditor) {
-        val actions = listOf(
-            getString(R.string.omni_editor_find) to { findInTheEditor(editor) },
-            getString(R.string.omni_editor_line) to {
-                askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
-                    results.removeAllViews()
-                    val line = asked.toIntOrNull()
-                    if (line == null || line < 1) {
-                        results.addView(
-                            notice(getString(R.string.omni_editor_line_ask), palette.warning)
-                        )
-                    } else {
-                        editor.showLine(line)
+    private fun editorMenu(path: String, editor: CodeEditor, under: View) {
+        anchoredMenu(
+            under,
+            listOf(
+                MenuChoice(Mark.Shape.FIND, getString(R.string.omni_editor_find)) {
+                    findInTheEditor(editor)
+                },
+                MenuChoice(Mark.Shape.SORTED_DOWN, getString(R.string.omni_editor_line)) {
+                    askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
+                        results.removeAllViews()
+                        val line = asked.toIntOrNull()
+                        if (line == null || line < 1) {
+                            results.addView(
+                                notice(getString(R.string.omni_editor_line_ask), palette.warning)
+                            )
+                        } else {
+                            editor.showLine(line)
+                        }
                     }
-                }
-            },
-            getString(R.string.omni_editor_size) to { askForTheReadingSize(editor) },
+                },
+                MenuChoice(Mark.Shape.WIDEN, getString(R.string.omni_editor_size)) {
+                    askForTheReadingSize(editor)
+                },
+                MenuChoice(
+                    Mark.Shape.WIDEN,
+                    getString(R.string.omni_editor_wrap),
+                    picked = editor.wrapping(),
+                    parted = true,
+                ) {
+                    val on = !editor.wrapping()
+                    editor.wrapAt(on)
+                    Preferences.setWrapping(this, on)
+                },
+                MenuChoice(
+                    Mark.Shape.SPARK,
+                    getString(R.string.omni_editor_complete),
+                    picked = Preferences.completing(this),
+                ) {
+                    val on = !Preferences.completing(this)
+                    Preferences.setCompleting(this, on)
+                    if (!on) {
+                        hideOffers()
+                    }
+                },
+                MenuChoice(Mark.Shape.BROOM, getString(R.string.omni_editor_strip)) {
+                    results.removeAllViews()
+                    val removed = editor.stripComments()
+                    results.addView(
+                        if (removed > 0) {
+                            notice(
+                                getString(R.string.omni_editor_stripped, removed),
+                                palette.ok,
+                            )
+                        } else {
+                            notice(getString(R.string.omni_editor_strip_none), palette.muted)
+                        }
+                    )
+                },
+            ),
         )
-        pickOne(path.substringAfterLast('/'), actions.map { it.first }) { which ->
-            actions[which].second()
-        }
     }
 
     private fun findInTheEditor(editor: CodeEditor) {
@@ -7734,6 +7913,10 @@ class BuilderActivity : Activity() {
 
     private fun offerWhileTyping(root: String, editor: CodeEditor) {
         editor.removeCallbacks(offerSoon)
+        if (!Preferences.completing(this)) {
+            hideOffers()
+            return
+        }
         offerRoot = root
         editor.postDelayed(offerSoon, OFFER_MILLIS)
     }
@@ -7849,6 +8032,15 @@ class BuilderActivity : Activity() {
         runCatching {
             window.showAsDropDown(editor, x.coerceAtMost(gap(40)), y)
         }.onFailure { offers = null }
+    }
+
+    private fun typeInto(editor: EditText) {
+        editor.isFocusableInTouchMode = true
+        editor.requestFocus()
+        runCatching {
+            getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                ?.showSoftInput(editor, 0)
+        }
     }
 
     private fun hideOffers() {
@@ -18109,6 +18301,24 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         invalidate()
     }
 
+    fun showAt(line: Int, column: Int, length: Int) {
+        post {
+            val held = text ?: return@post
+            var at = 0
+            var seen = 1
+            while (seen < line && at < held.length) {
+                if (held[at] == '\n') {
+                    seen += 1
+                }
+                at += 1
+            }
+            val from = (at + (column - 1).coerceAtLeast(0)).coerceIn(0, held.length)
+            val to = (from + length).coerceIn(from, held.length)
+            show(from, to)
+            requestFocus()
+        }
+    }
+
     fun showLine(line: Int) {
         post {
             val held = text ?: return@post
@@ -18238,6 +18448,67 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     }
 
     fun readingAt(): Float = readingSize
+
+    private var wrapping = true
+
+    fun wrapping(): Boolean = wrapping
+
+    fun wrapAt(on: Boolean) {
+        wrapping = on
+        setHorizontallyScrolling(!on)
+        isSingleLine = false
+        painted = -1 to -1
+        colour()
+        requestLayout()
+        invalidate()
+    }
+
+    fun stripComments(): Int {
+        val held = text ?: return 0
+        if (grammar === Grammar.PLAIN) {
+            return 0
+        }
+        val marks = Reader.read(held, grammar).filter { it.kind == Kind.COMMENT }
+        if (marks.isEmpty()) {
+            return 0
+        }
+        val whole = held.toString()
+        val out = StringBuilder(whole.length)
+        var at = 0
+        for (one in marks.sortedBy { it.from }) {
+            if (one.from < at) {
+                continue
+            }
+            out.append(whole, at, one.from)
+            at = one.to.coerceAtMost(whole.length)
+        }
+        out.append(whole, at.coerceAtMost(whole.length), whole.length)
+        val kept = out.lines()
+        val tidied = StringBuilder()
+        for ((index, line) in kept.withIndex()) {
+            val trimmed = line.trimEnd()
+            if (trimmed.isBlank() && index < kept.size - 1 && kept[index + 1].isBlank()) {
+                continue
+            }
+            tidied.append(trimmed)
+            if (index < kept.size - 1) {
+                tidied.append('\n')
+            }
+        }
+        val removed = whole.length - tidied.length
+        if (removed <= 0) {
+            return 0
+        }
+        val caret = selectionStart.coerceIn(0, tidied.length)
+        replaying = true
+        setText(tidied.toString())
+        replaying = false
+        history.forget()
+        setSelection(caret.coerceIn(0, text?.length ?: 0))
+        onChanged?.invoke()
+        read()
+        return removed
+    }
 
     var onResized: ((Float) -> Unit)? = null
 

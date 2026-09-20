@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">Número de línea</string>
     <string name="omni_editor_size">Tamaño del texto</string>
     <string name="omni_editor_size_note">Pellizcar el texto con dos dedos hace lo mismo.</string>
+    <string name="omni_editor_wrap">Ajustar las líneas</string>
+    <string name="omni_editor_complete">Sugerir mientras escribo</string>
+    <string name="omni_editor_strip">Quitar los comentarios</string>
+    <string name="omni_editor_stripped">%1$d caracteres de comentario quitados</string>
+    <string name="omni_editor_strip_none">No hay comentario que quitar.</string>
     <string name="omni_editor_find_back">Anterior</string>
     <string name="omni_editor_find_next">Siguiente</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

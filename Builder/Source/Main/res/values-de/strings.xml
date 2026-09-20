@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">Zeilennummer</string>
     <string name="omni_editor_size">Schriftgröße</string>
     <string name="omni_editor_size_note">Mit zwei Fingern zu zoomen bewirkt dasselbe.</string>
+    <string name="omni_editor_wrap">Zeilen umbrechen</string>
+    <string name="omni_editor_complete">Beim Tippen vorschlagen</string>
+    <string name="omni_editor_strip">Kommentare herausnehmen</string>
+    <string name="omni_editor_stripped">%1$d Zeichen Kommentar herausgenommen</string>
+    <string name="omni_editor_strip_none">Es gibt keinen Kommentar herauszunehmen.</string>
     <string name="omni_editor_find_back">Zurück</string>
     <string name="omni_editor_find_next">Weiter</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

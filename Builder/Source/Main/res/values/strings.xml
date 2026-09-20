@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">Line number</string>
     <string name="omni_editor_size">Text size</string>
     <string name="omni_editor_size_note">Pinching the text with two fingers does the same.</string>
+    <string name="omni_editor_wrap">Wrap the lines</string>
+    <string name="omni_editor_complete">Suggest as I type</string>
+    <string name="omni_editor_strip">Take the comments out</string>
+    <string name="omni_editor_stripped">%1$d characters of comment taken out</string>
+    <string name="omni_editor_strip_none">There is no comment to take out.</string>
     <string name="omni_editor_find_back">Previous</string>
     <string name="omni_editor_find_next">Next</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

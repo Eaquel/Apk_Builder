@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">पंक्ति संख्या</string>
     <string name="omni_editor_size">पाठ का आकार</string>
     <string name="omni_editor_size_note">दो उँगलियों से पाठ को दबाने पर भी यही होता है।</string>
+    <string name="omni_editor_wrap">पंक्तियाँ मोड़ें</string>
+    <string name="omni_editor_complete">लिखते समय सुझाएँ</string>
+    <string name="omni_editor_strip">टिप्पणियाँ हटाएँ</string>
+    <string name="omni_editor_stripped">टिप्पणी के %1$d अक्षर हटाए गए</string>
+    <string name="omni_editor_strip_none">हटाने को कोई टिप्पणी नहीं है।</string>
     <string name="omni_editor_find_back">पिछला</string>
     <string name="omni_editor_find_next">अगला</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>

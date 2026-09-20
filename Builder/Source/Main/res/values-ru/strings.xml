@@ -182,6 +182,11 @@
     <string name="omni_editor_line_ask">Номер строки</string>
     <string name="omni_editor_size">Размер текста</string>
     <string name="omni_editor_size_note">Сведение двумя пальцами делает то же самое.</string>
+    <string name="omni_editor_wrap">Переносить строки</string>
+    <string name="omni_editor_complete">Подсказывать при наборе</string>
+    <string name="omni_editor_strip">Убрать комментарии</string>
+    <string name="omni_editor_stripped">Убрано символов комментария: %1$d</string>
+    <string name="omni_editor_strip_none">Убирать нечего: комментариев нет.</string>
     <string name="omni_editor_find_back">Назад</string>
     <string name="omni_editor_find_next">Далее</string>
     <string name="omni_editor_spot">%1$d:%2$d</string>
