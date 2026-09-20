@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">राय</string>
-    <string name="omni_feedback_mail">आपका ई-मेल पता (वैकल्पिक)</string>
     <string name="omni_feedback_send">प्रतिक्रिया भेजें</string>
     <string name="omni_feedback_shot_pick">स्क्रीनशॉट जोड़ें</string>
     <string name="omni_feedback_shot">स्क्रीनशॉट (वैकल्पिक)</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">कृपया विस्तार से बताएं...</string>
     <string name="omni_feedback_subject_hint">छोटा और स्पष्ट शीर्षक लिखें...</string>
     <string name="omni_feedback_detail">विवरण</string>
-    <string name="omni_feedback_shot_chosen">एक तस्वीर लगी है।</string>
-    <string name="omni_feedback_send_note">यह इसी उपकरण के मेल ऐप को सब कुछ भरा हुआ खोल देता है। जब तक आप स्वयं न भेजें, कुछ भी उपकरण से बाहर नहीं जाता।</string>
+    <string name="omni_feedback_send_note">कोई डाक ऐप्लिकेशन नहीं खुलता। आप जो लिखते हैं वह इसी उपकरण पर रहता है और अपने चित्रों सहित जैसे ही हो सके हम तक पहुँच जाता है।</string>
     <string name="omni_feedback_needs">भेजने से पहले एक विषय और एक विवरण चाहिए।</string>
-    <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">ऐप को आँकिए</string>
     <string name="omni_rate_store">Play Store पर रेट करें</string>
     <string name="omni_menu_help">मदद</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">एक नया विचार</string>
     <string name="omni_feedback_kind_question_note">धन्यवाद कहिए</string>
     <string name="omni_feedback_kind_other_note">बाकी कुछ भी</string>
-    <string name="omni_feedback_shot_note">इससे हमें परेशानी जल्दी समझ आती है।</string>
+    <string name="omni_feedback_shot_note">इससे हम परेशानी जल्दी देख पाते हैं। हर एक अधिकतम %1$d MB।</string>
     <string name="omni_feedback_reach">संपर्क (वैकल्पिक)</string>
     <string name="omni_feedback_reach_note">ज़रूरत पड़ने पर हम आप तक पहुँच सकते हैं।</string>
+    <string name="omni_feedback_shot_most">अधिक से अधिक %1$d चित्र।</string>
+    <string name="omni_feedback_shot_large">%1$d MB से बड़ा एक चित्र बाहर रह गया।</string>
+    <string name="omni_feedback_rest">दूसरा %1$d मिनट में भेजा जा सकता है।</string>
+    <string name="omni_feedback_kept">रख लिया। जैसे ही हो सकेगा हम तक पहुँच जाएगा।</string>
+    <string name="omni_feedback_kept_not">इसे इस उपकरण पर रखा नहीं जा सका।</string>
+    <string name="omni_feedback_reach_soon">आपको उत्तर लिखना जल्द आ रहा है।</string>
     <string name="omni_web_tech">जिन तकनीकों का यह साथ देता है</string>
     <string name="omni_web_tech_note">HTML, CSS, JavaScript और आधुनिक जाल सबका साथ है। यह किसी भी साइट के साथ चलता है।</string>
     <string name="omni_web_where">वेबसाइट का पता</string>

@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">Retour</string>
-    <string name="omni_feedback_mail">Votre adresse e-mail (facultatif)</string>
     <string name="omni_feedback_send">Envoyer le retour</string>
     <string name="omni_feedback_shot_pick">Ajouter une capture</string>
     <string name="omni_feedback_shot">Capture d\'écran (facultatif)</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">Expliquez en détail…</string>
     <string name="omni_feedback_subject_hint">Écrivez un titre court et clair…</string>
     <string name="omni_feedback_detail">Description</string>
-    <string name="omni_feedback_shot_chosen">Une image est jointe.</string>
-    <string name="omni_feedback_send_note">Cela ouvre l’application de courrier de cet appareil, tout rempli. Rien ne quitte l’appareil tant que tu n’envoies pas toi-même.</string>
+    <string name="omni_feedback_send_note">Aucune application de courrier ne s\'ouvre. Ce que vous écrivez reste sur cet appareil et nous parvient, avec ses images, dès que possible.</string>
     <string name="omni_feedback_needs">Un sujet et une description sont nécessaires avant l’envoi.</string>
-    <string name="omni_feedback_subject_line">Omni Builder : %1$s</string>
     <string name="omni_rate_title">Noter l’application</string>
     <string name="omni_rate_store">Noter sur le Play Store</string>
     <string name="omni_menu_help">Aide</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">Une idée nouvelle</string>
     <string name="omni_feedback_kind_question_note">Dire merci</string>
     <string name="omni_feedback_kind_other_note">Autre chose</string>
-    <string name="omni_feedback_shot_note">Cela nous aide à comprendre le souci plus vite.</string>
+    <string name="omni_feedback_shot_note">Cela nous aide à voir le problème plus tôt. %1$d Mo au plus chacune.</string>
     <string name="omni_feedback_reach">Contact (facultatif)</string>
     <string name="omni_feedback_reach_note">Nous pouvons te joindre s’il le faut.</string>
+    <string name="omni_feedback_shot_most">Au plus %1$d images.</string>
+    <string name="omni_feedback_shot_large">Une image de plus de %1$d Mo a été laissée de côté.</string>
+    <string name="omni_feedback_rest">Un autre pourra partir dans %1$d minutes.</string>
+    <string name="omni_feedback_kept">Gardé. Il nous parviendra dès que possible.</string>
+    <string name="omni_feedback_kept_not">Impossible de le garder sur cet appareil.</string>
+    <string name="omni_feedback_reach_soon">Vous répondre arrive bientôt.</string>
     <string name="omni_web_tech">Technologies prises en charge</string>
     <string name="omni_web_tech_note">HTML, CSS, JavaScript et le web moderne sont pris en charge. Cela marche avec n’importe quel site.</string>
     <string name="omni_web_where">Adresse du site</string>

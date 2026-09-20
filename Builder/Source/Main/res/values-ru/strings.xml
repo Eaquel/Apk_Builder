@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">Отзыв</string>
-    <string name="omni_feedback_mail">Ваш адрес эл. почты (необязательно)</string>
     <string name="omni_feedback_send">Отправить отзыв</string>
     <string name="omni_feedback_shot_pick">Добавить снимок экрана</string>
     <string name="omni_feedback_shot">Снимок экрана (необязательно)</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">Опишите подробно…</string>
     <string name="omni_feedback_subject_hint">Напишите короткий и ясный заголовок…</string>
     <string name="omni_feedback_detail">Описание</string>
-    <string name="omni_feedback_shot_chosen">Картинка приложена.</string>
-    <string name="omni_feedback_send_note">Это откроет почтовое приложение на устройстве со всем заполненным. Пока вы сами не отправите, с устройства ничего не уйдёт.</string>
+    <string name="omni_feedback_send_note">Почтовое приложение не открывается. Написанное остаётся на этом устройстве и доходит до нас вместе с картинками, как только сможет.</string>
     <string name="omni_feedback_needs">Прежде чем отправить, нужны тема и описание.</string>
-    <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Оценить приложение</string>
     <string name="omni_rate_store">Оценить в Play Store</string>
     <string name="omni_menu_help">Помощь</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">Новая мысль</string>
     <string name="omni_feedback_kind_question_note">Сказать спасибо</string>
     <string name="omni_feedback_kind_other_note">Что-то другое</string>
-    <string name="omni_feedback_shot_note">Так мы поймём затруднение быстрее.</string>
+    <string name="omni_feedback_shot_note">Так мы увидим беду раньше. До %1$d МБ каждое.</string>
     <string name="omni_feedback_reach">Связь (по желанию)</string>
     <string name="omni_feedback_reach_note">Мы сможем написать вам, если понадобится.</string>
+    <string name="omni_feedback_shot_most">Не больше %1$d изображений.</string>
+    <string name="omni_feedback_shot_large">Изображение больше %1$d МБ осталось в стороне.</string>
+    <string name="omni_feedback_rest">Следующее можно отправить через %1$d минут.</string>
+    <string name="omni_feedback_kept">Сохранено. Дойдёт до нас, как только сможет.</string>
+    <string name="omni_feedback_kept_not">Сохранить на этом устройстве не удалось.</string>
+    <string name="omni_feedback_reach_soon">Ответ вам появится скоро.</string>
     <string name="omni_web_tech">Поддерживаемые технологии</string>
     <string name="omni_web_tech_note">HTML, CSS, JavaScript и современный веб поддержаны. Работает с любым сайтом.</string>
     <string name="omni_web_where">Адрес сайта</string>

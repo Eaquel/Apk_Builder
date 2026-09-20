@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">ملاحظات</string>
-    <string name="omni_feedback_mail">بريدك الإلكتروني (اختياري)</string>
     <string name="omni_feedback_send">إرسال الملاحظات</string>
     <string name="omni_feedback_shot_pick">أضف لقطة شاشة</string>
     <string name="omni_feedback_shot">لقطة شاشة (اختياري)</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">يرجى الشرح بالتفصيل...</string>
     <string name="omni_feedback_subject_hint">اكتب عنوانًا قصيرًا وواضحًا...</string>
     <string name="omni_feedback_detail">الوصف</string>
-    <string name="omni_feedback_shot_chosen">أُرفقت صورة.</string>
-    <string name="omni_feedback_send_note">يفتح هذا تطبيق البريد على الجهاز وكل شيء مملوء. ولا يغادر الجهاز شيء حتى ترسله بنفسك.</string>
+    <string name="omni_feedback_send_note">لا يُفتح أي تطبيق بريد. ما تكتبه يبقى على هذا الجهاز ويصل إلينا مع صوره حالما يستطيع.</string>
     <string name="omni_feedback_needs">يلزم موضوع ووصف قبل أن يُرسَل هذا.</string>
-    <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">قيّم التطبيق</string>
     <string name="omni_rate_store">قيّمه في متجر Play</string>
     <string name="omni_menu_help">مساعدة</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">فكرة جديدة</string>
     <string name="omni_feedback_kind_question_note">قل شكرًا</string>
     <string name="omni_feedback_kind_other_note">شيء آخر</string>
-    <string name="omni_feedback_shot_note">يعيننا ذلك على فهم المشكلة أسرع.</string>
+    <string name="omni_feedback_shot_note">تساعدنا على رؤية المشكلة أبكر. حتى %1$d ميغابايت لكل صورة.</string>
     <string name="omni_feedback_reach">التواصل (اختياري)</string>
     <string name="omni_feedback_reach_note">نستطيع مراسلتك إن لزم.</string>
+    <string name="omni_feedback_shot_most">أربع صور على الأكثر: %1$d.</string>
+    <string name="omni_feedback_shot_large">صورة تتجاوز %1$d ميغابايت بقيت خارجًا.</string>
+    <string name="omni_feedback_rest">يمكن إرسال واحد آخر بعد %1$d دقيقة.</string>
+    <string name="omni_feedback_kept">حُفظ. سيصل إلينا حالما يستطيع.</string>
+    <string name="omni_feedback_kept_not">تعذر حفظه على هذا الجهاز.</string>
+    <string name="omni_feedback_reach_soon">الرد عليك قادم قريبًا.</string>
     <string name="omni_web_tech">التقنيات المدعومة</string>
     <string name="omni_web_tech_note">HTML وCSS وJavaScript والوِب الحديث كلها مدعومة. ويعمل مع أي موقع.</string>
     <string name="omni_web_where">عنوان الموقع</string>

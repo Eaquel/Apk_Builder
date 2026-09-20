@@ -1146,6 +1146,8 @@ object Preferences {
     private const val SEARCHES = "searches"
     private const val SEARCHES_KEPT = 40
     private val LOCKED_THEMES = setOf("hacker", "anime")
+    private const val FEEDBACK_DRAFT = "feedback_draft"
+    private const val FEEDBACK_SENT = "feedback_sent"
     private const val ASSISTANT_KEY = "assistant_key"
     private const val ASSISTANT_MODEL = "assistant_model"
     private const val ASSISTANT_EFFORT = "assistant_effort"
@@ -1264,6 +1266,23 @@ object Preferences {
 
     fun setReading(context: Context, size: Float) {
         store(context).edit().putFloat(READING, size).apply()
+    }
+
+    fun feedbackDraft(context: Context): String =
+        store(context).getString(FEEDBACK_DRAFT, "").orEmpty()
+
+    fun setFeedbackDraft(context: Context, held: String) {
+        store(context).edit().putString(FEEDBACK_DRAFT, held).apply()
+    }
+
+    fun forgetFeedbackDraft(context: Context) {
+        store(context).edit().remove(FEEDBACK_DRAFT).apply()
+    }
+
+    fun feedbackSentAt(context: Context): Long = store(context).getLong(FEEDBACK_SENT, 0L)
+
+    fun setFeedbackSentAt(context: Context, at: Long) {
+        store(context).edit().putLong(FEEDBACK_SENT, at).apply()
     }
 
 }
@@ -3217,6 +3236,20 @@ class BuilderActivity : Activity() {
 
         const val ARCHIVE_REQUEST = 4
 
+        const val MOST_SHOTS = 4
+
+        const val SHOT_LARGEST_MB = 5
+
+        const val LARGEST_SHOT_BYTES = SHOT_LARGEST_MB * 1024L * 1024L
+
+        const val FEEDBACK_REST_MILLIS = 5L * 60L * 1000L
+
+        const val SHOTS_FOLDER = "Shots"
+
+        const val OUTBOX_FOLDER = "Outbox"
+
+        const val REPORT_FILE = "Report.json"
+
         const val LOG_HELD = 600
 
         val TILE_UNTOUCHED = 0xFFF7F8FA.toInt()
@@ -3659,8 +3692,7 @@ class BuilderActivity : Activity() {
     private var feedbackKind = 0
     private var feedbackSubject = ""
     private var feedbackDetail = ""
-    private var feedbackMail = ""
-    private var feedbackShot: String? = null
+    private val feedbackShots = mutableListOf<String>()
     private var helpFor = ""
     private var helpBand = 0
     private var docBand = 0
@@ -12021,19 +12053,146 @@ class BuilderActivity : Activity() {
         )
     }
 
-    private fun mailIntent(subject: String, body: String): Intent =
-        Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")).apply {
-            putExtra(Intent.EXTRA_SUBJECT, subject)
-            putExtra(Intent.EXTRA_TEXT, body)
-        }
+    private fun feedbackReport(): JSONObject = JSONObject().apply {
+        put("kind", resources.getResourceEntryName(FEEDBACK_KINDS[feedbackKind]))
+        put("subject", feedbackSubject)
+        put("detail", feedbackDetail)
+        put("version", versionShown())
+        put("device", Build.MANUFACTURER + " " + Build.MODEL)
+        put("api", Build.VERSION.SDK_INT)
+        put("language", Preferences.language(this@BuilderActivity))
+        put("wrappedAt", System.currentTimeMillis())
+        put("shots", feedbackShots.size)
+    }
 
-    private fun feedbackBody(): String = buildString {
-        append(getString(FEEDBACK_KINDS[feedbackKind])).append('\n')
-        append(feedbackSubject).append("\n\n")
-        append(feedbackDetail).append("\n\n")
-        append(getString(R.string.omni_about_version, versionShown())).append('\n')
-        append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
-        append(" · API ").append(Build.VERSION.SDK_INT)
+    private fun keepFeedback() {
+        val held = JSONObject().apply {
+            put("kind", feedbackKind)
+            put("subject", feedbackSubject)
+            put("detail", feedbackDetail)
+            put("shots", org.json.JSONArray(feedbackShots))
+        }
+        Preferences.setFeedbackDraft(this, held.toString())
+    }
+
+    private fun takeBackTheFeedback() {
+        val held = Preferences.feedbackDraft(this)
+        if (held.isEmpty()) {
+            return
+        }
+        val document = runCatching { JSONObject(held) }.getOrNull() ?: return
+        feedbackKind = document.optInt("kind").coerceIn(0, FEEDBACK_KINDS.size - 1)
+        feedbackSubject = document.optString("subject")
+        feedbackDetail = document.optString("detail")
+        feedbackShots.clear()
+        val listed = document.optJSONArray("shots")
+        for (index in 0 until (listed?.length() ?: 0)) {
+            val one = listed?.optString(index).orEmpty()
+            if (one.isNotEmpty() && File(one).isFile) {
+                feedbackShots.add(one)
+            }
+        }
+    }
+
+    private fun shotsFolder(): File = File(cacheDir, SHOTS_FOLDER).apply { mkdirs() }
+
+    private fun outbox(): File = File(filesDir, OUTBOX_FOLDER).apply { mkdirs() }
+
+    private fun holdTheShot(uri: Uri): File? {
+        val into = File(shotsFolder(), "Shot-" + System.nanoTime() + ".img")
+        val written = runCatching {
+            contentResolver.openInputStream(uri).use { from ->
+                if (from == null) {
+                    return null
+                }
+                into.outputStream().use { out ->
+                    val room = ByteArray(64 * 1024)
+                    var carried = 0L
+                    while (true) {
+                        val read = from.read(room)
+                        if (read <= 0) {
+                            break
+                        }
+                        carried += read
+                        if (carried > LARGEST_SHOT_BYTES) {
+                            return@runCatching -1L
+                        }
+                        out.write(room, 0, read)
+                    }
+                    carried
+                }
+            }
+        }.getOrDefault(-1L)
+        if (written < 0L) {
+            into.delete()
+            return null
+        }
+        return into
+    }
+
+    private fun takeTheShots(uris: List<Uri>) {
+        results.removeAllViews()
+        var refused = false
+        for (uri in uris) {
+            if (feedbackShots.size >= MOST_SHOTS) {
+                results.addView(
+                    notice(getString(R.string.omni_feedback_shot_most, MOST_SHOTS), palette.warning)
+                )
+                break
+            }
+            val held = holdTheShot(uri)
+            if (held == null) {
+                refused = true
+                continue
+            }
+            feedbackShots.add(held.absolutePath)
+        }
+        if (refused) {
+            results.addView(
+                notice(getString(R.string.omni_feedback_shot_large, SHOT_LARGEST_MB), palette.warning)
+            )
+        }
+        keepFeedback()
+        render(false)
+    }
+
+    private fun dropTheShot(path: String) {
+        feedbackShots.remove(path)
+        File(path).delete()
+        keepFeedback()
+        render(false)
+    }
+
+    private fun shotStrip(): View = FlowLayout(this, gap(2), gap(2)).apply {
+        feedbackShots.forEach { path ->
+            addView(
+                FrameLayout(context).apply {
+                    addView(
+                        thumbnail(path, gap(20)),
+                        FrameLayout.LayoutParams(gap(20), gap(20)),
+                    )
+                    addView(
+                        View(context).apply {
+                            background = pill(Ink.fade(palette.background, 0.72f), gap(4).toFloat())
+                            foreground = Mark(Mark.Shape.CLOSE, palette.error)
+                            contentDescription = getString(R.string.omni_action_clear)
+                            isClickable = true
+                            isFocusable = true
+                            readAs(Button::class.java.name)
+                            setOnClickListener { dropTheShot(path) }
+                        },
+                        FrameLayout.LayoutParams(gap(8), gap(8)).apply {
+                            gravity = Gravity.END or Gravity.TOP
+                        },
+                    )
+                }
+            )
+        }
+    }
+
+    private fun restingFor(): Long {
+        val since = System.currentTimeMillis() - Preferences.feedbackSentAt(this)
+        return (FEEDBACK_REST_MILLIS - since).coerceAtLeast(0L)
     }
 
     private fun sendFeedback() {
@@ -12042,16 +12201,42 @@ class BuilderActivity : Activity() {
             results.addView(notice(getString(R.string.omni_feedback_needs), palette.warning))
             return
         }
-        val intent = mailIntent(
-            getString(R.string.omni_feedback_subject_line, feedbackSubject),
-            feedbackBody(),
-        )
-        val shot = feedbackShot
-        if (shot != null) {
-            intent.putExtra(Intent.EXTRA_STREAM, Uri.parse(shot))
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val resting = restingFor()
+        if (resting > 0L) {
+            results.addView(
+                notice(
+                    getString(
+                        R.string.omni_feedback_rest,
+                        ((resting + 59_999L) / 60_000L).toInt(),
+                    ),
+                    palette.warning,
+                )
+            )
+            return
         }
-        hand(intent)
+        val stamp = SimpleDateFormat(OUTPUT_STAMP, Locale.US).format(Date())
+        val here = File(outbox(), stamp)
+        val wrapped = runCatching {
+            here.mkdirs()
+            File(here, REPORT_FILE).writeText(feedbackReport().toString())
+            feedbackShots.forEachIndexed { index, path ->
+                File(path).copyTo(File(here, "Shot-" + (index + 1) + ".img"), overwrite = true)
+            }
+            true
+        }.getOrDefault(false)
+        if (!wrapped) {
+            here.deleteRecursively()
+            results.addView(notice(getString(R.string.omni_feedback_kept_not), palette.error))
+            return
+        }
+        Preferences.setFeedbackSentAt(this, System.currentTimeMillis())
+        Preferences.forgetFeedbackDraft(this)
+        feedbackSubject = ""
+        feedbackDetail = ""
+        feedbackShots.forEach { File(it).delete() }
+        feedbackShots.clear()
+        flash(getString(R.string.omni_feedback_kept), palette.ok, Mark.Shape.SPEECH)
+        render(false)
     }
 
     private fun kindCell(at: Int, mark: Mark.Shape, title: String, detail: String): View {
@@ -12081,6 +12266,7 @@ class BuilderActivity : Activity() {
             )
             setOnClickListener {
                 feedbackKind = at
+                keepFeedback()
                 render(false)
             }
             addView(
@@ -12122,6 +12308,7 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderFeedback() {
+        takeBackTheFeedback()
         content.addView(
             screenHead(
                 Mark.Shape.SPEECH,
@@ -12159,7 +12346,10 @@ class BuilderActivity : Activity() {
                 SUBJECT_LIMIT,
                 1,
                 R.string.omni_feedback_subject_hint,
-            ) { feedbackSubject = it }
+            ) {
+                feedbackSubject = it
+                keepFeedback()
+            }
         )
         content.addView(
             counted(
@@ -12168,67 +12358,78 @@ class BuilderActivity : Activity() {
                 DETAIL_LIMIT,
                 3,
                 R.string.omni_feedback_detail_hint,
-            ) { feedbackDetail = it }
+            ) {
+                feedbackDetail = it
+                keepFeedback()
+            }
         )
 
-        content.addView(label(getString(R.string.omni_feedback_shot)))
-        val shot = feedbackShot
         content.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                minimumHeight = gap(21)
-                setPadding(gap(4), gap(4), gap(4), gap(4))
-                isClickable = true
-                isFocusable = true
-                contentDescription = getString(R.string.omni_feedback_shot_pick)
-                readAs(Button::class.java.name)
-                background = touchable(
-                    GradientDrawable().apply {
-                        this.shape = GradientDrawable.RECTANGLE
-                        cornerRadius = gap(4).toFloat()
-                        setColor(Color.TRANSPARENT)
-                        setStroke(gap(1) / 2, palette.divider, gap(2).toFloat(), gap(2).toFloat())
-                    },
-                    palette.accent,
-                )
-                setOnClickListener { chooseShot() }
-                addView(
-                    View(context).apply {
-                        foreground = Mark(Mark.Shape.IMAGE, palette.muted)
-                    },
-                    LinearLayout.LayoutParams(gap(7), gap(7)),
-                )
-                addView(
-                    TextView(context).apply {
-                        text = if (shot == null) {
-                            getString(R.string.omni_feedback_shot_pick)
-                        } else {
-                            getString(R.string.omni_feedback_shot_chosen)
-                        }
-                        setTextColor(if (shot == null) palette.accent else palette.ok)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        gravity = Gravity.CENTER
-                        setPadding(0, gap(2), 0, 0)
-                    }
-                )
-                addView(
-                    TextView(context).apply {
-                        text = getString(R.string.omni_feedback_shot_note)
-                        setTextColor(palette.muted)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        gravity = Gravity.CENTER
-                    }
-                )
-            },
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(1) },
+            label(
+                getString(R.string.omni_feedback_shot) + "  " +
+                    getString(R.string.omni_counted, feedbackShots.size, MOST_SHOTS)
+            )
         )
-        if (shot != null) {
+        if (feedbackShots.isNotEmpty()) {
             content.addView(
-                subtle(getString(R.string.omni_action_clear), palette.muted) {
-                    feedbackShot = null
-                    render(false)
-                }
+                shotStrip(),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    topMargin = gap(1)
+                    bottomMargin = gap(1)
+                },
+            )
+        }
+        if (feedbackShots.size < MOST_SHOTS) {
+            content.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    minimumHeight = gap(21)
+                    setPadding(gap(4), gap(4), gap(4), gap(4))
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = getString(R.string.omni_feedback_shot_pick)
+                    readAs(Button::class.java.name)
+                    background = touchable(
+                        GradientDrawable().apply {
+                            this.shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(4).toFloat()
+                            setColor(Color.TRANSPARENT)
+                            setStroke(
+                                gap(1) / 2,
+                                palette.divider,
+                                gap(2).toFloat(),
+                                gap(2).toFloat(),
+                            )
+                        },
+                        palette.accent,
+                    )
+                    setOnClickListener { chooseShot() }
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(Mark.Shape.IMAGE, palette.muted)
+                        },
+                        LinearLayout.LayoutParams(gap(7), gap(7)),
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(R.string.omni_feedback_shot_pick)
+                            setTextColor(palette.accent)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            gravity = Gravity.CENTER
+                            setPadding(0, gap(2), 0, 0)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(R.string.omni_feedback_shot_note, SHOT_LARGEST_MB)
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            gravity = Gravity.CENTER
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gap(1) },
             )
         }
 
@@ -12239,12 +12440,14 @@ class BuilderActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.MAIL, palette.muted) },
+                    View(context).apply { foreground = Mark(Mark.Shape.CLOCK, palette.muted) },
                     LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
                 )
                 addView(
-                    field(getString(R.string.omni_feedback_mail), feedbackMail) {
-                        feedbackMail = it
+                    TextView(context).apply {
+                        text = getString(R.string.omni_feedback_reach_soon)
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
@@ -12254,6 +12457,17 @@ class BuilderActivity : Activity() {
         content.addView(reply)
 
         content.addView(primary(getString(R.string.omni_feedback_send)) { sendFeedback() })
+        val resting = restingFor()
+        if (resting > 0L) {
+            content.addView(
+                quiet(
+                    getString(
+                        R.string.omni_feedback_rest,
+                        ((resting + 59_999L) / 60_000L).toInt(),
+                    )
+                )
+            )
+        }
         content.addView(
             noteCard(
                 getString(R.string.omni_language_told),
@@ -12266,6 +12480,7 @@ class BuilderActivity : Activity() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "image/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         runCatching { startActivityForResult(intent, SHOT_REQUEST) }
             .onFailure {
@@ -14570,8 +14785,18 @@ class BuilderActivity : Activity() {
             return
         }
         if (requestCode == SHOT_REQUEST) {
-            feedbackShot = data?.data?.toString()
-            render(false)
+            val picked = mutableListOf<Uri>()
+            val many = data?.clipData
+            if (many != null) {
+                for (index in 0 until many.itemCount) {
+                    many.getItemAt(index)?.uri?.let { picked.add(it) }
+                }
+            } else {
+                data?.data?.let { picked.add(it) }
+            }
+            if (picked.isNotEmpty()) {
+                takeTheShots(picked)
+            }
             return
         }
         if (requestCode == ARCHIVE_REQUEST) {

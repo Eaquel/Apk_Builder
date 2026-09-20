@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">Geri Bildirim</string>
-    <string name="omni_feedback_mail">E-posta adresiniz (isteğe bağlı)</string>
     <string name="omni_feedback_send">Geri Bildirimi Gönder</string>
     <string name="omni_feedback_shot_pick">Ekran görüntüsü ekle</string>
     <string name="omni_feedback_shot">Ekran Görüntüsü (İsteğe Bağlı)</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">Lütfen detaylı bir şekilde açıklayın...</string>
     <string name="omni_feedback_subject_hint">Kısa ve net bir başlık yazın...</string>
     <string name="omni_feedback_detail">Açıklama</string>
-    <string name="omni_feedback_shot_chosen">Bir görsel eklendi.</string>
-    <string name="omni_feedback_send_note">Bu, cihazdaki posta uygulamasını her şey doldurulmuş olarak açar. Sen göndermeden hiçbir şey cihazdan çıkmaz.</string>
+    <string name="omni_feedback_send_note">Hiçbir posta uygulaması açılmaz. Yazdığınız bu cihazda saklanır ve resimleriyle birlikte ilk fırsatta bize ulaşır.</string>
     <string name="omni_feedback_needs">Bunun gönderilebilmesi için bir konu ve bir açıklama gerekir.</string>
-    <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Uygulamayı Değerlendir</string>
     <string name="omni_rate_store">Play Store\'da Değerlendir</string>
     <string name="omni_menu_help">Yardım</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">Yeni bir fikir</string>
     <string name="omni_feedback_kind_question_note">Teşekkür et</string>
     <string name="omni_feedback_kind_other_note">Diğer konular</string>
-    <string name="omni_feedback_shot_note">Sorunu daha hızlı anlamamıza yardımcı olur.</string>
+    <string name="omni_feedback_shot_note">Sorunu daha çabuk görmemizi sağlar. Her biri en çok %1$d MB.</string>
     <string name="omni_feedback_reach">İletişim (İsteğe Bağlı)</string>
     <string name="omni_feedback_reach_note">Gerekirse sizinle iletişime geçebiliriz.</string>
+    <string name="omni_feedback_shot_most">En fazla %1$d resim.</string>
+    <string name="omni_feedback_shot_large">%1$d MB üzerindeki bir resim alınmadı.</string>
+    <string name="omni_feedback_rest">Yenisi %1$d dakika sonra gönderilebilir.</string>
+    <string name="omni_feedback_kept">Saklandı. İlk fırsatta bize ulaşacak.</string>
+    <string name="omni_feedback_kept_not">Bu cihazda saklanamadı.</string>
+    <string name="omni_feedback_reach_soon">Size geri yazılması yakında.</string>
     <string name="omni_web_tech">Desteklenen Teknolojiler</string>
     <string name="omni_web_tech_note">HTML, CSS, JavaScript ve modern web teknolojileri desteklenir. Tüm web siteleri ile uyumludur.</string>
     <string name="omni_web_where">Web Site Adresi</string>

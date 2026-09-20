@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">Masukan</string>
-    <string name="omni_feedback_mail">Alamat e-mel kamu (opsional)</string>
     <string name="omni_feedback_send">Kirim masukan</string>
     <string name="omni_feedback_shot_pick">Tambahkan tangkapan layar</string>
     <string name="omni_feedback_shot">Tangkapan layar (opsional)</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">Jelaskan secara rinci...</string>
     <string name="omni_feedback_subject_hint">Tulis judul yang singkat dan jelas...</string>
     <string name="omni_feedback_detail">Uraian</string>
-    <string name="omni_feedback_shot_chosen">Sebuah gambar terlampir.</string>
-    <string name="omni_feedback_send_note">Ini membuka aplikasi surel di perangkat ini dengan semuanya terisi. Tak ada yang meninggalkan perangkat sampai kamu sendiri mengirimnya.</string>
+    <string name="omni_feedback_send_note">Tidak ada aplikasi surel yang dibuka. Yang Anda tulis tetap di perangkat ini dan sampai ke kami, beserta gambarnya, begitu bisa.</string>
     <string name="omni_feedback_needs">Judul dan uraian diperlukan sebelum ini bisa dikirim.</string>
-    <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">Nilai Aplikasi Ini</string>
     <string name="omni_rate_store">Nilai di Play Store</string>
     <string name="omni_menu_help">Bantuan</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">Sebuah gagasan baru</string>
     <string name="omni_feedback_kind_question_note">Berterima kasih</string>
     <string name="omni_feedback_kind_other_note">Apa pun lainnya</string>
-    <string name="omni_feedback_shot_note">Itu membantu kami memahami masalahnya lebih cepat.</string>
+    <string name="omni_feedback_shot_note">Membantu kami melihat masalahnya lebih awal. Paling besar %1$d MB tiap gambar.</string>
     <string name="omni_feedback_reach">Kontak (opsional)</string>
     <string name="omni_feedback_reach_note">Kami bisa menghubungimu bila perlu.</string>
+    <string name="omni_feedback_shot_most">Paling banyak %1$d gambar.</string>
+    <string name="omni_feedback_shot_large">Gambar di atas %1$d MB tidak ikut.</string>
+    <string name="omni_feedback_rest">Satu lagi bisa dikirim dalam %1$d menit.</string>
+    <string name="omni_feedback_kept">Disimpan. Sampai ke kami begitu bisa.</string>
+    <string name="omni_feedback_kept_not">Tidak bisa disimpan di perangkat ini.</string>
+    <string name="omni_feedback_reach_soon">Membalas Anda akan segera hadir.</string>
     <string name="omni_web_tech">Teknologi yang didukungnya</string>
     <string name="omni_web_tech_note">HTML, CSS, JavaScript dan web modern semuanya didukung. Ia bekerja dengan situs mana pun.</string>
     <string name="omni_web_where">Alamat situs</string>

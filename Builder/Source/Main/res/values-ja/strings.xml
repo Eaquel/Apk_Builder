@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">ご意見</string>
-    <string name="omni_feedback_mail">メールアドレス（任意）</string>
     <string name="omni_feedback_send">フィードバックを送る</string>
     <string name="omni_feedback_shot_pick">スクリーンショットを追加</string>
     <string name="omni_feedback_shot">スクリーンショット（任意）</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">詳しく説明してください…</string>
     <string name="omni_feedback_subject_hint">短く分かりやすい見出しを…</string>
     <string name="omni_feedback_detail">説明</string>
-    <string name="omni_feedback_shot_chosen">画像が添えられています。</string>
-    <string name="omni_feedback_send_note">これはこの端末のメールアプリを、すべて入力した状態で開きます。あなたが自分で送るまで、何も端末を離れません。</string>
+    <string name="omni_feedback_send_note">メールのアプリは開きません。書いたものはこの端末に残り、画像とともに送れるようになり次第こちらに届きます。</string>
     <string name="omni_feedback_needs">送るには件名と説明が必要です。</string>
-    <string name="omni_feedback_subject_line">Omni Builder: %1$s</string>
     <string name="omni_rate_title">アプリを評価する</string>
     <string name="omni_rate_store">Play ストアで評価</string>
     <string name="omni_menu_help">ヘルプ</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">新しい思いつき</string>
     <string name="omni_feedback_kind_question_note">ありがとうを伝える</string>
     <string name="omni_feedback_kind_other_note">そのほか</string>
-    <string name="omni_feedback_shot_note">そのほうが困りごとを早く掴めます。</string>
+    <string name="omni_feedback_shot_note">困りごとを早く把握できます。1枚あたり最大 %1$d MB。</string>
     <string name="omni_feedback_reach">連絡先（任意）</string>
     <string name="omni_feedback_reach_note">必要なときにこちらから連絡できます。</string>
+    <string name="omni_feedback_shot_most">画像は最大 %1$d 枚です。</string>
+    <string name="omni_feedback_shot_large">%1$d MB を超える画像は見送りました。</string>
+    <string name="omni_feedback_rest">次は %1$d 分後に送れます。</string>
+    <string name="omni_feedback_kept">預かりました。送れるようになり次第こちらに届きます。</string>
+    <string name="omni_feedback_kept_not">この端末に預けられませんでした。</string>
+    <string name="omni_feedback_reach_soon">お返事を書く仕組みは近く用意します。</string>
     <string name="omni_web_tech">対応する技術</string>
     <string name="omni_web_tech_note">HTML、CSS、JavaScript と今どきのウェブに対応しています。どんなサイトでも動きます。</string>
     <string name="omni_web_where">サイトの住所</string>

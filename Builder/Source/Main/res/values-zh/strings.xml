@@ -230,7 +230,6 @@
     <string name="omni_about_rights">© %1$s Omni Builder</string>
     <string name="omni_counted">%1$d/%2$d</string>
     <string name="omni_feedback_title">反馈</string>
-    <string name="omni_feedback_mail">你的电子邮件地址（可选）</string>
     <string name="omni_feedback_send">发送反馈</string>
     <string name="omni_feedback_shot_pick">添加截图</string>
     <string name="omni_feedback_shot">截图（可选）</string>
@@ -244,10 +243,8 @@
     <string name="omni_feedback_detail_hint">请详细说明……</string>
     <string name="omni_feedback_subject_hint">写一个简短清楚的标题……</string>
     <string name="omni_feedback_detail">描述</string>
-    <string name="omni_feedback_shot_chosen">已附上一张图片。</string>
-    <string name="omni_feedback_send_note">这会打开本机的邮件应用，内容已填好。在你亲自发送之前，没有任何东西离开本机。</string>
+    <string name="omni_feedback_send_note">不会打开任何邮件应用。你写下的内容留在这台设备上，连同图片，一有机会就送到我们手上。</string>
     <string name="omni_feedback_needs">发送前需要主题和描述。</string>
-    <string name="omni_feedback_subject_line">Omni Builder：%1$s</string>
     <string name="omni_rate_title">评价此应用</string>
     <string name="omni_rate_store">在 Play 商店评分</string>
     <string name="omni_menu_help">帮助</string>
@@ -611,9 +608,15 @@
     <string name="omni_feedback_kind_idea_note">新的想法</string>
     <string name="omni_feedback_kind_question_note">说声谢谢</string>
     <string name="omni_feedback_kind_other_note">其他</string>
-    <string name="omni_feedback_shot_note">这能帮我们更快弄清问题。</string>
+    <string name="omni_feedback_shot_note">这能让我们更早看清问题。每张最多 %1$d MB。</string>
     <string name="omni_feedback_reach">联系方式（可选）</string>
     <string name="omni_feedback_reach_note">需要时我们可以联系你。</string>
+    <string name="omni_feedback_shot_most">最多 %1$d 张图片。</string>
+    <string name="omni_feedback_shot_large">一张超过 %1$d MB 的图片没有被收下。</string>
+    <string name="omni_feedback_rest">%1$d 分钟后可以再发一条。</string>
+    <string name="omni_feedback_kept">已留下。有机会就会送到我们手上。</string>
+    <string name="omni_feedback_kept_not">在这台设备上留不下来。</string>
+    <string name="omni_feedback_reach_soon">给你回信的功能很快就来。</string>
     <string name="omni_web_tech">支持的技术</string>
     <string name="omni_web_tech_note">HTML、CSS、JavaScript 和现代网页技术都支持，任何网站都可以。</string>
     <string name="omni_web_where">网站地址</string>
