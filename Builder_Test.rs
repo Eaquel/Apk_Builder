@@ -4376,6 +4376,8 @@ public class Written {
             .expect("the settings are written beside the manifest");
         for key in [
             "package",
+            "namespace",
+            "applicationId",
             "label",
             "version",
             "sdk",
@@ -4384,6 +4386,13 @@ public class Written {
             "abis",
             "dependencies",
             "build",
+            "java",
+            "buildTypes",
+            "cmake",
+            "proguard",
+            "packaging",
+            "resources",
+            "versions",
             "signing",
         ] {
             assert!(
@@ -4398,8 +4407,112 @@ public class Written {
         assert_eq!(read.target_sdk, 36);
         assert!(read.dependencies.is_empty(), "nothing is added by default");
         assert!(read.shrink);
+        assert_eq!(read.namespace, "com.tr.yt.made");
+        assert_eq!(read.application_id, "com.tr.yt.made");
+
+        assert!(
+            written.lines().count() > 40,
+            "the settings are written to be read, not on one line: {written}"
+        );
+        assert!(
+            written.contains("\n    \"package\": "),
+            "every key sits on its own indented line: {written}"
+        );
+
+        let empty = crate::settings::Settings::default();
+        for key in ["cppFlags", "excludes", "pickFirst", "named", "plugins"] {
+            assert!(
+                empty.to_json().contains(&format!("\"{key}\"")),
+                "{key} is written even when it holds nothing"
+            );
+        }
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn everything_the_four_build_files_hold_survives_a_trip_through_the_settings() {
+        let mut settings = crate::settings::Settings {
+            package: "com.tr.yt.whole".to_string(),
+            namespace: "com.tr.yt.whole.inner".to_string(),
+            application_id: "com.tr.yt.whole.free".to_string(),
+            label: "Whole".to_string(),
+            key_alias: "release".to_string(),
+            ..Default::default()
+        };
+        settings.java = crate::settings::Java {
+            source: "21".to_string(),
+            target: "21".to_string(),
+            jvm: "21".to_string(),
+        };
+        settings.variants = vec![
+            crate::settings::Variant {
+                name: "debug".to_string(),
+                minify: false,
+                shrink_resources: false,
+                debuggable: true,
+                suffix: ".debug".to_string(),
+                proguard: Vec::new(),
+            },
+            crate::settings::Variant {
+                name: "release".to_string(),
+                minify: true,
+                shrink_resources: true,
+                debuggable: false,
+                suffix: String::new(),
+                proguard: vec!["proguard-rules.pro".to_string()],
+            },
+        ];
+        settings.native = crate::settings::Native {
+            path: "CMakeLists.txt".to_string(),
+            cmake: "3.22.1".to_string(),
+            standard: "17".to_string(),
+            flags: vec!["-frtti".to_string(), "-fexceptions".to_string()],
+            arguments: vec!["-DANDROID_STL=c++_shared".to_string()],
+            targets: vec!["native".to_string()],
+            sources: vec!["Native/Builder.cpp".to_string()],
+            libraries: vec!["log".to_string()],
+        };
+        settings.shrinking = crate::settings::Shrinking {
+            files: vec!["proguard-rules.pro".to_string()],
+            rules: vec!["-keep class com.tr.yt.whole.** { *; }".to_string()],
+        };
+        settings.packaging = crate::settings::Packaging {
+            excludes: vec!["META-INF/*.kotlin_module".to_string()],
+            first: vec!["lib/arm64-v8a/libc++_shared.so".to_string()],
+            legacy_jni: true,
+        };
+        settings.resources = crate::settings::Resources {
+            vectors: false,
+            kept: vec!["en".to_string(), "tr".to_string()],
+        };
+        settings.catalogue = crate::settings::Catalogue {
+            versions: vec![crate::settings::Named {
+                name: "agp".to_string(),
+                value: "8.7.0".to_string(),
+            }],
+            libraries: vec![crate::settings::Dependency {
+                name: "androidx.core:core".to_string(),
+                version: "1.13.1".to_string(),
+                file: "Libraries/core.jar".to_string(),
+            }],
+            plugins: vec![crate::settings::Dependency {
+                name: "com.android.application".to_string(),
+                version: "8.7.0".to_string(),
+                file: String::new(),
+            }],
+        };
+        settings.signing = crate::settings::Signing {
+            store: "Keys/release.jks".to_string(),
+            v2: true,
+            v3: true,
+            v31: false,
+            v4: true,
+        };
+
+        let written = settings.to_json();
+        let read = crate::settings::Settings::from_json(&written).expect("they read back");
+        assert_eq!(read, settings, "written: {written}");
     }
 
     #[test]

@@ -2673,6 +2673,8 @@ internal class Mark(
         MAIL(0),
         BOLT(0),
         SWAP(0),
+        UNDO(0),
+        REDO(0),
         HEART(R.drawable.omni_icon_heart),
         CLOCK(R.drawable.omni_icon_clock),
         TRASH(R.drawable.omni_icon_trash),
@@ -2982,6 +2984,30 @@ internal class Mark(
                 path.moveTo(8.5f, 11.5f)
                 path.lineTo(5f, 15f)
                 path.lineTo(8.5f, 18.5f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.UNDO -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(9.5f, 5f)
+                path.lineTo(5f, 9.5f)
+                path.lineTo(9.5f, 14f)
+                path.moveTo(5f, 9.5f)
+                path.lineTo(14.5f, 9.5f)
+                path.cubicTo(18.5f, 9.5f, 20.5f, 12f, 20.5f, 14.8f)
+                path.cubicTo(20.5f, 17.6f, 18.5f, 19.5f, 15f, 19.5f)
+                path.lineTo(10.5f, 19.5f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.REDO -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(14.5f, 5f)
+                path.lineTo(19f, 9.5f)
+                path.lineTo(14.5f, 14f)
+                path.moveTo(19f, 9.5f)
+                path.lineTo(9.5f, 9.5f)
+                path.cubicTo(5.5f, 9.5f, 3.5f, 12f, 3.5f, 14.8f)
+                path.cubicTo(3.5f, 17.6f, 5.5f, 19.5f, 9f, 19.5f)
+                path.lineTo(13.5f, 19.5f)
                 canvas.drawPath(path, paint)
             }
             Shape.BOLT -> {
@@ -3600,6 +3626,7 @@ class BuilderActivity : Activity() {
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
+    private var buildSecret: String? = null
 
     private class Shell(
         val view: TerminalView,
@@ -3678,7 +3705,17 @@ class BuilderActivity : Activity() {
 
     private var editorSaveMark: View? = null
 
+    private var editorSpot: TextView? = null
+
+    private var editorUndoMark: View? = null
+
+    private var editorRedoMark: View? = null
+
     private var editorSave: (() -> Unit)? = null
+
+    private var editorUndo: (() -> Unit)? = null
+
+    private var editorRedo: (() -> Unit)? = null
 
     private var editorMore: (() -> Unit)? = null
 
@@ -4058,7 +4095,12 @@ class BuilderActivity : Activity() {
         editor = null
         editorAt = null
         editorSaveMark = null
+        editorSpot = null
+        editorUndoMark = null
+        editorRedoMark = null
         editorSave = null
+        editorUndo = null
+        editorRedo = null
         editorMore = null
         logView = null
         logCount = null
@@ -4575,40 +4617,41 @@ class BuilderActivity : Activity() {
                 return
             }
             if (here is Screen.Editor) {
+                val spot = TextView(this).apply {
+                    setTextColor(palette.muted)
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    maxLines = 1
+                }
+                editorSpot = spot
                 crown.addView(
-                    TextView(this).apply {
-                        text = getString(R.string.omni_app_name)
-                        setTextColor(palette.foreground)
-                        typeface = Type.heading
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
-                        gravity = Gravity.CENTER
-                        maxLines = 1
-                    },
+                    editorHead(here.path, spot),
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
-                crown.addView(
-                    markControl(Mark.Shape.PLAY, R.string.omni_editor_run) {
-                        editorSave?.invoke()
-                        go(Screen.Build(here.root))
-                    },
-                    each,
-                )
-                crown.addView(
-                    markControl(Mark.Shape.LOG, R.string.omni_tab_shell) { go(Screen.Terminal) },
-                    each,
-                )
+                val small = LinearLayout.LayoutParams(gap(9), gap(9))
+                val stepBackward = markControl(Mark.Shape.UNDO, R.string.omni_editor_undo) {
+                    editorUndo?.invoke()
+                }
+                val stepForward = markControl(Mark.Shape.REDO, R.string.omni_editor_redo) {
+                    editorRedo?.invoke()
+                }
+                editorUndoMark = stepBackward
+                editorRedoMark = stepForward
+                crown.addView(stepBackward, small)
+                crown.addView(stepForward, small)
                 val saving = markControl(Mark.Shape.SAVE, R.string.omni_action_save) {
                     editorSave?.invoke()
                 }
                 editorSaveMark = saving
-                paintTheSave()
-                crown.addView(saving, each)
+                crown.addView(saving, small)
                 crown.addView(
                     markControl(Mark.Shape.MORE, R.string.omni_action_more) {
                         editorMore?.invoke()
                     },
-                    each,
+                    small,
                 )
+                paintTheSave()
+                paintTheSteps()
                 return
             }
             if (here is Screen.HelpAdb || here is Screen.HelpTalk) {
@@ -4657,6 +4700,56 @@ class BuilderActivity : Activity() {
             Mark.Shape.SAVE,
             if (editorDirty) palette.warning else palette.foreground,
         )
+    }
+
+    private fun paintTheSteps() {
+        val held = editor
+        val backward = held?.canUndo() ?: false
+        val forward = held?.canRedo() ?: false
+        editorUndoMark?.let {
+            it.isEnabled = backward
+            it.foreground = Mark(
+                Mark.Shape.UNDO,
+                if (backward) palette.foreground else palette.divider,
+            )
+        }
+        editorRedoMark?.let {
+            it.isEnabled = forward
+            it.foreground = Mark(
+                Mark.Shape.REDO,
+                if (forward) palette.foreground else palette.divider,
+            )
+        }
+    }
+
+    private fun editorHead(path: String, spot: TextView): View {
+        val (shape, tint) = markFor(FileEntry(path, false, 0L, 0L))
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                View(context).apply { foreground = Mark(shape, tint) },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = path.substringAfterLast('/')
+                            setTextColor(palette.foreground)
+                            typeface = Type.heading
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                        },
+                        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                    )
+                    addView(spot, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
     }
 
     private fun footControl(mark: Mark.Shape, named: Int, on: Boolean, onPress: () -> Unit): View =
@@ -6443,15 +6536,55 @@ class BuilderActivity : Activity() {
         when {
             entry.folder -> go(Screen.Files(root, entry.path))
             looksLikeAPicture(entry.path) -> go(Screen.Picture(root, entry.path))
-            PACKAGE_SUFFIXES.any { name.endsWith(it) } -> {
-                results.removeAllViews()
-                inspectPackage(File(root, entry.path).absolutePath)
-            }
+            PACKAGE_SUFFIXES.any { name.endsWith(it) } -> handPackage(root, entry)
             else -> {
                 editorText = ""
                 go(Screen.Editor(root, entry.path))
             }
         }
+    }
+
+    private fun handPackage(root: String, entry: FileEntry) {
+        val file = File(root, entry.path)
+        val named = entry.path.substringAfterLast('/')
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        if (named.lowercase(Locale.US).endsWith(".apk")) {
+            actions += getString(R.string.omni_install_title) to { installPackage(file) }
+        }
+        actions += getString(R.string.omni_action_open) to { openOutside(file) }
+        actions += getString(R.string.omni_action_share) to { shareOutside(file) }
+        actions += getString(R.string.omni_open_title) to {
+            results.removeAllViews()
+            inspectPackage(file.absolutePath)
+            scroller.post { scroller.fullScroll(View.FOCUS_DOWN) }
+        }
+        pickOne(named, actions.map { it.first }) { which -> actions[which].second() }
+    }
+
+    private fun installPackage(file: File) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            askToAllowInstalling()
+            return
+        }
+        openOutside(file)
+    }
+
+    private fun askToAllowInstalling() {
+        dialogShell(
+            getString(R.string.omni_install_needed),
+            body(getString(R.string.omni_install_needed_note)),
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    it.dismiss()
+                    hand(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                            .setData(Uri.parse("package:$packageName"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                },
+            ),
+        )
     }
 
     private fun showActions(root: String, folder: String, entry: FileEntry, other: String?) {
@@ -6806,27 +6939,29 @@ class BuilderActivity : Activity() {
             editor.removeCallbacks(watch)
             editor.postDelayed(watch, WATCH_CODE_MILLIS)
             offerWhileTyping(root, editor)
+            paintTheSteps()
         }
         editor.onChanged = ::mark
 
-        val spot = TextView(this).apply {
-            setTextColor(palette.muted)
-            typeface = Type.data
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
         fun sayWhere() {
             val (line, column) = editor.caretAt()
-            spot.text = getString(R.string.omni_editor_spot, line, column)
+            editorSpot?.text = getString(R.string.omni_editor_spot, line, column) +
+                "  " + CHARSET_SHOWN
         }
         sayWhere()
         editor.onCaret = { _, _ -> sayWhere() }
-        content.addView(editorTab(path, spot) {
-            save()
-            go(Screen.Files(root, path.substringBeforeLast('/', "")))
-        })
 
         editorSave = ::save
-        editorMore = { editorMenu(root, path, editor, ::mark, keep) }
+        editorUndo = {
+            editor.undo()
+            mark()
+        }
+        editorRedo = {
+            editor.redo()
+            mark()
+        }
+        editorMore = { editorMenu(path, editor) }
+        paintTheSteps()
 
         if (draft != null) {
             content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
@@ -6836,88 +6971,11 @@ class BuilderActivity : Activity() {
             editor,
             LinearLayout.LayoutParams(
                 MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.74f).toInt(),
+                (resources.displayMetrics.heightPixels * 0.78f).toInt(),
             ),
         )
         content.addView(symbolBar(editor, ::mark))
         editor.postDelayed(watch, WATCH_CODE_MILLIS)
-    }
-
-    private fun editorTab(path: String, spot: TextView, onClose: () -> Unit): View {
-        val (shape, tint) = markFor(FileEntry(path, false, 0L, 0L))
-        val tab = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(3), gap(2), gap(2), gap(2))
-            background = GradientDrawable().apply {
-                this.shape = GradientDrawable.RECTANGLE
-                cornerRadii = floatArrayOf(
-                    gap(2).toFloat(), gap(2).toFloat(), gap(2).toFloat(), gap(2).toFloat(),
-                    0f, 0f, 0f, 0f,
-                )
-                setColor(palette.raised)
-            }
-            addView(
-                View(context).apply { foreground = Mark(shape, tint) },
-                LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
-            )
-            addView(
-                TextView(context).apply {
-                    text = path.substringAfterLast('/')
-                    setTextColor(palette.accent)
-                    typeface = Type.strong
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    maxLines = 1
-                }
-            )
-            addView(
-                View(context).apply {
-                    contentDescription = getString(R.string.omni_action_back)
-                    isClickable = true
-                    isFocusable = true
-                    readAs(Button::class.java.name)
-                    background = reacting(Color.TRANSPARENT, gap(4).toFloat(), palette.accent)
-                    foreground = Mark(Mark.Shape.CLOSE, palette.muted)
-                    setOnClickListener { onClose() }
-                },
-                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
-            )
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.BOTTOM
-                    addView(tab, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-                    addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-                    addView(
-                        spot,
-                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                            marginEnd = gap(3)
-                            bottomMargin = gap(2)
-                        },
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = CHARSET_SHOWN
-                            setTextColor(palette.muted)
-                            typeface = Type.data
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        },
-                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                            marginEnd = gap(1)
-                            bottomMargin = gap(2)
-                        },
-                    )
-                },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
-            )
-            addView(
-                View(context).apply { setBackgroundColor(palette.divider) },
-                LinearLayout.LayoutParams(MATCH_PARENT, 1),
-            )
-        }
     }
 
     private fun symbolBar(editor: CodeEditor, mark: () -> Unit): View {
@@ -6935,10 +6993,15 @@ class BuilderActivity : Activity() {
                     minWidth = gap(7)
                     setPadding(gap(2), gap(3), gap(2), gap(3))
                     background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
+                    isFocusable = false
+                    isFocusableInTouchMode = false
                     setOnClickListener {
                         val from = editor.selectionStart.coerceAtLeast(0)
                         val to = editor.selectionEnd.coerceAtLeast(from)
                         editor.text?.replace(from, to, symbol)
+                        editor.setSelection(
+                            (from + symbol.length).coerceIn(0, editor.text?.length ?: 0)
+                        )
                         mark()
                         press()
                     }
@@ -6957,99 +7020,115 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun editorMenu(
-        root: String,
-        path: String,
-        editor: CodeEditor,
-        changed: () -> Unit,
-        keep: Runnable,
-    ) {
-        val actions = mutableListOf<Pair<String, () -> Unit>>()
-        actions += getString(R.string.omni_editor_undo) to {
-            editor.undo()
-            changed()
-        }
-        actions += getString(R.string.omni_editor_redo) to {
-            editor.redo()
-            changed()
-        }
-        actions += getString(R.string.omni_editor_find) to {
-            askToFind(getString(R.string.omni_editor_find_ask), findHere) { asked ->
-                findHere = asked
-                results.removeAllViews()
-                val at = editor.findFrom(asked, editor.selectionEnd)
-                if (at < 0) {
-                    results.addView(
-                        notice(getString(R.string.omni_editor_find_none), palette.warning)
-                    )
-                } else {
-                    editor.show(at, at + asked.length)
-                }
-            }
-        }
-        actions += getString(R.string.omni_editor_line) to {
-            askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
-                results.removeAllViews()
-                val line = asked.toIntOrNull()
-                if (line == null || line < 1) {
-                    results.addView(
-                        notice(getString(R.string.omni_editor_line_ask), palette.warning)
-                    )
-                } else {
-                    editor.showLine(line)
-                }
-            }
-        }
-        actions += getString(R.string.omni_editor_shape) to {
-            layOut(path.substringAfterLast('/'), editor)
-            changed()
-        }
-        actions += getString(R.string.omni_action_copy) to {
-            copyOut(selectionOf(editor), path.substringAfterLast('/'))
-        }
-        actions += getString(R.string.omni_editor_paste) to {
-            pasteInto(editor)
-            changed()
-        }
-        actions += getString(R.string.omni_editor_replace) to {
-            askToFind(getString(R.string.omni_editor_find_ask), findHere) { needle ->
-                findHere = needle
-                askForName(getString(R.string.omni_editor_replace_with), "") { instead ->
+    private fun editorMenu(path: String, editor: CodeEditor) {
+        val actions = listOf(
+            getString(R.string.omni_editor_find) to { findInTheEditor(editor) },
+            getString(R.string.omni_editor_line) to {
+                askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
                     results.removeAllViews()
-                    val count = editor.replaceEvery(needle, instead)
-                    changed()
-                    results.addView(
-                        notice(
-                            if (count == 0) {
-                                getString(R.string.omni_editor_find_none)
-                            } else {
-                                getString(R.string.omni_editor_replaced, count)
-                            },
-                            if (count == 0) palette.warning else palette.ok,
+                    val line = asked.toIntOrNull()
+                    if (line == null || line < 1) {
+                        results.addView(
+                            notice(getString(R.string.omni_editor_line_ask), palette.warning)
                         )
-                    )
+                    } else {
+                        editor.showLine(line)
+                    }
                 }
-            }
-        }
-        actions += getString(R.string.omni_tab_settings) to { go(Screen.Settings) }
-        actions += getString(R.string.omni_editor_go) to { goToDefinition(root, editor) }
-        actions += getString(R.string.omni_editor_uses) to { findUses(root, editor) }
-        actions += getString(R.string.omni_action_delete) to {
-            results.removeAllViews()
-            val thrown = runCatching {
-                JSONObject(Builder.nativeRemovePath(root, path, trashFolder()))
-            }.getOrNull()
-            if (thrown != null && thrown.optBoolean("removed", false)) {
-                editor.removeCallbacks(keep)
-                Drafts.forget(this, root, path)
-                go(Screen.Files(root, path.substringBeforeLast('/', "")))
-            } else {
-                thrown?.let { showRefusal(Refusal.parse(it), results) }
-            }
-        }
+            },
+            getString(R.string.omni_editor_size) to { askForTheReadingSize(editor) },
+        )
         pickOne(path.substringAfterLast('/'), actions.map { it.first }) { which ->
             actions[which].second()
         }
+    }
+
+    private fun findInTheEditor(editor: CodeEditor) {
+        val asking = styledField(findHere, getString(R.string.omni_editor_find_ask))
+        val counted = quiet("")
+        fun walk(onward: Boolean) {
+            val needle = asking.text.toString()
+            if (needle.isEmpty()) {
+                counted.text = getString(R.string.omni_files_needs_name)
+                return
+            }
+            findHere = needle
+            Preferences.remember(this, needle)
+            val at = if (onward) {
+                editor.findFrom(needle, editor.selectionEnd)
+            } else {
+                editor.findBefore(needle, editor.selectionStart)
+            }
+            if (at < 0) {
+                counted.text = getString(R.string.omni_editor_find_none)
+                return
+            }
+            editor.show(at, at + needle.length)
+            counted.text = getString(R.string.omni_editor_spot, editor.caretAt().first, at + 1)
+        }
+        dialogShell(
+            getString(R.string.omni_editor_find),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(asking, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(counted, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_editor_find_back) to { _: AlertDialog -> walk(false) },
+                getString(R.string.omni_editor_find_next) to { _: AlertDialog -> walk(true) },
+            ),
+        )
+        asking.requestFocus()
+    }
+
+    private fun askForTheReadingSize(editor: CodeEditor) {
+        val shown = TextView(this).apply {
+            setTextColor(palette.foreground)
+            typeface = Type.data
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+        }
+        fun say() {
+            shown.text = editor.readingAt().toInt().toString()
+        }
+        say()
+        fun step(named: String, by: Float): View = control().apply {
+            text = named
+            setTextColor(palette.foreground)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            minWidth = gap(12)
+            minimumHeight = gap(12)
+            background = reacting(palette.raised, gap(3).toFloat(), palette.accent)
+            setOnClickListener {
+                editor.readAt(editor.readingAt() + by)
+                say()
+                press()
+            }
+        }
+        dialogShell(
+            getString(R.string.omni_editor_size),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(2), 0, gap(2))
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(step("\u2212", -1f))
+                        addView(shown, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                        addView(step("+", 1f))
+                    },
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+                addView(quiet(getString(R.string.omni_editor_size_note)))
+            },
+            listOf(
+                getString(R.string.omni_action_confirm) to { it: AlertDialog -> it.dismiss() },
+            ),
+        )
     }
 
     private fun checkWhileTyping(root: String, path: String, editor: CodeEditor) {
@@ -7174,7 +7253,8 @@ class BuilderActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(gap(3), gap(1), gap(3), gap(1))
                     isClickable = true
-                    isFocusable = true
+                    isFocusable = false
+                    isFocusableInTouchMode = false
                     readAs(Button::class.java.name)
                     background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
                     setOnClickListener {
@@ -7195,9 +7275,11 @@ class BuilderActivity : Activity() {
             list,
             (resources.displayMetrics.widthPixels * 0.62f).toInt(),
             WRAP_CONTENT,
-            true,
+            false,
         ).apply {
             isOutsideTouchable = true
+            isTouchable = true
+            inputMethodMode = android.widget.PopupWindow.INPUT_METHOD_NOT_NEEDED
             elevation = gap(2).toFloat()
         }
         offers = window
@@ -7217,105 +7299,6 @@ class BuilderActivity : Activity() {
 
     private fun isNamePart(c: Char): Boolean =
         c.isLetterOrDigit() || c == '_' || c == '$'
-
-    private fun layOut(name: String, editor: CodeEditor) {
-        results.removeAllViews()
-        val held = editor.text ?: return
-        val answer = runCatching {
-            JSONObject(Builder.nativeLayOut(name, held.toString()))
-        }.getOrNull()
-        if (answer == null || !answer.optBoolean("laid", false)) {
-            answer?.let { showRefusal(Refusal.parse(it), results) }
-            return
-        }
-        if (!answer.optBoolean("changed", false)) {
-            results.addView(notice(getString(R.string.omni_editor_shaped_none), palette.muted))
-            return
-        }
-        val caret = editor.selectionStart
-        held.replace(0, held.length, answer.optString("text"))
-        editor.setSelection(caret.coerceIn(0, editor.text?.length ?: 0))
-        results.addView(notice(getString(R.string.omni_editor_shaped), palette.ok))
-    }
-
-    private fun wordAt(editor: CodeEditor): String {
-        val held = editor.text ?: return ""
-        val caret = editor.selectionEnd.coerceIn(0, held.length)
-        var from = caret
-        while (from > 0 && isNamePart(held[from - 1])) from -= 1
-        var to = caret
-        while (to < held.length && isNamePart(held[to])) to += 1
-        return held.subSequence(from, to).toString()
-    }
-
-    private fun goToDefinition(root: String, editor: CodeEditor) {
-        val word = wordAt(editor)
-        results.removeAllViews()
-        if (word.isEmpty()) {
-            results.addView(notice(getString(R.string.omni_editor_name_none), palette.muted))
-            return
-        }
-        working({ Builder.nativeSymbols(root, word) }) finished@{ answer ->
-            val named = runCatching { JSONObject(answer).optJSONArray("named") }.getOrNull()
-            var mine: JSONObject? = null
-            var anywhere: JSONObject? = null
-            for (index in 0 until (named?.length() ?: 0)) {
-                val one = named?.optJSONObject(index) ?: continue
-                if (one.optString("simple") != word) continue
-                if (anywhere == null) anywhere = one
-                if (one.optString("from") == "project") {
-                    mine = one
-                    break
-                }
-            }
-            val found = mine
-            if (found == null) {
-                results.addView(
-                    notice(
-                        getString(
-                            if (anywhere == null) R.string.omni_editor_name_nothing
-                            else R.string.omni_editor_go_platform,
-                            anywhere?.optString("qualified") ?: word,
-                        ),
-                        palette.muted,
-                    )
-                )
-                return@finished
-            }
-            val where = runCatching {
-                JSONObject(Builder.nativeWhereWritten(root, found.optString("qualified")))
-            }.getOrNull()
-            if (where == null || !where.optBoolean("written", false)) {
-                results.addView(
-                    notice(
-                        getString(R.string.omni_editor_go_platform, found.optString("qualified")),
-                        palette.muted,
-                    )
-                )
-                return@finished
-            }
-            editorLine = where.optInt("line")
-            go(Screen.Editor(root, where.optString("path")))
-        }
-    }
-
-    private fun findUses(root: String, editor: CodeEditor) {
-        val word = wordAt(editor)
-        results.removeAllViews()
-        if (word.isEmpty()) {
-            results.addView(notice(getString(R.string.omni_editor_name_none), palette.muted))
-            return
-        }
-        working({ Builder.nativeSearchProject(root, word, true, true) }) finished@{ answer ->
-            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-            if (!document.optBoolean("searched", false)) {
-                showRefusal(Refusal.parse(document), results)
-                return@finished
-            }
-            searchFor = word
-            showFound(root, document.optJSONObject("result"))
-        }
-    }
 
     private fun putName(editor: CodeEditor, from: Int, to: Int, chosen: JSONObject) {
         val held = editor.text ?: return
@@ -7364,34 +7347,11 @@ class BuilderActivity : Activity() {
         )
     }
 
-    private fun selectionOf(editor: CodeEditor): String {
-        val held = editor.text?.toString().orEmpty()
-        val from = editor.selectionStart
-        val to = editor.selectionEnd
-        if (from < 0 || to < 0 || from == to) return held
-        return held.substring(min(from, to), max(from, to))
-    }
-
     private fun copyOut(text: String, label: String) {
         val clipboard = getSystemService(ClipboardManager::class.java) ?: return
         clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
         results.removeAllViews()
         results.addView(notice(getString(R.string.omni_settings_logs_copied), palette.ok))
-    }
-
-    private fun pasteInto(editor: CodeEditor) {
-        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
-        val held = clipboard.primaryClip?.takeIf { it.itemCount > 0 }
-            ?.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
-            .orEmpty()
-        if (held.isEmpty()) return
-        val editable = editor.text ?: return
-        val from = min(editor.selectionStart, editor.selectionEnd).coerceIn(0, editable.length)
-        val to = max(editor.selectionStart, editor.selectionEnd).coerceIn(0, editable.length)
-        editable.replace(from, to, held)
-        editor.setSelection((from + held.length).coerceIn(0, editor.text?.length ?: 0))
     }
 
     private fun tool(text: String, colour: Int, onPress: () -> Unit) = control().apply {
@@ -7450,9 +7410,16 @@ class BuilderActivity : Activity() {
                     palette.accent,
                 )
             )
+            val remembered = buildSecret
+                ?.let { Vault.open(it) }
+                ?.let { held ->
+                    val said = String(held)
+                    held.fill(' ')
+                    said
+                }
             val secret = secret(
                 getString(R.string.omni_build_password),
-                if (shared) DEFAULT_KEY_PASSWORD else "",
+                remembered ?: if (shared) DEFAULT_KEY_PASSWORD else "",
             )
             buildPasswordView = secret.second
             signing.addView(secret.first)
@@ -7532,7 +7499,9 @@ class BuilderActivity : Activity() {
                     isFocusable = true
                     contentDescription = said(one.name, getString(R.string.omni_action_open))
                     readAs(Button::class.java.name)
-                    setOnClickListener { openOutside(file) }
+                    setOnClickListener {
+                        if (one.bundle) openOutside(file) else installPackage(file)
+                    }
                 }
             )
             actionsFor(file, shelf)
@@ -14086,6 +14055,7 @@ class BuilderActivity : Activity() {
         val apk = File(here, "$name.apk")
         val aab = File(here, "$name.aab")
         val password = readSecret(buildPasswordView)
+        buildSecret = Vault.seal(password)
         val started = System.nanoTime()
 
         val learned = Preferences.timings(this)
@@ -14116,7 +14086,6 @@ class BuilderActivity : Activity() {
             }
             runOnUiThread {
                 password.fill(' ')
-                buildPasswordView?.text?.clear()
                 building = false
                 if (isFinishing || isDestroyed) {
                     return@runOnUiThread
@@ -16202,6 +16171,20 @@ internal class Grammar(
     val annotations: Boolean,
 
     val markup: Boolean,
+
+    val folded: Boolean = false,
+
+    val keys: Boolean = false,
+
+    val fields: Boolean = false,
+
+    val tripled: Boolean = false,
+
+    val ticks: Boolean = false,
+
+    val embedded: Boolean = false,
+
+    val notes: Boolean = false,
 ) {
     companion object {
 
@@ -16250,7 +16233,68 @@ internal class Grammar(
             "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
         )
 
+        private val SCRIPT_WORDS = setOf(
+            "arguments", "as", "async", "await", "break", "case", "catch", "class", "const",
+            "continue", "debugger", "default", "delete", "do", "else", "export", "extends",
+            "false", "finally", "for", "from", "function", "get", "globalThis", "if", "import",
+            "in", "instanceof", "let", "new", "null", "of", "return", "set", "static", "super",
+            "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void",
+            "while", "with", "yield",
+        )
+
+        private val TYPED_WORDS = SCRIPT_WORDS + setOf(
+            "abstract", "any", "asserts", "bigint", "boolean", "declare", "enum", "implements",
+            "infer", "interface", "is", "keyof", "module", "namespace", "never", "number",
+            "object", "override", "private", "protected", "public", "readonly", "require",
+            "satisfies", "string", "symbol", "type", "unique", "unknown",
+        )
+
+        private val PYTHON = setOf(
+            "and", "as", "assert", "async", "await", "break", "case", "class", "continue", "def",
+            "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if",
+            "import", "in", "is", "lambda", "match", "None", "nonlocal", "not", "or", "pass",
+            "raise", "return", "self", "True", "try", "while", "with", "yield",
+        )
+
+        private val SHELL = setOf(
+            "alias", "break", "case", "cd", "continue", "declare", "do", "done", "echo", "elif",
+            "else", "esac", "eval", "exec", "exit", "export", "false", "fi", "for", "function",
+            "if", "in", "local", "read", "readonly", "return", "select", "set", "shift", "source",
+            "test", "then", "time", "trap", "true", "type", "umask", "unalias", "unset", "until",
+            "wait", "while",
+        )
+
+        private val SQL = setOf(
+            "add", "all", "alter", "and", "as", "asc", "begin", "between", "by", "case", "cast",
+            "check", "column", "commit", "constraint", "create", "cross", "default", "delete",
+            "desc", "distinct", "drop", "else", "end", "exists", "foreign", "from", "full",
+            "group", "having", "if", "in", "index", "inner", "insert", "into", "is", "join",
+            "key", "left", "like", "limit", "not", "null", "offset", "on", "or", "order",
+            "outer", "primary", "references", "replace", "right", "rollback", "select", "set",
+            "table", "then", "transaction", "trigger", "union", "unique", "update", "using",
+            "values", "view", "when", "where", "with",
+        )
+
+        private val SHEET_WORDS = setOf(
+            "and", "auto", "from", "important", "inherit", "initial", "none", "not", "only",
+            "revert", "to", "unset",
+        )
+
+        private val NOTED = setOf(
+            "false", "no", "null", "off", "on", "true", "yes",
+        )
+
         val PLAIN = Grammar(emptySet(), null, null, false, false, false)
+
+        val SCRIPT = Grammar(
+            SCRIPT_WORDS, "//", "/*" to "*/", true, true, false,
+            ticks = true,
+        )
+
+        val SHEET = Grammar(
+            SHEET_WORDS, null, "/*" to "*/", true, true, false,
+            fields = true,
+        )
 
         fun of(name: String): Grammar {
             val lower = name.lowercase()
@@ -16258,20 +16302,59 @@ internal class Grammar(
                 lower.endsWith(".java") ->
                     Grammar(JAVA, "//", "/*" to "*/", true, true, false)
                 lower.endsWith(".kt") || lower.endsWith(".kts") ->
-                    Grammar(KOTLIN, "//", "/*" to "*/", true, true, false)
+                    Grammar(KOTLIN, "//", "/*" to "*/", true, true, false, tripled = true)
                 lower.endsWith(".rs") ->
                     Grammar(RUST, "//", "/*" to "*/", true, true, false)
                 lower.endsWith(".c") || lower.endsWith(".h") ||
                     lower.endsWith(".cc") || lower.endsWith(".cpp") ||
                     lower.endsWith(".hpp") || lower.endsWith(".cxx") ->
                     Grammar(CPP, "//", "/*" to "*/", true, false, false)
-                lower.endsWith(".xml") || lower.endsWith(".svg") || lower.endsWith(".html") ->
+                lower.endsWith(".html") || lower.endsWith(".htm") ->
+                    Grammar(
+                        emptySet(), null, "<!--" to "-->", false, false, true,
+                        embedded = true,
+                    )
+                lower.endsWith(".xml") || lower.endsWith(".svg") ->
                     Grammar(emptySet(), null, "<!--" to "-->", false, false, true)
                 lower.endsWith(".json") ->
-                    Grammar(setOf("true", "false", "null"), null, null, false, false, false)
+                    Grammar(
+                        setOf("true", "false", "null"), null, null, false, false, false,
+                        keys = true,
+                    )
+                lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs") ||
+                    lower.endsWith(".jsx") ->
+                    SCRIPT
+                lower.endsWith(".ts") || lower.endsWith(".tsx") ->
+                    Grammar(
+                        TYPED_WORDS, "//", "/*" to "*/", true, true, false,
+                        ticks = true,
+                    )
+                lower.endsWith(".css") || lower.endsWith(".scss") || lower.endsWith(".less") ->
+                    SHEET
+                lower.endsWith(".py") || lower.endsWith(".pyi") ->
+                    Grammar(
+                        PYTHON, "#", null, true, true, false,
+                        tripled = true,
+                    )
+                lower.endsWith(".sh") || lower.endsWith(".bash") || lower.endsWith(".zsh") ->
+                    Grammar(
+                        SHELL, "#", null, true, false, false,
+                        ticks = true,
+                    )
+                lower.endsWith(".sql") ->
+                    Grammar(SQL, "--", "/*" to "*/", true, false, false, folded = true)
+                lower.endsWith(".md") || lower.endsWith(".markdown") ->
+                    Grammar(emptySet(), null, null, false, false, false, notes = true)
+                lower.endsWith(".yaml") || lower.endsWith(".yml") ->
+                    Grammar(
+                        NOTED, "#", null, true, false, false,
+                        keys = true, fields = true,
+                    )
                 lower.endsWith(".omni") || lower.endsWith(".toml") ||
-                    lower.endsWith(".properties") || lower.endsWith(".gradle") ->
-                    Grammar(emptySet(), "#", null, false, false, false)
+                    lower.endsWith(".properties") || lower.endsWith(".pro") ||
+                    lower.endsWith(".gradle") || lower.endsWith(".cfg") ||
+                    lower.endsWith(".ini") ->
+                    Grammar(emptySet(), "#", null, false, false, false, fields = true)
                 else -> PLAIN
             }
         }
@@ -16284,10 +16367,10 @@ internal object Reader {
 
     fun read(text: CharSequence, grammar: Grammar): List<Token> {
         val out = ArrayList<Token>(min(text.length / 6 + 16, 200_000))
-        if (grammar.markup) {
-            readMarkup(text, grammar, out)
-        } else {
-            readCode(text, grammar, out)
+        when {
+            grammar.notes -> readNotes(text, out)
+            grammar.markup -> readMarkup(text, grammar, out)
+            else -> readCode(text, grammar, out)
         }
         return out
     }
@@ -16318,11 +16401,27 @@ internal object Reader {
             }
 
             if (here == '"') {
-                at = quoted(text, at, end, '"', out)
+                if (grammar.tripled && starts(text, at, "\"\"\"")) {
+                    at = fenced(text, at, end, "\"\"\"", false, out)
+                    continue
+                }
+                val to = quoted(text, at, end, '"', out)
+                if (grammar.keys && labelled(text, to, end)) {
+                    out[out.size - 1] = Token(at, to, Kind.ATTRIBUTE)
+                }
+                at = to
                 continue
             }
             if (grammar.characters && here == '\'') {
+                if (grammar.tripled && starts(text, at, "'''")) {
+                    at = fenced(text, at, end, "'''", false, out)
+                    continue
+                }
                 at = quoted(text, at, end, '\'', out)
+                continue
+            }
+            if (grammar.ticks && here == '`') {
+                at = fenced(text, at, end, "`", false, out)
                 continue
             }
 
@@ -16350,8 +16449,12 @@ internal object Reader {
                 var to = at
                 while (to < end && isWord(text[to])) to++
                 val word = text.subSequence(at, to).toString()
+                val looked = if (grammar.folded) word.lowercase() else word
                 when {
-                    grammar.keywords.contains(word) -> out.add(Token(at, to, Kind.KEYWORD))
+                    grammar.keywords.contains(looked) -> out.add(Token(at, to, Kind.KEYWORD))
+
+                    grammar.fields && labelled(text, to, end) ->
+                        out.add(Token(at, to, Kind.ATTRIBUTE))
 
                     here.isUpperCase() -> out.add(Token(at, to, Kind.TYPE))
                 }
@@ -16361,6 +16464,30 @@ internal object Reader {
 
             at++
         }
+    }
+
+    private fun labelled(text: CharSequence, from: Int, end: Int): Boolean {
+        var at = from
+        while (at < end && (text[at] == ' ' || text[at] == '\t')) at++
+        return at < end && text[at] == ':'
+    }
+
+    private fun fenced(
+        text: CharSequence,
+        from: Int,
+        end: Int,
+        fence: String,
+        withinLine: Boolean,
+        out: MutableList<Token>,
+    ): Int {
+        var to = from + fence.length
+        while (to < end && !starts(text, to, fence)) {
+            if (withinLine && text[to] == '\n') break
+            to++
+        }
+        to = min(end, to + fence.length)
+        out.add(Token(from, to, Kind.TEXT))
+        return max(to, from + 1)
     }
 
     private fun quoted(
@@ -16406,9 +16533,14 @@ internal object Reader {
             }
 
             var to = at + 1
-            if (to < end && (text[to] == '/' || text[to] == '?' || text[to] == '!')) to++
+            var shutting = false
+            if (to < end && (text[to] == '/' || text[to] == '?' || text[to] == '!')) {
+                shutting = text[to] == '/'
+                to++
+            }
             val nameFrom = to
             while (to < end && (isWord(text[to]) || text[to] == ':' || text[to] == '-')) to++
+            val named = text.subSequence(nameFrom, to).toString().lowercase()
             if (to > nameFrom) out.add(Token(at, to, Kind.TAG))
 
             while (to < end && text[to] != '>') {
@@ -16432,7 +16564,88 @@ internal object Reader {
                 out.add(Token(to, to + 1, Kind.TAG))
                 to++
             }
+            val inner = when {
+                !grammar.embedded || shutting -> null
+                named == "script" -> Grammar.SCRIPT
+                named == "style" -> Grammar.SHEET
+                else -> null
+            }
+            if (inner != null) {
+                val shut = "</$named"
+                var body = to
+                while (body < end && !startsLoosely(text, body, shut)) body++
+                if (body > to) {
+                    val held = ArrayList<Token>()
+                    readCode(text.subSequence(to, body), inner, held)
+                    held.forEach { out.add(Token(it.from + to, it.to + to, it.kind)) }
+                }
+                to = body
+            }
             at = max(to, at + 1)
+        }
+    }
+
+    private fun readNotes(text: CharSequence, out: MutableList<Token>) {
+        val end = min(text.length, LIMIT)
+        var at = 0
+        var fresh = true
+        while (at < end) {
+            val here = text[at]
+            if (here == '\n') {
+                fresh = true
+                at++
+                continue
+            }
+            if (fresh) {
+                fresh = false
+                var probe = at
+                while (probe < end && (text[probe] == ' ' || text[probe] == '\t')) probe++
+                if (probe < end && (text[probe] == '#' || text[probe] == '>')) {
+                    val kind = if (text[probe] == '#') Kind.KEYWORD else Kind.COMMENT
+                    var to = probe
+                    while (to < end && text[to] != '\n') to++
+                    out.add(Token(probe, to, kind))
+                    at = to
+                    continue
+                }
+                if (probe + 1 < end && text[probe + 1] == ' ' &&
+                    (text[probe] == '-' || text[probe] == '*' || text[probe] == '+')
+                ) {
+                    out.add(Token(probe, probe + 1, Kind.TAG))
+                    at = probe + 1
+                    continue
+                }
+            }
+            if (here == '`') {
+                val fence = if (starts(text, at, "```")) "```" else "`"
+                at = fenced(text, at, end, fence, fence == "`", out)
+                continue
+            }
+            if (here == '*' && at + 1 < end && text[at + 1] == '*') {
+                var to = at + 2
+                while (to < end && text[to] != '\n' && !starts(text, to, "**")) to++
+                to = min(end, to + 2)
+                out.add(Token(at, to, Kind.TYPE))
+                at = max(to, at + 1)
+                continue
+            }
+            if (here == '[') {
+                var to = at + 1
+                while (to < end && text[to] != '\n' && text[to] != ']') to++
+                if (to < end && text[to] == ']') to++
+                out.add(Token(at, to, Kind.ATTRIBUTE))
+                at = max(to, at + 1)
+                continue
+            }
+            if (here == '(') {
+                var to = at + 1
+                while (to < end && text[to] != '\n' && text[to] != ')') to++
+                if (to < end && text[to] == ')') to++
+                out.add(Token(at, to, Kind.TEXT))
+                at = max(to, at + 1)
+                continue
+            }
+            at++
         }
     }
 
@@ -16440,6 +16653,14 @@ internal object Reader {
         if (at + what.length > text.length) return false
         for (index in what.indices) {
             if (text[at + index] != what[index]) return false
+        }
+        return true
+    }
+
+    private fun startsLoosely(text: CharSequence, at: Int, what: String): Boolean {
+        if (at + what.length > text.length) return false
+        for (index in what.indices) {
+            if (text[at + index].lowercaseChar() != what[index].lowercaseChar()) return false
         }
         return true
     }
@@ -16823,6 +17044,13 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         val held = text?.toString() ?: return -1
         val ahead = held.indexOf(needle, from.coerceIn(0, held.length))
         return if (ahead >= 0) ahead else held.indexOf(needle)
+    }
+
+    fun findBefore(needle: String, from: Int): Int {
+        if (needle.isEmpty()) return -1
+        val held = text?.toString() ?: return -1
+        val back = held.lastIndexOf(needle, (from - 1).coerceIn(-1, held.length))
+        return if (back >= 0) back else held.lastIndexOf(needle)
     }
 
     fun show(from: Int, to: Int) {

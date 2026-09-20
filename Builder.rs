@@ -321,6 +321,7 @@ pub mod json {
     pub struct Writer {
         buf: String,
         needs_comma: Vec<bool>,
+        roomy: bool,
     }
 
     impl Writer {
@@ -328,67 +329,96 @@ pub mod json {
             Writer {
                 buf: String::with_capacity(1024),
                 needs_comma: Vec::with_capacity(8),
+                roomy: false,
+            }
+        }
+
+        pub fn pretty() -> Self {
+            Writer {
+                roomy: true,
+                ..Writer::new()
+            }
+        }
+
+        fn indent(&mut self) {
+            if !self.roomy {
+                return;
+            }
+            self.buf.push('\n');
+            for _ in 0..self.needs_comma.len() {
+                self.buf.push_str("    ");
             }
         }
 
         fn separate(&mut self) {
-            if let Some(last) = self.needs_comma.last_mut() {
-                if *last {
-                    self.buf.push(',');
-                } else {
-                    *last = true;
-                }
+            if self.needs_comma.is_empty() {
+                return;
+            }
+            let last = self.needs_comma.len() - 1;
+            if self.needs_comma[last] {
+                self.buf.push(',');
+            } else {
+                self.needs_comma[last] = true;
+            }
+            self.indent();
+        }
+
+        fn named(&mut self, key: Option<&str>) {
+            let Some(k) = key else {
+                return;
+            };
+            self.write_escaped(k);
+            self.buf.push(':');
+            if self.roomy {
+                self.buf.push(' ');
             }
         }
 
         pub fn begin_object(&mut self, key: Option<&str>) {
             self.separate();
-            if let Some(k) = key {
-                self.write_escaped(k);
-                self.buf.push(':');
-            }
+            self.named(key);
             self.buf.push('{');
             self.needs_comma.push(false);
         }
 
         pub fn end_object(&mut self) {
-            self.needs_comma.pop();
+            let filled = self.needs_comma.pop().unwrap_or(false);
+            if filled {
+                self.indent();
+            }
             self.buf.push('}');
         }
 
         pub fn begin_array(&mut self, key: Option<&str>) {
             self.separate();
-            if let Some(k) = key {
-                self.write_escaped(k);
-                self.buf.push(':');
-            }
+            self.named(key);
             self.buf.push('[');
             self.needs_comma.push(false);
         }
 
         pub fn end_array(&mut self) {
-            self.needs_comma.pop();
+            let filled = self.needs_comma.pop().unwrap_or(false);
+            if filled {
+                self.indent();
+            }
             self.buf.push(']');
         }
 
         pub fn field_str(&mut self, key: &str, value: &str) {
             self.separate();
-            self.write_escaped(key);
-            self.buf.push(':');
+            self.named(Some(key));
             self.write_escaped(value);
         }
 
         pub fn field_u64(&mut self, key: &str, value: u64) {
             self.separate();
-            self.write_escaped(key);
-            self.buf.push(':');
+            self.named(Some(key));
             self.buf.push_str(&value.to_string());
         }
 
         pub fn field_bool(&mut self, key: &str, value: bool) {
             self.separate();
-            self.write_escaped(key);
-            self.buf.push(':');
+            self.named(Some(key));
             self.buf.push_str(if value { "true" } else { "false" });
         }
 
@@ -27021,9 +27051,144 @@ pub mod settings {
         pub file: String,
     }
 
+    pub const JAVA_LEVEL: &str = "17";
+
+    pub const RULES_FILE: &str = "proguard-rules.pro";
+
+    pub const DEBUG_VARIANT: &str = "debug";
+
+    pub const RELEASE_VARIANT: &str = "release";
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Named {
+        pub name: String,
+        pub value: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Java {
+        pub source: String,
+        pub target: String,
+        pub jvm: String,
+    }
+
+    impl Default for Java {
+        fn default() -> Java {
+            Java {
+                source: JAVA_LEVEL.to_string(),
+                target: JAVA_LEVEL.to_string(),
+                jvm: JAVA_LEVEL.to_string(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Variant {
+        pub name: String,
+        pub minify: bool,
+        pub shrink_resources: bool,
+        pub debuggable: bool,
+        pub suffix: String,
+        pub proguard: Vec<String>,
+    }
+
+    impl Variant {
+        pub fn debug() -> Variant {
+            Variant {
+                name: DEBUG_VARIANT.to_string(),
+                minify: false,
+                shrink_resources: false,
+                debuggable: true,
+                suffix: String::new(),
+                proguard: Vec::new(),
+            }
+        }
+
+        pub fn release() -> Variant {
+            Variant {
+                name: RELEASE_VARIANT.to_string(),
+                minify: true,
+                shrink_resources: true,
+                debuggable: false,
+                suffix: String::new(),
+                proguard: vec![RULES_FILE.to_string()],
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Native {
+        pub path: String,
+        pub cmake: String,
+        pub standard: String,
+        pub flags: Vec<String>,
+        pub arguments: Vec<String>,
+        pub targets: Vec<String>,
+        pub sources: Vec<String>,
+        pub libraries: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Shrinking {
+        pub files: Vec<String>,
+        pub rules: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Packaging {
+        pub excludes: Vec<String>,
+        pub first: Vec<String>,
+        pub legacy_jni: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Resources {
+        pub vectors: bool,
+        pub kept: Vec<String>,
+    }
+
+    impl Default for Resources {
+        fn default() -> Resources {
+            Resources {
+                vectors: true,
+                kept: Vec::new(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Catalogue {
+        pub versions: Vec<Named>,
+        pub libraries: Vec<Dependency>,
+        pub plugins: Vec<Dependency>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Signing {
+        pub store: String,
+        pub v2: bool,
+        pub v3: bool,
+        pub v31: bool,
+        pub v4: bool,
+    }
+
+    impl Default for Signing {
+        fn default() -> Signing {
+            Signing {
+                store: String::new(),
+                v2: true,
+                v3: true,
+                v31: true,
+                v4: true,
+            }
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Settings {
         pub package: String,
+        pub namespace: String,
+        pub application_id: String,
         pub label: String,
         pub version_name: String,
         pub version_code: u32,
@@ -27037,12 +27202,22 @@ pub mod settings {
         pub shrink: bool,
         pub seal_resources: bool,
         pub key_alias: String,
+        pub java: Java,
+        pub variants: Vec<Variant>,
+        pub native: Native,
+        pub shrinking: Shrinking,
+        pub packaging: Packaging,
+        pub resources: Resources,
+        pub catalogue: Catalogue,
+        pub signing: Signing,
     }
 
     impl Default for Settings {
         fn default() -> Settings {
             Settings {
                 package: String::new(),
+                namespace: String::new(),
+                application_id: String::new(),
                 label: String::new(),
                 version_name: crate::scaffold::FIRST_VERSION_NAME.to_string(),
                 version_code: crate::scaffold::FIRST_VERSION_CODE,
@@ -27056,6 +27231,14 @@ pub mod settings {
                 shrink: true,
                 seal_resources: false,
                 key_alias: String::new(),
+                java: Java::default(),
+                variants: vec![Variant::debug(), Variant::release()],
+                native: Native::default(),
+                shrinking: Shrinking::default(),
+                packaging: Packaging::default(),
+                resources: Resources::default(),
+                catalogue: Catalogue::default(),
+                signing: Signing::default(),
             }
         }
     }
@@ -27064,6 +27247,8 @@ pub mod settings {
         pub fn from_spec(spec: &crate::scaffold::Spec) -> Settings {
             Settings {
                 package: spec.package.clone(),
+                namespace: spec.package.clone(),
+                application_id: spec.package.clone(),
                 label: spec.label.clone(),
                 version_name: spec.version_name.clone(),
                 version_code: spec.version_code,
@@ -27078,9 +27263,11 @@ pub mod settings {
         }
 
         pub fn to_json(&self) -> String {
-            let mut w = Writer::new();
+            let mut w = Writer::pretty();
             w.begin_object(None);
             w.field_str("package", &self.package);
+            w.field_str("namespace", &self.namespace);
+            w.field_str("applicationId", &self.application_id);
             w.field_str("label", &self.label);
 
             w.begin_object(Some("version"));
@@ -27127,8 +27314,118 @@ pub mod settings {
             w.field_bool("sealResources", self.seal_resources);
             w.end_object();
 
+            w.begin_object(Some("java"));
+            w.field_str("source", &self.java.source);
+            w.field_str("target", &self.java.target);
+            w.field_str("jvm", &self.java.jvm);
+            w.end_object();
+
+            w.begin_array(Some("buildTypes"));
+            for one in &self.variants {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_bool("minify", one.minify);
+                w.field_bool("shrinkResources", one.shrink_resources);
+                w.field_bool("debuggable", one.debuggable);
+                w.field_str("applicationIdSuffix", &one.suffix);
+                w.begin_array(Some("proguardFiles"));
+                for named in &one.proguard {
+                    w.element_str(named);
+                }
+                w.end_array();
+                w.end_object();
+            }
+            w.end_array();
+
+            w.begin_object(Some("cmake"));
+            w.field_str("path", &self.native.path);
+            w.field_str("version", &self.native.cmake);
+            w.field_str("standard", &self.native.standard);
+            for (key, held) in [
+                ("cppFlags", &self.native.flags),
+                ("arguments", &self.native.arguments),
+                ("targets", &self.native.targets),
+                ("sources", &self.native.sources),
+                ("libraries", &self.native.libraries),
+            ] {
+                w.begin_array(Some(key));
+                for one in held {
+                    w.element_str(one);
+                }
+                w.end_array();
+            }
+            w.end_object();
+
+            w.begin_object(Some("proguard"));
+            for (key, held) in [
+                ("files", &self.shrinking.files),
+                ("rules", &self.shrinking.rules),
+            ] {
+                w.begin_array(Some(key));
+                for one in held {
+                    w.element_str(one);
+                }
+                w.end_array();
+            }
+            w.end_object();
+
+            w.begin_object(Some("packaging"));
+            for (key, held) in [
+                ("excludes", &self.packaging.excludes),
+                ("pickFirst", &self.packaging.first),
+            ] {
+                w.begin_array(Some(key));
+                for one in held {
+                    w.element_str(one);
+                }
+                w.end_array();
+            }
+            w.field_bool("legacyJni", self.packaging.legacy_jni);
+            w.end_object();
+
+            w.begin_object(Some("resources"));
+            w.field_bool("vectors", self.resources.vectors);
+            w.begin_array(Some("kept"));
+            for one in &self.resources.kept {
+                w.element_str(one);
+            }
+            w.end_array();
+            w.end_object();
+
+            w.begin_object(Some("versions"));
+            w.begin_array(Some("named"));
+            for one in &self.catalogue.versions {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_str("value", &one.value);
+                w.end_object();
+            }
+            w.end_array();
+            for (key, held) in [
+                ("libraries", &self.catalogue.libraries),
+                ("plugins", &self.catalogue.plugins),
+            ] {
+                w.begin_array(Some(key));
+                for one in held {
+                    w.begin_object(None);
+                    w.field_str("name", &one.name);
+                    w.field_str("version", &one.version);
+                    w.field_str("file", &one.file);
+                    w.end_object();
+                }
+                w.end_array();
+            }
+            w.end_object();
+
             w.begin_object(Some("signing"));
             w.field_str("alias", &self.key_alias);
+            w.field_str("store", &self.signing.store);
+            w.begin_object(Some("schemes"));
+            w.field_bool("v2", self.signing.v2);
+            w.field_bool("v3", self.signing.v3);
+            w.field_bool("v31", self.signing.v31);
+            w.field_bool("v4", self.signing.v4);
+            w.end_object();
             w.end_object();
 
             w.end_object();
@@ -27209,13 +27506,163 @@ pub mod settings {
                     out.seal_resources = found;
                 }
             }
+            if let Some(found) = word(&held, "namespace") {
+                out.namespace = found;
+            }
+            if let Some(found) = word(&held, "applicationId") {
+                out.application_id = found;
+            }
+            if let Some(java) = held.get("java") {
+                if let Some(found) = word(java, "source") {
+                    out.java.source = found;
+                }
+                if let Some(found) = word(java, "target") {
+                    out.java.target = found;
+                }
+                if let Some(found) = word(java, "jvm") {
+                    out.java.jvm = found;
+                }
+            }
+            if let Some(listed) = held.get("buildTypes").and_then(|one| one.list()) {
+                let read: Vec<Variant> = listed
+                    .iter()
+                    .filter_map(|one| {
+                        let name = one.get("name")?.text()?.to_string();
+                        let standing = if name == RELEASE_VARIANT {
+                            Variant::release()
+                        } else {
+                            Variant::debug()
+                        };
+                        Some(Variant {
+                            name,
+                            minify: flag(one, "minify").unwrap_or(standing.minify),
+                            shrink_resources: flag(one, "shrinkResources")
+                                .unwrap_or(standing.shrink_resources),
+                            debuggable: flag(one, "debuggable").unwrap_or(standing.debuggable),
+                            suffix: one
+                                .get("applicationIdSuffix")
+                                .and_then(|held| held.text())
+                                .unwrap_or_default()
+                                .to_string(),
+                            proguard: one
+                                .get("proguardFiles")
+                                .map(|held| held.strings())
+                                .unwrap_or(standing.proguard),
+                        })
+                    })
+                    .collect();
+                if !read.is_empty() {
+                    out.variants = read;
+                }
+            }
+            if let Some(cmake) = held.get("cmake") {
+                if let Some(found) = word(cmake, "path") {
+                    out.native.path = found;
+                }
+                if let Some(found) = word(cmake, "version") {
+                    out.native.cmake = found;
+                }
+                if let Some(found) = word(cmake, "standard") {
+                    out.native.standard = found;
+                }
+                out.native.flags = strings(cmake, "cppFlags");
+                out.native.arguments = strings(cmake, "arguments");
+                out.native.targets = strings(cmake, "targets");
+                out.native.sources = strings(cmake, "sources");
+                out.native.libraries = strings(cmake, "libraries");
+            }
+            if let Some(proguard) = held.get("proguard") {
+                out.shrinking.files = strings(proguard, "files");
+                out.shrinking.rules = strings(proguard, "rules");
+            }
+            if let Some(packaging) = held.get("packaging") {
+                out.packaging.excludes = strings(packaging, "excludes");
+                out.packaging.first = strings(packaging, "pickFirst");
+                if let Some(found) = flag(packaging, "legacyJni") {
+                    out.packaging.legacy_jni = found;
+                }
+            }
+            if let Some(resources) = held.get("resources") {
+                if let Some(found) = flag(resources, "vectors") {
+                    out.resources.vectors = found;
+                }
+                out.resources.kept = strings(resources, "kept");
+            }
+            if let Some(versions) = held.get("versions") {
+                if let Some(listed) = versions.get("named").and_then(|one| one.list()) {
+                    out.catalogue.versions = listed
+                        .iter()
+                        .filter_map(|one| {
+                            Some(Named {
+                                name: one.get("name")?.text()?.to_string(),
+                                value: one
+                                    .get("value")
+                                    .and_then(|held| held.text())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            })
+                        })
+                        .collect();
+                }
+                out.catalogue.libraries = depended(versions, "libraries");
+                out.catalogue.plugins = depended(versions, "plugins");
+            }
             if let Some(signing) = held.get("signing") {
                 if let Some(found) = word(signing, "alias") {
                     out.key_alias = found;
                 }
+                if let Some(found) = word(signing, "store") {
+                    out.signing.store = found;
+                }
+                if let Some(schemes) = signing.get("schemes") {
+                    if let Some(found) = flag(schemes, "v2") {
+                        out.signing.v2 = found;
+                    }
+                    if let Some(found) = flag(schemes, "v3") {
+                        out.signing.v3 = found;
+                    }
+                    if let Some(found) = flag(schemes, "v31") {
+                        out.signing.v31 = found;
+                    }
+                    if let Some(found) = flag(schemes, "v4") {
+                        out.signing.v4 = found;
+                    }
+                }
             }
             Ok(out)
         }
+    }
+
+    fn flag(at: &Json, key: &str) -> Option<bool> {
+        at.get(key).and_then(|one| one.boolean())
+    }
+
+    fn strings(at: &Json, key: &str) -> Vec<String> {
+        at.get(key).map(|one| one.strings()).unwrap_or_default()
+    }
+
+    fn depended(at: &Json, key: &str) -> Vec<Dependency> {
+        let Some(listed) = at.get(key).and_then(|one| one.list()) else {
+            return Vec::new();
+        };
+        listed
+            .iter()
+            .filter_map(|one| {
+                Some(Dependency {
+                    name: one.get("name")?.text()?.to_string(),
+                    version: one
+                        .get("version")
+                        .and_then(|held| held.text())
+                        .unwrap_or_default()
+                        .to_string(),
+                    file: one
+                        .get("file")
+                        .and_then(|held| held.text())
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            })
+            .collect()
     }
 
     pub fn path_in(root: &str) -> std::path::PathBuf {
@@ -27780,8 +28227,16 @@ pub mod scaffold {
                 out.push_str("        android:usesCleartextTraffic=\"true\"\n");
             }
             out.push_str("        android:extractNativeLibs=\"false\">\n");
+            let dressed = match self.web.as_ref() {
+                Some(web) if web.whole => {
+                    " android:theme=\"@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen\""
+                }
+                Some(_) => " android:theme=\"@android:style/Theme.DeviceDefault.NoActionBar\"",
+                None => "",
+            };
             out.push_str(&format!(
-                "        <activity android:name=\"{activity}\" android:exported=\"true\">\n"
+                "        <activity android:name=\"{activity}\"{dressed} \
+                 android:exported=\"true\">\n"
             ));
             out.push_str("            <intent-filter>\n");
             out.push_str(
