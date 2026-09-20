@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">Агент остановился после %1$d кругов.</string>
     <string name="omni_agent_ready">Записано файлов: %1$d. Собрать сейчас?</string>
     <string name="omni_agent_sign">Каким ключом подписать?</string>
+    <string name="omni_copilot_title">Вход в GitHub</string>
+    <string name="omni_copilot_where">Откройте %1$s и введите этот код.</string>
+    <string name="omni_copilot_waiting">Ждём, когда GitHub скажет да.</string>
+    <string name="omni_copilot_done">Вход выполнен. Copilot готов.</string>
+    <string name="omni_copilot_refused">GitHub не довёл вход до конца.</string>
+    <string name="omni_copilot_denied">Вход отклонён.</string>
+    <string name="omni_copilot_no_seat">У этой учётной записи нет места в Copilot.</string>
     <string name="omni_talk_left">Осталось</string>
     <string name="omni_talk_model">Модель</string>
     <string name="omni_talk_no_key">Ключ не задан, поэтому ничего нельзя спросить.</string>

@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">代理在 %1$d 轮后停下了。</string>
     <string name="omni_agent_ready">已写入 %1$d 个文件。现在构建吗？</string>
     <string name="omni_agent_sign">用哪把密钥签名？</string>
+    <string name="omni_copilot_title">登录 GitHub</string>
+    <string name="omni_copilot_where">打开 %1$s 并输入这个代码。</string>
+    <string name="omni_copilot_waiting">正在等 GitHub 点头。</string>
+    <string name="omni_copilot_done">已登录。Copilot 准备好了。</string>
+    <string name="omni_copilot_refused">GitHub 没有把登录走完。</string>
+    <string name="omni_copilot_denied">登录被拒绝了。</string>
+    <string name="omni_copilot_no_seat">这个账户没有 Copilot 席位。</string>
     <string name="omni_talk_left">剩余</string>
     <string name="omni_talk_model">模型</string>
     <string name="omni_talk_no_key">没有设置密钥，因此无法提问。</string>

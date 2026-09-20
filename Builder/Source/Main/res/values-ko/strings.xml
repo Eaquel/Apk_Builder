@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">에이전트가 %1$d 번 돌고 멈췄습니다.</string>
     <string name="omni_agent_ready">%1$d 개 파일을 썼습니다. 지금 빌드할까요?</string>
     <string name="omni_agent_sign">어느 키로 서명할까요?</string>
+    <string name="omni_copilot_title">GitHub 로그인</string>
+    <string name="omni_copilot_where">%1$s 을(를) 열고 이 코드를 입력하세요.</string>
+    <string name="omni_copilot_waiting">GitHub 의 대답을 기다리는 중입니다.</string>
+    <string name="omni_copilot_done">로그인했습니다. Copilot 이 준비되었습니다.</string>
+    <string name="omni_copilot_refused">GitHub 가 로그인을 끝내지 못했습니다.</string>
+    <string name="omni_copilot_denied">로그인이 거절되었습니다.</string>
+    <string name="omni_copilot_no_seat">이 계정에는 Copilot 자리가 없습니다.</string>
     <string name="omni_talk_left">남음</string>
     <string name="omni_talk_model">모형</string>
     <string name="omni_talk_no_key">열쇠가 설정되지 않아 아무것도 물을 수 없습니다.</string>

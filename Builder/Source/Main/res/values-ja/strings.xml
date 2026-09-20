@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">エージェントは %1$d 巡で止まりました。</string>
     <string name="omni_agent_ready">%1$d 個のファイルを書きました。いま組み立てますか。</string>
     <string name="omni_agent_sign">どの鍵で署名しますか。</string>
+    <string name="omni_copilot_title">GitHub にサインイン</string>
+    <string name="omni_copilot_where">%1$s を開いて、このコードを入れてください。</string>
+    <string name="omni_copilot_waiting">GitHub の返事を待っています。</string>
+    <string name="omni_copilot_done">サインインしました。Copilot の用意ができています。</string>
+    <string name="omni_copilot_refused">GitHub はサインインを終えませんでした。</string>
+    <string name="omni_copilot_denied">サインインは断られました。</string>
+    <string name="omni_copilot_no_seat">このアカウントには Copilot の席がありません。</string>
     <string name="omni_talk_left">残り</string>
     <string name="omni_talk_model">模型</string>
     <string name="omni_talk_no_key">鍵が設定されていないので、何も尋ねられません。</string>

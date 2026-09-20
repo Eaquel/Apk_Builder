@@ -3857,6 +3857,7 @@ class BuilderActivity : Activity() {
     private var agentRound = 0
     private var agentWrote = mutableListOf<String>()
     private var awaitingInstall: File? = null
+    private val signingIn = java.util.concurrent.atomic.AtomicBoolean(false)
     private var cloneAddress = ""
 
     private var cloneToken = ""
@@ -7443,6 +7444,140 @@ class BuilderActivity : Activity() {
         editor.requestFocus()
     }
 
+    private fun sayWhy(why: Throwable): String {
+        val refused = why as? Brain.Refused
+        if (refused == null) {
+            return why.message ?: why.javaClass.simpleName
+        }
+        val head = getString(refused.said)
+        return if (refused.detail.isEmpty()) head else head + "  (" + refused.detail + ")"
+    }
+
+    private fun askToSignIn(vendor: Brain.Vendor) {
+        if (vendor.copilot) {
+            signIntoGitHub(vendor)
+        } else {
+            askForTheAssistantKey(vendor)
+        }
+    }
+
+    private fun signIntoGitHub(vendor: Brain.Vendor) {
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_working), palette.accent))
+        Thread {
+            val answer = runCatching { Copilot.begin() }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                results.removeAllViews()
+                answer.fold({ coming -> showTheGitHubCode(vendor, coming) }) { why ->
+                    results.addView(notice(sayWhy(why), palette.error))
+                }
+            }
+        }.start()
+    }
+
+    private fun showTheGitHubCode(vendor: Brain.Vendor, coming: Copilot.Coming) {
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(2))
+            addView(
+                TextView(context).apply {
+                    text = coming.shown
+                    setTextColor(palette.accent)
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                    gravity = Gravity.CENTER
+                    setPadding(0, gap(2), 0, gap(2))
+                }
+            )
+            addView(quiet(getString(R.string.omni_copilot_where, coming.where)))
+            addView(
+                subtle(getString(R.string.omni_action_copy), palette.accent) {
+                    copyOut(coming.shown, vendor.shown)
+                }
+            )
+            addView(
+                subtle(getString(R.string.omni_action_open), palette.ok) {
+                    hand(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(coming.where))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            )
+            addView(quiet(getString(R.string.omni_copilot_waiting)))
+        }
+        val shown = dialogShell(
+            getString(R.string.omni_copilot_title),
+            body,
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog ->
+                    signingIn.set(false)
+                    it.dismiss()
+                },
+            ),
+        )
+        signingIn.set(true)
+        Thread {
+            var held = ""
+            var why: Throwable? = null
+            while (signingIn.get() && System.currentTimeMillis() < coming.until) {
+                runCatching { Thread.sleep(coming.every * 1000L) }
+                if (!signingIn.get()) {
+                    break
+                }
+                val outcome = runCatching { Copilot.granted(coming) }
+                if (outcome.isSuccess) {
+                    held = outcome.getOrNull().orEmpty()
+                    break
+                }
+                val fault = outcome.exceptionOrNull()
+                if (fault !is Copilot.Waiting) {
+                    why = fault
+                    break
+                }
+            }
+            val given = held
+            val fault = why
+            runOnUiThread {
+                signingIn.set(false)
+                runCatching { shown.dismiss() }
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                results.removeAllViews()
+                theGitHubAnswer(vendor, given, fault)
+            }
+        }.start()
+    }
+
+    private fun theGitHubAnswer(vendor: Brain.Vendor, given: String, why: Throwable?) {
+        if (given.isEmpty()) {
+            results.addView(
+                notice(
+                    why?.let { sayWhy(it) } ?: getString(R.string.omni_copilot_refused),
+                    palette.error,
+                )
+            )
+            return
+        }
+        val holding = given.toCharArray()
+        val locked = Vault.seal(holding)
+        holding.fill(' ')
+        if (locked == null) {
+            results.addView(notice(getString(R.string.omni_device_refused), palette.error))
+            return
+        }
+        Preferences.setVendorKey(this, vendor.id, locked)
+        Preferences.setFaults(this, vendor.id, 0)
+        Preferences.setRestingUntil(this, vendor.id, 0L)
+        Preferences.setAssistantVendor(this, vendor.id)
+        Copilot.forget()
+        results.addView(notice(getString(R.string.omni_copilot_done), palette.ok))
+        render(false)
+    }
+
     private fun vendorRow(vendor: Brain.Vendor, onPicked: () -> Unit): View {
         val here = Preferences.assistantVendor(this)
         val keyed = vendor.keyed(this)
@@ -7456,13 +7591,13 @@ class BuilderActivity : Activity() {
             isFocusable = true
             contentDescription = vendor.shown
             readAs(Button::class.java.name)
-            pressable(onHeld = { askForTheAssistantKey(vendor) })
+            pressable(onHeld = { askToSignIn(vendor) })
             setOnClickListener {
                 if (keyed) {
                     Preferences.setAssistantVendor(this@BuilderActivity, vendor.id)
                     onPicked()
                 } else {
-                    askForTheAssistantKey(vendor)
+                    askToSignIn(vendor)
                 }
             }
             addView(
@@ -10075,7 +10210,7 @@ class BuilderActivity : Activity() {
         results.removeAllViews()
         val sealed = Preferences.vendorKey(this, vendor.id)
         if (sealed.isEmpty() && !vendor.keyless) {
-            askForTheAssistantKey(vendor)
+            askToSignIn(vendor)
             return
         }
         working({
@@ -19451,6 +19586,7 @@ internal object Brain {
         val where: String,
         val models: List<Model>,
         val keyless: Boolean = false,
+        val copilot: Boolean = false,
     ) {
         fun keyed(context: Context): Boolean =
             keyless || Preferences.vendorKey(context, id).isNotEmpty()
@@ -19532,6 +19668,16 @@ internal object Brain {
                 Model("openai/gpt-4.1", "GPT-4.1", 1_000_000L),
                 Model("meta/Llama-4-Scout-17B-16E-Instruct", "Llama 4 Scout", 128_000L),
             ),
+        ),
+        Vendor(
+            "copilot", "GitHub Copilot", "https://api.githubcopilot.com", false, false,
+            "github.com", listOf(
+                Model("gpt-4.1", "GPT-4.1", 128_000L),
+                Model("gpt-5-mini", "GPT-5 mini", 128_000L),
+                Model("claude-sonnet-4.5", "Claude Sonnet 4.5", 200_000L),
+                Model("gemini-2.5-pro", "Gemini 2.5 Pro", 1_000_000L),
+            ),
+            copilot = true,
         ),
         Vendor(
             "nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", false, true,
@@ -19822,6 +19968,15 @@ internal object Brain {
             vendor.anthropic -> {
                 link.setRequestProperty("x-api-key", String(key))
                 link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
+            }
+            vendor.copilot -> {
+                link.setRequestProperty(
+                    "authorization",
+                    "Bearer " + Copilot.ticketFor(key),
+                )
+                link.setRequestProperty("editor-version", Copilot.EDITOR)
+                link.setRequestProperty("editor-plugin-version", Copilot.PLUGIN)
+                link.setRequestProperty("copilot-integration-id", Copilot.INTEGRATION)
             }
             key.isNotEmpty() -> {
                 link.setRequestProperty("authorization", "Bearer " + String(key))
@@ -20567,6 +20722,170 @@ internal object Forge {
             throw Remote.Refused(R.string.omni_repos_refused)
         }
         return readMany(held)
+    }
+}
+
+internal object Copilot {
+
+    private const val CLIENT = "Iv1.b507a08c87ecfe98"
+
+    private const val SCOPE = "read:user"
+
+    private const val ASKING = "https://github.com/login/device/code"
+
+    private const val GRANTING = "https://github.com/login/oauth/access_token"
+
+    private const val TICKETING = "https://api.github.com/copilot_internal/v2/token"
+
+    private const val GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+    const val EDITOR = "vscode/1.99.0"
+
+    const val PLUGIN = "copilot-chat/0.26.0"
+
+    const val INTEGRATION = "vscode-chat"
+
+    private const val OPEN_MILLIS = 20_000
+
+    private const val READ_MILLIS = 30_000
+
+    private const val REPLY_BYTES = 256 * 1024
+
+    private const val SOONER = 60L
+
+    class Coming(
+        val code: String,
+        val shown: String,
+        val where: String,
+        val every: Long,
+        val until: Long,
+    )
+
+    class Waiting : Exception()
+
+    private var ticket = ""
+
+    private var until = 0L
+
+    private fun read(link: HttpURLConnection): String {
+        val code = runCatching { link.responseCode }.getOrElse {
+            link.disconnect()
+            throw Brain.Refused(R.string.omni_talk_unreachable)
+        }
+        val stream = if (code in 200..299) link.inputStream else link.errorStream
+        val said = runCatching {
+            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(REPLY_BYTES) }
+                .orEmpty()
+        }.getOrDefault("")
+        link.disconnect()
+        if (said.isEmpty()) {
+            throw Brain.Refused(R.string.omni_copilot_refused)
+        }
+        return said
+    }
+
+    private fun posted(where: String, form: String): JSONObject {
+        val link = runCatching { URL(where).openConnection() }.getOrNull() as? HttpURLConnection
+            ?: throw Brain.Refused(R.string.omni_talk_unreachable)
+        link.connectTimeout = OPEN_MILLIS
+        link.readTimeout = READ_MILLIS
+        link.requestMethod = "POST"
+        link.doOutput = true
+        link.setRequestProperty("accept", "application/json")
+        link.setRequestProperty("content-type", "application/x-www-form-urlencoded")
+        link.setRequestProperty("user-agent", "omni-builder")
+        runCatching {
+            link.outputStream.use { out -> out.write(form.toByteArray(Charsets.UTF_8)) }
+        }.getOrElse {
+            link.disconnect()
+            throw Brain.Refused(R.string.omni_talk_unreachable)
+        }
+        return runCatching { JSONObject(read(link)) }.getOrElse {
+            throw Brain.Refused(R.string.omni_copilot_refused)
+        }
+    }
+
+    fun begin(): Coming {
+        val said = posted(
+            ASKING,
+            "client_id=" + CLIENT + "&scope=" + URLEncoder.encode(SCOPE, "UTF-8"),
+        )
+        val code = said.optString("device_code")
+        val shown = said.optString("user_code")
+        if (code.isEmpty() || shown.isEmpty()) {
+            throw Brain.Refused(R.string.omni_copilot_refused, said.optString("error"))
+        }
+        val every = said.optLong("interval", 5L).coerceIn(1L, 30L)
+        val lasts = said.optLong("expires_in", 900L).coerceIn(60L, 3600L)
+        return Coming(
+            code,
+            shown,
+            said.optString("verification_uri").ifEmpty { "https://github.com/login/device" },
+            every,
+            System.currentTimeMillis() + lasts * 1000L,
+        )
+    }
+
+    fun granted(coming: Coming): String {
+        val said = posted(
+            GRANTING,
+            "client_id=" + CLIENT +
+                "&device_code=" + URLEncoder.encode(coming.code, "UTF-8") +
+                "&grant_type=" + URLEncoder.encode(GRANT, "UTF-8"),
+        )
+        val token = said.optString("access_token")
+        if (token.isNotEmpty()) {
+            return token
+        }
+        when (said.optString("error")) {
+            "authorization_pending", "slow_down" -> throw Waiting()
+            "access_denied" -> throw Brain.Refused(R.string.omni_copilot_denied)
+            else -> throw Brain.Refused(
+                R.string.omni_copilot_refused,
+                said.optString("error_description").ifEmpty { said.optString("error") },
+            )
+        }
+    }
+
+    fun forget() {
+        synchronized(this) {
+            ticket = ""
+            until = 0L
+        }
+    }
+
+    fun ticketFor(key: CharArray): String {
+        val now = System.currentTimeMillis() / 1000L
+        synchronized(this) {
+            if (ticket.isNotEmpty() && until - SOONER > now) {
+                return ticket
+            }
+        }
+        if (key.isEmpty()) {
+            throw Brain.Refused(R.string.omni_talk_no_key)
+        }
+        val link = runCatching { URL(TICKETING).openConnection() }.getOrNull()
+            as? HttpURLConnection
+            ?: throw Brain.Refused(R.string.omni_talk_unreachable)
+        link.connectTimeout = OPEN_MILLIS
+        link.readTimeout = READ_MILLIS
+        link.setRequestProperty("accept", "application/json")
+        link.setRequestProperty("authorization", "token " + String(key))
+        link.setRequestProperty("editor-version", EDITOR)
+        link.setRequestProperty("editor-plugin-version", PLUGIN)
+        link.setRequestProperty("user-agent", "omni-builder")
+        val said = runCatching { JSONObject(read(link)) }.getOrElse {
+            throw Brain.Refused(R.string.omni_copilot_no_seat)
+        }
+        val given = said.optString("token")
+        if (given.isEmpty()) {
+            throw Brain.Refused(R.string.omni_copilot_no_seat, said.optString("message"))
+        }
+        synchronized(this) {
+            ticket = given
+            until = said.optLong("expires_at", now + 600L)
+        }
+        return given
     }
 }
 

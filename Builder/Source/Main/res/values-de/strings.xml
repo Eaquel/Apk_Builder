@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">Der Agent hielt nach %1$d Runden an.</string>
     <string name="omni_agent_ready">%1$d Dateien geschrieben. Jetzt bauen?</string>
     <string name="omni_agent_sign">Welcher Schlüssel soll unterschreiben?</string>
+    <string name="omni_copilot_title">Bei GitHub anmelden</string>
+    <string name="omni_copilot_where">Öffne %1$s und tippe diesen Code ein.</string>
+    <string name="omni_copilot_waiting">Es wird gewartet, bis GitHub ja sagt.</string>
+    <string name="omni_copilot_done">Angemeldet. Copilot ist bereit.</string>
+    <string name="omni_copilot_refused">GitHub hat die Anmeldung nicht zu Ende gebracht.</string>
+    <string name="omni_copilot_denied">Die Anmeldung wurde abgelehnt.</string>
+    <string name="omni_copilot_no_seat">Dieses Konto hat keinen Copilot-Platz.</string>
     <string name="omni_talk_left">Übrig</string>
     <string name="omni_talk_model">Modell</string>
     <string name="omni_talk_no_key">Es ist kein Schlüssel gesetzt, also lässt sich nichts fragen.</string>

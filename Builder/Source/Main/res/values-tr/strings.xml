@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">Ajan %1$d turdan sonra durdu.</string>
     <string name="omni_agent_ready">%1$d dosya yazıldı. Şimdi derlensin mi?</string>
     <string name="omni_agent_sign">Hangi anahtarla imzalansın?</string>
+    <string name="omni_copilot_title">GitHub hesabına gir</string>
+    <string name="omni_copilot_where">%1$s adresini aç ve bu kodu yaz.</string>
+    <string name="omni_copilot_waiting">GitHub evet diyene kadar bekleniyor.</string>
+    <string name="omni_copilot_done">Giriş yapıldı. Copilot hazır.</string>
+    <string name="omni_copilot_refused">GitHub girişi tamamlamadı.</string>
+    <string name="omni_copilot_denied">Giriş reddedildi.</string>
+    <string name="omni_copilot_no_seat">Bu hesabın Copilot aboneliği yok.</string>
     <string name="omni_talk_left">Kalan</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">Anahtar girilmedi, bu yüzden hiçbir şey sorulamaz.</string>

@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">एजेंट %1$d चक्रों के बाद रुक गया।</string>
     <string name="omni_agent_ready">%1$d फ़ाइलें लिखी गईं। अभी बनाएँ?</string>
     <string name="omni_agent_sign">किस कुंजी से हस्ताक्षर हो?</string>
+    <string name="omni_copilot_title">GitHub में साइन इन करें</string>
+    <string name="omni_copilot_where">%1$s खोलें और यह कोड लिखें।</string>
+    <string name="omni_copilot_waiting">GitHub के हाँ कहने का इंतज़ार है।</string>
+    <string name="omni_copilot_done">साइन इन हो गया। Copilot तैयार है।</string>
+    <string name="omni_copilot_refused">GitHub ने साइन इन पूरा नहीं किया।</string>
+    <string name="omni_copilot_denied">साइन इन अस्वीकार हुआ।</string>
+    <string name="omni_copilot_no_seat">इस खाते के पास Copilot की सीट नहीं है।</string>
     <string name="omni_talk_left">शेष</string>
     <string name="omni_talk_model">मॉडल</string>
     <string name="omni_talk_no_key">कोई कुंजी तय नहीं है, इसलिए कुछ पूछा नहीं जा सकता।</string>

@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">توقف الوكيل بعد %1$d جولات.</string>
     <string name="omni_agent_ready">كُتب %1$d ملفات. أنبنيه الآن؟</string>
     <string name="omni_agent_sign">بأي مفتاح يُوقَّع؟</string>
+    <string name="omni_copilot_title">تسجيل الدخول إلى GitHub</string>
+    <string name="omni_copilot_where">افتح %1$s واكتب هذا الرمز.</string>
+    <string name="omni_copilot_waiting">في انتظار موافقة GitHub.</string>
+    <string name="omni_copilot_done">تم تسجيل الدخول. Copilot جاهز.</string>
+    <string name="omni_copilot_refused">لم يُكمل GitHub تسجيل الدخول.</string>
+    <string name="omni_copilot_denied">رُفض تسجيل الدخول.</string>
+    <string name="omni_copilot_no_seat">لا يملك هذا الحساب اشتراك Copilot.</string>
     <string name="omni_talk_left">المتبقي</string>
     <string name="omni_talk_model">النموذج</string>
     <string name="omni_talk_no_key">لم يُضبط أي مفتاح، لذا لا يمكن سؤال شيء.</string>

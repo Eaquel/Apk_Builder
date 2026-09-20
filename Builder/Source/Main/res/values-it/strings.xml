@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">L’agente si è fermato dopo %1$d giri.</string>
     <string name="omni_agent_ready">%1$d file scritti. Costruirlo adesso?</string>
     <string name="omni_agent_sign">Quale chiave deve firmare?</string>
+    <string name="omni_copilot_title">Accedi a GitHub</string>
+    <string name="omni_copilot_where">Apri %1$s e scrivi questo codice.</string>
+    <string name="omni_copilot_waiting">In attesa che GitHub dica di sì.</string>
+    <string name="omni_copilot_done">Accesso fatto. Copilot è pronto.</string>
+    <string name="omni_copilot_refused">GitHub non ha finito l’accesso.</string>
+    <string name="omni_copilot_denied">L’accesso è stato rifiutato.</string>
+    <string name="omni_copilot_no_seat">Questo account non ha un posto Copilot.</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modello</string>
     <string name="omni_talk_no_key">Nessuna chiave impostata, quindi non si può chiedere nulla.</string>

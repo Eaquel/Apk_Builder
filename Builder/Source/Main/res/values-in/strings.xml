@@ -444,6 +444,13 @@
     <string name="omni_agent_stopped">Agen berhenti setelah %1$d putaran.</string>
     <string name="omni_agent_ready">%1$d berkas ditulis. Bangun sekarang?</string>
     <string name="omni_agent_sign">Kunci mana yang menandatangani?</string>
+    <string name="omni_copilot_title">Masuk ke GitHub</string>
+    <string name="omni_copilot_where">Buka %1$s lalu ketik kode ini.</string>
+    <string name="omni_copilot_waiting">Menunggu GitHub mengiyakan.</string>
+    <string name="omni_copilot_done">Sudah masuk. Copilot siap.</string>
+    <string name="omni_copilot_refused">GitHub tidak menyelesaikan proses masuk.</string>
+    <string name="omni_copilot_denied">Proses masuk ditolak.</string>
+    <string name="omni_copilot_no_seat">Akun ini tidak punya kursi Copilot.</string>
     <string name="omni_talk_left">Sisa</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">Tidak ada kunci yang disetel, jadi tidak ada yang bisa ditanyakan.</string>
