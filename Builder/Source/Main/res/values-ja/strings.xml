@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">ポート %1$s が開いています。下の付与コマンドをパソコンから実行してください。</string>
     <string name="omni_log_seeking">接続ポートを探しています</string>
     <string name="omni_log_sieve">ログを検索…</string>
+    <string name="omni_log_pair_found">ペア設定を待っている端末があります</string>
+    <string name="omni_log_pair_at">%1$s:%2$d でペア設定を受け付けています</string>
+    <string name="omni_log_notes">通知</string>
+    <string name="omni_log_notes_on">許可済み</string>
+    <string name="omni_log_notes_off">まだ許可されていません</string>
+    <string name="omni_log_args_hint">logcat の語をさらに、たとえば -s MyTag:V *:S</string>
+    <string name="omni_log_apps">アプリ</string>
+    <string name="omni_log_apps_any">この端末のすべて</string>
+    <string name="omni_log_apps_none">アプリを一覧できませんでした。</string>
     <string name="omni_log_written">ログの出力</string>
     <string name="omni_log_empty_note">記録を読みはじめるには「開始」に触れてください。</string>
     <string name="omni_log_about">ログについて</string>

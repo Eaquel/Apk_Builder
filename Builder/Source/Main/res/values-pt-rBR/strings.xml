@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">A porta %1$s está aberta. Execute a linha de permissão abaixo em um computador.</string>
     <string name="omni_log_seeking">Procurando a porta de conexão</string>
     <string name="omni_log_sieve">Buscar no registro…</string>
+    <string name="omni_log_pair_found">Um aparelho está esperando para parear</string>
+    <string name="omni_log_pair_at">Pareamento oferecido em %1$s:%2$d</string>
+    <string name="omni_log_notes">Notificações</string>
+    <string name="omni_log_notes_on">Permitidas</string>
+    <string name="omni_log_notes_off">Ainda não permitidas</string>
+    <string name="omni_log_args_hint">Mais palavras do logcat, como -s MinhaTag:V *:S</string>
+    <string name="omni_log_apps">Aplicativo</string>
+    <string name="omni_log_apps_any">Tudo neste aparelho</string>
+    <string name="omni_log_apps_none">Não foi possível listar nenhum aplicativo.</string>
     <string name="omni_log_written">Saída do registro</string>
     <string name="omni_log_empty_note">Toque em Iniciar para começar a ler o registro.</string>
     <string name="omni_log_about">Sobre o registro</string>

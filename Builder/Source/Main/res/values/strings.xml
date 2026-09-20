@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">Port %1$s is open. Run the grant line below from a computer.</string>
     <string name="omni_log_seeking">Looking for the connection port</string>
     <string name="omni_log_sieve">Search the log…</string>
+    <string name="omni_log_pair_found">A device is waiting to be paired</string>
+    <string name="omni_log_pair_at">Pairing offered at %1$s:%2$d</string>
+    <string name="omni_log_notes">Notifications</string>
+    <string name="omni_log_notes_on">Allowed</string>
+    <string name="omni_log_notes_off">Not allowed yet</string>
+    <string name="omni_log_args_hint">More logcat words, such as -s MyTag:V *:S</string>
+    <string name="omni_log_apps">Application</string>
+    <string name="omni_log_apps_any">Anything on this device</string>
+    <string name="omni_log_apps_none">No application could be listed.</string>
     <string name="omni_log_written">Log output</string>
     <string name="omni_log_empty_note">Tap Start to begin reading the log.</string>
     <string name="omni_log_about">About the log</string>

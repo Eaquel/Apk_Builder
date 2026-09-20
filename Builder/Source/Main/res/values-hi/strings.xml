@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">पोर्ट %1$s खुला है। नीचे दी गई अनुमति पंक्ति किसी कंप्यूटर से चलाएँ।</string>
     <string name="omni_log_seeking">कनेक्शन पोर्ट खोजा जा रहा है</string>
     <string name="omni_log_sieve">लॉग में खोजें…</string>
+    <string name="omni_log_pair_found">एक उपकरण जोड़ी बनने की प्रतीक्षा में है</string>
+    <string name="omni_log_pair_at">%1$s:%2$d पर जोड़ी बनाने की पेशकश है</string>
+    <string name="omni_log_notes">सूचनाएँ</string>
+    <string name="omni_log_notes_on">अनुमति है</string>
+    <string name="omni_log_notes_off">अभी अनुमति नहीं है</string>
+    <string name="omni_log_args_hint">और logcat शब्द, जैसे -s MyTag:V *:S</string>
+    <string name="omni_log_apps">ऐप्लिकेशन</string>
+    <string name="omni_log_apps_any">इस उपकरण पर सब कुछ</string>
+    <string name="omni_log_apps_none">कोई ऐप्लिकेशन सूचीबद्ध नहीं हो सका।</string>
     <string name="omni_log_written">लॉग का लेखा</string>
     <string name="omni_log_empty_note">लॉग पढ़ना शुरू करने के लिए शुरू दबाइए।</string>
     <string name="omni_log_about">लॉग के बारे में</string>

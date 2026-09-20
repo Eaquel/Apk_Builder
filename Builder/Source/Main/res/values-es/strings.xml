@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">El puerto %1$s está abierto. Ejecuta la línea de concesión de abajo desde un ordenador.</string>
     <string name="omni_log_seeking">Buscando el puerto de conexión</string>
     <string name="omni_log_sieve">Buscar en el registro…</string>
+    <string name="omni_log_pair_found">Un dispositivo espera emparejarse</string>
+    <string name="omni_log_pair_at">Emparejamiento ofrecido en %1$s:%2$d</string>
+    <string name="omni_log_notes">Avisos</string>
+    <string name="omni_log_notes_on">Permitidos</string>
+    <string name="omni_log_notes_off">Aún no permitidos</string>
+    <string name="omni_log_args_hint">Más palabras de logcat, como -s MiEtiqueta:V *:S</string>
+    <string name="omni_log_apps">Aplicación</string>
+    <string name="omni_log_apps_any">Todo lo de este dispositivo</string>
+    <string name="omni_log_apps_none">No se pudo listar ninguna aplicación.</string>
     <string name="omni_log_written">Salida del registro</string>
     <string name="omni_log_empty_note">Toca Iniciar para empezar a leer el registro.</string>
     <string name="omni_log_about">Sobre el registro</string>

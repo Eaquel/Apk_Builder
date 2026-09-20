@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">%1$s numaralı nokta açık. Aşağıdaki izin satırını bir bilgisayardan çalıştır.</string>
     <string name="omni_log_seeking">Bağlantı noktası aranıyor</string>
     <string name="omni_log_sieve">Loglarda ara…</string>
+    <string name="omni_log_pair_found">Bir cihaz eşleşmeyi bekliyor</string>
+    <string name="omni_log_pair_at">%1$s:%2$d adresinde eşleşme sunuluyor</string>
+    <string name="omni_log_notes">Bildirimler</string>
+    <string name="omni_log_notes_on">İzin verildi</string>
+    <string name="omni_log_notes_off">Henüz izin verilmedi</string>
+    <string name="omni_log_args_hint">Ek logcat sözcükleri, örneğin -s Etiketim:V *:S</string>
+    <string name="omni_log_apps">Uygulama</string>
+    <string name="omni_log_apps_any">Bu cihazdaki her şey</string>
+    <string name="omni_log_apps_none">Hiçbir uygulama sayılamadı.</string>
     <string name="omni_log_written">Logcat Çıktısı</string>
     <string name="omni_log_empty_note">Logcat\'i başlatmak için \'Başlat\' düğmesine tıklayın.</string>
     <string name="omni_log_about">Logcat Hakkında</string>

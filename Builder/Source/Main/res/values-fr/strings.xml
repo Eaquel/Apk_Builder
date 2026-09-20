@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">Le port %1$s est ouvert. Exécutez la ligne d\'autorisation ci-dessous depuis un ordinateur.</string>
     <string name="omni_log_seeking">Recherche du port de connexion</string>
     <string name="omni_log_sieve">Chercher dans le journal…</string>
+    <string name="omni_log_pair_found">Un appareil attend d\'être appairé</string>
+    <string name="omni_log_pair_at">Appairage proposé sur %1$s:%2$d</string>
+    <string name="omni_log_notes">Notifications</string>
+    <string name="omni_log_notes_on">Autorisées</string>
+    <string name="omni_log_notes_off">Pas encore autorisées</string>
+    <string name="omni_log_args_hint">D\'autres mots logcat, comme -s MonTag:V *:S</string>
+    <string name="omni_log_apps">Application</string>
+    <string name="omni_log_apps_any">Tout sur cet appareil</string>
+    <string name="omni_log_apps_none">Aucune application n\'a pu être listée.</string>
     <string name="omni_log_written">Sortie du journal</string>
     <string name="omni_log_empty_note">Touche Démarrer pour commencer à lire le journal.</string>
     <string name="omni_log_about">À propos du journal</string>

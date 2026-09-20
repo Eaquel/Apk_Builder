@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">端口 %1$s 已开放。请在电脑上运行下面的授权命令。</string>
     <string name="omni_log_seeking">正在查找连接端口</string>
     <string name="omni_log_sieve">在日志中搜索…</string>
+    <string name="omni_log_pair_found">有设备在等待配对</string>
+    <string name="omni_log_pair_at">%1$s:%2$d 正在提供配对</string>
+    <string name="omni_log_notes">通知</string>
+    <string name="omni_log_notes_on">已允许</string>
+    <string name="omni_log_notes_off">尚未允许</string>
+    <string name="omni_log_args_hint">更多 logcat 词，例如 -s MyTag:V *:S</string>
+    <string name="omni_log_apps">应用</string>
+    <string name="omni_log_apps_any">这台设备上的一切</string>
+    <string name="omni_log_apps_none">没能列出任何应用。</string>
     <string name="omni_log_written">日志输出</string>
     <string name="omni_log_empty_note">点按“开始”以读取日志。</string>
     <string name="omni_log_about">关于日志</string>

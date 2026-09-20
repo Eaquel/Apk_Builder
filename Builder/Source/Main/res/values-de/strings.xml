@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">Port %1$s ist offen. Führe die Freigabezeile unten von einem Rechner aus.</string>
     <string name="omni_log_seeking">Verbindungsport wird gesucht</string>
     <string name="omni_log_sieve">Im Protokoll suchen…</string>
+    <string name="omni_log_pair_found">Ein Gerät wartet auf die Kopplung</string>
+    <string name="omni_log_pair_at">Kopplung wird unter %1$s:%2$d angeboten</string>
+    <string name="omni_log_notes">Mitteilungen</string>
+    <string name="omni_log_notes_on">Erlaubt</string>
+    <string name="omni_log_notes_off">Noch nicht erlaubt</string>
+    <string name="omni_log_args_hint">Weitere logcat-Wörter, etwa -s MeinTag:V *:S</string>
+    <string name="omni_log_apps">Anwendung</string>
+    <string name="omni_log_apps_any">Alles auf diesem Gerät</string>
+    <string name="omni_log_apps_none">Es ließ sich keine Anwendung auflisten.</string>
     <string name="omni_log_written">Protokollausgabe</string>
     <string name="omni_log_empty_note">Tippe auf Starten, um das Protokoll zu lesen.</string>
     <string name="omni_log_about">Über das Protokoll</string>

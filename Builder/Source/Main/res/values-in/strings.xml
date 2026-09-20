@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">Porta %1$s terbuka. Jalankan baris pemberian izin di bawah dari komputer.</string>
     <string name="omni_log_seeking">Mencari porta koneksi</string>
     <string name="omni_log_sieve">Cari di catatan…</string>
+    <string name="omni_log_pair_found">Sebuah perangkat menunggu untuk dipasangkan</string>
+    <string name="omni_log_pair_at">Pemasangan ditawarkan di %1$s:%2$d</string>
+    <string name="omni_log_notes">Pemberitahuan</string>
+    <string name="omni_log_notes_on">Diizinkan</string>
+    <string name="omni_log_notes_off">Belum diizinkan</string>
+    <string name="omni_log_args_hint">Kata logcat lainnya, misalnya -s TagSaya:V *:S</string>
+    <string name="omni_log_apps">Aplikasi</string>
+    <string name="omni_log_apps_any">Semua di perangkat ini</string>
+    <string name="omni_log_apps_none">Tidak ada aplikasi yang bisa didaftar.</string>
     <string name="omni_log_written">Keluaran catatan</string>
     <string name="omni_log_empty_note">Ketuk Mulai untuk mulai membaca log.</string>
     <string name="omni_log_about">Tentang catatan</string>

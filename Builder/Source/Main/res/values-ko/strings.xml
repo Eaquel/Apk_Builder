@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">포트 %1$s이(가) 열려 있습니다. 아래 부여 명령을 컴퓨터에서 실행하세요.</string>
     <string name="omni_log_seeking">연결 포트를 찾는 중</string>
     <string name="omni_log_sieve">기록에서 찾기…</string>
+    <string name="omni_log_pair_found">짝짓기를 기다리는 기기가 있습니다</string>
+    <string name="omni_log_pair_at">%1$s:%2$d에서 짝짓기를 받고 있습니다</string>
+    <string name="omni_log_notes">알림</string>
+    <string name="omni_log_notes_on">허락됨</string>
+    <string name="omni_log_notes_off">아직 허락되지 않음</string>
+    <string name="omni_log_args_hint">logcat 낱말 더, 이를테면 -s MyTag:V *:S</string>
+    <string name="omni_log_apps">앱</string>
+    <string name="omni_log_apps_any">이 기기의 모든 것</string>
+    <string name="omni_log_apps_none">앱을 하나도 나열하지 못했습니다.</string>
     <string name="omni_log_written">기록 출력</string>
     <string name="omni_log_empty_note">기록을 읽기 시작하려면 시작을 누르십시오.</string>
     <string name="omni_log_about">기록에 대하여</string>

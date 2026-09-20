@@ -438,6 +438,15 @@
     <string name="omni_log_seek_found">المنفذ %1$s مفتوح. نفّذ سطر المنح أدناه من حاسوب.</string>
     <string name="omni_log_seeking">جارٍ البحث عن منفذ الاتصال</string>
     <string name="omni_log_sieve">ابحث في السجل…</string>
+    <string name="omni_log_pair_found">جهاز ينتظر الاقتران</string>
+    <string name="omni_log_pair_at">الاقتران معروض على %1$s:%2$d</string>
+    <string name="omni_log_notes">الإشعارات</string>
+    <string name="omni_log_notes_on">مسموح بها</string>
+    <string name="omni_log_notes_off">غير مسموح بها بعد</string>
+    <string name="omni_log_args_hint">كلمات logcat أخرى، مثل ‎-s MyTag:V *:S</string>
+    <string name="omni_log_apps">التطبيق</string>
+    <string name="omni_log_apps_any">كل شيء على هذا الجهاز</string>
+    <string name="omni_log_apps_none">تعذر سرد أي تطبيق.</string>
     <string name="omni_log_written">مخرجات السجل</string>
     <string name="omni_log_empty_note">المس ابدأ لتبدأ قراءة السجلّ.</string>
     <string name="omni_log_about">عن السجل</string>

@@ -7,6 +7,10 @@ import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Application
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
@@ -48,6 +52,8 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -3282,6 +3288,10 @@ class BuilderActivity : Activity() {
 
         const val ARCHIVE_REQUEST = 4
 
+        const val NOTE_REQUEST = 5
+
+        const val PAIRING_SERVICE = "_adb-tls-pairing._tcp."
+
         const val MOST_SHOTS = 4
 
         const val SHOT_LARGEST_MB = 5
@@ -3674,6 +3684,10 @@ class BuilderActivity : Activity() {
     private var logWireless = false
     private var logWired = false
     private var logSeeking = false
+    private var showing = false
+    private var logPairHost = ""
+    private var logPairPort = 0
+    private var listening: NsdManager.DiscoveryListener? = null
 
     private var screen: Screen = Screen.Projects
     private var navigating = false
@@ -3731,6 +3745,9 @@ class BuilderActivity : Activity() {
     private var logCount: TextView? = null
     private var logHollow: View? = null
     private var logSieve = ""
+    private var logArgs = ""
+    private var logPackage = ""
+    private var logPackageShown = ""
 
     private var webAddress = ""
     private val webParts = WEB_PARTS_ON.toMutableList()
@@ -4035,6 +4052,8 @@ class BuilderActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        showing = true
+        Bell.hush(this, Bell.BUILD_NOTE)
         aurora.resumeDrawing()
         if (Sentry.refused(this)) {
             if (standing != "TAMPERED") {
@@ -4064,6 +4083,7 @@ class BuilderActivity : Activity() {
     }
 
     override fun onPause() {
+        showing = false
         hideOffers()
         keepTheDraft()
         stopTheLog()
@@ -4191,6 +4211,7 @@ class BuilderActivity : Activity() {
         rightBox = null
         if (screen !is Screen.Logcat) {
             stopTheLog()
+            stopListeningForPairing()
         }
         if (screen !is Screen.Terminal) {
             closeTheShell()
@@ -8060,6 +8081,63 @@ class BuilderActivity : Activity() {
         Settings.Global.getInt(contentResolver, named, 0)
     }.getOrDefault(0) == 1
 
+    private fun logCommand(): List<String> {
+        val said = mutableListOf("logcat", "-v", "time")
+        val uid = uidOf(logPackage)
+        when {
+            uid > 0 -> said.add("--uid=" + uid)
+            !logReadsAll() -> said.add("--pid=" + android.os.Process.myPid())
+        }
+        logArgs.trim().split(Regex("\\s+")).forEach { one ->
+            if (one.isNotEmpty()) {
+                said.add(one)
+            }
+        }
+        return said
+    }
+
+    private fun uidOf(named: String): Int {
+        if (named.isEmpty()) {
+            return -1
+        }
+        return runCatching {
+            packageManager.getApplicationInfo(named, 0).uid
+        }.getOrDefault(-1)
+    }
+
+    private fun installedApps(): List<Pair<String, String>> = runCatching {
+        packageManager.getInstalledApplications(0)
+            .map { held ->
+                packageManager.getApplicationLabel(held).toString() to held.packageName
+            }
+            .sortedBy { it.first.lowercase(Locale.getDefault()) }
+    }.getOrDefault(emptyList())
+
+    private fun chooseTheLoggedApp() {
+        val apps = installedApps()
+        if (apps.isEmpty()) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_log_apps_none), palette.warning))
+            return
+        }
+        val named = listOf(getString(R.string.omni_log_apps_any)) +
+            apps.map { it.first + "  \u00b7  " + it.second }
+        pickOne(getString(R.string.omni_log_apps), named) { which ->
+            if (which == 0) {
+                logPackage = ""
+                logPackageShown = ""
+            } else {
+                logPackage = apps[which - 1].second
+                logPackageShown = apps[which - 1].first
+            }
+            if (logReading) {
+                stopTheLog()
+                startTheLog()
+            }
+            render(false)
+        }
+    }
+
     private fun logReadsAll(): Boolean =
         checkSelfPermission(android.Manifest.permission.READ_LOGS) ==
             PackageManager.PERMISSION_GRANTED
@@ -8067,10 +8145,118 @@ class BuilderActivity : Activity() {
     private fun grantLine(): String =
         "adb shell pm grant $packageName android.permission.READ_LOGS"
 
+    private fun askToNotify() {
+        if (Bell.allowed(this)) {
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching {
+                requestPermissions(
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    NOTE_REQUEST,
+                )
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == NOTE_REQUEST && !isFinishing && !isDestroyed) {
+            render(false)
+        }
+    }
+
+    private fun openDeveloperOptions() {
+        hand(
+            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun listenForPairing() {
+        if (listening != null) {
+            return
+        }
+        val manager = getSystemService(NsdManager::class.java) ?: return
+        val ears = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(service: String) = Unit
+
+            override fun onDiscoveryStopped(service: String) = Unit
+
+            override fun onStartDiscoveryFailed(service: String, why: Int) {
+                runOnUiThread { stopListeningForPairing() }
+            }
+
+            override fun onStopDiscoveryFailed(service: String, why: Int) = Unit
+
+            override fun onServiceLost(found: NsdServiceInfo) = Unit
+
+            override fun onServiceFound(found: NsdServiceInfo) {
+                runCatching {
+                    manager.resolveService(
+                        found,
+                        object : NsdManager.ResolveListener {
+                            override fun onResolveFailed(one: NsdServiceInfo, why: Int) = Unit
+
+                            override fun onServiceResolved(one: NsdServiceInfo) {
+                                val host = one.host?.hostAddress.orEmpty()
+                                val port = one.port
+                                runOnUiThread { pairingSeen(host, port) }
+                            }
+                        },
+                    )
+                }
+            }
+        }
+        val started = runCatching {
+            manager.discoverServices(PAIRING_SERVICE, NsdManager.PROTOCOL_DNS_SD, ears)
+        }.isSuccess
+        listening = if (started) ears else null
+    }
+
+    private fun stopListeningForPairing() {
+        val ears = listening ?: return
+        listening = null
+        runCatching { getSystemService(NsdManager::class.java)?.stopServiceDiscovery(ears) }
+    }
+
+    private fun pairingSeen(host: String, port: Int) {
+        if (isFinishing || isDestroyed || host.isEmpty() || port <= 0) {
+            return
+        }
+        if (logPairHost == host && logPairPort == port) {
+            return
+        }
+        logPairHost = host
+        logPairPort = port
+        Bell.say(
+            this,
+            Bell.PAIRING_NOTE,
+            getString(R.string.omni_log_pair_found),
+            getString(R.string.omni_log_pair_at, host, port),
+        )
+        flash(
+            getString(R.string.omni_log_pair_at, host, port),
+            palette.ok,
+            Mark.Shape.LINK,
+            4200L,
+        )
+        if (screen is Screen.Logcat) {
+            render(false)
+        }
+    }
+
     private fun seekTheDevice() {
         if (logSeeking) {
             return
         }
+        askToNotify()
+        listenForPairing()
         logSeeking = true
         flash(getString(R.string.omni_log_seeking), palette.accent, Mark.Shape.LINK, 0L)
         Thread {
@@ -8107,7 +8293,7 @@ class BuilderActivity : Activity() {
                         palette.warning,
                         Mark.Shape.INFO,
                         4200L,
-                    )
+                    ).also { openDeveloperOptions() }
                     wired -> flash(
                         getString(R.string.omni_log_seek_wired),
                         palette.warning,
@@ -8119,7 +8305,7 @@ class BuilderActivity : Activity() {
                         palette.error,
                         Mark.Shape.INFO,
                         4200L,
-                    )
+                    ).also { openDeveloperOptions() }
                 }
             }
         }.start()
@@ -8131,15 +8317,10 @@ class BuilderActivity : Activity() {
         }
         logRefused = ""
         logReading = true
+        val spoken = logCommand()
         Thread {
             val reading = runCatching {
-                ProcessBuilder(
-                    if (logReadsAll()) {
-                        listOf("logcat", "-v", "time")
-                    } else {
-                        listOf("logcat", "-v", "time", "--pid=" + android.os.Process.myPid())
-                    }
-                ).redirectErrorStream(true).start()
+                ProcessBuilder(spoken).redirectErrorStream(true).start()
             }.getOrElse { why ->
                 runOnUiThread {
                     logReading = false
@@ -10139,6 +10320,33 @@ class BuilderActivity : Activity() {
                     onPress = null,
                 )
             )
+            bound.addView(
+                factRow(
+                    getString(R.string.omni_log_notes),
+                    getString(
+                        if (Bell.allowed(this)) {
+                            R.string.omni_log_notes_on
+                        } else {
+                            R.string.omni_log_notes_off
+                        }
+                    ),
+                    Mark.Shape.SPEECH,
+                    R.string.omni_log_notes,
+                ) { askToNotify() }
+            )
+            if (logPairHost.isNotEmpty()) {
+                bound.addView(
+                    factRow(
+                        getString(R.string.omni_log_pair_found),
+                        getString(R.string.omni_log_pair_at, logPairHost, logPairPort),
+                    ) {
+                        copyOut(
+                            logPairHost + ":" + logPairPort,
+                            getString(R.string.omni_log_pair_found),
+                        )
+                    }
+                )
+            }
             bound.addView(quiet(getString(R.string.omni_log_seek_grant)))
             bound.addView(
                 LinearLayout(this).apply {
@@ -10246,6 +10454,49 @@ class BuilderActivity : Activity() {
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
             }
+        )
+        sieve.addView(rule(), MATCH_PARENT, 1)
+        sieve.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.CODE, palette.muted) },
+                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+                )
+                addView(
+                    EditText(context).apply {
+                        setText(logArgs)
+                        hint = getString(R.string.omni_log_args_hint)
+                        setHintTextColor(palette.muted)
+                        setTextColor(palette.foreground)
+                        typeface = Type.data
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setBackgroundColor(Color.TRANSPARENT)
+                        isSingleLine = true
+                        addTextChangedListener(object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                            override fun afterTextChanged(s: Editable?) {
+                                logArgs = s?.toString().orEmpty()
+                            }
+                        })
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        sieve.addView(rule(), MATCH_PARENT, 1)
+        sieve.addView(
+            factRow(
+                getString(R.string.omni_log_apps),
+                logPackageShown.ifEmpty { getString(R.string.omni_log_apps_any) },
+                Mark.Shape.DROID,
+                R.string.omni_log_apps,
+            ) { chooseTheLoggedApp() }
+        )
+        sieve.addView(
+            quiet(logCommand().joinToString(" "))
         )
         content.addView(sieve)
 
@@ -14787,6 +15038,14 @@ class BuilderActivity : Activity() {
             if (!outcome.built) {
                 OmniLog.event(LogLevel.ERROR, "build", "Refused: ${outcome.error}")
                 results.addView(notice(getString(R.string.omni_refused), palette.error))
+                if (!showing) {
+                    Bell.say(
+                        this,
+                        Bell.BUILD_NOTE,
+                        getString(R.string.omni_refused),
+                        outcome.error.orEmpty(),
+                    )
+                }
                 showRefusal(Refusal.parse(JSONObject(answer)), results)
                 outcome.findings.forEach { results.addView(quiet(it)) }
                 runCatching {
@@ -14808,6 +15067,14 @@ class BuilderActivity : Activity() {
             results.addView(
                 notice(getString(R.string.omni_build_done, elapsed), palette.ok)
             )
+            if (!showing) {
+                Bell.say(
+                    this,
+                    Bell.BUILD_NOTE,
+                    getString(R.string.omni_build_title),
+                    apk.name + "  ·  " + size(outcome.bytes),
+                )
+            }
             val facts = card()
             facts.addView(
                 keyValue(
@@ -18689,6 +18956,67 @@ internal object Brain {
     fun roughly(turns: List<Turn>, system: String): Long {
         val letters = turns.sumOf { it.said.length.toLong() } + system.length
         return letters / 4L
+    }
+}
+
+internal object Bell {
+
+    const val CHANNEL = "omni_builder"
+
+    const val BUILD_NOTE = 1
+
+    const val PAIRING_NOTE = 2
+
+    fun channelHere(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        if (manager.getNotificationChannel(CHANNEL) != null) {
+            return
+        }
+        runCatching {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL,
+                    context.getString(R.string.omni_app_name),
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                )
+            )
+        }
+    }
+
+    fun allowed(context: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    fun say(context: Context, id: Int, title: String, body: String) {
+        if (!allowed(context)) {
+            return
+        }
+        channelHere(context)
+        val opening = PendingIntent.getActivity(
+            context,
+            id,
+            Intent(context, BuilderActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val note = Notification.Builder(context, CHANNEL)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setAutoCancel(true)
+            .setContentIntent(opening)
+            .build()
+        runCatching {
+            context.getSystemService(NotificationManager::class.java)?.notify(id, note)
+        }
+    }
+
+    fun hush(context: Context, id: Int) {
+        runCatching {
+            context.getSystemService(NotificationManager::class.java)?.cancel(id)
+        }
     }
 }
 
