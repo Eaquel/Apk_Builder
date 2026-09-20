@@ -568,6 +568,44 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
                                          into_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDigestFile(
+    JNIEnv *env, jobject , jstring path) {
+  std::string path_text;
+  if (path == nullptr || !JavaStringToUtf8(env, path, &path_text)) {
+    ThrowJava(env, kIllegalState, "Summing a file needs a path.");
+    return nullptr;
+  }
+  return HandBack(env, omni_digest_file(path_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativePackArchive(
+    JNIEnv *env, jobject , jstring root, jstring names, jstring into,
+    jstring format, jstring password) {
+  std::string root_text;
+  std::string names_text;
+  std::string into_text;
+  std::string format_text;
+  std::string password_text;
+  if (root == nullptr || names == nullptr || into == nullptr ||
+      format == nullptr || password == nullptr ||
+      !JavaStringToUtf8(env, root, &root_text) ||
+      !JavaStringToUtf8(env, names, &names_text) ||
+      !JavaStringToUtf8(env, into, &into_text) ||
+      !JavaStringToUtf8(env, format, &format_text) ||
+      !JavaStringToUtf8(env, password, &password_text)) {
+    ThrowJava(env, kIllegalState,
+              "Packing needs a project, what to pack, where to write it, a shape "
+              "and a password that may be empty.");
+    return nullptr;
+  }
+  jstring answer = HandBack(
+      env, omni_pack_archive(root_text.c_str(), names_text.c_str(),
+                             into_text.c_str(), format_text.c_str(),
+                             password_text.c_str()));
+  Wipe(&password_text);
+  return answer;
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeOpenArchive(
     JNIEnv *env, jobject , jstring archive_path, jstring into) {
   std::string archive_text;

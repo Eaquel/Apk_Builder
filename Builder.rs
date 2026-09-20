@@ -19372,6 +19372,79 @@ pub mod cipher {
         *outer.finish().as_bytes()
     }
 
+    pub fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
+        const BLOCK: usize = 64;
+        let mut shortened = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            shortened[..20].copy_from_slice(crate::hash::sha1(key).as_bytes());
+        } else {
+            shortened[..key.len()].copy_from_slice(key);
+        }
+        let mut inner = Vec::with_capacity(BLOCK + message.len());
+        let mut outer = Vec::with_capacity(BLOCK + 20);
+        for byte in shortened.iter() {
+            inner.push(byte ^ 0x36);
+            outer.push(byte ^ 0x5c);
+        }
+        inner.extend_from_slice(message);
+        outer.extend_from_slice(crate::hash::sha1(&inner).as_bytes());
+        let mut out = [0u8; 20];
+        out.copy_from_slice(crate::hash::sha1(&outer).as_bytes());
+        out
+    }
+
+    pub fn pbkdf2_sha1(
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        length: usize,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if iterations == 0 {
+            return Err(fail(
+                "EK012",
+                "A key derivation needs at least one iteration.",
+            ));
+        }
+        if length == 0 || length > 1024 {
+            return Err(fail(
+                "EK013",
+                "A derived key of that length is not produced here.",
+            ));
+        }
+        let mut out = Vec::with_capacity(length);
+        let mut block_index = 1u32;
+        while out.len() < length {
+            let mut salted = salt.to_vec();
+            salted.extend_from_slice(&block_index.to_be_bytes());
+            let mut u = hmac_sha1(password, &salted);
+            let mut result = u;
+            for _ in 1..iterations {
+                u = hmac_sha1(password, &u);
+                for index in 0..20 {
+                    result[index] ^= u[index];
+                }
+            }
+            out.extend_from_slice(&result);
+            block_index += 1;
+        }
+        out.truncate(length);
+        Ok(out)
+    }
+
+    pub fn counter_stream(key: &[u8; KEY_BYTES], from: u32, data: &mut [u8]) {
+        let words = expand(key);
+        let mut at = from;
+        for chunk in data.chunks_mut(16) {
+            let mut block = [0u8; 16];
+            block[..4].copy_from_slice(&at.to_le_bytes());
+            encrypt_block(&mut block, &words);
+            for (byte, mask) in chunk.iter_mut().zip(block.iter()) {
+                *byte ^= mask;
+            }
+            at = at.wrapping_add(1);
+        }
+    }
+
     pub fn pbkdf2_sha256(
         password: &[u8],
         salt: &[u8],
@@ -31512,6 +31585,505 @@ pub mod trash {
     }
 }
 
+pub mod packer {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    pub const ZIP: &str = "zip";
+    pub const TAR: &str = "tar";
+    pub const FORMATS: &[&str] = &[ZIP, TAR];
+
+    pub const AES_METHOD: u16 = 99;
+    pub const AES_EXTRA_ID: u16 = 0x9901;
+    pub const AES_STRENGTH: u8 = 3;
+    pub const AES_SALT_BYTES: usize = 16;
+    pub const AES_CHECK_BYTES: usize = 2;
+    pub const AES_AUTH_BYTES: usize = 10;
+    pub const AES_ROUNDS: u32 = 1_000;
+
+    pub const MOST_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    pub const MOST_ENTRIES: usize = 100_000;
+
+    const TAR_BLOCK: usize = 512;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.packer",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Packed {
+        pub files: u64,
+        pub folders: u64,
+        pub bytes: u64,
+        pub written: u64,
+        pub sealed: bool,
+    }
+
+    pub struct Item {
+        pub name: String,
+        pub bytes: Vec<u8>,
+        pub folder: bool,
+        pub changed: u64,
+    }
+
+    fn walked(here: &std::path::Path, ahead: &str, into: &mut Vec<Item>) -> Result<(), Diagnostic> {
+        if into.len() >= MOST_ENTRIES {
+            return Err(
+                fail("EZ010", "That is more entries than one archive holds here.")
+                    .with_context(format!("Limit: {MOST_ENTRIES}")),
+            );
+        }
+        let named = if ahead.is_empty() {
+            here.file_name()
+                .and_then(|one| one.to_str())
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            format!(
+                "{ahead}/{}",
+                here.file_name()
+                    .and_then(|one| one.to_str())
+                    .unwrap_or_default()
+            )
+        };
+        let changed = here
+            .metadata()
+            .ok()
+            .and_then(|held| held.modified().ok())
+            .and_then(|held| held.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|held| held.as_secs())
+            .unwrap_or(0);
+
+        if here.is_dir() {
+            into.push(Item {
+                name: named.clone(),
+                bytes: Vec::new(),
+                folder: true,
+                changed,
+            });
+            let listing = std::fs::read_dir(here).map_err(|why| {
+                fail("EZ011", "A folder being packed could not be read.")
+                    .with_context(format!("Path: {}", here.display()))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            let mut children: Vec<std::path::PathBuf> =
+                listing.flatten().map(|one| one.path()).collect();
+            children.sort();
+            for child in children {
+                walked(&child, &named, into)?;
+            }
+            return Ok(());
+        }
+
+        let bytes = std::fs::read(here).map_err(|why| {
+            fail("EZ012", "A file being packed could not be read.")
+                .with_context(format!("Path: {}", here.display()))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        into.push(Item {
+            name: named,
+            bytes,
+            folder: false,
+            changed,
+        });
+        Ok(())
+    }
+
+    fn dos_time(seconds: u64) -> (u16, u16) {
+        let days = (seconds / 86_400) as i64;
+        let rest = (seconds % 86_400) as u32;
+        let (year, month, day) = civil_from_days(days + 719_468);
+        if year < 1980 {
+            return (0, 0x0021);
+        }
+        let time = (((rest / 3600) as u16) << 11)
+            | ((((rest % 3600) / 60) as u16) << 5)
+            | (((rest % 60) / 2) as u16);
+        let date = (((year - 1980) as u16) << 9) | ((month as u16) << 5) | (day as u16);
+        (time, date)
+    }
+
+    fn civil_from_days(held: i64) -> (i64, u32, u32) {
+        let era = if held >= 0 { held } else { held - 146_096 } / 146_097;
+        let day_of_era = (held - era * 146_097) as u64;
+        let year_of_era =
+            (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let year = year_of_era as i64 + era * 400;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let shifted = (5 * day_of_year + 2) / 153;
+        let day = (day_of_year - (153 * shifted + 2) / 5 + 1) as u32;
+        let month = if shifted < 10 {
+            shifted + 3
+        } else {
+            shifted - 9
+        } as u32;
+        (if month <= 2 { year + 1 } else { year }, month, day)
+    }
+
+    struct Sealed {
+        head: Vec<u8>,
+        body: Vec<u8>,
+        tail: Vec<u8>,
+    }
+
+    fn seal(password: &str, mut body: Vec<u8>) -> Result<Sealed, Diagnostic> {
+        let salt = crate::random::bytes(AES_SALT_BYTES)?;
+        let stretched = crate::cipher::pbkdf2_sha1(
+            password.as_bytes(),
+            &salt,
+            AES_ROUNDS,
+            crate::cipher::KEY_BYTES * 2 + AES_CHECK_BYTES,
+        )?;
+        let mut key = [0u8; crate::cipher::KEY_BYTES];
+        key.copy_from_slice(&stretched[..crate::cipher::KEY_BYTES]);
+        let authority = &stretched[crate::cipher::KEY_BYTES..crate::cipher::KEY_BYTES * 2];
+        let check = &stretched[crate::cipher::KEY_BYTES * 2..];
+
+        crate::cipher::counter_stream(&key, 1, &mut body);
+        let signed = crate::cipher::hmac_sha1(authority, &body);
+
+        let mut head = salt;
+        head.extend_from_slice(check);
+        Ok(Sealed {
+            head,
+            body,
+            tail: signed[..AES_AUTH_BYTES].to_vec(),
+        })
+    }
+
+    fn unseal(password: &str, held: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        let least = AES_SALT_BYTES + AES_CHECK_BYTES + AES_AUTH_BYTES;
+        if held.len() < least {
+            return Err(fail(
+                "EZ020",
+                "An entry says it is locked but is too short to hold a lock.",
+            ));
+        }
+        let salt = &held[..AES_SALT_BYTES];
+        let check = &held[AES_SALT_BYTES..AES_SALT_BYTES + AES_CHECK_BYTES];
+        let body = &held[AES_SALT_BYTES + AES_CHECK_BYTES..held.len() - AES_AUTH_BYTES];
+        let signed = &held[held.len() - AES_AUTH_BYTES..];
+
+        let stretched = crate::cipher::pbkdf2_sha1(
+            password.as_bytes(),
+            salt,
+            AES_ROUNDS,
+            crate::cipher::KEY_BYTES * 2 + AES_CHECK_BYTES,
+        )?;
+        if !crate::cipher::same_bytes(check, &stretched[crate::cipher::KEY_BYTES * 2..]) {
+            return Err(fail("EZ021", "That password does not open this archive.")
+                .with_suggestion("The two bytes an archive keeps to check a password disagree."));
+        }
+        let authority = &stretched[crate::cipher::KEY_BYTES..crate::cipher::KEY_BYTES * 2];
+        let wanted = crate::cipher::hmac_sha1(authority, body);
+        if !crate::cipher::same_bytes(signed, &wanted[..AES_AUTH_BYTES]) {
+            return Err(fail(
+                "EZ022",
+                "An entry does not match the mark its archive keeps for it.",
+            ));
+        }
+        let mut key = [0u8; crate::cipher::KEY_BYTES];
+        key.copy_from_slice(&stretched[..crate::cipher::KEY_BYTES]);
+        let mut out = body.to_vec();
+        crate::cipher::counter_stream(&key, 1, &mut out);
+        Ok(out)
+    }
+
+    fn put16(into: &mut Vec<u8>, value: u16) {
+        into.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put32(into: &mut Vec<u8>, value: u32) {
+        into.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn aes_extra(actual: u16) -> Vec<u8> {
+        let mut out = Vec::with_capacity(11);
+        put16(&mut out, AES_EXTRA_ID);
+        put16(&mut out, 7);
+        put16(&mut out, 2);
+        out.extend_from_slice(b"AE");
+        out.push(AES_STRENGTH);
+        put16(&mut out, actual);
+        out
+    }
+
+    fn zipped(items: Vec<Item>, password: &str) -> Result<(Vec<u8>, Packed), Diagnostic> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut directory: Vec<u8> = Vec::new();
+        let mut counted = Packed {
+            sealed: !password.is_empty(),
+            ..Packed::default()
+        };
+
+        for item in items {
+            let offset = out.len() as u32;
+            let name = if item.folder {
+                format!("{}/", item.name)
+            } else {
+                item.name.clone()
+            };
+            let (time, date) = dos_time(item.changed);
+            let plain = item.bytes.len() as u32;
+            let crc = crate::binary::checksum::crc32(&item.bytes);
+
+            let squeezed = if item.folder || item.bytes.is_empty() {
+                None
+            } else {
+                let tried = crate::deflate::raw(&item.bytes);
+                if tried.len() < item.bytes.len() {
+                    Some(tried)
+                } else {
+                    None
+                }
+            };
+            let actual: u16 = if squeezed.is_some() { 8 } else { 0 };
+            let body = squeezed.unwrap_or(item.bytes);
+
+            let (method, extra, payload) = if password.is_empty() || item.folder {
+                (actual, Vec::new(), body)
+            } else {
+                let locked = seal(password, body)?;
+                let mut joined = locked.head;
+                joined.extend_from_slice(&locked.body);
+                joined.extend_from_slice(&locked.tail);
+                (AES_METHOD, aes_extra(actual), joined)
+            };
+            let stored = payload.len() as u32;
+            let written_crc = if method == AES_METHOD { 0 } else { crc };
+
+            put32(&mut out, 0x0403_4b50);
+            put16(&mut out, if method == AES_METHOD { 51 } else { 20 });
+            put16(&mut out, 0);
+            put16(&mut out, method);
+            put16(&mut out, time);
+            put16(&mut out, date);
+            put32(&mut out, written_crc);
+            put32(&mut out, stored);
+            put32(&mut out, plain);
+            put16(&mut out, name.len() as u16);
+            put16(&mut out, extra.len() as u16);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&extra);
+            out.extend_from_slice(&payload);
+
+            put32(&mut directory, 0x0201_4b50);
+            put16(&mut directory, 20);
+            put16(&mut directory, if method == AES_METHOD { 51 } else { 20 });
+            put16(&mut directory, 0);
+            put16(&mut directory, method);
+            put16(&mut directory, time);
+            put16(&mut directory, date);
+            put32(&mut directory, written_crc);
+            put32(&mut directory, stored);
+            put32(&mut directory, plain);
+            put16(&mut directory, name.len() as u16);
+            put16(&mut directory, extra.len() as u16);
+            put16(&mut directory, 0);
+            put16(&mut directory, 0);
+            put16(&mut directory, 0);
+            put32(
+                &mut directory,
+                if item.folder {
+                    0x4000_0010
+                } else {
+                    0x8000_0000u32
+                },
+            );
+            put32(&mut directory, offset);
+            directory.extend_from_slice(name.as_bytes());
+            directory.extend_from_slice(&extra);
+
+            if item.folder {
+                counted.folders += 1;
+            } else {
+                counted.files += 1;
+                counted.bytes += u64::from(plain);
+            }
+            if out.len() as u64 > MOST_BYTES {
+                return Err(
+                    fail("EZ013", "The archive would grow past what this writes.")
+                        .with_context(format!("Largest: {MOST_BYTES} bytes")),
+                );
+            }
+        }
+
+        let count = (counted.files + counted.folders) as u16;
+        let at = out.len() as u32;
+        let size = directory.len() as u32;
+        out.extend_from_slice(&directory);
+        put32(&mut out, 0x0605_4b50);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, count);
+        put16(&mut out, count);
+        put32(&mut out, size);
+        put32(&mut out, at);
+        put16(&mut out, 0);
+        counted.written = out.len() as u64;
+        Ok((out, counted))
+    }
+
+    fn octal(into: &mut [u8], value: u64) {
+        let width = into.len() - 1;
+        let said = format!("{value:0width$o}");
+        let held = said.as_bytes();
+        let from = held.len().saturating_sub(width);
+        into[..width].copy_from_slice(&held[from..]);
+        into[width] = 0;
+    }
+
+    fn tarred(items: Vec<Item>) -> Result<(Vec<u8>, Packed), Diagnostic> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut counted = Packed::default();
+        for item in items {
+            let name = if item.folder {
+                format!("{}/", item.name)
+            } else {
+                item.name.clone()
+            };
+            if name.len() > 99 {
+                return Err(fail("EZ014", "A name is longer than a tar header carries.")
+                    .with_context(format!("Name: {name}"))
+                    .with_suggestion("Pack it as a zip, whose names may be longer."));
+            }
+            let mut head = [0u8; TAR_BLOCK];
+            head[..name.len()].copy_from_slice(name.as_bytes());
+            octal(&mut head[100..108], if item.folder { 0o755 } else { 0o644 });
+            octal(&mut head[108..116], 0);
+            octal(&mut head[116..124], 0);
+            octal(&mut head[124..136], item.bytes.len() as u64);
+            octal(&mut head[136..148], item.changed);
+            head[148..156].fill(b' ');
+            head[156] = if item.folder { b'5' } else { b'0' };
+            head[257..263].copy_from_slice(b"ustar\0");
+            head[263..265].copy_from_slice(b"00");
+            let sum: u64 = head.iter().map(|one| u64::from(*one)).sum();
+            octal(&mut head[148..155], sum);
+            head[155] = b' ';
+            out.extend_from_slice(&head);
+
+            if !item.folder {
+                out.extend_from_slice(&item.bytes);
+                let over = item.bytes.len() % TAR_BLOCK;
+                if over != 0 {
+                    out.extend(std::iter::repeat_n(0u8, TAR_BLOCK - over));
+                }
+                counted.files += 1;
+                counted.bytes += item.bytes.len() as u64;
+            } else {
+                counted.folders += 1;
+            }
+            if out.len() as u64 > MOST_BYTES {
+                return Err(
+                    fail("EZ013", "The archive would grow past what this writes.")
+                        .with_context(format!("Largest: {MOST_BYTES} bytes")),
+                );
+            }
+        }
+        out.extend(std::iter::repeat_n(0u8, TAR_BLOCK * 2));
+        counted.written = out.len() as u64;
+        Ok((out, counted))
+    }
+
+    pub fn pack(
+        root: &str,
+        names: &[String],
+        into: &str,
+        format: &str,
+        password: &str,
+    ) -> Result<Packed, Diagnostic> {
+        if !FORMATS.contains(&format) {
+            return Err(fail("EZ001", "That is not a shape this packs into.")
+                .with_context(format!("Asked: {format}"))
+                .with_context(format!("Written here: {}", FORMATS.join(", "))));
+        }
+        if format == TAR && !password.is_empty() {
+            return Err(fail("EZ002", "A tar carries no lock.")
+                .with_suggestion("Pack it as a zip, which does."));
+        }
+        if names.is_empty() {
+            return Err(fail("EZ003", "Nothing was named to pack."));
+        }
+
+        let base = std::path::Path::new(root);
+        let mut items = Vec::new();
+        for name in names {
+            let here = base.join(name);
+            if !here.exists() {
+                return Err(fail("EZ004", "Something named to pack is not there.")
+                    .with_context(format!("Path: {name}")));
+            }
+            walked(&here, "", &mut items)?;
+        }
+
+        let (bytes, counted) = if format == TAR {
+            tarred(items)?
+        } else {
+            zipped(items, password)?
+        };
+        std::fs::write(into, &bytes).map_err(|why| {
+            fail("EZ005", "The archive could not be written.")
+                .with_context(format!("Path: {into}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(counted)
+    }
+
+    pub fn open_entry(
+        archive: &crate::archive::Archive,
+        data: &[u8],
+        entry: &crate::archive::Entry,
+        password: &str,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if entry.compression != crate::archive::Compression::Other(AES_METHOD) {
+            return archive.content(data, entry);
+        }
+        if password.is_empty() {
+            return Err(fail("EZ023", "This archive is locked.")
+                .with_context(format!("Entry: {}", entry.name))
+                .with_suggestion("Give the password it was locked with."));
+        }
+        let stored = archive.stored_bytes(data, entry)?;
+        let plain = unseal(password, stored)?;
+        let actual = aes_actual_method(data, entry).unwrap_or(0);
+        match actual {
+            0 => Ok(plain),
+            8 => crate::inflate::raw(&plain),
+            other => Err(fail(
+                "EZ024",
+                "A locked entry is squeezed in a way this does not read.",
+            )
+            .with_context(format!("Method: {other}"))),
+        }
+    }
+
+    fn aes_actual_method(data: &[u8], entry: &crate::archive::Entry) -> Option<u16> {
+        let at = entry.local_header_offset as usize;
+        let name_len = u16::from_le_bytes([*data.get(at + 26)?, *data.get(at + 27)?]) as usize;
+        let extra_len = u16::from_le_bytes([*data.get(at + 28)?, *data.get(at + 29)?]) as usize;
+        let from = at + 30 + name_len;
+        let extra = data.get(from..from + extra_len)?;
+        let mut walk = 0usize;
+        while walk + 4 <= extra.len() {
+            let id = u16::from_le_bytes([extra[walk], extra[walk + 1]]);
+            let size = u16::from_le_bytes([extra[walk + 2], extra[walk + 3]]) as usize;
+            if id == AES_EXTRA_ID && size >= 7 && walk + 4 + size <= extra.len() {
+                let held = &extra[walk + 4..walk + 4 + size];
+                return Some(u16::from_le_bytes([held[5], held[6]]));
+            }
+            walk += 4 + size;
+        }
+        None
+    }
+}
+
 pub mod workspace {
     use crate::diag::{Diagnostic, Severity};
     use crate::json::Writer;
@@ -40861,6 +41433,75 @@ pub mod ffi {
                         }
                     }
                 },
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_digest_file(path: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(path) = text_from(path) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    w.field_bool("summed", true);
+                    w.field_str("sha256", &crate::hash::sha256(&bytes).to_hex());
+                    w.field_str("sha1", &crate::hash::sha1(&bytes).to_hex());
+                    w.field_u64("bytes", bytes.len() as u64);
+                }
+                Err(error) => {
+                    w.field_bool("summed", false);
+                    w.field_str("reason", &error.to_string());
+                }
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_pack_archive(
+        root: *const c_char,
+        names: *const c_char,
+        into: *const c_char,
+        format: *const c_char,
+        password: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(names), Some(into), Some(format), Some(password)) = (
+                text_from(root),
+                text_from(names),
+                text_from(into),
+                text_from(format),
+                text_from(password),
+            ) else {
+                return std::ptr::null_mut();
+            };
+            let wanted: Vec<String> = names
+                .split('\n')
+                .filter(|one| !one.trim().is_empty())
+                .map(str::to_string)
+                .collect();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::packer::pack(&root, &wanted, &into, &format, &password) {
+                Ok(held) => {
+                    w.field_bool("packed", true);
+                    w.field_str("path", &into);
+                    w.field_u64("files", held.files);
+                    w.field_u64("folders", held.folders);
+                    w.field_u64("bytes", held.bytes);
+                    w.field_u64("written", held.written);
+                    w.field_bool("sealed", held.sealed);
+                }
+                Err(error) => write_failure(&mut w, "packed", &error),
             }
             w.end_object();
             hand_back(w)

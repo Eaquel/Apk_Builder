@@ -16495,6 +16495,269 @@ public final class MainActivity extends Activity {
         eprintln!("rsa: seven signatures over one digest, blinded afresh each time, all identical");
     }
 
+    fn a_small_tree(at: &std::path::Path) {
+        std::fs::create_dir_all(at.join("Held/Inner")).expect("the tree is made");
+        std::fs::write(at.join("Held/first.txt"), b"one line and then another\n").unwrap();
+        std::fs::write(
+            at.join("Held/Inner/second.txt"),
+            "a line that repeats. ".repeat(80).as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(at.join("Held/Inner/empty.bin"), b"").unwrap();
+    }
+
+    fn tool_runs(named: &str, args: &[&str]) -> Option<(bool, String)> {
+        let held = std::process::Command::new(named).args(args).output().ok()?;
+        let mut said = String::from_utf8_lossy(&held.stdout).to_string();
+        said.push_str(&String::from_utf8_lossy(&held.stderr));
+        Some((held.status.success(), said))
+    }
+
+    #[test]
+    fn a_zip_this_writes_is_one_unzip_reads_back() {
+        let directory = temp_directory("omni-pack-zip");
+        a_small_tree(&directory);
+        let into = directory.join("Held.zip");
+
+        let counted = crate::packer::pack(
+            directory.to_str().unwrap(),
+            &["Held".to_string()],
+            into.to_str().unwrap(),
+            crate::packer::ZIP,
+            "",
+        )
+        .expect("the tree packs");
+        assert_eq!(counted.files, 3);
+        assert_eq!(counted.folders, 2);
+        assert!(!counted.sealed);
+
+        let Some((passed, said)) = tool_runs("unzip", &["-t", into.to_str().unwrap()]) else {
+            eprintln!("pack conformance: unzip is not available here");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        };
+        assert!(passed, "unzip refused what this wrote:\n{said}");
+
+        let out = directory.join("Out");
+        std::fs::create_dir_all(&out).unwrap();
+        let (passed, said) = tool_runs(
+            "unzip",
+            &["-q", into.to_str().unwrap(), "-d", out.to_str().unwrap()],
+        )
+        .expect("unzip runs");
+        assert!(passed, "unzip could not open it:\n{said}");
+
+        for name in [
+            "Held/first.txt",
+            "Held/Inner/second.txt",
+            "Held/Inner/empty.bin",
+        ] {
+            assert_eq!(
+                std::fs::read(out.join(name)).unwrap_or_else(|_| panic!("{name} is there")),
+                std::fs::read(directory.join(name)).unwrap(),
+                "{name} came back changed"
+            );
+        }
+
+        eprintln!("pack conformance: unzip reads back three files and two folders byte for byte");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_tar_this_writes_is_one_tar_reads_back() {
+        let directory = temp_directory("omni-pack-tar");
+        a_small_tree(&directory);
+        let into = directory.join("Held.tar");
+
+        let counted = crate::packer::pack(
+            directory.to_str().unwrap(),
+            &["Held".to_string()],
+            into.to_str().unwrap(),
+            crate::packer::TAR,
+            "",
+        )
+        .expect("the tree packs");
+        assert_eq!(counted.files, 3);
+        assert!(counted.written.is_multiple_of(512), "a tar is whole blocks");
+
+        let out = directory.join("Out");
+        std::fs::create_dir_all(&out).unwrap();
+        let Some((passed, said)) = tool_runs(
+            "tar",
+            &["-xf", into.to_str().unwrap(), "-C", out.to_str().unwrap()],
+        ) else {
+            eprintln!("pack conformance: tar is not available here");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        };
+        assert!(passed, "tar refused what this wrote:\n{said}");
+
+        for name in [
+            "Held/first.txt",
+            "Held/Inner/second.txt",
+            "Held/Inner/empty.bin",
+        ] {
+            assert_eq!(
+                std::fs::read(out.join(name)).unwrap_or_else(|_| panic!("{name} is there")),
+                std::fs::read(directory.join(name)).unwrap(),
+                "{name} came back changed"
+            );
+        }
+
+        assert_eq!(
+            crate::packer::pack(
+                directory.to_str().unwrap(),
+                &["Held".to_string()],
+                into.to_str().unwrap(),
+                crate::packer::TAR,
+                "secret",
+            )
+            .expect_err("a locked tar is refused")
+            .code,
+            "EZ002"
+        );
+
+        eprintln!("pack conformance: tar reads back three files byte for byte");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_locked_zip_opens_with_its_password_and_with_nothing_else() {
+        let directory = temp_directory("omni-pack-locked");
+        a_small_tree(&directory);
+        let into = directory.join("Held.zip");
+
+        let counted = crate::packer::pack(
+            directory.to_str().unwrap(),
+            &["Held".to_string()],
+            into.to_str().unwrap(),
+            crate::packer::ZIP,
+            "a long enough password",
+        )
+        .expect("the tree packs");
+        assert!(counted.sealed);
+
+        let bytes = std::fs::read(&into).expect("the archive is on disk");
+        let mut sink = crate::diag::Sink::new();
+        let archive = crate::archive::read(&bytes, &mut sink).expect("it is a readable archive");
+
+        let mut seen = 0;
+        for entry in archive.entries() {
+            if entry.is_directory() {
+                continue;
+            }
+            assert_eq!(
+                entry.compression,
+                crate::archive::Compression::Other(crate::packer::AES_METHOD),
+                "{} is not locked",
+                entry.name
+            );
+            let held = crate::packer::open_entry(&archive, &bytes, entry, "a long enough password")
+                .unwrap_or_else(|why| panic!("{} did not open: {}", entry.name, why.message));
+            assert_eq!(
+                held,
+                std::fs::read(directory.join(&entry.name)).unwrap(),
+                "{} came back changed",
+                entry.name
+            );
+
+            assert_eq!(
+                crate::packer::open_entry(&archive, &bytes, entry, "the wrong one")
+                    .expect_err("a wrong password is refused")
+                    .code,
+                "EZ021"
+            );
+            assert_eq!(
+                crate::packer::open_entry(&archive, &bytes, entry, "")
+                    .expect_err("no password at all is refused")
+                    .code,
+                "EZ023"
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 3, "every file is locked, not only the first");
+
+        if let Some((passed, said)) = tool_runs("unzip", &["-l", into.to_str().unwrap()]) {
+            assert!(
+                passed && said.contains("Held/first.txt"),
+                "unzip could not read the directory of a locked archive:\n{said}"
+            );
+        }
+
+        eprintln!(
+            "pack: three entries locked with AES-256, opened by the password and by nothing else"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_sha1_keyed_hash_answers_what_rfc_2202_publishes() {
+        let held = crate::cipher::hmac_sha1(&[0x0b; 20], b"Hi There");
+        assert_eq!(
+            held.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "b617318655057264e28bc0b6fb378c8ef146be00"
+        );
+
+        let held = crate::cipher::hmac_sha1(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            held.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
+        );
+
+        eprintln!("hmac-sha1: two published cases answered byte for byte");
+    }
+
+    #[test]
+    fn the_sha1_key_derivation_answers_what_rfc_6070_publishes() {
+        for (iterations, length, wanted) in [
+            (1u32, 20usize, "0c60c80f961f0e71f3a9b524af6012062fe037a6"),
+            (2, 20, "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957"),
+            (4096, 20, "4b007901b765489abead49d926f721d065a429c1"),
+        ] {
+            let held = crate::cipher::pbkdf2_sha1(b"password", b"salt", iterations, length)
+                .expect("the derivation is asked for a sane length");
+            assert_eq!(
+                held.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                wanted,
+                "iterations: {iterations}"
+            );
+        }
+
+        assert!(crate::cipher::pbkdf2_sha1(b"p", b"s", 0, 20).is_err());
+        assert!(crate::cipher::pbkdf2_sha1(b"p", b"s", 1, 0).is_err());
+
+        eprintln!("pbkdf2-sha1: three published cases answered byte for byte");
+    }
+
+    #[test]
+    fn the_counter_stream_is_its_own_inverse_and_walks_past_one_block() {
+        let key = [0x42u8; crate::cipher::KEY_BYTES];
+        let plain: Vec<u8> = (0..200u32).map(|one| (one % 251) as u8).collect();
+
+        let mut held = plain.clone();
+        crate::cipher::counter_stream(&key, 1, &mut held);
+        assert_ne!(held, plain, "the stream has to change what it covers");
+
+        crate::cipher::counter_stream(&key, 1, &mut held);
+        assert_eq!(held, plain, "running it again puts every byte back");
+
+        let mut first = plain.clone();
+        crate::cipher::counter_stream(&key, 1, &mut first);
+        let mut shifted = plain.clone();
+        crate::cipher::counter_stream(&key, 2, &mut shifted);
+        assert_ne!(first, shifted, "a different counter is a different stream");
+
+        let mut short = plain[..16].to_vec();
+        crate::cipher::counter_stream(&key, 1, &mut short);
+        assert_eq!(
+            short,
+            first[..16].to_vec(),
+            "the first block does not depend on what follows it"
+        );
+
+        eprintln!("aes-ctr: 200 bytes over thirteen blocks, reversible, counter-dependent");
+    }
+
     #[test]
     fn the_substitution_is_computed_and_answers_what_the_table_would() {
         let (sbox, inverse) = crate::cipher::table_substitution();

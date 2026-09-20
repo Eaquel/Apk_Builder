@@ -119,6 +119,9 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFileAttributes
+import java.nio.file.attribute.PosixFilePermission
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -624,6 +627,16 @@ object Builder {
     external fun nativeWriteFile(root: String, relative: String, contents: String): String
 
     external fun nativeGitCheckout(packPath: String, head: String, into: String): String
+
+    external fun nativeDigestFile(path: String): String
+
+    external fun nativePackArchive(
+        root: String,
+        names: String,
+        into: String,
+        format: String,
+        password: String,
+    ): String
 
     external fun nativeOpenArchive(archivePath: String, into: String): String
 
@@ -3292,6 +3305,10 @@ class BuilderActivity : Activity() {
 
         const val PAIRING_SERVICE = "_adb-tls-pairing._tcp."
 
+        const val TRASH_FOLDER = "Trash"
+
+        val PACK_FORMATS = listOf("zip", "tar")
+
         const val MOST_SHOTS = 4
 
         const val SHOT_LARGEST_MB = 5
@@ -5176,6 +5193,77 @@ class BuilderActivity : Activity() {
         val onPress: () -> Unit,
     )
 
+    private fun sheetCell(row: MenuChoice, shown: () -> AlertDialog?): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(13)
+            setPadding(gap(3), gap(2), gap(3), gap(2))
+            val live = row.picked != false
+            isClickable = live
+            isFocusable = live
+            alpha = if (live) 1f else 0.38f
+            contentDescription = row.named
+            readAs(Button::class.java.name)
+            if (live) {
+                pressable()
+                setOnClickListener {
+                    shown()?.dismiss()
+                    row.onPress()
+                }
+            }
+            addView(
+                View(context).apply {
+                    foreground = Mark(row.mark, row.tint ?: palette.foreground)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
+            )
+            addView(
+                TextView(context).apply {
+                    text = row.named
+                    setTextColor(row.tint ?: palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+        }
+
+    private fun actionSheet(titled: String, rows: List<MenuChoice>) {
+        var shown: AlertDialog? = null
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(2))
+        }
+        var at = 0
+        while (at < rows.size) {
+            val left = rows[at]
+            val right = rows.getOrNull(at + 1)
+            grid.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(
+                        sheetCell(left) { shown },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    if (right != null) {
+                        addView(
+                            sheetCell(right) { shown },
+                            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                        )
+                    } else {
+                        addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                    }
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+            at += 2
+        }
+        shown = dialogShell(titled, grid, emptyList())
+    }
+
     private fun anchoredMenu(under: View, rows: List<MenuChoice>) {
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6694,53 +6782,314 @@ class BuilderActivity : Activity() {
 
     private fun showActions(root: String, folder: String, entry: FileEntry, other: String?) {
         val name = entry.path.substringAfterLast('/')
-        val actions = mutableListOf<Pair<String, () -> Unit>>()
-
-        actions.add(getString(R.string.omni_action_open) to { openEntry(root, entry) })
-        if (other != null) {
-            actions.add(
-                getString(R.string.omni_files_copy_across) to {
-                    act(
-                        Builder.nativeCopyPath(root, entry.path, joined(other, name)),
-                        "copied",
-                    )
+        val here = File(root, entry.path)
+        val rows = listOf(
+            MenuChoice(
+                Mark.Shape.COPY,
+                getString(R.string.omni_files_copy_across),
+                picked = other != null,
+            ) {
+                if (other != null) {
+                    act(Builder.nativeCopyPath(root, entry.path, joined(other, name)), "copied")
                 }
-            )
-            actions.add(
-                getString(R.string.omni_files_move_across) to {
-                    act(
-                        Builder.nativeRenamePath(root, entry.path, joined(other, name)),
-                        "moved",
-                    )
+            },
+            MenuChoice(
+                Mark.Shape.EXPORT,
+                getString(R.string.omni_files_move_across),
+                picked = other != null,
+            ) {
+                if (other != null) {
+                    act(Builder.nativeRenamePath(root, entry.path, joined(other, name)), "moved")
                 }
-            )
-        }
-        actions.add(
-            getString(R.string.omni_action_rename) to {
+            },
+            MenuChoice(Mark.Shape.TRASH, getString(R.string.omni_action_delete), tint = palette.error) {
+                act(Builder.nativeRemovePath(root, entry.path, projectTrash(root)), "removed")
+            },
+            MenuChoice(Mark.Shape.PEN, getString(R.string.omni_action_rename)) {
                 askForName(getString(R.string.omni_action_rename), name) { chosen ->
-                    act(
-                        Builder.nativeRenamePath(root, entry.path, joined(folder, chosen)),
-                        "moved",
-                    )
+                    act(Builder.nativeRenamePath(root, entry.path, joined(folder, chosen)), "moved")
                 }
-            }
+            },
+            MenuChoice(Mark.Shape.GEAR, getString(R.string.omni_action_tools)) {
+                toolsFor(root, entry)
+            },
+            MenuChoice(Mark.Shape.ARCHIVE, getString(R.string.omni_action_compress)) {
+                askToCompress(root, folder, entry)
+            },
+            MenuChoice(Mark.Shape.INFO_FILL, getString(R.string.omni_action_properties)) {
+                showProperties(here, entry)
+            },
+            MenuChoice(
+                Mark.Shape.SHARE,
+                getString(R.string.omni_action_share),
+                picked = !entry.folder,
+            ) {
+                if (!entry.folder) {
+                    shareOutside(here)
+                }
+            },
         )
-        if (!entry.folder) {
-            actions.add(
-                getString(R.string.omni_action_share) to {
-                    shareOutside(File(root, entry.path))
-                }
+        actionSheet(if (entry.folder) "$name/" else name, rows)
+    }
+
+    private fun projectTrash(root: String): String =
+        File(root, TRASH_FOLDER).absolutePath
+
+    private fun permissionsOf(file: File): String {
+        val held = runCatching {
+            Files.readAttributes(file.toPath(), PosixFileAttributes::class.java)
+        }.getOrNull() ?: return ""
+        val order = listOf(
+            PosixFilePermission.OWNER_READ to "r",
+            PosixFilePermission.OWNER_WRITE to "w",
+            PosixFilePermission.OWNER_EXECUTE to "x",
+            PosixFilePermission.GROUP_READ to "r",
+            PosixFilePermission.GROUP_WRITE to "w",
+            PosixFilePermission.GROUP_EXECUTE to "x",
+            PosixFilePermission.OTHERS_READ to "r",
+            PosixFilePermission.OTHERS_WRITE to "w",
+            PosixFilePermission.OTHERS_EXECUTE to "x",
+        )
+        val drawn = order.joinToString("") { (one, letter) ->
+            if (held.permissions().contains(one)) letter else "-"
+        }
+        var octal = 0
+        order.forEachIndexed { at, (one, _) ->
+            if (held.permissions().contains(one)) {
+                octal = octal or (1 shl (8 - at))
+            }
+        }
+        val head = if (file.isDirectory) "d" else "-"
+        return head + drawn + "(" + Integer.toOctalString(octal).padStart(3, '0') + ")"
+    }
+
+    private fun ownerOf(file: File): Pair<String, String> {
+        val held = runCatching {
+            Files.readAttributes(file.toPath(), PosixFileAttributes::class.java)
+        }.getOrNull() ?: return "" to ""
+        val owner = runCatching { held.owner().name }.getOrDefault("")
+        val group = runCatching { held.group().name }.getOrDefault("")
+        return owner to group
+    }
+
+    private fun weighed(file: File): Long =
+        if (file.isDirectory) {
+            file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        } else {
+            file.length()
+        }
+
+    private fun showProperties(here: File, entry: FileEntry) {
+        val facts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(2))
+        }
+        val carried = weighed(here)
+        val (owner, group) = ownerOf(here)
+        val rows = listOf(
+            getString(R.string.omni_property_name) to here.name,
+            getString(R.string.omni_property_parent) to (here.parent ?: ""),
+            getString(R.string.omni_property_kind) to getString(
+                if (entry.folder) R.string.omni_files_folder else R.string.omni_files_file
+            ),
+            getString(R.string.omni_property_size) to
+                size(carried) + "  (" + carried + ")",
+            getString(R.string.omni_property_changed) to
+                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(here.lastModified())),
+            getString(R.string.omni_property_rights) to permissionsOf(here),
+            getString(R.string.omni_property_owner) to owner,
+            getString(R.string.omni_property_group) to group,
+        )
+        rows.forEach { (named, said) ->
+            if (said.isEmpty()) {
+                return@forEach
+            }
+            facts.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, gap(1), 0, gap(1))
+                    addView(
+                        TextView(context).apply {
+                            text = named
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        },
+                        LinearLayout.LayoutParams(gap(28), WRAP_CONTENT),
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = said
+                            setTextColor(palette.foreground)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
             )
         }
-        actions.add(
-            getString(R.string.omni_action_delete) to {
-                act(Builder.nativeRemovePath(root, entry.path, trashFolder()), "removed")
-            }
-        )
-
-        pickOne(if (entry.folder) "$name/" else name, actions.map { it.first }) { which ->
-            actions[which].second()
+        val summed = TextView(this).apply {
+            setTextColor(palette.marker)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(0, gap(2), 0, 0)
         }
+        facts.addView(summed, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        dialogShell(
+            getString(R.string.omni_action_properties),
+            facts,
+            listOf(
+                getString(R.string.omni_property_sum) to { _: AlertDialog ->
+                    if (here.isFile) {
+                        summed.text = getString(R.string.omni_property_summing)
+                        working({ Builder.nativeDigestFile(here.absolutePath) }) { answer ->
+                            val held = runCatching { JSONObject(answer) }.getOrNull()
+                            summed.text = if (held?.optBoolean("summed", false) == true) {
+                                "SHA-256  " + held.optString("sha256")
+                            } else {
+                                getString(R.string.omni_refused)
+                            }
+                        }
+                    }
+                },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog -> it.dismiss() },
+            ),
+        )
+    }
+
+    private fun askToCompress(root: String, folder: String, entry: FileEntry) {
+        val name = entry.path.substringAfterLast('/')
+        val stem = if (entry.folder) name else name.substringBeforeLast('.', name)
+        var format = PACK_FORMATS.first()
+
+        val named = styledField(stem, getString(R.string.omni_pack_name))
+        val ending = TextView(this).apply {
+            text = "." + format
+            setTextColor(palette.muted)
+            typeface = Type.data
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        }
+        val secret = styledField("", getString(R.string.omni_pack_password), secret = true)
+        val shaped = TextView(this).apply {
+            text = format
+            setTextColor(palette.accent)
+            typeface = Type.strong
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            minimumHeight = gap(10)
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.omni_pack_format)
+            readAs(Button::class.java.name)
+            setPadding(gap(2), gap(1), gap(2), gap(1))
+            pressable()
+        }
+        shaped.setOnClickListener {
+            pickOne(getString(R.string.omni_pack_format), PACK_FORMATS) { which ->
+                format = PACK_FORMATS[which]
+                shaped.text = format
+                ending.text = "." + format
+                secret.isEnabled = format == "zip"
+                secret.alpha = if (secret.isEnabled) 1f else 0.38f
+            }
+        }
+
+        dialogShell(
+            getString(R.string.omni_action_compress),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(label(getString(R.string.omni_pack_name)))
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(named, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                        addView(
+                            ending,
+                            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                                marginStart = gap(2)
+                            },
+                        )
+                    },
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+                addView(label(getString(R.string.omni_pack_format)))
+                addView(shaped, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(label(getString(R.string.omni_pack_password)))
+                addView(secret, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(quiet(getString(R.string.omni_pack_password_note)))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    val chosen = named.text.toString().trim()
+                    results.removeAllViews()
+                    if (chosen.isEmpty()) {
+                        results.addView(
+                            notice(getString(R.string.omni_files_needs_name), palette.warning)
+                        )
+                    } else {
+                        it.dismiss()
+                        packInto(root, folder, entry, chosen + "." + format, format, secret)
+                    }
+                },
+            ),
+        )
+        named.requestFocus()
+    }
+
+    private fun packInto(
+        root: String,
+        folder: String,
+        entry: FileEntry,
+        named: String,
+        format: String,
+        secret: EditText,
+    ) {
+        val held = readSecret(secret)
+        val password = String(held)
+        held.fill(' ')
+        secret.text?.clear()
+        val into = File(File(root, folder), named).absolutePath
+        working({
+            Builder.nativePackArchive(root, entry.path, into, format, password)
+        }) { answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@working
+            if (!document.optBoolean("packed", false)) {
+                showRefusal(Refusal.parse(document), results)
+                return@working
+            }
+            flash(
+                getString(
+                    R.string.omni_pack_done,
+                    document.optInt("files"),
+                    size(document.optLong("written")),
+                ),
+                palette.ok,
+                Mark.Shape.ARCHIVE,
+            )
+            render(false)
+        }
+    }
+
+    private fun toolsFor(root: String, entry: FileEntry) {
+        val here = File(root, entry.path)
+        val rows = mutableListOf<MenuChoice>()
+        if (!entry.folder) {
+            rows += MenuChoice(Mark.Shape.CODE, getString(R.string.omni_action_open_text)) {
+                editorText = ""
+                go(Screen.Editor(root, entry.path))
+            }
+        }
+        rows += MenuChoice(Mark.Shape.LINK, getString(R.string.omni_action_copy_path)) {
+            copyOut(here.absolutePath, entry.path.substringAfterLast('/'))
+        }
+        rows += MenuChoice(Mark.Shape.PAGE_ADD, getString(R.string.omni_action_create)) {
+            askToCreate(root, if (entry.folder) entry.path else entry.path.substringBeforeLast('/', ""))
+        }
+        actionSheet(getString(R.string.omni_action_tools), rows)
     }
 
     private fun askForSecret(title: String, onChosen: (CharArray) -> Unit) {
