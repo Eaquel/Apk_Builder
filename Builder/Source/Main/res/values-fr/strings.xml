@@ -395,6 +395,16 @@
     <string name="omni_talk_key">Clé de l\'assistant</string>
     <string name="omni_talk_key_gone">La clé a disparu de cet appareil.</string>
     <string name="omni_talk_key_note">La clé est scellée à cet appareil et n\'est jamais notée en clair.</string>
+    <string name="omni_talk_providers">Fournisseurs</string>
+    <string name="omni_talk_providers_note">Toucher celui sans clé la demande. Le maintenir change celle qu\'il a déjà.</string>
+    <string name="omni_talk_free">palier gratuit</string>
+    <string name="omni_talk_resting">repose %1$d min</string>
+    <string name="omni_talk_instead">C\'est %1$s qui a répondu.</string>
+    <string name="omni_talk_keyed">%1$d sur %2$d ont une clé</string>
+    <string name="omni_talk_key_where">Les clés viennent de %1$s.</string>
+    <string name="omni_talk_models_fetch">Demander à ce fournisseur ce qu\'il exécute</string>
+    <string name="omni_talk_models_none">Ce fournisseur n\'a rien nommé.</string>
+    <string name="omni_talk_models_got">%1$d modèles nommés</string>
     <string name="omni_talk_key_set">La clé est définie.</string>
     <string name="omni_talk_left">Reste</string>
     <string name="omni_talk_model">Modèle</string>

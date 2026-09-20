@@ -395,6 +395,16 @@
     <string name="omni_talk_key">Yardımcı anahtarı</string>
     <string name="omni_talk_key_gone">Anahtar bu cihazdan silindi.</string>
     <string name="omni_talk_key_note">Anahtar bu cihaza mühürlenir ve hiçbir yere açıkça yazılmaz.</string>
+    <string name="omni_talk_providers">Sağlayıcılar</string>
+    <string name="omni_talk_providers_note">Anahtarı olmayana basmak anahtarı sorar. Basılı tutmak var olanı değiştirir.</string>
+    <string name="omni_talk_free">ücretsiz katman</string>
+    <string name="omni_talk_resting">%1$d dk dinleniyor</string>
+    <string name="omni_talk_instead">Yanıtı %1$s verdi.</string>
+    <string name="omni_talk_keyed">%2$d sağlayıcıdan %1$d tanesinde anahtar var</string>
+    <string name="omni_talk_key_where">Anahtarlar %1$s adresinden alınır.</string>
+    <string name="omni_talk_models_fetch">Bu sağlayıcıya neler çalıştırdığını sor</string>
+    <string name="omni_talk_models_none">Bu sağlayıcı hiçbir şey saymadı.</string>
+    <string name="omni_talk_models_got">%1$d model sayıldı</string>
     <string name="omni_talk_key_set">Anahtar girildi.</string>
     <string name="omni_talk_left">Kalan</string>
     <string name="omni_talk_model">Model</string>

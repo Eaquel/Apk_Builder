@@ -1149,6 +1149,10 @@ object Preferences {
     private const val FEEDBACK_DRAFT = "feedback_draft"
     private const val FEEDBACK_SENT = "feedback_sent"
     private const val ASSISTANT_KEY = "assistant_key"
+    private const val ASSISTANT_VENDOR = "assistant_vendor"
+    private const val VENDOR_REST = "vendor_rest"
+    private const val VENDOR_FAULTS = "vendor_faults"
+    private const val VENDOR_MODELS = "vendor_models"
     private const val ASSISTANT_MODEL = "assistant_model"
     private const val ASSISTANT_EFFORT = "assistant_effort"
 
@@ -1175,19 +1179,61 @@ object Preferences {
 
     fun language(context: Context): String = store(context).getString(LANGUAGE, "").orEmpty()
 
-    fun assistantKey(context: Context): String =
-        store(context).getString(ASSISTANT_KEY, "").orEmpty()
+    fun vendorKey(context: Context, vendor: String): String =
+        store(context).getString(ASSISTANT_KEY + "_" + vendor, "").orEmpty()
 
-    fun setAssistantKey(context: Context, sealed: String) {
-        store(context).edit().putString(ASSISTANT_KEY, sealed).apply()
+    fun setVendorKey(context: Context, vendor: String, sealed: String) {
+        store(context).edit().putString(ASSISTANT_KEY + "_" + vendor, sealed).apply()
     }
 
-    fun assistantModel(context: Context): String =
-        store(context).getString(ASSISTANT_MODEL, "").orEmpty()
-            .ifEmpty { Brain.MODELS.first().id }
+    fun forgetVendorKey(context: Context, vendor: String) {
+        store(context).edit().remove(ASSISTANT_KEY + "_" + vendor).apply()
+    }
+
+    fun assistantVendor(context: Context): String =
+        store(context).getString(ASSISTANT_VENDOR, "").orEmpty()
+            .ifEmpty { Brain.VENDORS.first().id }
+
+    fun setAssistantVendor(context: Context, id: String) {
+        store(context).edit().putString(ASSISTANT_VENDOR, id).apply()
+    }
+
+    fun assistantModel(context: Context): String = modelFor(context, assistantVendor(context))
+
+    fun modelFor(context: Context, vendor: String): String {
+        val held = Brain.vendorOf(vendor)
+        return store(context).getString(ASSISTANT_MODEL + "_" + held.id, "").orEmpty()
+            .ifEmpty { held.models.first().id }
+    }
 
     fun setAssistantModel(context: Context, id: String) {
-        store(context).edit().putString(ASSISTANT_MODEL, id).apply()
+        val vendor = assistantVendor(context)
+        store(context).edit().putString(ASSISTANT_MODEL + "_" + vendor, id).apply()
+    }
+
+    fun restingUntil(context: Context, vendor: String): Long =
+        store(context).getLong(VENDOR_REST + "_" + vendor, 0L)
+
+    fun setRestingUntil(context: Context, vendor: String, at: Long) {
+        store(context).edit().putLong(VENDOR_REST + "_" + vendor, at).apply()
+    }
+
+    fun faults(context: Context, vendor: String): Int =
+        store(context).getInt(VENDOR_FAULTS + "_" + vendor, 0)
+
+    fun setFaults(context: Context, vendor: String, many: Int) {
+        store(context).edit().putInt(VENDOR_FAULTS + "_" + vendor, many).apply()
+    }
+
+    fun fetchedModels(context: Context, vendor: String): List<String> =
+        store(context).getString(VENDOR_MODELS + "_" + vendor, "").orEmpty()
+            .split('\n')
+            .filter { it.isNotBlank() }
+
+    fun setFetchedModels(context: Context, vendor: String, named: List<String>) {
+        store(context).edit()
+            .putString(VENDOR_MODELS + "_" + vendor, named.joinToString("\n"))
+            .apply()
     }
 
     fun assistantEffort(context: Context): String =
@@ -6780,18 +6826,19 @@ class BuilderActivity : Activity() {
         editor.requestFocus()
     }
 
-    private fun askForTheAssistantKey() {
+    private fun askForTheAssistantKey(vendor: Brain.Vendor) {
         val editor = styledField("", getString(R.string.omni_talk_key)).apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             typeface = Type.data
         }
         dialogShell(
-            getString(R.string.omni_talk_key),
+            vendor.shown,
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, gap(1), 0, gap(2))
                 addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(quiet(getString(R.string.omni_talk_key_where, vendor.where)))
                 addView(quiet(getString(R.string.omni_talk_key_note)))
             },
             listOf(
@@ -6812,7 +6859,9 @@ class BuilderActivity : Activity() {
                                 notice(getString(R.string.omni_device_refused), palette.error)
                             )
                         } else {
-                            Preferences.setAssistantKey(this, locked)
+                            Preferences.setVendorKey(this, vendor.id, locked)
+                            Preferences.setFaults(this, vendor.id, 0)
+                            Preferences.setRestingUntil(this, vendor.id, 0L)
                             results.addView(
                                 notice(getString(R.string.omni_talk_key_set), palette.ok)
                             )
@@ -6824,6 +6873,108 @@ class BuilderActivity : Activity() {
             ),
         )
         editor.requestFocus()
+    }
+
+    private fun vendorRow(vendor: Brain.Vendor, onPicked: () -> Unit): View {
+        val here = Preferences.assistantVendor(this)
+        val keyed = vendor.keyed(this)
+        val resting = Preferences.restingUntil(this, vendor.id) - System.currentTimeMillis()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = gap(ROW_UNITS)
+            setPadding(gap(4), gap(2), gap(4), gap(2))
+            isClickable = true
+            isFocusable = true
+            contentDescription = vendor.shown
+            readAs(Button::class.java.name)
+            pressable(onHeld = { askForTheAssistantKey(vendor) })
+            setOnClickListener {
+                if (keyed) {
+                    Preferences.setAssistantVendor(this@BuilderActivity, vendor.id)
+                    onPicked()
+                } else {
+                    askForTheAssistantKey(vendor)
+                }
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = vendor.shown
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = buildString {
+                                append(
+                                    if (keyed) {
+                                        getString(R.string.omni_talk_key_set)
+                                    } else {
+                                        getString(R.string.omni_talk_no_key)
+                                    }
+                                )
+                                if (vendor.free) {
+                                    append("  \u00b7  ").append(getString(R.string.omni_talk_free))
+                                }
+                                if (resting > 0L) {
+                                    append("  \u00b7  ").append(
+                                        getString(
+                                            R.string.omni_talk_resting,
+                                            ((resting + 59_999L) / 60_000L).toInt(),
+                                        )
+                                    )
+                                }
+                            }
+                            setTextColor(
+                                when {
+                                    resting > 0L -> palette.warning
+                                    keyed -> palette.ok
+                                    else -> palette.muted
+                                }
+                            )
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            maxLines = 1
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply { background = radioMark(vendor.id == here && keyed) },
+                LinearLayout.LayoutParams(gap(5), gap(5)),
+            )
+        }
+    }
+
+    private fun chooseTheVendor() {
+        var shown: AlertDialog? = null
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        Brain.VENDORS.forEachIndexed { at, one ->
+            if (at > 0) {
+                list.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+            }
+            list.addView(
+                vendorRow(one) {
+                    shown?.dismiss()
+                    render(false)
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        shown = dialogShell(
+            getString(R.string.omni_talk_providers),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(quiet(getString(R.string.omni_talk_providers_note)))
+                addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+        )
     }
 
     private fun askForName(title: String, initial: String, onChosen: (String) -> Unit) {
@@ -8600,6 +8751,9 @@ class BuilderActivity : Activity() {
                 MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_talk_switch)) {
                     chooseTheModel()
                 },
+                MenuChoice(Mark.Shape.SHIELD, getString(R.string.omni_talk_providers)) {
+                    chooseTheVendor()
+                },
                 MenuChoice(
                     Mark.Shape.HELP,
                     getString(R.string.omni_help_title),
@@ -8834,9 +8988,18 @@ class BuilderActivity : Activity() {
     }
 
     private fun assistantMeter(): View {
-        val model = Brain.modelOf(Preferences.assistantModel(this))
+        val vendor = Brain.vendorOf(Preferences.assistantVendor(this))
+        val model = Brain.modelOf(vendor, Preferences.assistantModel(this))
+        val used = if (talkWindowUsed > 0L) {
+            talkWindowUsed
+        } else {
+            Brain.roughly(
+                talkHeld.drop(1).map { Brain.Turn(it.first, it.second) },
+                assistantSystem(talkFolder()),
+            )
+        }
         val filled = if (model.window > 0L) {
-            (talkWindowUsed.toFloat() / model.window.toFloat()).coerceIn(0f, 1f)
+            (used.toFloat() / model.window.toFloat()).coerceIn(0f, 1f)
         } else {
             0f
         }
@@ -8852,7 +9015,7 @@ class BuilderActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     addView(
                         TextView(context).apply {
-                            text = model.shown
+                            text = vendor.shown + "  \u00b7  " + model.shown
                             setTextColor(palette.foreground)
                             typeface = Type.strong
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -8861,7 +9024,8 @@ class BuilderActivity : Activity() {
                             contentDescription = getString(R.string.omni_talk_model)
                             readAs(Button::class.java.name)
                             setPadding(gap(2), gap(1), gap(2), gap(1))
-                            pressable()
+                            maxLines = 1
+                            pressable(onHeld = { chooseTheVendor() })
                             setOnClickListener { chooseTheModel() }
                         },
                         LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
@@ -8871,7 +9035,7 @@ class BuilderActivity : Activity() {
                             text = buildString {
                                 append(getString(R.string.omni_talk_window))
                                 append("  ")
-                                append(countable(talkWindowUsed))
+                                append(countable(used))
                                 append(" / ")
                                 append(countable(model.window))
                                 append("  ")
@@ -8937,9 +9101,13 @@ class BuilderActivity : Activity() {
 
     private fun chooseTheModel() {
         var shown: AlertDialog? = null
+        val vendor = Brain.vendorOf(Preferences.assistantVendor(this))
         val here = Preferences.assistantModel(this)
+        val fetched = Preferences.fetchedModels(this, vendor.id)
+        val named = (vendor.models.map { it.id } + fetched).distinct()
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        Brain.MODELS.forEachIndexed { at, one ->
+        named.forEachIndexed { at, id ->
+            val one = Brain.modelOf(vendor, id)
             if (at > 0) {
                 list.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
             }
@@ -8989,13 +9157,58 @@ class BuilderActivity : Activity() {
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
             )
         }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(
+                subtle(vendor.shown, palette.accent) {
+                    shown?.dismiss()
+                    chooseTheVendor()
+                }
+            )
+            addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            if (!vendor.anthropic) {
+                addView(
+                    subtle(getString(R.string.omni_talk_models_fetch), palette.accent) {
+                        shown?.dismiss()
+                        fetchTheModels(vendor)
+                    }
+                )
+            }
+        }
         shown = dialogShell(
             getString(R.string.omni_talk_model),
-            list,
+            body,
             listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
         )
-        shown.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        shown.show()
+    }
+
+    private fun fetchTheModels(vendor: Brain.Vendor) {
+        results.removeAllViews()
+        val sealed = Preferences.vendorKey(this, vendor.id)
+        if (sealed.isEmpty()) {
+            askForTheAssistantKey(vendor)
+            return
+        }
+        working({
+            val opened = Vault.open(sealed) ?: return@working ""
+            val found = try {
+                Brain.listed(vendor, opened)
+            } finally {
+                opened.fill(' ')
+            }
+            found.joinToString("\n")
+        }) finished@{ answer ->
+            val found = answer.split('\n').filter { it.isNotBlank() }
+            if (found.isEmpty()) {
+                results.addView(notice(getString(R.string.omni_talk_models_none), palette.warning))
+                return@finished
+            }
+            Preferences.setFetchedModels(this, vendor.id, found)
+            results.addView(
+                notice(getString(R.string.omni_talk_models_got, found.size), palette.ok)
+            )
+            chooseTheModel()
+        }
     }
 
     private fun countable(value: Long): String = when {
@@ -9004,17 +9217,57 @@ class BuilderActivity : Activity() {
         else -> value.toString()
     }
 
+    private fun vendorsToTry(): List<Brain.Vendor> {
+        val now = System.currentTimeMillis()
+        val here = Brain.vendorOf(Preferences.assistantVendor(this))
+        val after = Brain.VENDORS.filter {
+            it.id != here.id &&
+                it.keyed(this) &&
+                Preferences.restingUntil(this, it.id) <= now
+        }
+        return listOf(here) + after
+    }
+
+    private fun vendorFaulted(vendor: Brain.Vendor) {
+        val many = Preferences.faults(this, vendor.id) + 1
+        if (many >= Brain.FAULTS_BEFORE_REST) {
+            Preferences.setFaults(this, vendor.id, 0)
+            Preferences.setRestingUntil(
+                this,
+                vendor.id,
+                System.currentTimeMillis() + Brain.REST_MILLIS,
+            )
+        } else {
+            Preferences.setFaults(this, vendor.id, many)
+        }
+    }
+
+    private fun vendorSteady(vendor: Brain.Vendor) {
+        Preferences.setFaults(this, vendor.id, 0)
+        Preferences.setRestingUntil(this, vendor.id, 0L)
+    }
+
+    private fun worthAnotherVendor(why: Throwable): Boolean {
+        val refused = why as? Brain.Refused ?: return false
+        return refused.said == R.string.omni_talk_spent ||
+            refused.said == R.string.omni_talk_busy ||
+            refused.said == R.string.omni_talk_server ||
+            refused.said == R.string.omni_talk_unreachable ||
+            refused.said == R.string.omni_talk_no_model
+    }
+
     private fun sendToTheAssistant() {
         val said = talkDraft.trim()
         if (said.isEmpty() || talkAsking) {
             return
         }
-        val key = Preferences.assistantKey(this)
-        if (key.isEmpty()) {
+        val tries = vendorsToTry().filter { it.keyed(this) }
+        if (tries.isEmpty()) {
             talkHeld.add(true to said)
             talkHeld.add(false to getString(R.string.omni_talk_no_key))
             talkDraft = ""
             render(false)
+            chooseTheVendor()
             return
         }
         talkHeld.add(true to said)
@@ -9036,26 +9289,61 @@ class BuilderActivity : Activity() {
         while (turns.isNotEmpty() && !turns.first().mine) {
             turns.removeAt(0)
         }
-        val model = Preferences.assistantModel(this)
         val effort = Preferences.assistantEffort(this)
         val where = talkFolder()
+        val chosen = tries.first().id
+        val sealed = tries.associate { it.id to Preferences.vendorKey(this, it.id) }
+        val models = tries.associate { it.id to Preferences.modelFor(this, it.id) }
 
         Thread {
-            val answer = runCatching {
-                val system = assistantSystem(where)
-                val opened = Vault.open(key) ?: throw Brain.Refused(R.string.omni_talk_bad_key)
-                try {
-                    Brain.stream(opened, turns, model, effort, system, talkStopping) { part ->
-                        runOnUiThread {
-                            if (isFinishing || isDestroyed) {
-                                return@runOnUiThread
+            val system = assistantSystem(where)
+            var held: Brain.Answer? = null
+            var answered: Brain.Vendor? = null
+            var why: Throwable? = null
+            for (vendor in tries) {
+                val locked = sealed[vendor.id].orEmpty()
+                if (locked.isEmpty()) {
+                    continue
+                }
+                talkPartial = ""
+                val outcome = runCatching {
+                    val opened = Vault.open(locked)
+                        ?: throw Brain.Refused(R.string.omni_talk_bad_key)
+                    try {
+                        Brain.stream(
+                            vendor,
+                            opened,
+                            turns,
+                            models[vendor.id].orEmpty(),
+                            effort,
+                            system,
+                            talkStopping,
+                        ) { part ->
+                            runOnUiThread {
+                                if (isFinishing || isDestroyed) {
+                                    return@runOnUiThread
+                                }
+                                talkPartial += part
+                                talkLive?.text = talkPartial
                             }
-                            talkPartial += part
-                            talkLive?.text = talkPartial
                         }
+                    } finally {
+                        opened.fill(' ')
                     }
-                } finally {
-                    opened.fill(' ')
+                }
+                if (outcome.isSuccess) {
+                    held = outcome.getOrNull()
+                    answered = vendor
+                    runOnUiThread { vendorSteady(vendor) }
+                    break
+                }
+                why = outcome.exceptionOrNull()
+                runOnUiThread { vendorFaulted(vendor) }
+                if (talkStopping.get() || talkPartial.isNotEmpty()) {
+                    break
+                }
+                if (why == null || !worthAnotherVendor(why)) {
+                    break
                 }
             }
             runOnUiThread {
@@ -9064,7 +9352,12 @@ class BuilderActivity : Activity() {
                 if (isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
-                answer.fold({ held ->
+                if (held != null) {
+                    if (answered != null && answered.id != chosen) {
+                        talkHeld.add(
+                            false to getString(R.string.omni_talk_instead, answered.shown)
+                        )
+                    }
                     val spoken = held.said.ifEmpty { talkPartial }
                     talkHeld.add(
                         false to spoken.ifEmpty { getString(R.string.omni_refused) }
@@ -9080,7 +9373,7 @@ class BuilderActivity : Activity() {
                         talkLeftTokens = held.limits.tokensLeft
                         talkResetsAt = held.limits.resetsAt
                     }
-                }) { why ->
+                } else {
                     if (talkPartial.isNotEmpty()) {
                         talkHeld.add(false to talkPartial)
                     }
@@ -9093,7 +9386,7 @@ class BuilderActivity : Activity() {
                             head + "  (" + refused.detail + ")"
                         }
                     } else {
-                        why.message ?: why.javaClass.simpleName
+                        why?.message ?: getString(R.string.omni_talk_refused)
                     }
                     talkHeld.add(false to text)
                 }
@@ -13994,37 +14287,52 @@ class BuilderActivity : Activity() {
 
         content.addView(heading(getString(R.string.omni_talk_key)))
         val brain = card()
-        val sealed = Preferences.assistantKey(this)
+        val thinking = Brain.vendorOf(Preferences.assistantVendor(this))
+        val keyed = Brain.VENDORS.count { it.keyed(this) }
         brain.addView(
             keyValue(
-                Brain.modelOf(Preferences.assistantModel(this)).shown,
-                if (sealed.isEmpty()) {
-                    getString(R.string.omni_talk_no_key)
-                } else {
-                    getString(R.string.omni_talk_key_set)
-                },
+                thinking.shown + "  \u00b7  " +
+                    Brain.modelOf(thinking, Preferences.assistantModel(this)).shown,
+                getString(R.string.omni_talk_keyed, keyed, Brain.VENDORS.size),
                 if (Vault.inHardware()) {
                     getString(R.string.omni_device_hardware)
                 } else {
                     getString(R.string.omni_device_software)
                 },
-                if (sealed.isEmpty()) palette.muted else palette.ok,
+                if (keyed == 0) palette.muted else palette.ok,
             )
         )
+        Brain.VENDORS.filter { it.keyed(this) }.forEach { one ->
+            brain.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+            brain.addView(
+                keyValue(
+                    one.shown,
+                    one.where,
+                    getString(R.string.omni_action_delete),
+                    palette.error,
+                ).apply {
+                    isClickable = true
+                    isFocusable = true
+                    readAs(Button::class.java.name)
+                    pressable()
+                    setOnClickListener {
+                        Preferences.forgetVendorKey(this@BuilderActivity, one.id)
+                        Preferences.setFetchedModels(this@BuilderActivity, one.id, emptyList())
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_talk_key_gone), palette.ok)
+                        )
+                        render(false)
+                    }
+                }
+            )
+        }
+        brain.addView(subtle(getString(R.string.omni_talk_providers), palette.accent) {
+            chooseTheVendor()
+        })
         brain.addView(subtle(getString(R.string.omni_talk_model), palette.accent) {
             chooseTheModel()
         })
-        brain.addView(subtle(getString(R.string.omni_action_change), palette.accent) {
-            askForTheAssistantKey()
-        })
-        if (sealed.isNotEmpty()) {
-            brain.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
-                Preferences.setAssistantKey(this, "")
-                results.removeAllViews()
-                results.addView(notice(getString(R.string.omni_talk_key_gone), palette.ok))
-                render(false)
-            })
-        }
         content.addView(brain)
         content.addView(quiet(getString(R.string.omni_talk_key_note)))
 
@@ -17758,9 +18066,7 @@ internal object DeviceKey {
 
 internal object Brain {
 
-    private const val HOST = "https://api.anthropic.com"
-
-    private const val DATED = "2023-06-01"
+    private const val ANTHROPIC_DATED = "2023-06-01"
 
     private const val OPEN_MILLIS = 20_000
 
@@ -17772,19 +18078,150 @@ internal object Brain {
 
     const val MOST_STREAMED = 64_000
 
+    const val REST_MILLIS = 120_000L
+
+    const val FAULTS_BEFORE_REST = 3
+
     class Model(
         val id: String,
         val shown: String,
         val window: Long,
     )
 
-    val MODELS: List<Model> = listOf(
+    class Vendor(
+        val id: String,
+        val shown: String,
+        val home: String,
+        val anthropic: Boolean,
+        val free: Boolean,
+        val where: String,
+        val models: List<Model>,
+    ) {
+        fun keyed(context: Context): Boolean =
+            Preferences.vendorKey(context, id).isNotEmpty()
+    }
+
+    private val CLAUDE = listOf(
         Model("claude-opus-5", "Opus 5", 1_000_000L),
         Model("claude-sonnet-5", "Sonnet 5", 1_000_000L),
+        Model("claude-fable-5-1", "Fable 5.1", 1_000_000L),
         Model("claude-haiku-4-5", "Haiku 4.5", 200_000L),
     )
 
-    fun modelOf(id: String): Model = MODELS.firstOrNull { it.id == id } ?: MODELS.first()
+    val VENDORS: List<Vendor> = listOf(
+        Vendor(
+            "anthropic", "Anthropic", "https://api.anthropic.com", true, false,
+            "console.anthropic.com", CLAUDE,
+        ),
+        Vendor(
+            "openai", "OpenAI", "https://api.openai.com/v1", false, false,
+            "platform.openai.com", listOf(
+                Model("gpt-5.2", "GPT-5.2", 400_000L),
+                Model("gpt-5.2-mini", "GPT-5.2 mini", 400_000L),
+                Model("gpt-5.1", "GPT-5.1", 400_000L),
+                Model("o4-mini", "o4 mini", 200_000L),
+            ),
+        ),
+        Vendor(
+            "google", "Google AI Studio",
+            "https://generativelanguage.googleapis.com/v1beta/openai", false, true,
+            "aistudio.google.com", listOf(
+                Model("gemini-3-pro", "Gemini 3 Pro", 1_000_000L),
+                Model("gemini-3-flash", "Gemini 3 Flash", 1_000_000L),
+                Model("gemini-2.5-flash", "Gemini 2.5 Flash", 1_000_000L),
+            ),
+        ),
+        Vendor(
+            "groq", "Groq", "https://api.groq.com/openai/v1", false, true,
+            "console.groq.com", listOf(
+                Model("llama-3.3-70b-versatile", "Llama 3.3 70B", 128_000L),
+                Model("qwen3-32b", "Qwen3 32B", 128_000L),
+                Model("openai/gpt-oss-120b", "GPT-OSS 120B", 128_000L),
+            ),
+        ),
+        Vendor(
+            "cerebras", "Cerebras", "https://api.cerebras.ai/v1", false, true,
+            "cloud.cerebras.ai", listOf(
+                Model("llama-3.3-70b", "Llama 3.3 70B", 128_000L),
+                Model("qwen-3-235b-a22b-instruct", "Qwen3 235B", 128_000L),
+            ),
+        ),
+        Vendor(
+            "openrouter", "OpenRouter", "https://openrouter.ai/api/v1", false, true,
+            "openrouter.ai", listOf(
+                Model("deepseek/deepseek-r1:free", "DeepSeek R1 free", 164_000L),
+                Model("qwen/qwen3-coder:free", "Qwen3 Coder free", 262_000L),
+                Model("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash free", 1_000_000L),
+            ),
+        ),
+        Vendor(
+            "opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", false, true,
+            "opencode.ai/zen", listOf(
+                Model("big-pickle", "Big Pickle", 256_000L),
+                Model("nemotron-3-ultra-free", "Nemotron 3 Ultra", 128_000L),
+                Model("muse-spark-1.3-contributor-free", "Muse Spark 1.3", 128_000L),
+                Model("mimo-v2.5-free", "MiMo v2.5", 128_000L),
+            ),
+        ),
+        Vendor(
+            "github", "GitHub Models", "https://models.github.ai/inference", false, true,
+            "github.com/marketplace/models", listOf(
+                Model("openai/gpt-4.1", "GPT-4.1", 1_000_000L),
+                Model("meta/Llama-4-Scout-17B-16E-Instruct", "Llama 4 Scout", 128_000L),
+            ),
+        ),
+        Vendor(
+            "nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", false, true,
+            "build.nvidia.com", listOf(
+                Model("nvidia/llama-3.3-nemotron-super-49b-v1", "Nemotron Super 49B", 128_000L),
+                Model("deepseek-ai/deepseek-r1", "DeepSeek R1", 164_000L),
+            ),
+        ),
+        Vendor(
+            "mistral", "Mistral", "https://api.mistral.ai/v1", false, true,
+            "console.mistral.ai", listOf(
+                Model("mistral-large-latest", "Mistral Large", 128_000L),
+                Model("codestral-latest", "Codestral", 256_000L),
+            ),
+        ),
+        Vendor(
+            "deepseek", "DeepSeek", "https://api.deepseek.com/v1", false, false,
+            "platform.deepseek.com", listOf(
+                Model("deepseek-chat", "DeepSeek Chat", 128_000L),
+                Model("deepseek-reasoner", "DeepSeek Reasoner", 128_000L),
+            ),
+        ),
+        Vendor(
+            "xai", "xAI", "https://api.x.ai/v1", false, false,
+            "console.x.ai", listOf(
+                Model("grok-4", "Grok 4", 256_000L),
+                Model("grok-code-fast-1", "Grok Code Fast", 256_000L),
+            ),
+        ),
+        Vendor(
+            "together", "Together", "https://api.together.xyz/v1", false, false,
+            "api.together.ai", listOf(
+                Model("Qwen/Qwen3-235B-A22B-Instruct-2507-tput", "Qwen3 235B", 256_000L),
+                Model("deepseek-ai/DeepSeek-V3", "DeepSeek V3", 128_000L),
+            ),
+        ),
+        Vendor(
+            "fireworks", "Fireworks", "https://api.fireworks.ai/inference/v1", false, false,
+            "fireworks.ai", listOf(
+                Model("accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+                    "Qwen3 Coder 480B", 256_000L),
+                Model("accounts/fireworks/models/deepseek-v3", "DeepSeek V3", 128_000L),
+            ),
+        ),
+    )
+
+    fun vendorOf(id: String): Vendor = VENDORS.firstOrNull { it.id == id } ?: VENDORS.first()
+
+    fun modelOf(vendor: Vendor, id: String): Model =
+        vendor.models.firstOrNull { it.id == id }
+            ?: Model(id.ifEmpty { vendor.models.first().id }, id.ifEmpty {
+                vendor.models.first().shown
+            }, vendor.models.first().window)
 
     class Turn(val mine: Boolean, val said: String)
 
@@ -17815,7 +18252,7 @@ internal object Brain {
 
     class Refused(val said: Int, val detail: String = "") : Exception()
 
-    private fun bodyOf(turns: List<Turn>, model: String, effort: String, system: String): String {
+    private fun messagesOf(turns: List<Turn>): JSONArray {
         val messages = JSONArray()
         turns.forEach { one ->
             messages.put(
@@ -17824,10 +18261,19 @@ internal object Brain {
                     .put("content", one.said)
             )
         }
+        return messages
+    }
+
+    private fun anthropicBody(
+        turns: List<Turn>,
+        model: String,
+        effort: String,
+        system: String,
+    ): JSONObject {
         val asked = JSONObject()
             .put("model", model)
             .put("max_tokens", MOST_TOKENS)
-            .put("messages", messages)
+            .put("messages", messagesOf(turns))
             .put("thinking", JSONObject().put("type", "adaptive"))
         if (effort.isNotEmpty()) {
             asked.put("output_config", JSONObject().put("effort", effort))
@@ -17846,8 +18292,45 @@ internal object Brain {
                 )
             )
         }
-        return asked.toString()
+        return asked
     }
+
+    private fun openBody(
+        turns: List<Turn>,
+        model: String,
+        effort: String,
+        system: String,
+    ): JSONObject {
+        val messages = JSONArray()
+        if (system.isNotEmpty()) {
+            messages.put(JSONObject().put("role", "system").put("content", system))
+        }
+        val held = messagesOf(turns)
+        for (at in 0 until held.length()) {
+            messages.put(held.get(at))
+        }
+        val asked = JSONObject()
+            .put("model", model)
+            .put("max_tokens", MOST_TOKENS)
+            .put("messages", messages)
+        if (effort.isNotEmpty()) {
+            asked.put("reasoning_effort", effort)
+        }
+        return asked
+    }
+
+    private fun bodyFor(
+        vendor: Vendor,
+        turns: List<Turn>,
+        model: String,
+        effort: String,
+        system: String,
+    ): JSONObject =
+        if (vendor.anthropic) {
+            anthropicBody(turns, model, effort, system)
+        } else {
+            openBody(turns, model, effort, system)
+        }
 
     private fun refusalFor(code: Int): Int = when (code) {
         401, 403 -> R.string.omni_talk_bad_key
@@ -17920,6 +18403,24 @@ internal object Brain {
         return out.toString()
     }
 
+    private fun openSpokenFrom(reply: JSONObject): String {
+        val first = reply.optJSONArray("choices")?.optJSONObject(0) ?: return ""
+        val message = first.optJSONObject("message") ?: return ""
+        val held = message.opt("content")
+        if (held is JSONArray) {
+            val out = StringBuilder()
+            for (at in 0 until held.length()) {
+                val one = held.optJSONObject(at) ?: continue
+                val part = one.optString("text")
+                if (part.isNotEmpty()) {
+                    out.append(part)
+                }
+            }
+            return out.toString()
+        }
+        return held?.toString().orEmpty()
+    }
+
     private fun spendFrom(reply: JSONObject): Spend {
         val used = reply.optJSONObject("usage") ?: JSONObject()
         return Spend(
@@ -17930,38 +18431,49 @@ internal object Brain {
         )
     }
 
-    fun ask(
-        key: CharArray,
-        turns: List<Turn>,
-        model: String,
-        effort: String,
-        system: String,
-    ): Answer {
-        if (key.isEmpty()) {
-            throw Refused(R.string.omni_talk_no_key)
-        }
-        val link = runCatching { URL("$HOST/v1/messages").openConnection() }
+    private fun openSpendFrom(reply: JSONObject): Spend {
+        val used = reply.optJSONObject("usage") ?: JSONObject()
+        val cached = used.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L
+        return Spend(
+            (used.optLong("prompt_tokens") - cached).coerceAtLeast(0L),
+            used.optLong("completion_tokens"),
+            0L,
+            cached,
+        )
+    }
+
+    private fun opened(vendor: Vendor, key: CharArray, path: String, listening: Boolean):
+        HttpURLConnection {
+        val link = runCatching { URL(vendor.home + path).openConnection() }
             .getOrNull() as? HttpURLConnection
             ?: throw Refused(R.string.omni_talk_unreachable)
-        link.requestMethod = "POST"
         link.connectTimeout = OPEN_MILLIS
         link.readTimeout = READ_MILLIS
-        link.doOutput = true
-        link.setRequestProperty("x-api-key", String(key))
-        link.setRequestProperty("anthropic-version", DATED)
         link.setRequestProperty("content-type", "application/json")
-        link.setRequestProperty("accept", "application/json")
+        link.setRequestProperty(
+            "accept",
+            if (listening) "text/event-stream" else "application/json",
+        )
         link.setRequestProperty("User-Agent", "omni-builder")
+        if (vendor.anthropic) {
+            link.setRequestProperty("x-api-key", String(key))
+            link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
+        } else {
+            link.setRequestProperty("authorization", "Bearer " + String(key))
+        }
+        return link
+    }
 
+    private fun sent(link: HttpURLConnection, body: String) {
         runCatching {
-            link.outputStream.use { out ->
-                out.write(bodyOf(turns, model, effort, system).toByteArray(Charsets.UTF_8))
-            }
+            link.outputStream.use { out -> out.write(body.toByteArray(Charsets.UTF_8)) }
         }.getOrElse {
             link.disconnect()
             throw Refused(R.string.omni_talk_unreachable)
         }
+    }
 
+    private fun answered(link: HttpURLConnection): Limits {
         val code = runCatching { link.responseCode }.getOrElse {
             link.disconnect()
             throw Refused(R.string.omni_talk_unreachable)
@@ -17971,23 +18483,141 @@ internal object Brain {
             val trouble = read(link.errorStream)
             link.disconnect()
             val detail = runCatching {
-                JSONObject(trouble).optJSONObject("error")?.optString("message").orEmpty()
+                val held = JSONObject(trouble)
+                held.optJSONObject("error")?.optString("message").orEmpty()
+                    .ifEmpty { held.optString("message") }
             }.getOrDefault("")
             throw Refused(refusalFor(code), detailFor(code, limits, detail))
         }
+        return limits
+    }
 
+    fun ask(
+        vendor: Vendor,
+        key: CharArray,
+        turns: List<Turn>,
+        model: String,
+        effort: String,
+        system: String,
+    ): Answer {
+        if (key.isEmpty()) {
+            throw Refused(R.string.omni_talk_no_key)
+        }
+        val link = opened(vendor, key, if (vendor.anthropic) "/v1/messages" else "/chat/completions", false)
+        link.requestMethod = "POST"
+        link.doOutput = true
+        sent(link, bodyFor(vendor, turns, model, effort, system).toString())
+        val limits = answered(link)
         val said = read(link.inputStream)
         link.disconnect()
         val reply = runCatching { JSONObject(said) }
             .getOrElse { throw Refused(R.string.omni_talk_refused) }
-        val stopped = reply.optString("stop_reason")
-        if (stopped == "refusal") {
-            throw Refused(R.string.omni_talk_declined)
+        if (vendor.anthropic) {
+            val stopped = reply.optString("stop_reason")
+            if (stopped == "refusal") {
+                throw Refused(R.string.omni_talk_declined)
+            }
+            return Answer(spokenFrom(reply), stopped, spendFrom(reply), limits)
         }
-        return Answer(spokenFrom(reply), stopped, spendFrom(reply), limits)
+        val stopped = reply.optJSONArray("choices")
+            ?.optJSONObject(0)
+            ?.optString("finish_reason")
+            .orEmpty()
+        return Answer(
+            openSpokenFrom(reply),
+            if (stopped == "length") "max_tokens" else stopped,
+            openSpendFrom(reply),
+            limits,
+        )
+    }
+
+    fun listed(vendor: Vendor, key: CharArray): List<String> {
+        if (key.isEmpty() || vendor.anthropic) {
+            return emptyList()
+        }
+        val link = runCatching { opened(vendor, key, "/models", false) }.getOrNull()
+            ?: return emptyList()
+        link.requestMethod = "GET"
+        return runCatching {
+            if (link.responseCode != 200) {
+                emptyList()
+            } else {
+                val held = JSONObject(read(link.inputStream)).optJSONArray("data")
+                val out = mutableListOf<String>()
+                for (at in 0 until (held?.length() ?: 0)) {
+                    val named = held?.optJSONObject(at)?.optString("id").orEmpty()
+                    if (named.isNotEmpty()) {
+                        out.add(named)
+                    }
+                }
+                out.sorted()
+            }
+        }.getOrDefault(emptyList()).also { link.disconnect() }
+    }
+
+    private fun anthropicStream(
+        event: JSONObject,
+        whole: StringBuilder,
+        onText: (String) -> Unit,
+        held: LongArray,
+    ): String {
+        when (event.optString("type")) {
+            "message_start" -> {
+                val used = event.optJSONObject("message")?.optJSONObject("usage")
+                held[0] = used?.optLong("input_tokens") ?: 0L
+                held[2] = used?.optLong("cache_creation_input_tokens") ?: 0L
+                held[3] = used?.optLong("cache_read_input_tokens") ?: 0L
+            }
+            "content_block_delta" -> {
+                val delta = event.optJSONObject("delta") ?: return ""
+                if (delta.optString("type") != "text_delta") {
+                    return ""
+                }
+                val part = delta.optString("text")
+                if (part.isNotEmpty()) {
+                    whole.append(part)
+                    onText(part)
+                }
+            }
+            "message_delta" -> {
+                held[1] = event.optJSONObject("usage")?.optLong("output_tokens") ?: held[1]
+                return event.optJSONObject("delta")?.optString("stop_reason").orEmpty()
+            }
+            "error" -> {
+                val why = event.optJSONObject("error")?.optString("message").orEmpty()
+                throw Refused(R.string.omni_talk_server, why)
+            }
+        }
+        return ""
+    }
+
+    private fun openStream(
+        event: JSONObject,
+        whole: StringBuilder,
+        onText: (String) -> Unit,
+        held: LongArray,
+    ): String {
+        event.optJSONObject("error")?.let { why ->
+            throw Refused(R.string.omni_talk_server, why.optString("message"))
+        }
+        event.optJSONObject("usage")?.let { used ->
+            val cached = used.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L
+            held[0] = (used.optLong("prompt_tokens") - cached).coerceAtLeast(0L)
+            held[1] = used.optLong("completion_tokens")
+            held[3] = cached
+        }
+        val first = event.optJSONArray("choices")?.optJSONObject(0) ?: return ""
+        val part = first.optJSONObject("delta")?.optString("content").orEmpty()
+        if (part.isNotEmpty()) {
+            whole.append(part)
+            onText(part)
+        }
+        val stopped = first.optString("finish_reason")
+        return if (stopped == "length") "max_tokens" else stopped
     }
 
     fun stream(
+        vendor: Vendor,
         key: CharArray,
         turns: List<Turn>,
         model: String,
@@ -17999,49 +18629,21 @@ internal object Brain {
         if (key.isEmpty()) {
             throw Refused(R.string.omni_talk_no_key)
         }
-        val link = runCatching { URL("$HOST/v1/messages").openConnection() }
-            .getOrNull() as? HttpURLConnection
-            ?: throw Refused(R.string.omni_talk_unreachable)
+        val link = opened(vendor, key, if (vendor.anthropic) "/v1/messages" else "/chat/completions", true)
         link.requestMethod = "POST"
-        link.connectTimeout = OPEN_MILLIS
-        link.readTimeout = READ_MILLIS
         link.doOutput = true
-        link.setRequestProperty("x-api-key", String(key))
-        link.setRequestProperty("anthropic-version", DATED)
-        link.setRequestProperty("content-type", "application/json")
-        link.setRequestProperty("accept", "text/event-stream")
-        link.setRequestProperty("User-Agent", "omni-builder")
-
-        val asked = JSONObject(bodyOf(turns, model, effort, system))
+        val asked = bodyFor(vendor, turns, model, effort, system)
         asked.put("max_tokens", MOST_STREAMED)
         asked.put("stream", true)
-        runCatching {
-            link.outputStream.use { out -> out.write(asked.toString().toByteArray(Charsets.UTF_8)) }
-        }.getOrElse {
-            link.disconnect()
-            throw Refused(R.string.omni_talk_unreachable)
+        if (!vendor.anthropic) {
+            asked.put("stream_options", JSONObject().put("include_usage", true))
         }
-
-        val code = runCatching { link.responseCode }.getOrElse {
-            link.disconnect()
-            throw Refused(R.string.omni_talk_unreachable)
-        }
-        val limits = limitsOf(link)
-        if (code != 200) {
-            val trouble = read(link.errorStream)
-            link.disconnect()
-            val detail = runCatching {
-                JSONObject(trouble).optJSONObject("error")?.optString("message").orEmpty()
-            }.getOrDefault("")
-            throw Refused(refusalFor(code), detailFor(code, limits, detail))
-        }
+        sent(link, asked.toString())
+        val limits = answered(link)
 
         val whole = StringBuilder()
+        val held = longArrayOf(0L, 0L, 0L, 0L)
         var stopped = ""
-        var input = 0L
-        var output = 0L
-        var written = 0L
-        var readBack = 0L
         runCatching {
             link.inputStream.bufferedReader(Charsets.UTF_8).use { from ->
                 while (true) {
@@ -18053,40 +18655,18 @@ internal object Brain {
                     if (!line.startsWith("data:")) {
                         continue
                     }
-                    val held = line.removePrefix("data:").trim()
-                    if (held.isEmpty() || held == "[DONE]") {
+                    val part = line.removePrefix("data:").trim()
+                    if (part.isEmpty() || part == "[DONE]") {
                         continue
                     }
-                    val event = runCatching { JSONObject(held) }.getOrNull() ?: continue
-                    when (event.optString("type")) {
-                        "message_start" -> {
-                            val used = event.optJSONObject("message")?.optJSONObject("usage")
-                            input = used?.optLong("input_tokens") ?: 0L
-                            written = used?.optLong("cache_creation_input_tokens") ?: 0L
-                            readBack = used?.optLong("cache_read_input_tokens") ?: 0L
-                        }
-                        "content_block_delta" -> {
-                            val delta = event.optJSONObject("delta") ?: continue
-                            if (delta.optString("type") != "text_delta") {
-                                continue
-                            }
-                            val part = delta.optString("text")
-                            if (part.isNotEmpty()) {
-                                whole.append(part)
-                                onText(part)
-                            }
-                        }
-                        "message_delta" -> {
-                            stopped = event.optJSONObject("delta")?.optString("stop_reason")
-                                .orEmpty()
-                                .ifEmpty { stopped }
-                            output = event.optJSONObject("usage")?.optLong("output_tokens")
-                                ?: output
-                        }
-                        "error" -> {
-                            val why = event.optJSONObject("error")?.optString("message").orEmpty()
-                            throw Refused(R.string.omni_talk_server, why)
-                        }
+                    val event = runCatching { JSONObject(part) }.getOrNull() ?: continue
+                    val said = if (vendor.anthropic) {
+                        anthropicStream(event, whole, onText, held)
+                    } else {
+                        openStream(event, whole, onText, held)
+                    }
+                    if (said.isNotEmpty()) {
+                        stopped = said
                     }
                 }
             }
@@ -18101,38 +18681,14 @@ internal object Brain {
         return Answer(
             whole.toString(),
             stopped,
-            Spend(input, output, written, readBack),
+            Spend(held[0], held[1], held[2], held[3]),
             limits,
         )
     }
 
-    fun count(key: CharArray, turns: List<Turn>, model: String, system: String): Long {
-        if (key.isEmpty()) {
-            return -1L
-        }
-        val link = runCatching { URL("$HOST/v1/messages/count_tokens").openConnection() }
-            .getOrNull() as? HttpURLConnection ?: return -1L
-        return runCatching {
-            link.requestMethod = "POST"
-            link.connectTimeout = OPEN_MILLIS
-            link.readTimeout = OPEN_MILLIS
-            link.doOutput = true
-            link.setRequestProperty("x-api-key", String(key))
-            link.setRequestProperty("anthropic-version", DATED)
-            link.setRequestProperty("content-type", "application/json")
-            link.setRequestProperty("User-Agent", "omni-builder")
-            val asked = JSONObject(bodyOf(turns, model, "", system))
-            asked.remove("max_tokens")
-            asked.remove("output_config")
-            link.outputStream.use { out ->
-                out.write(asked.toString().toByteArray(Charsets.UTF_8))
-            }
-            if (link.responseCode != 200) {
-                -1L
-            } else {
-                JSONObject(read(link.inputStream)).optLong("input_tokens", -1L)
-            }
-        }.getOrDefault(-1L).also { link.disconnect() }
+    fun roughly(turns: List<Turn>, system: String): Long {
+        val letters = turns.sumOf { it.said.length.toLong() } + system.length
+        return letters / 4L
     }
 }
 

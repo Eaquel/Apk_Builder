@@ -395,6 +395,16 @@
     <string name="omni_talk_key">Ключ помощника</string>
     <string name="omni_talk_key_gone">Ключ удалён с этого устройства.</string>
     <string name="omni_talk_key_note">Ключ запечатан к этому устройству и нигде не записан открыто.</string>
+    <string name="omni_talk_providers">Поставщики</string>
+    <string name="omni_talk_providers_note">Нажатие на того, у кого нет ключа, спросит его. Долгое нажатие меняет имеющийся.</string>
+    <string name="omni_talk_free">бесплатный уровень</string>
+    <string name="omni_talk_resting">отдыхает %1$d мин</string>
+    <string name="omni_talk_instead">Ответил %1$s.</string>
+    <string name="omni_talk_keyed">ключ есть у %1$d из %2$d</string>
+    <string name="omni_talk_key_where">Ключи берутся на %1$s.</string>
+    <string name="omni_talk_models_fetch">Спросить поставщика, что он запускает</string>
+    <string name="omni_talk_models_none">Этот поставщик ничего не назвал.</string>
+    <string name="omni_talk_models_got">названо моделей: %1$d</string>
     <string name="omni_talk_key_set">Ключ задан.</string>
     <string name="omni_talk_left">Осталось</string>
     <string name="omni_talk_model">Модель</string>

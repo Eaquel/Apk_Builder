@@ -395,6 +395,16 @@
     <string name="omni_talk_key">सहायक कुंजी</string>
     <string name="omni_talk_key_gone">कुंजी इस यंत्र से हट गई।</string>
     <string name="omni_talk_key_note">कुंजी इस यंत्र पर मुहरबंद रहती है और कभी खुले में नहीं लिखी जाती।</string>
+    <string name="omni_talk_providers">प्रदाता</string>
+    <string name="omni_talk_providers_note">बिना कुंजी वाले को छूने पर कुंजी माँगी जाती है। दबाए रखने पर मौजूदा बदल जाती है।</string>
+    <string name="omni_talk_free">मुफ़्त स्तर</string>
+    <string name="omni_talk_resting">%1$d मिनट विश्राम</string>
+    <string name="omni_talk_instead">उत्तर %1$s ने दिया।</string>
+    <string name="omni_talk_keyed">%2$d में से %1$d के पास कुंजी है</string>
+    <string name="omni_talk_key_where">कुंजियाँ %1$s से मिलती हैं।</string>
+    <string name="omni_talk_models_fetch">इस प्रदाता से पूछें कि वह क्या चलाता है</string>
+    <string name="omni_talk_models_none">इस प्रदाता ने कुछ नहीं बताया।</string>
+    <string name="omni_talk_models_got">%1$d मॉडल बताए गए</string>
     <string name="omni_talk_key_set">कुंजी तय हो गई।</string>
     <string name="omni_talk_left">शेष</string>
     <string name="omni_talk_model">मॉडल</string>

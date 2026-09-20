@@ -395,6 +395,16 @@
     <string name="omni_talk_key">Chave do assistente</string>
     <string name="omni_talk_key_gone">A chave saiu deste aparelho.</string>
     <string name="omni_talk_key_note">A chave é selada a este aparelho e nunca é escrita às claras.</string>
+    <string name="omni_talk_providers">Fornecedores</string>
+    <string name="omni_talk_providers_note">Tocar num sem chave pede-a. Manter premido muda a que já tem.</string>
+    <string name="omni_talk_free">nível gratuito</string>
+    <string name="omni_talk_resting">descansa %1$d min</string>
+    <string name="omni_talk_instead">Respondeu %1$s em vez dele.</string>
+    <string name="omni_talk_keyed">%1$d de %2$d têm chave</string>
+    <string name="omni_talk_key_where">As chaves vêm de %1$s.</string>
+    <string name="omni_talk_models_fetch">Perguntar a este fornecedor o que corre</string>
+    <string name="omni_talk_models_none">Este fornecedor não nomeou nada.</string>
+    <string name="omni_talk_models_got">%1$d modelos nomeados</string>
     <string name="omni_talk_key_set">A chave está definida.</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modelo</string>
