@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub girişi tamamlamadı.</string>
     <string name="omni_copilot_denied">Giriş reddedildi.</string>
     <string name="omni_copilot_no_seat">Bu hesabın Copilot aboneliği yok.</string>
+    <string name="omni_import_locked">Bu arşiv kilitli</string>
+    <string name="omni_import_locked_note">Kilitlendiği parolayı gir.</string>
+    <string name="omni_import_locked_again">Parola bu değildi. Bir daha dene.</string>
+    <string name="omni_import_gradle_left">Burada çalışmayan Gradle eklentileri</string>
+    <string name="omni_import_gradle_left_note">Gerisi aktarıldı. Bunları proje Gradle\'dan istemişti; onların ekleyeceği ne varsa burada değil.</string>
+    <string name="omni_libraries_missing">%1$d kitaplık yazılı ama burada değil</string>
+    <string name="omni_libraries_missing_note">Maven Central ve Google\'dan, onların da istediği her şeyle birlikte indirilebilir.</string>
+    <string name="omni_libraries_fetch">İndir</string>
+    <string name="omni_libraries_without">Onlarsız derle</string>
+    <string name="omni_libraries_fetching">Kitaplıklar indiriliyor</string>
+    <string name="omni_libraries_got">%1$d dosya indi</string>
     <string name="omni_talk_left">Kalan</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">Anahtar girilmedi, bu yüzden hiçbir şey sorulamaz.</string>

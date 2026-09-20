@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub tidak menyelesaikan proses masuk.</string>
     <string name="omni_copilot_denied">Proses masuk ditolak.</string>
     <string name="omni_copilot_no_seat">Akun ini tidak punya kursi Copilot.</string>
+    <string name="omni_import_locked">Arsip ini terkunci</string>
+    <string name="omni_import_locked_note">Masukkan kata sandi yang dipakai menguncinya.</string>
+    <string name="omni_import_locked_again">Itu bukan kata sandinya. Coba lagi.</string>
+    <string name="omni_import_gradle_left">Plugin Gradle yang tidak dijalankan di sini</string>
+    <string name="omni_import_gradle_left_note">Sisanya ikut pindah. Ini yang diminta proyek dari Gradle, dan apa pun yang akan ditambahkannya tidak ada di sini.</string>
+    <string name="omni_libraries_missing">%1$d pustaka disebut tetapi tidak ada di sini</string>
+    <string name="omni_libraries_missing_note">Semuanya bisa diambil dari Maven Central dan Google, berikut apa pun yang mereka minta.</string>
+    <string name="omni_libraries_fetch">Ambil</string>
+    <string name="omni_libraries_without">Bangun tanpa itu</string>
+    <string name="omni_libraries_fetching">Mengambil pustaka</string>
+    <string name="omni_libraries_got">%1$d berkas sudah turun</string>
     <string name="omni_talk_left">Sisa</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">Tidak ada kunci yang disetel, jadi tidak ada yang bisa ditanyakan.</string>

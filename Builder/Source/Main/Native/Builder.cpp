@@ -568,6 +568,16 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
                                          into_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeMavenPlan(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Planning the libraries needs a project.");
+    return nullptr;
+  }
+  return HandBack(env, omni_maven_plan(root_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectRepairs(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
@@ -632,17 +642,24 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativePackArchive(
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeOpenArchive(
-    JNIEnv *env, jobject , jstring archive_path, jstring into) {
+    JNIEnv *env, jobject , jstring archive_path, jstring into, jstring password) {
   std::string archive_text;
   std::string into_text;
-  if (archive_path == nullptr || into == nullptr ||
+  std::string password_text;
+  if (archive_path == nullptr || into == nullptr || password == nullptr ||
       !JavaStringToUtf8(env, archive_path, &archive_text) ||
-      !JavaStringToUtf8(env, into, &into_text)) {
+      !JavaStringToUtf8(env, into, &into_text) ||
+      !JavaStringToUtf8(env, password, &password_text)) {
     ThrowJava(env, kIllegalState,
-              "Opening an archive needs the archive and a folder to write into.");
+              "Opening an archive needs the archive, a folder to write into and a "
+              "password that may be empty.");
     return nullptr;
   }
-  return HandBack(env, omni_open_archive(archive_text.c_str(), into_text.c_str()));
+  jstring answer = HandBack(
+      env, omni_open_archive(archive_text.c_str(), into_text.c_str(),
+                             password_text.c_str()));
+  Wipe(&password_text);
+  return answer;
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(

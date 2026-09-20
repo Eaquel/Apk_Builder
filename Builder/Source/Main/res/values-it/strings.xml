@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub non ha finito l’accesso.</string>
     <string name="omni_copilot_denied">L’accesso è stato rifiutato.</string>
     <string name="omni_copilot_no_seat">Questo account non ha un posto Copilot.</string>
+    <string name="omni_import_locked">Questo archivio è chiuso a chiave</string>
+    <string name="omni_import_locked_note">Dai la password con cui è stato chiuso.</string>
+    <string name="omni_import_locked_again">Quella non era la password. Riprova.</string>
+    <string name="omni_import_gradle_left">Plugin Gradle che qui non girano</string>
+    <string name="omni_import_gradle_left_note">Il resto è passato. Questi il progetto li chiedeva a Gradle, e quello che avrebbero aggiunto non c’è.</string>
+    <string name="omni_libraries_missing">%1$d librerie sono nominate ma non ci sono</string>
+    <string name="omni_libraries_missing_note">Si possono prendere da Maven Central e da Google, con tutto ciò che a loro volta chiedono.</string>
+    <string name="omni_libraries_fetch">Prendile</string>
+    <string name="omni_libraries_without">Costruisci senza</string>
+    <string name="omni_libraries_fetching">Sto prendendo le librerie</string>
+    <string name="omni_libraries_got">Sono arrivati %1$d file</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modello</string>
     <string name="omni_talk_no_key">Nessuna chiave impostata, quindi non si può chiedere nulla.</string>

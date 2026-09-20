@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">O GitHub não terminou o início de sessão.</string>
     <string name="omni_copilot_denied">O início de sessão foi recusado.</string>
     <string name="omni_copilot_no_seat">Esta conta não tem lugar no Copilot.</string>
+    <string name="omni_import_locked">Este arquivo está trancado</string>
+    <string name="omni_import_locked_note">Dá a palavra-passe com que foi trancado.</string>
+    <string name="omni_import_locked_again">Não era essa a palavra-passe. Tenta de novo.</string>
+    <string name="omni_import_gradle_left">Plugins do Gradle que isto não corre</string>
+    <string name="omni_import_gradle_left_note">O resto passou. Estes o projeto pediu ao Gradle, e o que eles teriam acrescentado não está aqui.</string>
+    <string name="omni_libraries_missing">%1$d bibliotecas estão nomeadas mas não estão aqui</string>
+    <string name="omni_libraries_missing_note">Podem ser trazidas do Maven Central e da Google, com tudo o que elas por sua vez pedem.</string>
+    <string name="omni_libraries_fetch">Trazer</string>
+    <string name="omni_libraries_without">Construir sem elas</string>
+    <string name="omni_libraries_fetching">A trazer as bibliotecas</string>
+    <string name="omni_libraries_got">Chegaram %1$d ficheiros</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modelo</string>
     <string name="omni_talk_no_key">Nenhuma chave definida, por isso nada pode ser perguntado.</string>

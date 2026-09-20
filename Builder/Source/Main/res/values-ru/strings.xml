@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub не довёл вход до конца.</string>
     <string name="omni_copilot_denied">Вход отклонён.</string>
     <string name="omni_copilot_no_seat">У этой учётной записи нет места в Copilot.</string>
+    <string name="omni_import_locked">Этот архив заперт</string>
+    <string name="omni_import_locked_note">Введите пароль, которым его заперли.</string>
+    <string name="omni_import_locked_again">Это не тот пароль. Попробуйте ещё раз.</string>
+    <string name="omni_import_gradle_left">Плагины Gradle, которые здесь не работают</string>
+    <string name="omni_import_gradle_left_note">Остальное перенеслось. Эти проект просил у Gradle, и того, что они добавили бы, здесь нет.</string>
+    <string name="omni_libraries_missing">Библиотек названо: %1$d, но их здесь нет</string>
+    <string name="omni_libraries_missing_note">Их можно принести с Maven Central и от Google вместе со всем, что они просят в свою очередь.</string>
+    <string name="omni_libraries_fetch">Принести</string>
+    <string name="omni_libraries_without">Собрать без них</string>
+    <string name="omni_libraries_fetching">Приносим библиотеки</string>
+    <string name="omni_libraries_got">Скачано файлов: %1$d</string>
     <string name="omni_talk_left">Осталось</string>
     <string name="omni_talk_model">Модель</string>
     <string name="omni_talk_no_key">Ключ не задан, поэтому ничего нельзя спросить.</string>

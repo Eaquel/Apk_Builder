@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">لم يُكمل GitHub تسجيل الدخول.</string>
     <string name="omni_copilot_denied">رُفض تسجيل الدخول.</string>
     <string name="omni_copilot_no_seat">لا يملك هذا الحساب اشتراك Copilot.</string>
+    <string name="omni_import_locked">هذا الأرشيف مقفل</string>
+    <string name="omni_import_locked_note">أدخل كلمة السر التي أُقفل بها.</string>
+    <string name="omni_import_locked_again">ليست هذه كلمة السر. جرّب مرة أخرى.</string>
+    <string name="omni_import_gradle_left">إضافات Gradle التي لا تعمل هنا</string>
+    <string name="omni_import_gradle_left_note">انتقل الباقي. هذه طلبها المشروع من Gradle، وما كانت ستضيفه ليس هنا.</string>
+    <string name="omni_libraries_missing">%1$d مكتبات مذكورة لكنها ليست هنا</string>
+    <string name="omni_libraries_missing_note">يمكن جلبها من Maven Central ومن Google، مع كل ما تطلبه هي بدورها.</string>
+    <string name="omni_libraries_fetch">اجلبها</string>
+    <string name="omni_libraries_without">ابنِ من دونها</string>
+    <string name="omni_libraries_fetching">يجري جلب المكتبات</string>
+    <string name="omni_libraries_got">نزل %1$d ملفات</string>
     <string name="omni_talk_left">المتبقي</string>
     <string name="omni_talk_model">النموذج</string>
     <string name="omni_talk_no_key">لم يُضبط أي مفتاح، لذا لا يمكن سؤال شيء.</string>

@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub ने साइन इन पूरा नहीं किया।</string>
     <string name="omni_copilot_denied">साइन इन अस्वीकार हुआ।</string>
     <string name="omni_copilot_no_seat">इस खाते के पास Copilot की सीट नहीं है।</string>
+    <string name="omni_import_locked">यह संग्रह बंद है</string>
+    <string name="omni_import_locked_note">वह पासवर्ड दें जिससे इसे बंद किया गया था।</string>
+    <string name="omni_import_locked_again">पासवर्ड यह नहीं था। फिर से आज़माएँ।</string>
+    <string name="omni_import_gradle_left">Gradle प्लगइन जो यहाँ नहीं चलते</string>
+    <string name="omni_import_gradle_left_note">बाकी सब आ गया। ये परियोजना ने Gradle से माँगे थे, और जो ये जोड़ते वह यहाँ नहीं है।</string>
+    <string name="omni_libraries_missing">%1$d लाइब्रेरी नाम से हैं पर यहाँ नहीं हैं</string>
+    <string name="omni_libraries_missing_note">इन्हें Maven Central और Google से लाया जा सकता है, उनके अपने माँगे हुए सब कुछ के साथ।</string>
+    <string name="omni_libraries_fetch">ले आएँ</string>
+    <string name="omni_libraries_without">इनके बिना बनाएँ</string>
+    <string name="omni_libraries_fetching">लाइब्रेरी लाई जा रही हैं</string>
+    <string name="omni_libraries_got">%1$d फ़ाइलें आ गईं</string>
     <string name="omni_talk_left">शेष</string>
     <string name="omni_talk_model">मॉडल</string>
     <string name="omni_talk_no_key">कोई कुंजी तय नहीं है, इसलिए कुछ पूछा नहीं जा सकता।</string>

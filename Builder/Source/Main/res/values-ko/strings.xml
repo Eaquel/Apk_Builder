@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub 가 로그인을 끝내지 못했습니다.</string>
     <string name="omni_copilot_denied">로그인이 거절되었습니다.</string>
     <string name="omni_copilot_no_seat">이 계정에는 Copilot 자리가 없습니다.</string>
+    <string name="omni_import_locked">이 묶음은 잠겨 있습니다</string>
+    <string name="omni_import_locked_note">잠글 때 쓴 암호를 입력하세요.</string>
+    <string name="omni_import_locked_again">암호가 다릅니다. 다시 해 보세요.</string>
+    <string name="omni_import_gradle_left">여기서 돌지 않는 Gradle 플러그인</string>
+    <string name="omni_import_gradle_left_note">나머지는 넘어왔습니다. 이것들은 프로젝트가 Gradle 에 요청한 것이고, 그것들이 더했을 것은 여기 없습니다.</string>
+    <string name="omni_libraries_missing">%1$d 개 라이브러리가 이름만 있고 여기 없습니다</string>
+    <string name="omni_libraries_missing_note">Maven Central 과 Google 에서, 그것들이 다시 요구하는 것까지 함께 가져올 수 있습니다.</string>
+    <string name="omni_libraries_fetch">가져오기</string>
+    <string name="omni_libraries_without">없이 빌드</string>
+    <string name="omni_libraries_fetching">라이브러리를 가져오는 중</string>
+    <string name="omni_libraries_got">%1$d 개 파일을 받았습니다</string>
     <string name="omni_talk_left">남음</string>
     <string name="omni_talk_model">모형</string>
     <string name="omni_talk_no_key">열쇠가 설정되지 않아 아무것도 물을 수 없습니다.</string>

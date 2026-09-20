@@ -628,6 +628,8 @@ object Builder {
 
     external fun nativeGitCheckout(packPath: String, head: String, into: String): String
 
+    external fun nativeMavenPlan(root: String): String
+
     external fun nativeProjectRepairs(root: String): String
 
     external fun nativeApplyRepairs(root: String, repairs: String): String
@@ -642,7 +644,11 @@ object Builder {
         password: String,
     ): String
 
-    external fun nativeOpenArchive(archivePath: String, into: String): String
+    external fun nativeOpenArchive(
+        archivePath: String,
+        into: String,
+        password: String,
+    ): String
 
     external fun nativeNewFolder(root: String, relative: String): String
 
@@ -3678,6 +3684,16 @@ class BuilderActivity : Activity() {
         const val ASSISTANT_PATHS = 400
 
         const val AGENT_ROUNDS = 12
+
+        const val LIBRARY_ROUNDS = 12
+
+        const val LIBRARY_SHOWN = 12
+
+        const val LIBRARY_OPEN_MILLIS = 20_000
+
+        const val LIBRARY_READ_MILLIS = 60_000
+
+        const val LIBRARY_MOST_BYTES = 96L * 1024L * 1024L
 
         const val AGENT_WRITE = "<<<OMNI WRITE "
 
@@ -7000,8 +7016,24 @@ class BuilderActivity : Activity() {
                     act(Builder.nativeRenamePath(root, entry.path, joined(other, name)), "moved")
                 }
             },
-            MenuChoice(Mark.Shape.TRASH, getString(R.string.omni_action_delete), tint = palette.error) {
-                act(Builder.nativeRemovePath(root, entry.path, projectTrash(root)), "removed")
+            MenuChoice(
+                Mark.Shape.TRASH,
+                getString(
+                    if (entry.path == TRASH_FOLDER) {
+                        R.string.omni_action_empty
+                    } else {
+                        R.string.omni_action_delete
+                    }
+                ),
+                tint = palette.error,
+            ) {
+                if (entry.path == TRASH_FOLDER) {
+                    results.removeAllViews()
+                    runCatching { Builder.nativeTrashEmpty(projectTrash(root)) }
+                    render(false)
+                } else {
+                    act(Builder.nativeRemovePath(root, entry.path, projectTrash(root)), "removed")
+                }
             },
             MenuChoice(Mark.Shape.PEN, getString(R.string.omni_action_rename)) {
                 askForName(getString(R.string.omni_action_rename), name) { chosen ->
@@ -15805,7 +15837,168 @@ class BuilderActivity : Activity() {
         val after: String get() = held.optString("after")
     }
 
+    private class Want(held: JSONObject) {
+        val coordinate: String = held.optString("coordinate")
+        val kind: String = held.optString("kind")
+        val path: String = held.optString("path")
+        val urls: List<String> = buildList {
+            held.optJSONArray("urls")?.let { array ->
+                for (index in 0 until array.length()) {
+                    add(array.getString(index))
+                }
+            }
+        }
+    }
+
+    private fun wantedLibraries(answer: String): List<Want> {
+        val document = runCatching { JSONObject(answer) }.getOrNull() ?: return emptyList()
+        if (!document.optBoolean("planned", false)) {
+            return emptyList()
+        }
+        val held = document.optJSONArray("wanted") ?: return emptyList()
+        return buildList {
+            for (index in 0 until held.length()) {
+                held.optJSONObject(index)?.let { add(Want(it)) }
+            }
+        }
+    }
+
+    private fun downloadOne(root: String, one: Want): String {
+        val into = File(root, one.path)
+        into.parentFile?.mkdirs()
+        var last = ""
+        for (where in one.urls) {
+            val link = runCatching { URL(where).openConnection() }.getOrNull()
+                as? HttpURLConnection ?: continue
+            link.connectTimeout = LIBRARY_OPEN_MILLIS
+            link.readTimeout = LIBRARY_READ_MILLIS
+            link.instanceFollowRedirects = true
+            link.setRequestProperty("User-Agent", "omni-builder")
+            val code = runCatching { link.responseCode }.getOrElse { -1 }
+            if (code != 200) {
+                last = one.coordinate + "  " + code
+                link.disconnect()
+                continue
+            }
+            val held = runCatching {
+                val temporary = File(into.absolutePath + ".part")
+                link.inputStream.use { from ->
+                    temporary.outputStream().use { out ->
+                        val buffer = ByteArray(64 * 1024)
+                        var carried = 0L
+                        while (true) {
+                            val read = from.read(buffer)
+                            if (read <= 0) {
+                                break
+                            }
+                            carried += read
+                            if (carried > LIBRARY_MOST_BYTES) {
+                                throw java.io.IOException(one.coordinate)
+                            }
+                            out.write(buffer, 0, read)
+                        }
+                    }
+                }
+                temporary.renameTo(into)
+            }
+            link.disconnect()
+            if (held.isSuccess && into.isFile) {
+                return ""
+            }
+            File(into.absolutePath + ".part").delete()
+            last = one.coordinate
+        }
+        return last.ifEmpty { one.coordinate }
+    }
+
+    private fun fetchTheLibraries(root: String, onDone: () -> Unit) {
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_libraries_fetching), palette.accent))
+        Thread {
+            val refused = mutableListOf<String>()
+            var carried = 0
+            var rounds = 0
+            while (rounds < LIBRARY_ROUNDS) {
+                rounds += 1
+                val wanted = wantedLibraries(
+                    runCatching { Builder.nativeMavenPlan(root) }.getOrDefault("")
+                ).filter { !refused.contains(it.coordinate + it.kind) }
+                if (wanted.isEmpty()) {
+                    break
+                }
+                for (one in wanted) {
+                    val why = downloadOne(root, one)
+                    if (why.isEmpty()) {
+                        carried += 1
+                    } else {
+                        refused.add(one.coordinate + one.kind)
+                        if (!refused.contains(why)) {
+                            refused.add(why)
+                        }
+                    }
+                }
+            }
+            val got = carried
+            val left = refused.filter { !it.endsWith("pom") && !it.endsWith("jar") && !it.endsWith("aar") }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                results.removeAllViews()
+                results.addView(
+                    notice(
+                        getString(R.string.omni_libraries_got, got),
+                        if (left.isEmpty()) palette.ok else palette.warning,
+                    )
+                )
+                left.take(LIBRARY_SHOWN).forEach { results.addView(quiet(it)) }
+                onDone()
+            }
+        }.start()
+    }
+
     private fun mendThenBuild(root: String) {
+        results.removeAllViews()
+        working({ Builder.nativeMavenPlan(root) }) planned@{ answer ->
+            val wanted = wantedLibraries(answer)
+            if (wanted.isEmpty()) {
+                mendThenBuildNow(root)
+                return@planned
+            }
+            dialogShell(
+                getString(R.string.omni_libraries_missing, wanted.size),
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(0, gap(1), 0, gap(2))
+                    addView(quiet(getString(R.string.omni_libraries_missing_note)))
+                    wanted.take(LIBRARY_SHOWN).forEach { one ->
+                        addView(
+                            TextView(context).apply {
+                                text = one.coordinate
+                                setTextColor(palette.muted)
+                                typeface = Type.data
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                maxLines = 1
+                                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                            }
+                        )
+                    }
+                },
+                listOf(
+                    getString(R.string.omni_libraries_without) to { it: AlertDialog ->
+                        it.dismiss()
+                        mendThenBuildNow(root)
+                    },
+                    getString(R.string.omni_libraries_fetch) to { it: AlertDialog ->
+                        it.dismiss()
+                        fetchTheLibraries(root) { mendThenBuildNow(root) }
+                    },
+                ),
+            )
+        }
+    }
+
+    private fun mendThenBuildNow(root: String) {
         results.removeAllViews()
         working({ Builder.nativeProjectRepairs(root) }) finished@{ answer ->
             val document = runCatching { JSONObject(answer) }.getOrNull()
@@ -16423,23 +16616,117 @@ class BuilderActivity : Activity() {
             results.addView(notice(getString(R.string.omni_import_none), palette.error))
             return
         }
-        val root = freeFolder(namedBy(uri))
-        working({ Builder.nativeOpenArchive(staged.absolutePath, root.absolutePath) })
+        openTheStagedArchive(staged, namedBy(uri), "")
+    }
+
+    private fun openTheStagedArchive(staged: File, named: String, password: String) {
+        val root = freeFolder(named)
+        working({ Builder.nativeOpenArchive(staged.absolutePath, root.absolutePath, password) })
         finished@{ answer ->
-            staged.delete()
-            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-            if (!document.optBoolean("unpacked", false)) {
+            val document = runCatching { JSONObject(answer) }.getOrNull()
+            if (document == null) {
+                staged.delete()
                 root.deleteRecursively()
-                showRefusal(Refusal.parse(document), results)
+                results.addView(notice(getString(R.string.omni_refused), palette.error))
                 return@finished
             }
+            if (!document.optBoolean("unpacked", false)) {
+                root.deleteRecursively()
+                val refusal = Refusal.parse(document)
+                if (refusal.code == "EZ023" || refusal.code == "EZ026") {
+                    askForTheArchivePassword(staged, named, refusal.code == "EZ026")
+                    return@finished
+                }
+                staged.delete()
+                showRefusal(refusal, results)
+                return@finished
+            }
+            staged.delete()
             flash(
                 getString(R.string.omni_import_done, document.optInt("files")),
                 palette.ok,
                 Mark.Shape.ARCHIVE,
             )
-            openHere(root.absolutePath)
+            val left = mutableListOf<String>()
+            document.optJSONArray("unread")?.let { held ->
+                for (index in 0 until held.length()) {
+                    left.add(held.getString(index))
+                }
+            }
+            if (left.isEmpty()) {
+                openHere(root.absolutePath)
+                return@finished
+            }
+            dialogShell(
+                getString(R.string.omni_import_gradle_left),
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(0, gap(1), 0, gap(2))
+                    addView(quiet(getString(R.string.omni_import_gradle_left_note)))
+                    left.forEach { one ->
+                        addView(
+                            TextView(context).apply {
+                                text = one
+                                setTextColor(palette.warning)
+                                typeface = Type.data
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setPadding(0, gap(1), 0, 0)
+                            }
+                        )
+                    }
+                },
+                listOf(
+                    getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                        it.dismiss()
+                        openHere(root.absolutePath)
+                    },
+                ),
+            )
         }
+    }
+
+    private fun askForTheArchivePassword(staged: File, named: String, again: Boolean) {
+        val editor = styledField("", getString(R.string.omni_pack_password), true).apply {
+            typeface = Type.data
+        }
+        dialogShell(
+            getString(R.string.omni_import_locked),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(
+                    quiet(
+                        getString(
+                            if (again) {
+                                R.string.omni_import_locked_again
+                            } else {
+                                R.string.omni_import_locked_note
+                            }
+                        )
+                    )
+                )
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog ->
+                    staged.delete()
+                    it.dismiss()
+                },
+                getString(R.string.omni_action_open) to { it: AlertDialog ->
+                    val held = readSecret(editor)
+                    val said = String(held)
+                    held.fill(' ')
+                    editor.text?.clear()
+                    it.dismiss()
+                    if (said.isEmpty()) {
+                        staged.delete()
+                    } else {
+                        openTheStagedArchive(staged, named, said)
+                    }
+                },
+            ),
+        )
+        editor.requestFocus()
     }
 
     private fun stageImage(uri: Uri): File? {

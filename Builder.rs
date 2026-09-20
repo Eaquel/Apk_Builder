@@ -12923,6 +12923,7 @@ pub mod archive {
         pub uncompressed_size: u64,
         pub local_header_offset: u64,
         pub data_offset: u64,
+        pub locked: bool,
     }
 
     impl Entry {
@@ -12987,6 +12988,17 @@ pub mod archive {
         }
 
         pub fn content(&self, data: &[u8], entry: &Entry) -> Result<Vec<u8>, Diagnostic> {
+            if entry.locked {
+                return Err(Diagnostic::new(
+                    "EA021",
+                    Severity::Error,
+                    FailureClass::UserError,
+                    "core.archive",
+                    "An entry is encrypted.",
+                )
+                .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                .with_suggestion("Encrypted archives are not read."));
+            }
             let stored = self.stored_bytes(data, entry)?;
             let out = match entry.compression {
                 Compression::Stored => stored.to_vec(),
@@ -13142,6 +13154,14 @@ pub mod archive {
     }
 
     pub fn read(data: &[u8], sink: &mut Sink) -> Option<Archive> {
+        read_with_locks(data, sink, false)
+    }
+
+    pub fn read_locked(data: &[u8], sink: &mut Sink) -> Option<Archive> {
+        read_with_locks(data, sink, true)
+    }
+
+    fn read_with_locks(data: &[u8], sink: &mut Sink, permit_locked: bool) -> Option<Archive> {
         if data.len() as u64 > MAX_ARCHIVE_BYTES {
             sink.emit(
                 Diagnostic::new(
@@ -13225,7 +13245,7 @@ pub mod archive {
         }
 
         for index in 0..record.entry_count {
-            match read_central_entry(&mut reader, data, index) {
+            match read_central_entry(&mut reader, data, index, permit_locked) {
                 Ok(entry) => entries.push(entry),
                 Err(error) => {
                     sink.emit(error);
@@ -13492,6 +13512,7 @@ pub mod archive {
         reader: &mut Reader<'_>,
         data: &[u8],
         index: u64,
+        permit_locked: bool,
     ) -> Result<Entry, Diagnostic> {
         let signature = reader.u32()?;
         if signature != CENTRAL_HEADER_SIGNATURE {
@@ -13520,7 +13541,7 @@ pub mod archive {
         let _external = reader.u32()?;
         let mut local_header_offset = u64::from(reader.u32()?);
 
-        if flags & 0x0001 != 0 {
+        if flags & 0x0001 != 0 && !permit_locked {
             return Err(fail("EA021", "An entry is encrypted.")
                 .with_context(format!("Entry: {index}"))
                 .with_suggestion("Encrypted archives are not read."));
@@ -13558,6 +13579,7 @@ pub mod archive {
             uncompressed_size,
             local_header_offset,
             data_offset,
+            locked: flags & 0x0001 != 0,
         })
     }
 
@@ -13646,7 +13668,7 @@ pub mod archive {
         let mut skipped = 0;
 
         for entry in archive.entries() {
-            if matches!(entry.compression, Compression::Other(_)) {
+            if entry.locked || matches!(entry.compression, Compression::Other(_)) {
                 skipped += 1;
                 continue;
             }
@@ -27775,6 +27797,7 @@ pub mod settings {
         pub locales: Vec<String>,
         pub abis: Vec<String>,
         pub dependencies: Vec<Dependency>,
+        pub processors: Vec<Dependency>,
         pub shrink: bool,
         pub seal_resources: bool,
         pub key_alias: String,
@@ -27804,6 +27827,7 @@ pub mod settings {
                 locales: Vec::new(),
                 abis: vec![crate::scaffold::ARM64.to_string()],
                 dependencies: Vec::new(),
+                processors: Vec::new(),
                 shrink: true,
                 seal_resources: false,
                 key_alias: String::new(),
@@ -27917,8 +27941,31 @@ pub mod settings {
             }
             w.end_array();
 
+            w.blank();
+            w.note("Libraries the code leans on. name is the Maven coordinate");
+            w.note("without its version, and file is only for a jar or aar that");
+            w.note("already sits in Libraries.");
+            w.note("Example: { \"name\": \"androidx.core:core-ktx\", \"version\": \"1.13.1\" }");
             w.begin_array(Some("dependencies"));
             for one in &self.dependencies {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_str("version", &one.version);
+                w.field_str("file", &one.file);
+                w.end_object();
+            }
+            w.end_array();
+
+            w.blank();
+            w.note("What Gradle would hand to kapt, ksp or annotationProcessor.");
+            w.note("This build does not run them, so anything they would have");
+            w.note("written has to be in the project already. They are kept here");
+            w.note("so nothing is lost when the project goes back to Gradle.");
+            w.note(
+                "Example: { \"name\": \"androidx.room:room-compiler\", \"version\": \"2.6.1\" }",
+            );
+            w.begin_array(Some("processors"));
+            for one in &self.processors {
                 w.begin_object(None);
                 w.field_str("name", &one.name);
                 w.field_str("version", &one.version);
@@ -28141,8 +28188,11 @@ pub mod settings {
                     _ => out.abis = named,
                 }
             }
-            if let Some(listed) = held.get("dependencies").and_then(|one| one.list()) {
-                out.dependencies = listed
+            for (named, into) in [("dependencies", 0), ("processors", 1)] {
+                let Some(listed) = held.get(named).and_then(|one| one.list()) else {
+                    continue;
+                };
+                let found: Vec<Dependency> = listed
                     .iter()
                     .filter_map(|one| {
                         Some(Dependency {
@@ -28160,6 +28210,11 @@ pub mod settings {
                         })
                     })
                     .collect();
+                if into == 0 {
+                    out.dependencies = found;
+                } else {
+                    out.processors = found;
+                }
             }
             if let Some(build) = held.get("build") {
                 if let Some(found) = build.get("shrink").and_then(|one| one.boolean()) {
@@ -28442,6 +28497,1490 @@ pub mod settings {
             return Some((start, start + name.len() + consumed));
         }
         None
+    }
+}
+
+pub mod gradle {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::settings::{Dependency, Named, Settings};
+    use crate::FailureClass;
+
+    pub const BUILD_FILES: &[&str] = &["build.gradle.kts", "build.gradle"];
+    pub const SETTINGS_FILES: &[&str] = &["settings.gradle.kts", "settings.gradle"];
+    pub const CATALOGUE_FILE: &str = "gradle/libs.versions.toml";
+    pub const APPLICATION_PLUGIN: &str = "com.android.application";
+    pub const LIBRARY_PLUGIN: &str = "com.android.library";
+    pub const MOST_BYTES: u64 = 4 * 1024 * 1024;
+
+    pub const CARRIED_PLUGINS: &[&str] = &[
+        APPLICATION_PLUGIN,
+        LIBRARY_PLUGIN,
+        "com.android.base",
+        "kotlin-android",
+        "kotlin-kapt",
+        "kotlin-parcelize",
+        "org.jetbrains.kotlin.android",
+        "org.jetbrains.kotlin.kapt",
+        "org.jetbrains.kotlin.plugin.parcelize",
+        "com.google.devtools.ksp",
+        "java",
+        "java-library",
+    ];
+
+    pub const KEPT_CONFIGURATIONS: &[&str] = &[
+        "implementation",
+        "api",
+        "compileOnly",
+        "runtimeOnly",
+        "compile",
+        "provided",
+    ];
+
+    pub const PROCESSING_CONFIGURATIONS: &[&str] = &["annotationProcessor", "kapt", "ksp"];
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.gradle",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Read {
+        pub settings: Settings,
+        pub modules: Vec<String>,
+        pub plugins: Vec<String>,
+        pub processors: Vec<Dependency>,
+        pub unread: Vec<String>,
+    }
+
+    pub fn plain(text: &str) -> String {
+        let held: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0usize;
+        while at < held.len() {
+            let here = held[at];
+            if here == '/' && at + 1 < held.len() && held[at + 1] == '/' {
+                while at < held.len() && held[at] != '\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            if here == '/' && at + 1 < held.len() && held[at + 1] == '*' {
+                at += 2;
+                while at + 1 < held.len() && !(held[at] == '*' && held[at + 1] == '/') {
+                    if held[at] == '\n' {
+                        out.push('\n');
+                    }
+                    at += 1;
+                }
+                at = (at + 2).min(held.len());
+                out.push(' ');
+                continue;
+            }
+            if here == '"' || here == '\'' {
+                let (taken, next) = quoted(&held, at);
+                out.push_str(&taken);
+                at = next;
+                continue;
+            }
+            out.push(here);
+            at += 1;
+        }
+        out
+    }
+
+    fn quoted(held: &[char], from: usize) -> (String, usize) {
+        let mark = held[from];
+        let three =
+            from + 2 < held.len() && mark == '"' && held[from + 1] == '"' && held[from + 2] == '"';
+        let mut out = String::new();
+        let mut at = from;
+        if three {
+            out.push_str("\"\"\"");
+            at = from + 3;
+            while at + 2 < held.len()
+                && !(held[at] == '"' && held[at + 1] == '"' && held[at + 2] == '"')
+            {
+                out.push(held[at]);
+                at += 1;
+            }
+            out.push_str("\"\"\"");
+            return (out, (at + 3).min(held.len()));
+        }
+        out.push(mark);
+        at += 1;
+        while at < held.len() && held[at] != mark {
+            if held[at] == '\\' && at + 1 < held.len() {
+                out.push(held[at]);
+                at += 1;
+            }
+            if held[at] == '\n' {
+                break;
+            }
+            out.push(held[at]);
+            at += 1;
+        }
+        out.push(mark);
+        (out, (at + 1).min(held.len()))
+    }
+
+    fn word_at(held: &[char], at: usize, word: &str) -> bool {
+        let wanted: Vec<char> = word.chars().collect();
+        if at + wanted.len() > held.len() {
+            return false;
+        }
+        if held[at..at + wanted.len()] != wanted[..] {
+            return false;
+        }
+        let before_ok = at == 0 || !is_name(held[at - 1]);
+        let after = at + wanted.len();
+        let after_ok = after >= held.len() || !is_name(held[after]);
+        before_ok && after_ok
+    }
+
+    fn is_name(here: char) -> bool {
+        here.is_alphanumeric() || here == '_' || here == '.'
+    }
+
+    fn skip_blank(held: &[char], mut at: usize) -> usize {
+        while at < held.len() && held[at].is_whitespace() {
+            at += 1;
+        }
+        at
+    }
+
+    fn closing(held: &[char], open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut at = open;
+        while at < held.len() {
+            match held[at] {
+                '"' | '\'' => {
+                    let (_, next) = quoted(held, at);
+                    at = next;
+                    continue;
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(at);
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        None
+    }
+
+    pub fn block(text: &str, named: &str) -> Option<String> {
+        let held: Vec<char> = text.chars().collect();
+        let mut at = 0usize;
+        while at < held.len() {
+            if held[at] == '"' || held[at] == '\'' {
+                let (_, next) = quoted(&held, at);
+                at = next;
+                continue;
+            }
+            if !word_at(&held, at, named) {
+                at += 1;
+                continue;
+            }
+            let mut after = skip_blank(&held, at + named.chars().count());
+            if after < held.len() && held[after] == '(' {
+                let mut depth = 0usize;
+                while after < held.len() {
+                    match held[after] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                after += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    after += 1;
+                }
+                after = skip_blank(&held, after);
+            }
+            if after < held.len() && held[after] == '{' {
+                if let Some(shut) = closing(&held, after) {
+                    return Some(held[after + 1..shut].iter().collect());
+                }
+            }
+            at += 1;
+        }
+        None
+    }
+
+    pub fn without(text: &str, named: &str) -> String {
+        let held: Vec<char> = text.chars().collect();
+        let mut at = 0usize;
+        while at < held.len() {
+            if held[at] == '"' || held[at] == '\'' {
+                let (_, next) = quoted(&held, at);
+                at = next;
+                continue;
+            }
+            if !word_at(&held, at, named) {
+                at += 1;
+                continue;
+            }
+            let after = skip_blank(&held, at + named.chars().count());
+            if after < held.len() && held[after] == '{' {
+                if let Some(shut) = closing(&held, after) {
+                    let mut out: String = held[..at].iter().collect();
+                    out.push_str(&held[shut + 1..].iter().collect::<String>());
+                    return out;
+                }
+            }
+            at += 1;
+        }
+        text.to_string()
+    }
+
+    pub fn value(text: &str, key: &str) -> Option<String> {
+        let held: Vec<char> = text.chars().collect();
+        let mut at = 0usize;
+        while at < held.len() {
+            if held[at] == '"' || held[at] == '\'' {
+                let (_, next) = quoted(&held, at);
+                at = next;
+                continue;
+            }
+            if !word_at(&held, at, key) {
+                at += 1;
+                continue;
+            }
+            let mut after = skip_blank(&held, at + key.chars().count());
+            let mut bracketed = false;
+            if after < held.len() && held[after] == '+' {
+                after = skip_blank(&held, after + 1);
+            }
+            if after < held.len() && (held[after] == '=' || held[after] == ':') {
+                after = skip_blank(&held, after + 1);
+            }
+            if after < held.len() && held[after] == '(' {
+                bracketed = true;
+                after = skip_blank(&held, after + 1);
+            }
+            if after >= held.len() || held[after] == '{' {
+                at += 1;
+                continue;
+            }
+            if held[after] == '"' || held[after] == '\'' {
+                let (taken, _) = quoted(&held, after);
+                let inner: String = taken.chars().collect();
+                let trimmed = inner
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string();
+                return Some(trimmed);
+            }
+            let mut taken = String::new();
+            while after < held.len()
+                && held[after] != '\n'
+                && held[after] != ')'
+                && held[after] != ','
+                && held[after] != ';'
+                && held[after] != '}'
+                && !(bracketed && held[after] == ' ')
+            {
+                taken.push(held[after]);
+                after += 1;
+            }
+            let taken = taken.trim().to_string();
+            if !taken.is_empty() {
+                return Some(taken);
+            }
+            at += 1;
+        }
+        None
+    }
+
+    pub fn number(text: &str, keys: &[&str]) -> Option<u32> {
+        for key in keys {
+            if let Some(found) = value(text, key) {
+                if let Ok(held) = found.trim().parse::<u32>() {
+                    return Some(held);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn flag(text: &str, keys: &[&str]) -> Option<bool> {
+        for key in keys {
+            if let Some(found) = value(text, key) {
+                match found.trim() {
+                    "true" => return Some(true),
+                    "false" => return Some(false),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    pub fn statements(text: &str) -> Vec<String> {
+        let held: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut line = String::new();
+        let mut at = 0usize;
+        while at < held.len() {
+            match held[at] {
+                '"' | '\'' => {
+                    let (taken, next) = quoted(&held, at);
+                    line.push_str(&taken);
+                    at = next;
+                    continue;
+                }
+                '{' => {
+                    if let Some(shut) = closing(&held, at) {
+                        at = shut + 1;
+                        continue;
+                    }
+                    at += 1;
+                    continue;
+                }
+                '\n' | ';' => {
+                    let held_line = line.trim().to_string();
+                    if !held_line.is_empty() {
+                        out.push(held_line);
+                    }
+                    line.clear();
+                }
+                other => line.push(other),
+            }
+            at += 1;
+        }
+        let last = line.trim().to_string();
+        if !last.is_empty() {
+            out.push(last);
+        }
+        out
+    }
+
+    fn first_word(said: &str) -> &str {
+        let cut = said
+            .find(|here: char| !is_name(here) && here != '-')
+            .unwrap_or(said.len());
+        &said[..cut]
+    }
+
+    fn inner_text(said: &str) -> String {
+        let said = said.trim();
+        let without = match said.find('(') {
+            Some(at) => said[at + 1..].trim_end_matches(')').to_string(),
+            None => said.to_string(),
+        };
+        without.trim().to_string()
+    }
+
+    fn unquoted(said: &str) -> Option<String> {
+        let said = said.trim();
+        for mark in ['"', '\''] {
+            if said.starts_with(mark) {
+                let rest = &said[1..];
+                if let Some(shut) = rest.find(mark) {
+                    return Some(rest[..shut].to_string());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn catalogue(text: &str) -> crate::settings::Catalogue {
+        let mut out = crate::settings::Catalogue::default();
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                section = line.trim_matches(['[', ']']).to_string();
+                continue;
+            }
+            let Some((name, rest)) = line.split_once('=') else {
+                continue;
+            };
+            let name = name.trim().trim_matches('"').to_string();
+            let rest = rest.trim();
+            match section.as_str() {
+                "versions" => {
+                    if let Some(held) = unquoted(rest) {
+                        out.versions.push(Named { name, value: held });
+                    }
+                }
+                "libraries" | "plugins" => {
+                    let held = catalogued(rest, &out.versions);
+                    if section == "libraries" {
+                        out.libraries.push(Dependency {
+                            name,
+                            version: held.1,
+                            file: held.0,
+                        });
+                    } else {
+                        out.plugins.push(Dependency {
+                            name,
+                            version: held.1,
+                            file: held.0,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn catalogued(rest: &str, versions: &[Named]) -> (String, String) {
+        if let Some(held) = unquoted(rest) {
+            let mut pieces = held.split(':');
+            let group = pieces.next().unwrap_or("").to_string();
+            let name = pieces.next().unwrap_or("").to_string();
+            let version = pieces.next().unwrap_or("").to_string();
+            if name.is_empty() {
+                return (group, version);
+            }
+            return (format!("{group}:{name}"), version);
+        }
+        let inside = rest.trim().trim_matches(['{', '}']).trim();
+        let module = field(inside, "module");
+        let group = field(inside, "group").or_else(|| field(inside, "id"));
+        let name = field(inside, "name");
+        let where_at = match (module, group, name) {
+            (Some(module), _, _) => module,
+            (None, Some(group), Some(name)) => format!("{group}:{name}"),
+            (None, Some(group), None) => group,
+            _ => String::new(),
+        };
+        let version = match field(inside, "version") {
+            Some(held) => held,
+            None => match field(inside, "version.ref") {
+                Some(named) => versions
+                    .iter()
+                    .find(|one| one.name == named)
+                    .map(|one| one.value.clone())
+                    .unwrap_or_default(),
+                None => String::new(),
+            },
+        };
+        (where_at, version)
+    }
+
+    fn field(inside: &str, named: &str) -> Option<String> {
+        let mut at = 0usize;
+        while let Some(found) = inside[at..].find(named) {
+            let start = at + found;
+            let before_ok = start == 0 || !is_name(inside[..start].chars().last().unwrap_or(' '));
+            let after = start + named.len();
+            let tail = inside[after..].trim_start();
+            if before_ok && tail.starts_with('=') {
+                if let Some(held) = unquoted(&tail[1..]) {
+                    return Some(held);
+                }
+            }
+            at = start + named.len();
+        }
+        None
+    }
+
+    fn named_from_catalogue(alias: &str, held: &crate::settings::Catalogue) -> Option<Dependency> {
+        let wanted = alias.replace('.', "-");
+        held.libraries
+            .iter()
+            .find(|one| one.name == wanted || one.name.replace('.', "-") == wanted)
+            .cloned()
+    }
+
+    fn coordinate(said: &str) -> Option<(String, String)> {
+        let mut pieces = said.split(':');
+        let group = pieces.next()?.trim().to_string();
+        let name = pieces.next()?.trim().to_string();
+        let version = pieces.next().unwrap_or("").trim().to_string();
+        if group.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some((format!("{group}:{name}"), version))
+    }
+
+    pub fn dependencies(text: &str, held: &crate::settings::Catalogue, into: &mut Read) {
+        let Some(body) = block(text, "dependencies") else {
+            return;
+        };
+        for said in statements(&body) {
+            let configuration = first_word(&said);
+            let kept = KEPT_CONFIGURATIONS.contains(&configuration);
+            let processing = PROCESSING_CONFIGURATIONS.contains(&configuration);
+            if !kept && !processing {
+                continue;
+            }
+            let argument = inner_text(&said[configuration.len()..]);
+            if argument.starts_with("project") {
+                if let Some(named) = unquoted(&inner_text(&argument)) {
+                    let named = named.trim_start_matches(':').to_string();
+                    if !named.is_empty() && !into.modules.contains(&named) {
+                        into.modules.push(named);
+                    }
+                }
+                continue;
+            }
+            if argument.starts_with("files") || argument.starts_with("fileTree") {
+                if let Some(named) = unquoted(&inner_text(&argument)) {
+                    into.settings.dependencies.push(Dependency {
+                        name: named.clone(),
+                        version: String::new(),
+                        file: named,
+                    });
+                }
+                continue;
+            }
+            let found = match unquoted(&argument) {
+                Some(held) => coordinate(&held),
+                None => {
+                    let alias = argument
+                        .trim()
+                        .trim_start_matches("libs.")
+                        .trim_end_matches(')')
+                        .trim();
+                    if !argument.trim().starts_with("libs.") {
+                        None
+                    } else {
+                        named_from_catalogue(alias, held)
+                            .map(|one| (one.file.clone(), one.version.clone()))
+                    }
+                }
+            };
+            let Some((name, version)) = found else {
+                into.unread.push(said.trim().to_string());
+                continue;
+            };
+            let one = Dependency {
+                name,
+                version,
+                file: String::new(),
+            };
+            if processing {
+                if !into.processors.contains(&one) {
+                    into.processors.push(one);
+                }
+            } else if !into.settings.dependencies.contains(&one) {
+                into.settings.dependencies.push(one);
+            }
+        }
+    }
+
+    pub fn plugins(text: &str, into: &mut Read) {
+        if let Some(body) = block(text, "plugins") {
+            for said in statements(&body) {
+                let named = if said.trim_start().starts_with("id") {
+                    unquoted(&inner_text(&said[said.find("id").unwrap_or(0) + 2..]))
+                } else if said.trim_start().starts_with("kotlin") {
+                    unquoted(&inner_text(&said[said.find("kotlin").unwrap_or(0) + 6..]))
+                        .map(|held| format!("org.jetbrains.kotlin.{held}"))
+                } else if said.trim_start().starts_with("alias") {
+                    Some(
+                        inner_text(&said[said.find("alias").unwrap_or(0) + 5..])
+                            .trim_start_matches("libs.plugins.")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                if let Some(named) = named {
+                    if !named.is_empty() && !into.plugins.contains(&named) {
+                        into.plugins.push(named);
+                    }
+                }
+            }
+        }
+        for said in statements(text) {
+            let said = said.trim();
+            if !said.starts_with("apply plugin") {
+                continue;
+            }
+            if let Some(named) = unquoted(said) {
+                if !into.plugins.contains(&named) {
+                    into.plugins.push(named);
+                }
+            }
+        }
+    }
+
+    pub fn modules(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for said in statements(&plain(text)) {
+            let said = said.trim();
+            if !said.starts_with("include") || said.starts_with("includeBuild") {
+                continue;
+            }
+            let mut rest = said["include".len()..].trim();
+            while !rest.is_empty() {
+                let Some(mark) = rest.find(['"', '\'']) else {
+                    break;
+                };
+                let quote = rest.as_bytes()[mark] as char;
+                let after = &rest[mark + 1..];
+                let Some(shut) = after.find(quote) else {
+                    break;
+                };
+                let named = after[..shut].trim_start_matches(':').replace(':', "/");
+                if !named.is_empty() && !out.contains(&named) {
+                    out.push(named);
+                }
+                rest = &after[shut + 1..];
+            }
+        }
+        out
+    }
+
+    fn text_of(path: &std::path::Path) -> Option<String> {
+        let held = std::fs::metadata(path).ok()?;
+        if !held.is_file() || held.len() > MOST_BYTES {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()
+    }
+
+    pub fn build_file(folder: &std::path::Path) -> Option<std::path::PathBuf> {
+        BUILD_FILES
+            .iter()
+            .map(|named| folder.join(named))
+            .find(|path| path.is_file())
+    }
+
+    fn settings_file(root: &std::path::Path) -> Option<std::path::PathBuf> {
+        SETTINGS_FILES
+            .iter()
+            .map(|named| root.join(named))
+            .find(|path| path.is_file())
+    }
+
+    pub fn looks_like_one(root: &str) -> bool {
+        let here = std::path::Path::new(root);
+        build_file(here).is_some() || settings_file(here).is_some()
+    }
+
+    pub fn application_module(root: &str) -> Option<String> {
+        let here = std::path::Path::new(root);
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(path) = settings_file(here) {
+            if let Some(text) = text_of(&path) {
+                candidates.extend(modules(&text));
+            }
+        }
+        candidates.push(String::new());
+        candidates.push("app".to_string());
+        for named in &candidates {
+            let folder = if named.is_empty() {
+                here.to_path_buf()
+            } else {
+                here.join(named)
+            };
+            let Some(path) = build_file(&folder) else {
+                continue;
+            };
+            let Some(text) = text_of(&path) else {
+                continue;
+            };
+            let mut found = Read::default();
+            plugins(&plain(&text), &mut found);
+            if found.plugins.iter().any(|one| one == APPLICATION_PLUGIN) {
+                return Some(named.clone());
+            }
+        }
+        None
+    }
+
+    fn languages_of(found: &Read, root: &std::path::Path, module: &str) -> Vec<String> {
+        let mut out = vec!["java".to_string()];
+        let kotlin = found
+            .plugins
+            .iter()
+            .any(|one| one.contains("kotlin") || one.contains("android.kotlin"));
+        if kotlin && !out.contains(&"kotlin".to_string()) {
+            out.push("kotlin".to_string());
+        }
+        let here = if module.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(module)
+        };
+        if here.join("src/main/cpp").is_dir() || here.join("src/main/jni").is_dir() {
+            out.push("cpp".to_string());
+        }
+        out
+    }
+
+    pub fn read(root: &str, module: &str) -> Result<Read, Diagnostic> {
+        let here = std::path::Path::new(root);
+        let folder = if module.is_empty() {
+            here.to_path_buf()
+        } else {
+            here.join(module)
+        };
+        let Some(path) = build_file(&folder) else {
+            return Err(fail("EG201", "This folder holds no Gradle build file.")
+                .with_context(format!("Path: {}", folder.display()))
+                .with_suggestion("A Gradle project carries build.gradle or build.gradle.kts."));
+        };
+        let Some(raw) = text_of(&path) else {
+            return Err(fail("EG202", "The Gradle build file could not be read.")
+                .with_context(format!("Path: {}", path.display())));
+        };
+        let text = plain(&raw);
+
+        let mut found = Read::default();
+        let held = match text_of(&here.join(CATALOGUE_FILE)) {
+            Some(text) => catalogue(&text),
+            None => crate::settings::Catalogue::default(),
+        };
+        found.settings.catalogue = held.clone();
+        plugins(&text, &mut found);
+        dependencies(&text, &held, &mut found);
+
+        if let Some(path) = settings_file(here) {
+            if let Some(text) = text_of(&path) {
+                for named in modules(&text) {
+                    if named != module && !found.modules.contains(&named) {
+                        found.modules.push(named);
+                    }
+                }
+            }
+        }
+
+        let android = block(&text, "android").unwrap_or_default();
+        let default = block(&android, "defaultConfig").unwrap_or_default();
+
+        if let Some(held) = value(&android, "namespace") {
+            found.settings.namespace = held;
+        }
+        if let Some(held) = value(&default, "applicationId") {
+            found.settings.application_id = held;
+        }
+        if found.settings.namespace.is_empty() {
+            found.settings.namespace = found.settings.application_id.clone();
+        }
+        if found.settings.application_id.is_empty() {
+            found.settings.application_id = found.settings.namespace.clone();
+        }
+        found.settings.package = found.settings.namespace.clone();
+
+        if let Some(held) = number(&android, &["compileSdk", "compileSdkVersion"]) {
+            found.settings.compile_sdk = held;
+        }
+        if let Some(held) = number(&default, &["minSdk", "minSdkVersion"]) {
+            found.settings.min_sdk = held;
+        }
+        if let Some(held) = number(&default, &["targetSdk", "targetSdkVersion"]) {
+            found.settings.target_sdk = held;
+        }
+        if let Some(held) = number(&default, &["versionCode"]) {
+            found.settings.version_code = held.max(1);
+        }
+        if let Some(held) = value(&default, "versionName") {
+            found.settings.version_name = held;
+        }
+
+        let release = block(&android, "buildTypes")
+            .and_then(|types| block(&types, "release"))
+            .unwrap_or_default();
+        let minify = flag(&release, &["minifyEnabled", "isMinifyEnabled"]).unwrap_or(false);
+        let shrink = flag(&release, &["shrinkResources", "isShrinkResources"]).unwrap_or(minify);
+        found.settings.shrink = minify;
+        for one in found.settings.variants.iter_mut() {
+            if one.name == crate::settings::RELEASE_VARIANT {
+                one.minify = minify;
+                one.shrink_resources = shrink;
+            }
+        }
+
+        let compile = block(&android, "compileOptions").unwrap_or_default();
+        if let Some(held) = value(&compile, "sourceCompatibility") {
+            found.settings.java.source = level_of(&held);
+        }
+        if let Some(held) = value(&compile, "targetCompatibility") {
+            found.settings.java.target = level_of(&held);
+        }
+        if let Some(held) = value(&text, "jvmTarget") {
+            found.settings.java.jvm = level_of(&held);
+        }
+
+        let outer = without(&android, "defaultConfig");
+        if let Some(cmake) =
+            block(&outer, "externalNativeBuild").and_then(|one| block(&one, "cmake"))
+        {
+            if let Some(held) = value(&cmake, "path") {
+                found.settings.native.path = held;
+            }
+            if let Some(held) = value(&cmake, "version") {
+                found.settings.native.cmake = held;
+            }
+        }
+        let flags = block(&default, "externalNativeBuild").and_then(|one| block(&one, "cmake"));
+        if let Some(flags) = flags {
+            if let Some(held) = value(&flags, "cppFlags") {
+                found.settings.native.flags = vec![held];
+            }
+            for named in ["arguments", "abiFilters", "targets"] {
+                let held = value(&flags, named).unwrap_or_default();
+                if held.is_empty() {
+                    continue;
+                }
+                if named == "targets" {
+                    found.settings.native.targets = vec![held];
+                } else if named == "arguments" {
+                    found.settings.native.arguments = vec![held];
+                }
+            }
+        }
+
+        if let Some(held) = value(&default, "proguardFiles") {
+            if !held.is_empty() {
+                found.settings.shrinking.files = vec![held];
+            }
+        }
+
+        found.settings.languages = languages_of(&found, here, module);
+        found.settings.label = found
+            .settings
+            .namespace
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        for one in &found.plugins {
+            if !CARRIED_PLUGINS.contains(&one.as_str()) {
+                found.unread.push(one.clone());
+            }
+        }
+        Ok(found)
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Adopted {
+        pub module: String,
+        pub modules: Vec<String>,
+        pub moved: u64,
+        pub processors: Vec<Dependency>,
+        pub unread: Vec<String>,
+    }
+
+    pub const SOURCE_MAP: &[(&str, &str)] = &[
+        ("src/main/java", crate::scaffold::JAVA_FOLDER),
+        ("src/main/kotlin", "Kotlin"),
+        ("src/main/cpp", "Native"),
+        ("src/main/jni", "Native"),
+        ("src/main/rust", "Rust"),
+        ("src/main/res", crate::scaffold::RES_FOLDER),
+        ("src/main/assets", crate::scaffold::ASSETS_FOLDER),
+        ("src/main/jniLibs", crate::scaffold::LIBRARY_FOLDER),
+        ("libs", crate::scaffold::LIBRARY_FOLDER),
+    ];
+
+    fn language_folder(named: &str) -> &'static str {
+        if named.ends_with(".kt") || named.ends_with(".kts") {
+            "Kotlin"
+        } else {
+            crate::scaffold::JAVA_FOLDER
+        }
+    }
+
+    fn walk(here: &std::path::Path, under: &str, into: &mut Vec<(String, std::path::PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(here) else {
+            return;
+        };
+        let mut held: Vec<std::fs::DirEntry> = entries.flatten().collect();
+        held.sort_by_key(|one| one.file_name());
+        for entry in held {
+            let path = entry.path();
+            let named = entry.file_name().to_string_lossy().to_string();
+            let inner = if under.is_empty() {
+                named.clone()
+            } else {
+                format!("{under}/{named}")
+            };
+            if path.is_dir() {
+                walk(&path, &inner, into);
+            } else if path.is_file() {
+                into.push((inner, path));
+            }
+        }
+    }
+
+    fn carry(from: &std::path::Path, to: &std::path::Path) -> Result<bool, Diagnostic> {
+        if to.exists() {
+            return Ok(false);
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|why| {
+                fail(
+                    "EG205",
+                    "A folder for the imported source could not be made.",
+                )
+                .with_context(format!("Path: {}", parent.display()))
+                .with_context(format!("Reason: {why}"))
+            })?;
+        }
+        crate::trash::shift(from, to).map_err(|why| {
+            fail(
+                "EG206",
+                "A file from the Gradle project could not be moved.",
+            )
+            .with_context(format!("Path: {}", from.display()))
+            .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(true)
+    }
+
+    fn adopt_module(
+        root: &std::path::Path,
+        module: &str,
+        manifest: bool,
+        out: &mut Adopted,
+    ) -> Result<(), Diagnostic> {
+        let here = if module.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(module)
+        };
+        if !here.is_dir() {
+            return Ok(());
+        }
+        if manifest {
+            let from = here.join("src/main/AndroidManifest.xml");
+            if from.is_file() && carry(&from, &root.join("AndroidManifest.xml"))? {
+                out.moved += 1;
+            }
+        }
+        for (gradle_folder, omni_folder) in SOURCE_MAP {
+            let from = here.join(gradle_folder);
+            if !from.is_dir() {
+                continue;
+            }
+            let mut held = Vec::new();
+            walk(&from, "", &mut held);
+            for (named, path) in held {
+                let folder = if *omni_folder == crate::scaffold::JAVA_FOLDER {
+                    language_folder(&named)
+                } else {
+                    omni_folder
+                };
+                if carry(&path, &root.join(folder).join(&named))? {
+                    out.moved += 1;
+                }
+            }
+            std::fs::remove_dir_all(&from).ok();
+        }
+        let rules = here.join(crate::settings::RULES_FILE);
+        if rules.is_file() && carry(&rules, &root.join(crate::settings::RULES_FILE))? {
+            out.moved += 1;
+        }
+        Ok(())
+    }
+
+    pub fn adopt(root: &str) -> Result<Option<Adopted>, Diagnostic> {
+        if !looks_like_one(root) {
+            return Ok(None);
+        }
+        let here = std::path::Path::new(root);
+        let module = application_module(root).unwrap_or_default();
+        let found = read(root, &module)?;
+
+        let mut out = Adopted {
+            module: module.clone(),
+            modules: found.modules.clone(),
+            moved: 0,
+            processors: found.processors.clone(),
+            unread: found.unread.clone(),
+        };
+        adopt_module(here, &module, true, &mut out)?;
+        for one in &found.modules {
+            adopt_module(here, one, false, &mut out)?;
+        }
+
+        let mut settings = found.settings;
+        settings.processors = found.processors.clone();
+        if settings.namespace.is_empty() {
+            let mut quiet = crate::diag::Sink::new();
+            let manifest = crate::scaffold::read_manifest(root)?;
+            if let Some(parsed) = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut quiet) {
+                settings.package = parsed.attribute("package").unwrap_or_default().to_string();
+                settings.namespace = settings.package.clone();
+                settings.application_id = settings.package.clone();
+            }
+        }
+        if settings.label.is_empty() {
+            settings.label = here
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+        }
+        crate::settings::write(root, &settings)?;
+        Ok(Some(out))
+    }
+
+    fn level_of(said: &str) -> String {
+        let held = said
+            .trim()
+            .rsplit('.')
+            .next()
+            .unwrap_or(said)
+            .trim_start_matches("VERSION_")
+            .replace('_', ".");
+        let held = held.trim_start_matches("1.").to_string();
+        if held.chars().all(|here| here.is_ascii_digit()) && !held.is_empty() {
+            held
+        } else {
+            crate::settings::JAVA_LEVEL.to_string()
+        }
+    }
+}
+
+pub mod maven {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::FailureClass;
+
+    pub const CENTRAL: &str = "https://repo1.maven.org/maven2";
+    pub const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
+    pub const CACHE: &str = "Maven";
+    pub const MOST_ROUNDS: usize = 24;
+    pub const MOST_LIBRARIES: usize = 400;
+    pub const MOST_POM_BYTES: u64 = 2 * 1024 * 1024;
+
+    pub const GOOGLE_GROUPS: &[&str] = &[
+        "androidx.",
+        "com.android.",
+        "com.google.android.",
+        "com.google.firebase",
+        "android.arch.",
+        "com.google.gms",
+    ];
+
+    pub const POM: &str = "pom";
+    pub const JAR: &str = "jar";
+    pub const AAR: &str = "aar";
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.maven",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Coordinate {
+        pub group: String,
+        pub artifact: String,
+        pub version: String,
+    }
+
+    impl Coordinate {
+        pub fn parse(said: &str) -> Option<Coordinate> {
+            let mut pieces = said.split(':');
+            let group = pieces.next()?.trim().to_string();
+            let artifact = pieces.next()?.trim().to_string();
+            let version = pieces.next().unwrap_or("").trim().to_string();
+            if group.is_empty() || artifact.is_empty() {
+                return None;
+            }
+            if !fit(&group) || !fit(&artifact) || !fit(&version) {
+                return None;
+            }
+            Some(Coordinate {
+                group,
+                artifact,
+                version: settled(&version),
+            })
+        }
+
+        pub fn named(&self) -> String {
+            format!("{}:{}", self.group, self.artifact)
+        }
+
+        pub fn text(&self) -> String {
+            format!("{}:{}:{}", self.group, self.artifact, self.version)
+        }
+
+        pub fn under(&self) -> String {
+            format!(
+                "{}/{}/{}",
+                self.group.replace('.', "/"),
+                self.artifact,
+                self.version
+            )
+        }
+
+        pub fn file(&self, kind: &str) -> String {
+            format!("{}-{}.{kind}", self.artifact, self.version)
+        }
+
+        pub fn from_google(&self) -> bool {
+            GOOGLE_GROUPS
+                .iter()
+                .any(|one| self.group.starts_with(one) || self.group == one.trim_end_matches('.'))
+        }
+
+        pub fn urls(&self, kind: &str) -> Vec<String> {
+            let tail = format!("{}/{}", self.under(), self.file(kind));
+            if self.from_google() {
+                vec![format!("{GOOGLE}/{tail}"), format!("{CENTRAL}/{tail}")]
+            } else {
+                vec![format!("{CENTRAL}/{tail}"), format!("{GOOGLE}/{tail}")]
+            }
+        }
+    }
+
+    fn fit(said: &str) -> bool {
+        !said.is_empty()
+            && said.len() <= 200
+            && said.chars().all(|here| {
+                here.is_ascii_alphanumeric()
+                    || here == '.'
+                    || here == '-'
+                    || here == '_'
+                    || here == '+'
+                    || here == '['
+                    || here == ']'
+                    || here == '('
+                    || here == ')'
+                    || here == ','
+            })
+    }
+
+    fn settled(version: &str) -> String {
+        let held = version.trim();
+        if !held.starts_with('[') && !held.starts_with('(') {
+            return held.to_string();
+        }
+        let inner = held.trim_matches(['[', ']', '(', ')']);
+        let first = inner.split(',').next().unwrap_or("").trim();
+        if first.is_empty() {
+            inner.split(',').nth(1).unwrap_or("").trim().to_string()
+        } else {
+            first.to_string()
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Want {
+        pub coordinate: String,
+        pub kind: String,
+        pub urls: Vec<String>,
+        pub path: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Plan {
+        pub wanted: Vec<Want>,
+        pub held: Vec<String>,
+        pub unresolved: Vec<String>,
+        pub rounds: usize,
+        pub done: bool,
+    }
+
+    fn cache_of(root: &str) -> std::path::PathBuf {
+        std::path::Path::new(root)
+            .join(crate::scaffold::LIBRARY_FOLDER)
+            .join(CACHE)
+    }
+
+    pub fn pom_path(root: &str, one: &Coordinate) -> std::path::PathBuf {
+        cache_of(root).join(one.file(POM))
+    }
+
+    pub fn library_path(root: &str, one: &Coordinate, kind: &str) -> std::path::PathBuf {
+        std::path::Path::new(root)
+            .join(crate::scaffold::LIBRARY_FOLDER)
+            .join(one.file(kind))
+    }
+
+    fn text_of(path: &std::path::Path) -> Option<String> {
+        let held = std::fs::metadata(path).ok()?;
+        if !held.is_file() || held.len() > MOST_POM_BYTES {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()
+    }
+
+    fn child(held: &crate::xml::Element, named: &str) -> Option<String> {
+        held.children_named(named)
+            .next()
+            .map(|one| one.text.trim().to_string())
+            .filter(|one| !one.is_empty())
+    }
+
+    fn filled(said: &str, known: &std::collections::BTreeMap<String, String>) -> String {
+        let mut out = said.to_string();
+        for _ in 0..4 {
+            let Some(from) = out.find("${") else {
+                break;
+            };
+            let Some(to) = out[from..].find('}') else {
+                break;
+            };
+            let named = out[from + 2..from + to].to_string();
+            let with = known.get(&named).cloned().unwrap_or_default();
+            if with.is_empty() {
+                out.replace_range(from..from + to + 1, "");
+            } else {
+                out.replace_range(from..from + to + 1, &with);
+            }
+        }
+        out.trim().to_string()
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Pom {
+        pub packaging: String,
+        pub parent: Option<Coordinate>,
+        pub needs: Vec<Coordinate>,
+        pub managed: Vec<Coordinate>,
+    }
+
+    pub fn read_pom(text: &str, of: &Coordinate) -> Option<Pom> {
+        let mut quiet = Sink::new();
+        let root = crate::xml::parse(text, "pom.xml", &mut quiet)?;
+        if root.name != "project" {
+            return None;
+        }
+        let mut known: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        known.insert("project.version".to_string(), of.version.clone());
+        known.insert("project.groupId".to_string(), of.group.clone());
+        known.insert("project.artifactId".to_string(), of.artifact.clone());
+        known.insert("pom.version".to_string(), of.version.clone());
+        known.insert("version".to_string(), of.version.clone());
+        if let Some(held) = root.children_named("properties").next() {
+            for one in &held.children {
+                known.insert(one.name.clone(), one.text.trim().to_string());
+            }
+        }
+
+        let parent = root.children_named("parent").next().and_then(|held| {
+            Coordinate::parse(&format!(
+                "{}:{}:{}",
+                filled(&child(held, "groupId").unwrap_or_default(), &known),
+                filled(&child(held, "artifactId").unwrap_or_default(), &known),
+                filled(&child(held, "version").unwrap_or_default(), &known),
+            ))
+        });
+
+        let mut out = Pom {
+            packaging: child(&root, "packaging").unwrap_or_else(|| JAR.to_string()),
+            parent,
+            ..Pom::default()
+        };
+
+        if let Some(held) = root.children_named("dependencies").next() {
+            out.needs = carried(held, &known, true);
+        }
+        if let Some(held) = root
+            .children_named("dependencyManagement")
+            .next()
+            .and_then(|one| one.children_named("dependencies").next())
+        {
+            out.managed = carried(held, &known, false);
+        }
+        Some(out)
+    }
+
+    fn carried(
+        held: &crate::xml::Element,
+        known: &std::collections::BTreeMap<String, String>,
+        only_compiled: bool,
+    ) -> Vec<Coordinate> {
+        let mut out = Vec::new();
+        for one in held.children_named("dependency") {
+            let scope = child(one, "scope").unwrap_or_else(|| "compile".to_string());
+            let optional = child(one, "optional").unwrap_or_default() == "true";
+            if only_compiled && (optional || !(scope == "compile" || scope == "runtime")) {
+                continue;
+            }
+            let group = filled(&child(one, "groupId").unwrap_or_default(), known);
+            let artifact = filled(&child(one, "artifactId").unwrap_or_default(), known);
+            let version = filled(&child(one, "version").unwrap_or_default(), known);
+            let Some(found) = Coordinate::parse(&format!("{group}:{artifact}:{version}")) else {
+                continue;
+            };
+            if !out.contains(&found) {
+                out.push(found);
+            }
+        }
+        out
+    }
+
+    pub fn plan(root: &str) -> Result<Plan, Diagnostic> {
+        let mut out = Plan::default();
+        let Some(settings) = crate::settings::held(root)? else {
+            out.done = true;
+            return Ok(out);
+        };
+
+        let mut wanted: Vec<Coordinate> = Vec::new();
+        for one in &settings.dependencies {
+            if !one.file.is_empty() {
+                continue;
+            }
+            let Some(found) = Coordinate::parse(&format!("{}:{}", one.name, one.version)) else {
+                out.unresolved.push(one.name.clone());
+                continue;
+            };
+            if found.version.is_empty() {
+                out.unresolved.push(found.named());
+                continue;
+            }
+            if !wanted.contains(&found) {
+                wanted.push(found);
+            }
+        }
+
+        let mut poms: std::collections::BTreeMap<String, Pom> = std::collections::BTreeMap::new();
+        let mut missing: Vec<Coordinate> = Vec::new();
+        let mut seen: Vec<Coordinate> = Vec::new();
+        let mut round = 0usize;
+        while !wanted.is_empty() && round < MOST_ROUNDS && seen.len() < MOST_LIBRARIES {
+            round += 1;
+            let mut next: Vec<Coordinate> = Vec::new();
+            for one in wanted.drain(..) {
+                if seen.contains(&one) {
+                    continue;
+                }
+                seen.push(one.clone());
+                let Some(text) = text_of(&pom_path(root, &one)) else {
+                    if !missing.contains(&one) {
+                        missing.push(one);
+                    }
+                    continue;
+                };
+                let Some(held) = read_pom(&text, &one) else {
+                    out.unresolved.push(one.text());
+                    continue;
+                };
+                for mut need in held.needs.clone() {
+                    if need.version.is_empty() {
+                        let known = held
+                            .managed
+                            .iter()
+                            .find(|managed| managed.named() == need.named());
+                        match known {
+                            Some(found) => need.version = found.version.clone(),
+                            None => {
+                                out.unresolved.push(need.named());
+                                continue;
+                            }
+                        }
+                    }
+                    if !seen.contains(&need) && !next.contains(&need) {
+                        next.push(need);
+                    }
+                }
+                if let Some(parent) = held.parent.clone() {
+                    if !seen.contains(&parent) && !next.contains(&parent) {
+                        next.push(parent);
+                    }
+                }
+                poms.insert(one.text(), held);
+            }
+            wanted = next;
+        }
+        out.rounds = round;
+
+        for one in &missing {
+            out.wanted.push(Want {
+                coordinate: one.text(),
+                kind: POM.to_string(),
+                urls: one.urls(POM),
+                path: format!(
+                    "{}/{}/{}",
+                    crate::scaffold::LIBRARY_FOLDER,
+                    CACHE,
+                    one.file(POM)
+                ),
+            });
+        }
+        if !out.wanted.is_empty() {
+            out.unresolved.sort();
+            out.unresolved.dedup();
+            return Ok(out);
+        }
+
+        for one in &seen {
+            let held = poms.get(&one.text());
+            let packaging = held
+                .map(|pom| pom.packaging.clone())
+                .unwrap_or_else(|| JAR.to_string());
+            if packaging == "pom" {
+                continue;
+            }
+            let kind = if packaging == AAR { AAR } else { JAR };
+            if library_path(root, one, kind).is_file()
+                || library_path(root, one, if kind == AAR { JAR } else { AAR }).is_file()
+            {
+                out.held.push(one.text());
+                continue;
+            }
+            out.wanted.push(Want {
+                coordinate: one.text(),
+                kind: kind.to_string(),
+                urls: one.urls(kind),
+                path: format!("{}/{}", crate::scaffold::LIBRARY_FOLDER, one.file(kind)),
+            });
+        }
+        out.unresolved.sort();
+        out.unresolved.dedup();
+        out.done = out.wanted.is_empty();
+        if seen.len() >= MOST_LIBRARIES {
+            return Err(fail(
+                "EM301",
+                "This asks for more libraries than one build pulls in.",
+            )
+            .with_context(format!("Most: {MOST_LIBRARIES}"))
+            .with_suggestion("Name the few the project uses directly and let the rest go."));
+        }
+        Ok(out)
+    }
+
+    pub fn write_json(plan: &Plan, w: &mut crate::json::Writer) {
+        w.field_bool("done", plan.done);
+        w.field_u64("rounds", plan.rounds as u64);
+        w.begin_array(Some("wanted"));
+        for one in &plan.wanted {
+            w.begin_object(None);
+            w.field_str("coordinate", &one.coordinate);
+            w.field_str("kind", &one.kind);
+            w.field_str("path", &one.path);
+            w.begin_array(Some("urls"));
+            for url in &one.urls {
+                w.element_str(url);
+            }
+            w.end_array();
+            w.end_object();
+        }
+        w.end_array();
+        w.begin_array(Some("held"));
+        for one in &plan.held {
+            w.element_str(one);
+        }
+        w.end_array();
+        w.begin_array(Some("unresolved"));
+        for one in &plan.unresolved {
+            w.element_str(one);
+        }
+        w.end_array();
     }
 }
 
@@ -32100,6 +33639,38 @@ pub mod trash {
     pub const RECORD_FILE: &str = "Origin";
     pub const PAYLOAD: &str = "Item";
     pub const MAX_ENTRIES: usize = 2_000;
+    pub const KEPT: i64 = 0;
+
+    pub fn inside_a_project(root: &str) -> bool {
+        std::path::Path::new(root)
+            .parent()
+            .map(|above| above.join(crate::settings::FILE_NAME).is_file())
+            .unwrap_or(false)
+    }
+
+    fn held_for(root: &str) -> i64 {
+        if inside_a_project(root) {
+            KEPT
+        } else {
+            HELD_SECONDS
+        }
+    }
+
+    pub fn day_of(now: i64) -> String {
+        let days = now.div_euclid(86_400);
+        let (year, month, day) = crate::packer::civil_from_days(days + 719_468);
+        format!("{year:04}-{month:02}-{day:02}")
+    }
+
+    fn moment_of(now: i64) -> String {
+        let rest = now.rem_euclid(86_400);
+        format!(
+            "{:02}-{:02}-{:02}",
+            rest / 3600,
+            (rest % 3600) / 60,
+            rest % 60
+        )
+    }
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
@@ -32123,7 +33694,14 @@ pub mod trash {
     }
 
     impl Entry {
+        pub fn kept(&self) -> bool {
+            self.expires_at == KEPT
+        }
+
         pub fn seconds_left(&self, now: i64) -> i64 {
+            if self.kept() {
+                return 0;
+            }
             (self.expires_at - now).max(0)
         }
 
@@ -32137,6 +33715,7 @@ pub mod trash {
             w.field_u64("deletedAt", self.deleted_at.max(0) as u64);
             w.field_u64("expiresAt", self.expires_at.max(0) as u64);
             w.field_u64("secondsLeft", self.seconds_left(now) as u64);
+            w.field_bool("kept", self.kept());
             w.field_bool("restorable", !std::path::Path::new(&self.origin).exists());
             w.end_object();
         }
@@ -32224,13 +33803,18 @@ pub mod trash {
         if entry.name.is_empty() || !held.join(PAYLOAD).exists() {
             return None;
         }
-        entry.expires_at = entry.deleted_at + HELD_SECONDS;
+        entry.expires_at = match held_for(root) {
+            KEPT => KEPT,
+            keeps => entry.deleted_at + keeps,
+        };
         Some(entry)
     }
 
     fn identifier(root: &std::path::Path, now: i64) -> Result<String, Diagnostic> {
+        let day = day_of(now);
+        let moment = moment_of(now);
         for attempt in 0..10_000u32 {
-            let id = format!("{:012}-{attempt:04}", now.max(0));
+            let id = format!("{day}/{moment}-{attempt:04}");
             if !root.join(&id).exists() {
                 return Ok(id);
             }
@@ -32239,6 +33823,48 @@ pub mod trash {
             "ET004",
             "The trash already holds every name this second could take.",
         ))
+    }
+
+    fn identifiers(root: &str) -> Vec<String> {
+        let Ok(days) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for day in days.flatten() {
+            if !day.path().is_dir() {
+                continue;
+            }
+            let Some(named) = day.file_name().to_str().map(|name| name.to_string()) else {
+                continue;
+            };
+            let Ok(moments) = std::fs::read_dir(day.path()) else {
+                continue;
+            };
+            for moment in moments.flatten() {
+                if !moment.path().is_dir() {
+                    continue;
+                }
+                if let Some(held) = moment.file_name().to_str() {
+                    out.push(format!("{named}/{held}"));
+                }
+            }
+        }
+        out.sort();
+        out.reverse();
+        out
+    }
+
+    fn forget_the_day(root: &str, id: &str) {
+        let Some((day, _)) = id.split_once('/') else {
+            return;
+        };
+        let held = std::path::Path::new(root).join(day);
+        if std::fs::read_dir(&held)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            std::fs::remove_dir(&held).ok();
+        }
     }
 
     pub fn send(root: &str, path: &str, now: i64) -> Result<Entry, Diagnostic> {
@@ -32291,7 +33917,10 @@ pub mod trash {
             folder: source.is_dir(),
             bytes: weigh(source),
             deleted_at: now,
-            expires_at: now + HELD_SECONDS,
+            expires_at: match held_for(root) {
+                KEPT => KEPT,
+                keeps => now + keeps,
+            },
         };
 
         std::fs::write(held.join(RECORD_FILE), record(&entry)).map_err(|why| {
@@ -32316,19 +33945,10 @@ pub mod trash {
     }
 
     pub fn list(root: &str, now: i64) -> Vec<Entry> {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return Vec::new();
-        };
-        let mut ids: Vec<String> = entries
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| entry.file_name().to_str().map(|name| name.to_string()))
-            .collect();
-        ids.sort();
-        ids.reverse();
-        ids.iter()
+        identifiers(root)
+            .iter()
             .filter_map(|id| read_record(root, id))
-            .filter(|entry| entry.expires_at > now)
+            .filter(|entry| entry.kept() || entry.expires_at > now)
             .collect()
     }
 
@@ -32341,7 +33961,7 @@ pub mod trash {
                      keeps a copy after that.",
                 )
         })?;
-        if entry.expires_at <= now {
+        if !entry.kept() && entry.expires_at <= now {
             return Err(fail("ET011", "That was held for its day and is gone.")
                 .with_context(format!("Deleted at: {}", entry.deleted_at)));
         }
@@ -32370,6 +33990,7 @@ pub mod trash {
                 .with_context(format!("Reason: {why}"))
         })?;
         std::fs::remove_dir_all(&held).ok();
+        forget_the_day(root, id);
         Ok(entry)
     }
 
@@ -32383,43 +34004,40 @@ pub mod trash {
         std::fs::remove_dir_all(&held).map_err(|why| {
             fail("ET021", "That could not be removed from the trash.")
                 .with_context(format!("Reason: {why}"))
-        })
+        })?;
+        forget_the_day(root, id);
+        Ok(())
     }
 
     pub fn sweep(root: &str, now: i64) -> usize {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return 0;
-        };
         let mut swept = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(id) = entry.file_name().to_str().map(|name| name.to_string()) else {
-                continue;
+        for id in identifiers(root) {
+            let gone = match read_record(root, &id) {
+                Some(held) => !held.kept() && held.expires_at <= now,
+                None => !inside_a_project(root),
             };
-            let held = read_record(root, &id);
-            let gone = match held {
-                Some(held) => held.expires_at <= now,
-                None => true,
-            };
-            if gone && std::fs::remove_dir_all(&path).is_ok() {
+            if gone && std::fs::remove_dir_all(std::path::Path::new(root).join(&id)).is_ok() {
                 swept += 1;
+                forget_the_day(root, &id);
             }
         }
         swept
     }
 
     pub fn empty(root: &str) -> usize {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return 0;
-        };
         let mut emptied = 0;
+        for id in identifiers(root) {
+            if std::fs::remove_dir_all(std::path::Path::new(root).join(&id)).is_ok() {
+                emptied += 1;
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return emptied;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && std::fs::remove_dir_all(&path).is_ok() {
-                emptied += 1;
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).ok();
             }
         }
         emptied
@@ -32550,7 +34168,7 @@ pub mod packer {
         (time, date)
     }
 
-    fn civil_from_days(held: i64) -> (i64, u32, u32) {
+    pub(crate) fn civil_from_days(held: i64) -> (i64, u32, u32) {
         let era = if held >= 0 { held } else { held - 146_096 } / 146_097;
         let day_of_era = (held - era * 146_097) as u64;
         let year_of_era =
@@ -32877,32 +34495,137 @@ pub mod packer {
         Ok(counted)
     }
 
+    const LEGACY_HEADER_BYTES: usize = 12;
+
+    struct Keys {
+        one: u32,
+        two: u32,
+        three: u32,
+    }
+
+    fn step_crc(held: u32, byte: u8) -> u32 {
+        let mut state = (held ^ u32::from(byte)) & 0xff;
+        for _ in 0..8 {
+            let mask = (state & 1).wrapping_neg();
+            state = (state >> 1) ^ (0xedb8_8320 & mask);
+        }
+        (held >> 8) ^ state
+    }
+
+    impl Keys {
+        fn new(password: &str) -> Keys {
+            let mut keys = Keys {
+                one: 0x1234_5678,
+                two: 0x2345_6789,
+                three: 0x3456_7890,
+            };
+            for byte in password.as_bytes() {
+                keys.feed(*byte);
+            }
+            keys
+        }
+
+        fn feed(&mut self, byte: u8) {
+            self.one = step_crc(self.one, byte);
+            self.two = self
+                .two
+                .wrapping_add(self.one & 0xff)
+                .wrapping_mul(134_775_813)
+                .wrapping_add(1);
+            self.three = step_crc(self.three, (self.two >> 24) as u8);
+        }
+
+        fn masked(&self) -> u8 {
+            let held = (self.three | 2) & 0xffff;
+            (held.wrapping_mul(held ^ 1) >> 8) as u8
+        }
+
+        fn open(&mut self, data: &[u8]) -> Vec<u8> {
+            data.iter()
+                .map(|byte| {
+                    let plain = byte ^ self.masked();
+                    self.feed(plain);
+                    plain
+                })
+                .collect()
+        }
+    }
+
+    fn legacy_checks(data: &[u8], entry: &crate::archive::Entry) -> Vec<u8> {
+        let mut out = vec![(entry.crc32 >> 24) as u8];
+        let at = entry.local_header_offset as usize;
+        if let (Some(low), Some(high)) = (data.get(at + 10), data.get(at + 11)) {
+            out.push(u16::from_le_bytes([*low, *high]).to_le_bytes()[1]);
+        }
+        out
+    }
+
+    fn squeezed_back(held: Vec<u8>, method: u16, named: &str) -> Result<Vec<u8>, Diagnostic> {
+        match method {
+            0 => Ok(held),
+            8 => crate::inflate::raw(&held),
+            other => Err(fail(
+                "EZ024",
+                "A locked entry is squeezed in a way this does not read.",
+            )
+            .with_context(format!("Entry: {named}"))
+            .with_context(format!("Method: {other}"))),
+        }
+    }
+
+    fn its_locked(named: &str) -> Diagnostic {
+        fail("EZ023", "This archive is locked.")
+            .with_context(format!("Entry: {named}"))
+            .with_suggestion("Give the password it was locked with.")
+    }
+
     pub fn open_entry(
         archive: &crate::archive::Archive,
         data: &[u8],
         entry: &crate::archive::Entry,
         password: &str,
     ) -> Result<Vec<u8>, Diagnostic> {
-        if entry.compression != crate::archive::Compression::Other(AES_METHOD) {
+        if entry.compression == crate::archive::Compression::Other(AES_METHOD) {
+            if password.is_empty() {
+                return Err(its_locked(&entry.name));
+            }
+            let stored = archive.stored_bytes(data, entry)?;
+            let plain = unseal(password, stored)?;
+            let actual = aes_actual_method(data, entry).unwrap_or(0);
+            return squeezed_back(plain, actual, &entry.name);
+        }
+        if !entry.locked {
             return archive.content(data, entry);
         }
         if password.is_empty() {
-            return Err(fail("EZ023", "This archive is locked.")
-                .with_context(format!("Entry: {}", entry.name))
-                .with_suggestion("Give the password it was locked with."));
+            return Err(its_locked(&entry.name));
         }
         let stored = archive.stored_bytes(data, entry)?;
-        let plain = unseal(password, stored)?;
-        let actual = aes_actual_method(data, entry).unwrap_or(0);
-        match actual {
-            0 => Ok(plain),
-            8 => crate::inflate::raw(&plain),
-            other => Err(fail(
-                "EZ024",
-                "A locked entry is squeezed in a way this does not read.",
-            )
-            .with_context(format!("Method: {other}"))),
+        if stored.len() < LEGACY_HEADER_BYTES {
+            return Err(
+                fail("EZ025", "A locked entry is shorter than its own lock.")
+                    .with_context(format!("Entry: {}", entry.name)),
+            );
         }
+        let opened = Keys::new(password).open(stored);
+        let wrong = || {
+            fail("EZ026", "That password does not open this archive.")
+                .with_context(format!("Entry: {}", entry.name))
+                .with_suggestion("Check the password and try it again.")
+        };
+        if !legacy_checks(data, entry).contains(&opened[LEGACY_HEADER_BYTES - 1]) {
+            return Err(wrong());
+        }
+        let held = squeezed_back(
+            opened[LEGACY_HEADER_BYTES..].to_vec(),
+            entry.compression.method(),
+            &entry.name,
+        )
+        .map_err(|why| if why.code == "EZ024" { why } else { wrong() })?;
+        if entry.crc32 != 0 && crate::binary::checksum::crc32(&held) != entry.crc32 {
+            return Err(wrong());
+        }
+        Ok(held)
     }
 
     fn aes_actual_method(data: &[u8], entry: &crate::archive::Entry) -> Option<u16> {
@@ -33414,9 +35137,25 @@ pub mod workspace {
         pub stripped: String,
         pub settings_written: bool,
         pub icon_drawn: bool,
+        pub adopted: bool,
+        pub unread: Vec<String>,
     }
 
     fn shared_prefix(names: &[String]) -> String {
+        let gradle: Option<&String> = names
+            .iter()
+            .filter(|name| {
+                let tail = name.rsplit('/').next().unwrap_or("");
+                crate::gradle::SETTINGS_FILES.contains(&tail)
+                    || crate::gradle::BUILD_FILES.contains(&tail)
+            })
+            .min_by_key(|name| name.matches('/').count());
+        if let Some(found) = gradle {
+            return match found.rfind('/') {
+                Some(cut) => found[..=cut].to_string(),
+                None => String::new(),
+            };
+        }
         let manifest: Option<&String> = names
             .iter()
             .filter(|name| name.ends_with("AndroidManifest.xml"))
@@ -33442,14 +35181,14 @@ pub mod workspace {
         first.unwrap_or("").to_string()
     }
 
-    pub fn unpack(archive_path: &str, into: &str) -> Result<Unpacked, Diagnostic> {
+    pub fn unpack(archive_path: &str, into: &str, password: &str) -> Result<Unpacked, Diagnostic> {
         let bytes = std::fs::read(archive_path).map_err(|why| {
             fail("EW170", "That archive could not be read.")
                 .with_context(format!("Path: {archive_path}"))
                 .with_context(format!("Reason: {why}"))
         })?;
         let mut sink = crate::diag::Sink::new();
-        let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+        let Some(archive) = crate::archive::read_locked(&bytes, &mut sink) else {
             let said = sink
                 .entries()
                 .first()
@@ -33503,7 +35242,7 @@ pub mod workspace {
                         .with_suggestion("Unpack it elsewhere and open the folder it leaves."),
                 );
             }
-            let content = archive.content(&bytes, entry)?;
+            let content = crate::packer::open_entry(&archive, &bytes, entry, password)?;
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent).map_err(|why| {
                     fail("EW175", "A folder in the archive could not be made.")
@@ -33523,6 +35262,14 @@ pub mod workspace {
             out.bytes += content.len() as u64;
         }
 
+        if !had_settings {
+            if let Some(held) = crate::gradle::adopt(into)? {
+                had_settings = true;
+                out.adopted = true;
+                out.settings_written = true;
+                out.unread = held.unread.clone();
+            }
+        }
         let manifest = crate::scaffold::read_manifest(into)?;
         if !had_settings {
             let mut settings = crate::settings::Settings::default();
@@ -33579,6 +35326,18 @@ pub mod workspace {
                     "Edit it instead. A project folder without a manifest is not a project, \
                      and nothing here would find it again.",
                 ));
+        }
+        let trimmed = relative.trim_start_matches("./").trim_matches('/');
+        if trimmed == crate::trash::FOLDER
+            || trimmed.starts_with(&format!("{}/", crate::trash::FOLDER))
+        {
+            return Err(
+                fail("EW142", "The trash is not something the trash can hold.")
+                    .with_context(format!("Path: {relative}"))
+                    .with_suggestion(
+                        "Empty it instead. Moving it into itself would lose what it holds.",
+                    ),
+            );
         }
         let path = inside(root, relative)?;
         if !path.exists() {
@@ -42254,6 +44013,27 @@ pub mod ffi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn omni_maven_plan(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::maven::plan(&root) {
+                Ok(plan) => {
+                    w.field_bool("planned", true);
+                    crate::maven::write_json(&plan, &mut w);
+                }
+                Err(error) => write_failure(&mut w, "planned", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn omni_project_repairs(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
@@ -42540,15 +44320,17 @@ pub mod ffi {
     pub unsafe extern "C" fn omni_open_archive(
         archive_path: *const c_char,
         into: *const c_char,
+        password: *const c_char,
     ) -> *mut c_char {
         let result = catch_unwind(|| {
             let (Some(archive_path), Some(into)) = (text_from(archive_path), text_from(into))
             else {
                 return std::ptr::null_mut();
             };
+            let password = text_from(password).unwrap_or_default();
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
-            match crate::workspace::unpack(&archive_path, &into) {
+            match crate::workspace::unpack(&archive_path, &into, &password) {
                 Ok(held) => {
                     w.field_bool("unpacked", true);
                     w.field_str("root", &into);
@@ -42558,6 +44340,12 @@ pub mod ffi {
                     w.field_u64("bytes", held.bytes);
                     w.field_bool("settingsWritten", held.settings_written);
                     w.field_bool("iconDrawn", held.icon_drawn);
+                    w.field_bool("adopted", held.adopted);
+                    w.begin_array(Some("unread"));
+                    for one in &held.unread {
+                        w.element_str(one);
+                    }
+                    w.end_array();
                 }
                 Err(error) => write_failure(&mut w, "unpacked", &error),
             }

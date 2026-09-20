@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub はサインインを終えませんでした。</string>
     <string name="omni_copilot_denied">サインインは断られました。</string>
     <string name="omni_copilot_no_seat">このアカウントには Copilot の席がありません。</string>
+    <string name="omni_import_locked">この書庫には鍵がかかっています</string>
+    <string name="omni_import_locked_note">鍵をかけたときの合言葉を入れてください。</string>
+    <string name="omni_import_locked_again">合言葉が違います。もう一度どうぞ。</string>
+    <string name="omni_import_gradle_left">ここでは動かない Gradle プラグイン</string>
+    <string name="omni_import_gradle_left_note">残りは移りました。これらは Gradle に頼んでいたもので、それが足すはずだったものはここにありません。</string>
+    <string name="omni_libraries_missing">%1$d 個のライブラリが名前だけあって、ここにありません</string>
+    <string name="omni_libraries_missing_note">Maven Central と Google から、それらがさらに求めるものごと取ってこられます。</string>
+    <string name="omni_libraries_fetch">取ってくる</string>
+    <string name="omni_libraries_without">なしで組み立てる</string>
+    <string name="omni_libraries_fetching">ライブラリを取ってきています</string>
+    <string name="omni_libraries_got">%1$d 個のファイルが届きました</string>
     <string name="omni_talk_left">残り</string>
     <string name="omni_talk_model">模型</string>
     <string name="omni_talk_no_key">鍵が設定されていないので、何も尋ねられません。</string>

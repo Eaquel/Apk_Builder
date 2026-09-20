@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub n’a pas terminé la connexion.</string>
     <string name="omni_copilot_denied">La connexion a été refusée.</string>
     <string name="omni_copilot_no_seat">Ce compte n’a pas de place Copilot.</string>
+    <string name="omni_import_locked">Cette archive est verrouillée</string>
+    <string name="omni_import_locked_note">Donne le mot de passe avec lequel elle a été verrouillée.</string>
+    <string name="omni_import_locked_again">Ce n’était pas le mot de passe. Réessaie.</string>
+    <string name="omni_import_gradle_left">Greffons Gradle que ceci n’exécute pas</string>
+    <string name="omni_import_gradle_left_note">Le reste est passé. Le projet les demandait à Gradle, et ce qu’ils auraient ajouté n’est pas là.</string>
+    <string name="omni_libraries_missing">%1$d bibliothèques sont nommées mais absentes</string>
+    <string name="omni_libraries_missing_note">On peut les chercher sur Maven Central et chez Google, avec tout ce qu’elles demandent à leur tour.</string>
+    <string name="omni_libraries_fetch">Les chercher</string>
+    <string name="omni_libraries_without">Construire sans elles</string>
+    <string name="omni_libraries_fetching">Récupération des bibliothèques</string>
+    <string name="omni_libraries_got">%1$d fichiers sont arrivés</string>
     <string name="omni_talk_left">Reste</string>
     <string name="omni_talk_model">Modèle</string>
     <string name="omni_talk_no_key">Aucune clé n\'est définie, donc rien ne peut être demandé.</string>

@@ -4464,7 +4464,7 @@ public class Written {
         std::fs::write(&held, &bytes).expect("the archive lands on disk");
         let root = directory.join("Zipped");
 
-        let opened = crate::workspace::unpack(held.to_str().unwrap(), root.to_str().unwrap())
+        let opened = crate::workspace::unpack(held.to_str().unwrap(), root.to_str().unwrap(), "")
             .expect("the archive opens into a project");
 
         assert_eq!(opened.stripped, "Zipped-main/");
@@ -4631,7 +4631,7 @@ public class Written {
         std::fs::write(&held, &bytes).expect("the archive lands on disk");
         let root = directory.join("Bare");
 
-        let error = crate::workspace::unpack(held.to_str().unwrap(), root.to_str().unwrap())
+        let error = crate::workspace::unpack(held.to_str().unwrap(), root.to_str().unwrap(), "")
             .expect_err("it is refused");
         assert_eq!(error.code, "EP030");
 
@@ -14026,6 +14026,476 @@ public final class App extends Activity {
     }
 
     #[test]
+    fn a_gradle_project_is_read_the_way_gradle_reads_it() {
+        let directory = temp_directory("omni-gradle-read");
+        std::fs::create_dir_all(directory.join("app/src/main/cpp")).unwrap();
+        std::fs::create_dir_all(directory.join("gradle")).unwrap();
+
+        std::fs::write(
+            directory.join("settings.gradle.kts"),
+            "pluginManagement { repositories { google(); mavenCentral() } }\n\
+             rootProject.name = \"Held\"\n\
+             include(\":app\")\n\
+             include(\":core\", \":ui\")\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            directory.join("gradle/libs.versions.toml"),
+            "[versions]\n\
+             core = \"1.13.1\"\n\
+             room = \"2.6.1\"\n\
+             \n\
+             [libraries]\n\
+             androidx-core-ktx = { module = \"androidx.core:core-ktx\", version.ref = \"core\" }\n\
+             room-runtime = { group = \"androidx.room\", name = \"room-runtime\", version.ref = \"room\" }\n\
+             room-compiler = { module = \"androidx.room:room-compiler\", version.ref = \"room\" }\n\
+             material = \"com.google.android.material:material:1.12.0\"\n\
+             \n\
+             [plugins]\n\
+             android-application = { id = \"com.android.application\", version = \"8.5.0\" }\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            directory.join("app/build.gradle.kts"),
+            "// the comment at the top { is not a block\n\
+             plugins {\n\
+             \x20   id(\"com.android.application\")\n\
+             \x20   id(\"org.jetbrains.kotlin.android\")\n\
+             \x20   id(\"com.google.devtools.ksp\")\n\
+             \x20   id(\"com.google.gms.google-services\")\n\
+             }\n\
+             \n\
+             android {\n\
+             \x20   namespace = \"com.tr.yt\"\n\
+             \x20   compileSdk = 35\n\
+             \n\
+             \x20   defaultConfig {\n\
+             \x20       applicationId = \"com.tr.yt.free\"\n\
+             \x20       minSdk = 24\n\
+             \x20       targetSdk = 34\n\
+             \x20       versionCode = 17\n\
+             \x20       versionName = \"2.3.1\"\n\
+             \x20       externalNativeBuild { cmake { cppFlags += \"-std=c++17\" } }\n\
+             \x20   }\n\
+             \n\
+             \x20   buildTypes {\n\
+             \x20       release {\n\
+             \x20           isMinifyEnabled = true\n\
+             \x20           isShrinkResources = true\n\
+             \x20       }\n\
+             \x20   }\n\
+             \n\
+             \x20   compileOptions {\n\
+             \x20       sourceCompatibility = JavaVersion.VERSION_11\n\
+             \x20       targetCompatibility = JavaVersion.VERSION_11\n\
+             \x20   }\n\
+             \n\
+             \x20   externalNativeBuild { cmake { path = \"src/main/cpp/CMakeLists.txt\" } }\n\
+             }\n\
+             \n\
+             dependencies {\n\
+             \x20   implementation(libs.androidx.core.ktx)\n\
+             \x20   implementation(libs.room.runtime)\n\
+             \x20   implementation(\"com.squareup.okhttp3:okhttp:4.12.0\")\n\
+             \x20   implementation(project(\":core\"))\n\
+             \x20   ksp(libs.room.compiler)\n\
+             \x20   testImplementation(\"junit:junit:4.13.2\")\n\
+             }\n",
+        )
+        .unwrap();
+
+        let text = directory.to_str().unwrap();
+        assert!(crate::gradle::looks_like_one(text));
+        assert_eq!(
+            crate::gradle::application_module(text).as_deref(),
+            Some("app"),
+            "the module that applies the application plugin is the one to build"
+        );
+
+        let found = crate::gradle::read(text, "app").expect("the build file reads");
+        assert_eq!(found.settings.namespace, "com.tr.yt");
+        assert_eq!(found.settings.application_id, "com.tr.yt.free");
+        assert_eq!(found.settings.compile_sdk, 35);
+        assert_eq!(found.settings.min_sdk, 24);
+        assert_eq!(found.settings.target_sdk, 34);
+        assert_eq!(found.settings.version_code, 17);
+        assert_eq!(found.settings.version_name, "2.3.1");
+        assert_eq!(found.settings.java.source, "11");
+        assert_eq!(found.settings.native.path, "src/main/cpp/CMakeLists.txt");
+        assert!(found.settings.shrink, "release minifies, so this does too");
+
+        let named: Vec<&str> = found
+            .settings
+            .dependencies
+            .iter()
+            .map(|one| one.name.as_str())
+            .collect();
+        assert!(named.contains(&"androidx.core:core-ktx"), "{named:?}");
+        assert!(named.contains(&"androidx.room:room-runtime"), "{named:?}");
+        assert!(named.contains(&"com.squareup.okhttp3:okhttp"), "{named:?}");
+        assert!(
+            !named.contains(&"junit:junit"),
+            "a test-only dependency is not one the app carries"
+        );
+        assert_eq!(
+            found
+                .settings
+                .dependencies
+                .iter()
+                .find(|one| one.name == "androidx.core:core-ktx")
+                .map(|one| one.version.as_str()),
+            Some("1.13.1"),
+            "the version comes out of the catalogue"
+        );
+        assert_eq!(
+            found.processors.first().map(|one| one.name.as_str()),
+            Some("androidx.room:room-compiler"),
+            "what ksp is given is a processor, not a library"
+        );
+        assert!(
+            found.modules.contains(&"core".to_string()),
+            "{:?}",
+            found.modules
+        );
+        assert!(
+            found.modules.contains(&"ui".to_string()),
+            "{:?}",
+            found.modules
+        );
+        assert!(found.settings.languages.contains(&"kotlin".to_string()));
+        assert!(found.settings.languages.contains(&"cpp".to_string()));
+        assert_eq!(
+            found.unread,
+            vec!["com.google.gms.google-services".to_string()],
+            "a plugin this cannot run is said out loud, not swallowed"
+        );
+
+        eprintln!(
+            "gradle: read {} dependencies, {} processors and {} other modules",
+            found.settings.dependencies.len(),
+            found.processors.len(),
+            found.modules.len()
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_standard_gradle_project_opens_as_one_this_builds() {
+        let directory = temp_directory("omni-gradle-adopt");
+        let from = directory.join("Sent");
+        std::fs::create_dir_all(from.join("app/src/main/java/com/tr/yt")).unwrap();
+        std::fs::create_dir_all(from.join("app/src/main/res/values")).unwrap();
+        std::fs::create_dir_all(from.join("app/src/main/cpp")).unwrap();
+        std::fs::create_dir_all(from.join("app/src/test/java")).unwrap();
+        std::fs::create_dir_all(from.join("core/src/main/java/com/tr/yt/core")).unwrap();
+        std::fs::create_dir_all(from.join("app/libs")).unwrap();
+
+        std::fs::write(
+            from.join("settings.gradle.kts"),
+            "rootProject.name = \"Sent\"\ninclude(\":app\")\ninclude(\":core\")\n",
+        )
+        .unwrap();
+        std::fs::write(from.join("build.gradle.kts"), "plugins { }\n").unwrap();
+        std::fs::write(
+            from.join("app/build.gradle.kts"),
+            "plugins { id(\"com.android.application\") ; id(\"org.jetbrains.kotlin.android\") }\n\
+             android {\n\
+             \x20   namespace = \"com.tr.yt\"\n\
+             \x20   compileSdk = 35\n\
+             \x20   defaultConfig { applicationId = \"com.tr.yt\" ; minSdk = 24 ; versionCode = 4 ; versionName = \"1.4\" }\n\
+             }\n\
+             dependencies { implementation(project(\":core\")) }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("core/build.gradle.kts"),
+            "plugins { id(\"com.android.library\") }\nandroid { namespace = \"com.tr.yt.core\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("app/src/main/AndroidManifest.xml"),
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.tr.yt\"><application android:label=\"Sent\"><activity \
+             android:name=\".App\" android:exported=\"true\"/></application></manifest>",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("app/src/main/java/com/tr/yt/App.java"),
+            "package com.tr.yt;\npublic class App {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("app/src/main/java/com/tr/yt/Helper.kt"),
+            "package com.tr.yt\nclass Helper\n",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("app/src/test/java/Gone.java"),
+            "public class Gone {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("core/src/main/java/com/tr/yt/core/Core.java"),
+            "package com.tr.yt.core;\npublic class Core {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("app/src/main/res/values/strings.xml"),
+            "<resources><string name=\"app_name\">Sent</string></resources>",
+        )
+        .unwrap();
+        std::fs::write(
+            from.join("app/src/main/cpp/CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.22)\n",
+        )
+        .unwrap();
+        std::fs::write(from.join("app/libs/held.jar"), b"not really a jar").unwrap();
+        std::fs::write(from.join("app/proguard-rules.pro"), "-dontwarn **\n").unwrap();
+
+        let packed = directory.join("Sent.zip");
+        crate::packer::pack(
+            directory.to_str().unwrap(),
+            &["Sent".to_string()],
+            packed.to_str().unwrap(),
+            crate::packer::ZIP,
+            "",
+        )
+        .expect("the project packs");
+
+        let root = directory.join("Opened");
+        let opened = crate::workspace::unpack(packed.to_str().unwrap(), root.to_str().unwrap(), "")
+            .expect("the project opens");
+        assert!(opened.adopted, "a Gradle project is taken in as one");
+        assert!(
+            opened.settings_written,
+            "opening one writes the settings this builds from"
+        );
+
+        assert!(
+            root.join("AndroidManifest.xml").is_file(),
+            "the manifest is at the root"
+        );
+        assert!(root.join("Java/com/tr/yt/App.java").is_file());
+        assert!(
+            root.join("Kotlin/com/tr/yt/Helper.kt").is_file(),
+            "a .kt under src/main/java still goes where Kotlin lives"
+        );
+        assert!(
+            root.join("Java/com/tr/yt/core/Core.java").is_file(),
+            "a library module's source comes with it"
+        );
+        assert!(root.join("Res/values/strings.xml").is_file());
+        assert!(root.join("Native/CMakeLists.txt").is_file());
+        assert!(root.join("Libraries/held.jar").is_file());
+        assert!(root.join("proguard-rules.pro").is_file());
+        assert!(
+            !root.join("Java/Gone.java").is_file(),
+            "what only the tests used is not compiled into the app"
+        );
+        assert!(
+            root.join("app/build.gradle.kts").is_file(),
+            "the build file it came with is left where it was"
+        );
+
+        let held = crate::settings::held(root.to_str().unwrap())
+            .unwrap()
+            .expect("the settings are written");
+        assert_eq!(held.namespace, "com.tr.yt");
+        assert_eq!(held.compile_sdk, 35);
+        assert_eq!(held.min_sdk, 24);
+        assert_eq!(held.version_code, 4);
+        assert_eq!(held.version_name, "1.4");
+        assert!(held.languages.contains(&"kotlin".to_string()));
+        assert!(held.languages.contains(&"cpp".to_string()));
+
+        let ignored = crate::builder::uncompiled_source(root.to_str().unwrap());
+        assert_eq!(
+            ignored
+                .iter()
+                .map(|(language, _)| *language)
+                .collect::<Vec<&str>>(),
+            vec!["kotlin"],
+            "only the Kotlin is named as what this build cannot compile: {ignored:?}"
+        );
+
+        eprintln!(
+            "gradle: took in a two module project, {} files moved into place",
+            opened.files
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn what_a_project_names_comes_down_from_maven_with_all_it_leans_on() {
+        let directory = temp_directory("omni-maven");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
+
+        let mut settings = crate::settings::held(&text).unwrap().unwrap();
+        settings.dependencies = vec![crate::settings::Dependency {
+            name: "com.squareup.okhttp3:okhttp".to_string(),
+            version: "4.12.0".to_string(),
+            file: String::new(),
+        }];
+        crate::settings::write(&text, &settings).unwrap();
+
+        let mut rounds = 0;
+        let mut asked = 0;
+        loop {
+            rounds += 1;
+            assert!(rounds < 24, "the plan never settled");
+            let plan = crate::maven::plan(&text).expect("the plan is made");
+            if plan.done {
+                break;
+            }
+            let mut carried = 0;
+            for want in &plan.wanted {
+                let into = root.join(&want.path);
+                std::fs::create_dir_all(into.parent().unwrap()).unwrap();
+                for url in &want.urls {
+                    asked += 1;
+                    let Some((passed, _)) = tool_runs(
+                        "curl",
+                        &["-sSfL", "-m", "40", "-o", into.to_str().unwrap(), url],
+                    ) else {
+                        eprintln!("maven: curl is not here to fetch anything");
+                        std::fs::remove_dir_all(&directory).ok();
+                        return;
+                    };
+                    if passed && into.is_file() {
+                        carried += 1;
+                        break;
+                    }
+                }
+            }
+            if carried == 0 {
+                eprintln!("maven: nothing came down, so there is nothing to check");
+                std::fs::remove_dir_all(&directory).ok();
+                return;
+            }
+        }
+
+        let libraries = root.join(crate::scaffold::LIBRARY_FOLDER);
+        let held: Vec<String> = std::fs::read_dir(&libraries)
+            .unwrap()
+            .flatten()
+            .filter(|one| one.path().is_file())
+            .map(|one| one.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            held.contains(&"okhttp-4.12.0.jar".to_string()),
+            "what was named did not come down: {held:?}"
+        );
+        assert!(
+            held.iter().any(|one| one.starts_with("okio")),
+            "what okhttp leans on did not come with it: {held:?}"
+        );
+        assert!(
+            held.iter().any(|one| one.starts_with("kotlin-stdlib")),
+            "the Kotlin runtime okhttp leans on did not come with it: {held:?}"
+        );
+        for one in &held {
+            let bytes = std::fs::metadata(libraries.join(one)).unwrap().len();
+            assert!(bytes > 0, "{one} came down empty");
+        }
+        assert!(
+            crate::maven::plan(&text).unwrap().done,
+            "asking again wants nothing more"
+        );
+
+        eprintln!(
+            "maven: {} jars in {rounds} rounds and {asked} requests, from one name",
+            held.len()
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_project_keeps_what_it_deletes_in_folders_named_by_the_day() {
+        let directory = temp_directory("omni-trash-project");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
+        let bin = root
+            .join(crate::trash::FOLDER)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let now = 1_787_000_000;
+        let day = crate::trash::day_of(now);
+
+        crate::workspace::write_text(&text, "Kotlin/Gone.kt", "class Gone\n").unwrap();
+        let thrown = crate::workspace::remove(&text, "Kotlin/Gone.kt", &bin, now).unwrap();
+        assert!(thrown.kept(), "what a project deletes is kept, not timed");
+        assert!(
+            thrown.id.starts_with(&format!("{day}/")),
+            "{} is not filed under the day it was deleted",
+            thrown.id
+        );
+        assert!(root.join(crate::trash::FOLDER).join(&day).is_dir());
+
+        let later = now + 9 * crate::trash::HELD_SECONDS;
+        assert_eq!(
+            crate::trash::sweep(&bin, later),
+            0,
+            "a project's trash is never swept out from under it"
+        );
+        assert_eq!(
+            crate::trash::list(&bin, later).len(),
+            1,
+            "it is still there nine days on"
+        );
+
+        crate::trash::restore(&bin, &thrown.id, later).unwrap();
+        assert_eq!(
+            crate::workspace::read_text(&text, "Kotlin/Gone.kt").unwrap(),
+            "class Gone\n"
+        );
+        assert!(
+            !root.join(crate::trash::FOLDER).join(&day).exists(),
+            "a day with nothing left in it is forgotten"
+        );
+
+        let second = now + 3 * crate::trash::HELD_SECONDS;
+        crate::workspace::remove(&text, "Kotlin/Gone.kt", &bin, now).unwrap();
+        crate::workspace::write_text(&text, "Kotlin/Gone.kt", "again\n").unwrap();
+        crate::workspace::remove(&text, "Kotlin/Gone.kt", &bin, second).unwrap();
+        let mut days: Vec<String> = std::fs::read_dir(&bin)
+            .unwrap()
+            .flatten()
+            .filter(|one| one.path().is_dir())
+            .map(|one| one.file_name().to_string_lossy().to_string())
+            .collect();
+        days.sort();
+        assert_eq!(
+            days,
+            vec![day.clone(), crate::trash::day_of(second)],
+            "two days deleted on, two folders"
+        );
+        assert_eq!(crate::trash::list(&bin, second).len(), 2);
+
+        assert_eq!(
+            crate::workspace::remove(&text, crate::trash::FOLDER, &bin, second)
+                .unwrap_err()
+                .code,
+            "EW142",
+            "the trash is not something the trash can hold"
+        );
+
+        assert_eq!(crate::trash::empty(&bin), 2);
+        assert!(crate::trash::list(&bin, second).is_empty());
+        assert!(
+            std::fs::read_dir(&bin).unwrap().flatten().count() == 0,
+            "emptying leaves no day behind"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_project_keeps_the_image_the_developer_chose() {
         let _turn = crate::progress::one_at_a_time();
         let mut files = Vec::new();
@@ -16923,6 +17393,78 @@ public final class App extends Activity {
         eprintln!(
             "pack: three entries locked with AES-256, opened by the password and by nothing else"
         );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_zip_locked_the_old_way_by_somebody_else_still_opens() {
+        let directory = temp_directory("omni-pack-legacy");
+        std::fs::create_dir_all(&directory).expect("the folder is made");
+        let short = "a line, and then another\n";
+        let long = "x".repeat(4_000);
+        std::fs::write(directory.join("Note.txt"), short).expect("the note is written");
+        std::fs::write(directory.join("Long.txt"), &long).expect("the long file is written");
+        let into = directory.join("Locked.zip");
+
+        let Some((passed, said)) = tool_runs(
+            "zip",
+            &[
+                "-q",
+                "-j",
+                "-P",
+                "hunter2",
+                into.to_str().unwrap(),
+                directory.join("Note.txt").to_str().unwrap(),
+                directory.join("Long.txt").to_str().unwrap(),
+            ],
+        ) else {
+            eprintln!("pack: zip is not here to write an old-style locked archive");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        };
+        assert!(passed, "zip refused to write the archive:\n{said}");
+
+        let bytes = std::fs::read(&into).expect("the archive is on disk");
+        let mut sink = crate::diag::Sink::new();
+        assert!(
+            crate::archive::read(&bytes, &mut sink).is_none(),
+            "a locked archive is still refused by the reader that refuses locks"
+        );
+        let mut sink = crate::diag::Sink::new();
+        let archive =
+            crate::archive::read_locked(&bytes, &mut sink).expect("it is a readable archive");
+
+        let mut seen = 0;
+        for entry in archive.entries() {
+            if entry.is_directory() {
+                continue;
+            }
+            assert!(entry.locked, "{} is not marked locked", entry.name);
+            let held = crate::packer::open_entry(&archive, &bytes, entry, "hunter2")
+                .unwrap_or_else(|why| panic!("{} did not open: {}", entry.name, why.message));
+            assert_eq!(
+                held,
+                std::fs::read(directory.join(&entry.name)).unwrap(),
+                "{} came back changed",
+                entry.name
+            );
+            assert_eq!(
+                crate::packer::open_entry(&archive, &bytes, entry, "")
+                    .expect_err("no password at all is refused")
+                    .code,
+                "EZ023"
+            );
+            assert_eq!(
+                crate::packer::open_entry(&archive, &bytes, entry, "not the one")
+                    .expect_err("a wrong password is refused")
+                    .code,
+                "EZ026"
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 2, "both files are read back");
+
+        eprintln!("pack: a zip locked by zip -P opens, stored and squeezed alike");
         std::fs::remove_dir_all(&directory).ok();
     }
 

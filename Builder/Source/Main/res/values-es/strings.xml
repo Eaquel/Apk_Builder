@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub no terminó el inicio de sesión.</string>
     <string name="omni_copilot_denied">El inicio de sesión fue rechazado.</string>
     <string name="omni_copilot_no_seat">Esta cuenta no tiene plaza de Copilot.</string>
+    <string name="omni_import_locked">Este archivo está cerrado con llave</string>
+    <string name="omni_import_locked_note">Da la contraseña con la que se cerró.</string>
+    <string name="omni_import_locked_again">Esa no era la contraseña. Inténtalo otra vez.</string>
+    <string name="omni_import_gradle_left">Complementos de Gradle que esto no ejecuta</string>
+    <string name="omni_import_gradle_left_note">Lo demás pasó. Estos se los pidió el proyecto a Gradle, y lo que habrían añadido no está aquí.</string>
+    <string name="omni_libraries_missing">%1$d bibliotecas están nombradas pero no están aquí</string>
+    <string name="omni_libraries_missing_note">Se pueden traer de Maven Central y de Google, junto con todo lo que ellas piden a su vez.</string>
+    <string name="omni_libraries_fetch">Traerlas</string>
+    <string name="omni_libraries_without">Compilar sin ellas</string>
+    <string name="omni_libraries_fetching">Trayendo las bibliotecas</string>
+    <string name="omni_libraries_got">Bajaron %1$d archivos</string>
     <string name="omni_talk_left">Resta</string>
     <string name="omni_talk_model">Modelo</string>
     <string name="omni_talk_no_key">No hay clave, así que no se puede preguntar nada.</string>

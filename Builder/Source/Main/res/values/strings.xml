@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub did not finish the sign in.</string>
     <string name="omni_copilot_denied">The sign in was turned down.</string>
     <string name="omni_copilot_no_seat">This account has no Copilot seat.</string>
+    <string name="omni_import_locked">This archive is locked</string>
+    <string name="omni_import_locked_note">Give the password it was locked with.</string>
+    <string name="omni_import_locked_again">That was not the password. Try it again.</string>
+    <string name="omni_import_gradle_left">Gradle plugins this does not run</string>
+    <string name="omni_import_gradle_left_note">The rest came across. These the project asked Gradle for, and whatever they would have added is not here.</string>
+    <string name="omni_libraries_missing">%1$d libraries are named but not here</string>
+    <string name="omni_libraries_missing_note">They can be fetched from Maven Central and Google, along with everything they in turn ask for.</string>
+    <string name="omni_libraries_fetch">Fetch them</string>
+    <string name="omni_libraries_without">Build without them</string>
+    <string name="omni_libraries_fetching">Fetching the libraries</string>
+    <string name="omni_libraries_got">%1$d files came down</string>
     <string name="omni_talk_left">Left</string>
     <string name="omni_talk_model">Model</string>
     <string name="omni_talk_no_key">No key is set, so nothing can be asked.</string>

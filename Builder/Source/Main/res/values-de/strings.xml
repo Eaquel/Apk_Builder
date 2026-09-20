@@ -451,6 +451,17 @@
     <string name="omni_copilot_refused">GitHub hat die Anmeldung nicht zu Ende gebracht.</string>
     <string name="omni_copilot_denied">Die Anmeldung wurde abgelehnt.</string>
     <string name="omni_copilot_no_seat">Dieses Konto hat keinen Copilot-Platz.</string>
+    <string name="omni_import_locked">Dieses Archiv ist verschlossen</string>
+    <string name="omni_import_locked_note">Gib das Passwort an, mit dem es verschlossen wurde.</string>
+    <string name="omni_import_locked_again">Das war nicht das Passwort. Versuch es noch einmal.</string>
+    <string name="omni_import_gradle_left">Gradle-Plugins, die hier nicht laufen</string>
+    <string name="omni_import_gradle_left_note">Der Rest kam mit. Diese hat das Projekt von Gradle verlangt, und was sie beigetragen hätten, ist nicht hier.</string>
+    <string name="omni_libraries_missing">%1$d Bibliotheken sind genannt, aber nicht da</string>
+    <string name="omni_libraries_missing_note">Sie lassen sich von Maven Central und Google holen, mitsamt allem, was sie ihrerseits verlangen.</string>
+    <string name="omni_libraries_fetch">Holen</string>
+    <string name="omni_libraries_without">Ohne sie bauen</string>
+    <string name="omni_libraries_fetching">Die Bibliotheken werden geholt</string>
+    <string name="omni_libraries_got">%1$d Dateien kamen herunter</string>
     <string name="omni_talk_left">Übrig</string>
     <string name="omni_talk_model">Modell</string>
     <string name="omni_talk_no_key">Es ist kein Schlüssel gesetzt, also lässt sich nichts fragen.</string>
