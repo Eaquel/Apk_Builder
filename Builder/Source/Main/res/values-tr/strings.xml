@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">Bu anahtarı oluştururken seçtiğin parola.</string>
     <string name="omni_build_both_note">Tek dokunuş ikisini de yazar: kurulacak imzalı bir paket ve yüklenecek bir paket demeti. Önce güvenlik ilkesi çalışır; reddederse hiçbiri yazılmaz.</string>
     <string name="omni_build_done">%1$d ms içinde bitti</string>
+    <string name="omni_mend_title">Düzeltilebilecekler</string>
+    <string name="omni_mend_note">Bu derleme reddedilecek. Onu durduranlardan %1$d tanesi sizin için yazılabilir; henüz hiçbir şey değiştirilmedi.</string>
+    <string name="omni_mend_one">Düzelt</string>
+    <string name="omni_mend_all">Hepsini düzelt</string>
+    <string name="omni_mend_skip">Yine de derle</string>
+    <string name="omni_mend_done">%1$d tanesi düzeltildi</string>
     <string name="omni_built_title">Burada derlenenler</string>
     <string name="omni_built_none">Henüz bir şey derlenmedi.</string>
     <string name="omni_result_package">Paket</string>

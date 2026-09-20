@@ -628,6 +628,10 @@ object Builder {
 
     external fun nativeGitCheckout(packPath: String, head: String, into: String): String
 
+    external fun nativeProjectRepairs(root: String): String
+
+    external fun nativeApplyRepairs(root: String, repairs: String): String
+
     external fun nativeDigestFile(path: String): String
 
     external fun nativePackArchive(
@@ -8218,7 +8222,9 @@ class BuilderActivity : Activity() {
         )
         content.addView(sealed)
 
-        content.addView(primary(getString(R.string.omni_action_build_both)) { buildProject(root) })
+        content.addView(
+            primary(getString(R.string.omni_action_build_both)) { mendThenBuild(root) }
+        )
         content.addView(quiet(getString(R.string.omni_build_both_note)))
 
         content.addView(heading(getString(R.string.omni_built_title)))
@@ -15360,6 +15366,164 @@ class BuilderActivity : Activity() {
             }
         }
         ceremony.postDelayed(look, LOOK_MILLIS)
+    }
+
+    private class Mend(val held: JSONObject) {
+        val title: String get() = held.optString("title")
+        val path: String get() = held.optString("path")
+        val line: Int get() = held.optInt("line")
+        val confidence: String get() = held.optString("confidence")
+        val after: String get() = held.optString("after")
+    }
+
+    private fun mendThenBuild(root: String) {
+        results.removeAllViews()
+        working({ Builder.nativeProjectRepairs(root) }) finished@{ answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull()
+            val listed = document?.optJSONArray("repairs")
+            val found = mutableListOf<Mend>()
+            for (index in 0 until (listed?.length() ?: 0)) {
+                listed?.optJSONObject(index)?.let { found.add(Mend(it)) }
+            }
+            if (found.isEmpty()) {
+                buildProject(root)
+                return@finished
+            }
+            offerTheMends(root, found, document?.optString("left").orEmpty())
+        }
+    }
+
+    private fun mendRow(root: String, one: Mend, onDone: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(gap(2), gap(2), gap(2), gap(2))
+            addView(
+                View(context).apply {
+                    foreground = Mark(
+                        Mark.Shape.BROOM,
+                        when (one.confidence) {
+                            "CERTAIN" -> palette.ok
+                            "RISKY" -> palette.error
+                            else -> palette.warning
+                        },
+                    )
+                },
+                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+            )
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = one.title
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = one.path + ":" + one.line
+                            setTextColor(palette.muted)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.START
+                        }
+                    )
+                    val written = one.after.lines().firstOrNull { it.isNotBlank() }.orEmpty()
+                    if (written.isNotEmpty()) {
+                        addView(
+                            TextView(context).apply {
+                                text = written.trim()
+                                setTextColor(palette.marker)
+                                typeface = Type.data
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                maxLines = 2
+                                ellipsize = android.text.TextUtils.TruncateAt.END
+                            }
+                        )
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                control().apply {
+                    text = getString(R.string.omni_mend_one)
+                    setTextColor(palette.background)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    background = reacting(palette.accent, gap(4).toFloat(), palette.accent)
+                    setPadding(gap(3), gap(1), gap(3), gap(1))
+                    setOnClickListener {
+                        isEnabled = false
+                        alpha = 0.5f
+                        applyMends(root, listOf(one)) { onDone() }
+                    }
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginStart = gap(2)
+                },
+            )
+        }
+
+    private fun applyMends(root: String, held: List<Mend>, onDone: () -> Unit) {
+        val asked = org.json.JSONArray()
+        held.forEach { asked.put(it.held) }
+        working({ Builder.nativeApplyRepairs(root, asked.toString()) }) { answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull()
+            if (document?.optBoolean("mended", false) != true) {
+                document?.let { showRefusal(Refusal.parse(it), results) }
+                return@working
+            }
+            flash(
+                getString(R.string.omni_mend_done, document.optInt("repaired")),
+                palette.ok,
+                Mark.Shape.BROOM,
+            )
+            onDone()
+        }
+    }
+
+    private fun offerTheMends(root: String, found: List<Mend>, left: String) {
+        var shown: AlertDialog? = null
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val again = {
+            shown?.dismiss()
+            mendThenBuild(root)
+        }
+        found.forEachIndexed { at, one ->
+            if (at > 0) {
+                list.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+            }
+            list.addView(
+                mendRow(root, one, again),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(quiet(getString(R.string.omni_mend_note, found.size)))
+            if (left.isNotEmpty()) {
+                addView(quiet(left))
+            }
+            addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        shown = dialogShell(
+            getString(R.string.omni_mend_title),
+            body,
+            listOf(
+                getString(R.string.omni_mend_skip) to { it: AlertDialog ->
+                    it.dismiss()
+                    buildProject(root)
+                },
+                getString(R.string.omni_mend_all) to { it: AlertDialog ->
+                    it.dismiss()
+                    applyMends(root, found) { mendThenBuild(root) }
+                },
+            ),
+        )
     }
 
     private fun buildProject(root: String) {

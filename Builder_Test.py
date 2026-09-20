@@ -36,7 +36,6 @@ KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
 COMPILERS = ROOT / "Compilers"
-GUARD = ROOT / "Guard.rs"
 ANDROID = ROOT / "Android.rs"
 
 CONFORMANCE = {
@@ -137,7 +136,6 @@ def check_layout() -> str:
         ROOT / "Builder/Source/Main/Native/CMakeLists.txt",
         ROOT / "Builder/build.gradle.kts",
         ROOT / "Builder/proguard-rules.pro",
-        GUARD,
         ANDROID,
     ]
     missing = [str(path.relative_to(ROOT)) for path in required if not path.is_file()]
@@ -166,7 +164,7 @@ def check_layout() -> str:
     if stray:
         raise AssertionError(f"tests live in Builder_Test.py alone, found {stray}")
 
-    sources = [CORE, SPEECH, GUARD, ANDROID]
+    sources = [CORE, SPEECH, ANDROID]
     sources += sorted(COMPILERS.glob("*.rs"))
     sources += sorted((COMPILERS / "Java").glob("*.rs"))
     carried = [
@@ -202,7 +200,7 @@ def check_comments() -> str:
     ]
     watched += sorted(COMPILERS.glob("*.rs"))
     watched += sorted((COMPILERS / "Java").glob("*.rs"))
-    watched += [GUARD, ANDROID]
+    watched += [ANDROID]
 
     found: list[str] = []
     for path in watched:
@@ -602,7 +600,7 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
     def plain(text: str) -> str:
         return re.sub(r"\\\n\s*", "", text).replace('\\"', '"').replace("\\'", "'").strip()
 
-    for path in [CORE, GUARD, ANDROID] + sorted(COMPILERS.glob("*.rs")) + sorted((COMPILERS / "Java").glob("*.rs")):
+    for path in [CORE, ANDROID] + sorted(COMPILERS.glob("*.rs")) + sorted((COMPILERS / "Java").glob("*.rs")):
         text = path.read_text(encoding="utf-8")
         text = text.split("\n#[cfg(test)]\n", 1)[0]
         for found in re.finditer(r'"(E(?:[A-Z]\d{3}|\d{4}))"', text):
@@ -639,7 +637,7 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
                     lines.add(plain(said.group(2)))
                 break
 
-        if path == GUARD:
+        if path == CORE:
             policy = text
             for rule in re.finditer(
                 r'\(\s*"E[A-Z]\d{3}",\s*"[a-z-]+",\s*"((?:[^"\\]|\\.)*)",\s*\)', policy, re.S

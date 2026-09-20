@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">Kata sandi yang kamu pilih ketika membuat kunci ini.</string>
     <string name="omni_build_both_note">Satu tekan menulis keduanya: paket bertanda tangan untuk dipasang, dan bundel untuk diunggah. Kebijakan keamanan berjalan lebih dulu, dan tak satu pun ditulis bila ia menolak.</string>
     <string name="omni_build_done">Selesai dalam %1$d md</string>
+    <string name="omni_mend_title">Yang bisa dibetulkan</string>
+    <string name="omni_mend_note">Pembuatan ini akan ditolak. %1$d dari yang menghentikannya bisa dituliskan untuk Anda; belum ada yang diubah.</string>
+    <string name="omni_mend_one">Betulkan</string>
+    <string name="omni_mend_all">Betulkan semua</string>
+    <string name="omni_mend_skip">Tetap bangun</string>
+    <string name="omni_mend_done">%1$d dibetulkan</string>
     <string name="omni_built_title">Dibangun di sini</string>
     <string name="omni_built_none">Belum ada yang dibangun.</string>
     <string name="omni_result_package">Paket</string>

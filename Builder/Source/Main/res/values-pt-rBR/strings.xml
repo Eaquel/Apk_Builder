@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">A senha que você escolheu quando criou esta chave.</string>
     <string name="omni_build_both_note">Um toque escreve os dois: um pacote assinado para instalar e um bundle para enviar. A política de segurança roda primeiro, e nenhum dos dois é escrito se ela recusar.</string>
     <string name="omni_build_done">Pronto em %1$d ms</string>
+    <string name="omni_mend_title">O que dá para consertar</string>
+    <string name="omni_mend_note">Esta compilação recusaria. %1$d do que a trava pode ser escrito para você; nada foi mudado ainda.</string>
+    <string name="omni_mend_one">Consertar</string>
+    <string name="omni_mend_all">Consertar tudo</string>
+    <string name="omni_mend_skip">Compilar assim mesmo</string>
+    <string name="omni_mend_done">%1$d consertados</string>
     <string name="omni_built_title">Compilados aqui</string>
     <string name="omni_built_none">Nada compilado ainda.</string>
     <string name="omni_result_package">Pacote</string>

@@ -363,6 +363,35 @@ pub mod json {
             self.indent();
         }
 
+        fn owed_comma(&mut self) {
+            if self.needs_comma.is_empty() {
+                return;
+            }
+            let last = self.needs_comma.len() - 1;
+            if self.needs_comma[last] {
+                self.buf.push(',');
+                self.needs_comma[last] = false;
+            }
+        }
+
+        pub fn note(&mut self, said: &str) {
+            if !self.roomy || self.needs_comma.is_empty() {
+                return;
+            }
+            self.owed_comma();
+            self.indent();
+            self.buf.push_str("// ");
+            self.buf.push_str(said);
+        }
+
+        pub fn blank(&mut self) {
+            if !self.roomy || self.needs_comma.is_empty() {
+                return;
+            }
+            self.owed_comma();
+            self.buf.push('\n');
+        }
+
         fn named(&mut self, key: Option<&str>) {
             let Some(k) = key else {
                 return;
@@ -522,8 +551,31 @@ pub mod json {
 
     impl Scan<'_> {
         fn skip(&mut self) {
-            while self.at < self.held.len() && self.held[self.at].is_ascii_whitespace() {
-                self.at += 1;
+            loop {
+                while self.at < self.held.len() && self.held[self.at].is_ascii_whitespace() {
+                    self.at += 1;
+                }
+                if self.at + 1 >= self.held.len() || self.held[self.at] != b'/' {
+                    return;
+                }
+                match self.held[self.at + 1] {
+                    b'/' => {
+                        self.at += 2;
+                        while self.at < self.held.len() && self.held[self.at] != b'\n' {
+                            self.at += 1;
+                        }
+                    }
+                    b'*' => {
+                        self.at += 2;
+                        while self.at + 1 < self.held.len()
+                            && !(self.held[self.at] == b'*' && self.held[self.at + 1] == b'/')
+                        {
+                            self.at += 1;
+                        }
+                        self.at = (self.at + 2).min(self.held.len());
+                    }
+                    _ => return,
+                }
             }
         }
 
@@ -6438,6 +6490,11 @@ pub mod graph {
                 w.element_str(output.as_str());
             }
             w.end_array();
+            w.blank();
+            w.note("Libraries this project is built against. name is the Maven");
+            w.note("coordinate, version what to fetch, file a jar or aar already on");
+            w.note("disk when you would rather not fetch anything.");
+            w.note("Example: {\"name\": \"androidx.core:core\", \"version\": \"1.13.1\"}");
             w.begin_array(Some("dependencies"));
             for dependency in &self.dependencies {
                 w.element_str(dependency.as_str());
@@ -20476,7 +20533,453 @@ pub mod certificate {
 }
 
 #[path = "Guard.rs"]
-pub mod guard;
+pub mod guard {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::json::Writer;
+    use crate::xml::Element;
+    use crate::FailureClass;
+
+    pub const MINIMUM_SDK: i64 = crate::compiler::OLDEST_API as i64;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Verdict {
+        Passed,
+        Refused,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Finding {
+        pub rule: &'static str,
+        pub code: &'static str,
+        pub what: String,
+        pub why: String,
+        pub remedy: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Report {
+        pub findings: Vec<Finding>,
+        pub rules_applied: usize,
+    }
+
+    impl Report {
+        pub fn verdict(&self) -> Verdict {
+            if self.findings.is_empty() {
+                Verdict::Passed
+            } else {
+                Verdict::Refused
+            }
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str(
+                "verdict",
+                match self.verdict() {
+                    Verdict::Passed => "PASSED",
+                    Verdict::Refused => "REFUSED",
+                },
+            );
+            w.field_u64("rulesApplied", self.rules_applied as u64);
+            w.begin_array(Some("findings"));
+            for finding in &self.findings {
+                w.begin_object(None);
+                w.field_str("rule", finding.rule);
+                w.field_str("code", finding.code);
+                w.field_str("what", &finding.what);
+                w.field_str("why", &finding.why);
+                w.field_str("remedy", &finding.remedy);
+                w.end_object();
+            }
+            w.end_array();
+            w.field_str(
+                "note",
+                "These rules are the ones a manifest can be checked against. Passing them says the package does not carry these specific weaknesses; it is not a statement that the application is secure.",
+            );
+            w.end_object();
+        }
+    }
+
+    fn attribute<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
+        element
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    fn walk<'a>(element: &'a Element, out: &mut Vec<&'a Element>) {
+        out.push(element);
+        for child in &element.children {
+            walk(child, out);
+        }
+    }
+
+    pub const RULES: &[(&str, &str, &str)] = &[
+        (
+            "EG001",
+            "no-debuggable",
+            "Nothing on the device may attach a debugger to it.",
+        ),
+        (
+            "EG002",
+            "no-cleartext",
+            "Its traffic is not carried in the open.",
+        ),
+        (
+            "EG003",
+            "no-backup",
+            "Its data is not copied off the device by the backup service.",
+        ),
+        (
+            "EG004",
+            "guard-exported",
+            "What other applications may start is said, and what they must hold to start it.",
+        ),
+        (
+            "EG005",
+            "provider-uri-grants",
+            "A content provider does not hand out access to everything it holds.",
+        ),
+        (
+            "EG006",
+            "minimum-platform",
+            "It runs on platforms that still receive fixes.",
+        ),
+        (
+            "EG007",
+            "high-risk-permission",
+            "It does not ask for a permission that reads everything a person does.",
+        ),
+        (
+            "EG008",
+            "no-shared-user",
+            "It does not share a user with another application.",
+        ),
+        (
+            "EG009",
+            "no-legacy-storage",
+            "It does not opt out of the storage rules the platform put there.",
+        ),
+        (
+            "EG010",
+            "no-package-census",
+            "It does not ask to see every application installed.",
+        ),
+        (
+            "EG011",
+            "no-task-hijacking",
+            "Another application cannot place its own screen inside this one's task.",
+        ),
+        (
+            "EG012",
+            "no-ignored-restriction",
+            "It does not carry a restriction the platform it targets ignores.",
+        ),
+    ];
+
+    pub const ADAPTIVE_FROM_API: i64 = 37;
+
+    const IGNORED_AT_37: &[(&str, Option<&str>)] = &[
+        ("android:screenOrientation", None),
+        ("android:resizeableActivity", Some("false")),
+        ("android:minAspectRatio", None),
+        ("android:maxAspectRatio", None),
+    ];
+
+    pub fn fired(report: &Report, code: &str) -> bool {
+        report.findings.iter().any(|held| held.code == code)
+    }
+
+    pub fn inspect_manifest(root: &Element) -> Report {
+        let mut report = Report::default();
+        let mut elements = Vec::new();
+        walk(root, &mut elements);
+
+        let application = elements
+            .iter()
+            .find(|element| element.name == "application");
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            if attribute(application, "android:debuggable") == Some("true") {
+                report.findings.push(Finding {
+                    rule: "no-debuggable",
+                    code: "EG001",
+                    what: "The application is marked debuggable.".to_string(),
+                    why: "A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.".to_string(),
+                    remedy: "Remove android:debuggable, or set it to false.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            if attribute(application, "android:usesCleartextTraffic") == Some("true") {
+                report.findings.push(Finding {
+                    rule: "no-cleartext",
+                    code: "EG002",
+                    what: "The application permits cleartext HTTP.".to_string(),
+                    why: "Traffic without TLS can be read and rewritten by anything on the path.".to_string(),
+                    remedy: "Set android:usesCleartextTraffic to false, or configure a network security policy that allows it for named hosts only.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            match attribute(application, "android:allowBackup") {
+                Some("false") => {}
+                _ => report.findings.push(Finding {
+                    rule: "no-backup",
+                    code: "EG003",
+                    what: "The application allows its data to be backed up.".to_string(),
+                    why: "With backup enabled, application data can be copied off the device over adb without unlocking it.".to_string(),
+                    remedy: "Set android:allowBackup to false, or declare rules that exclude anything sensitive.".to_string(),
+                }),
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if !matches!(
+                element.name.as_str(),
+                "activity" | "service" | "receiver" | "provider"
+            ) {
+                continue;
+            }
+            let exported = attribute(element, "android:exported") == Some("true");
+            let has_filter = element
+                .children
+                .iter()
+                .any(|child| child.name == "intent-filter");
+            let guarded = attribute(element, "android:permission").is_some();
+            let launcher = element.children.iter().any(|filter| {
+                filter.name == "intent-filter"
+                    && filter.children.iter().any(|entry| {
+                        entry.name == "category"
+                            && attribute(entry, "android:name")
+                                == Some("android.intent.category.LAUNCHER")
+                    })
+            });
+            if exported && has_filter && !guarded && !launcher {
+                let name = attribute(element, "android:name").unwrap_or("(unnamed)");
+                report.findings.push(Finding {
+                    rule: "guard-exported",
+                    code: "EG004",
+                    what: format!("{} {name} is exported with no permission.", element.name),
+                    why: "Any application on the device can reach an exported component that no permission guards.".to_string(),
+                    remedy: "Set android:exported to false, or require a permission with android:permission.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "provider" {
+                continue;
+            }
+            if attribute(element, "android:grantUriPermissions") == Some("true")
+                && attribute(element, "android:exported") == Some("true")
+            {
+                let name = attribute(element, "android:name").unwrap_or("(unnamed)");
+                report.findings.push(Finding {
+                    rule: "provider-uri-grants",
+                    code: "EG005",
+                    what: format!("provider {name} is exported and grants URI permissions."),
+                    why: "An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.".to_string(),
+                    remedy: "Set android:exported to false; a content provider is reachable through grants without being exported.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        let declared = elements
+            .iter()
+            .find(|element| element.name == "uses-sdk")
+            .and_then(|element| attribute(element, "android:minSdkVersion"))
+            .and_then(|text| text.parse::<i64>().ok());
+        match declared {
+            Some(value) if value >= MINIMUM_SDK => {}
+            _ => report.findings.push(Finding {
+                rule: "minimum-platform",
+                code: "EG006",
+                what: format!("The package does not require API {MINIMUM_SDK} or later."),
+                why: "Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.".to_string(),
+                remedy: "Declare a minimum platform that still receives fixes.".to_string(),
+            }),
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "uses-permission" {
+                continue;
+            }
+            let name = attribute(element, "android:name").unwrap_or("");
+            const REFUSED: &[(&str, &str)] = &[
+                (
+                    "android.permission.REQUEST_INSTALL_PACKAGES",
+                    "installing other applications",
+                ),
+                (
+                    "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "reading all of shared storage",
+                ),
+                (
+                    "android.permission.SYSTEM_ALERT_WINDOW",
+                    "drawing over other applications",
+                ),
+                (
+                    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    "observing and acting on every screen",
+                ),
+            ];
+            if let Some((_, what)) = REFUSED.iter().find(|(permission, _)| *permission == name) {
+                report.findings.push(Finding {
+                    rule: "high-risk-permission",
+                    code: "EG007",
+                    what: format!("The package requests {name}, which grants {what}."),
+                    why: "This permission reaches far beyond what a build tool's output needs, \
+                           and is the usual shape of an abusive application."
+                        .to_string(),
+                    remedy: "Remove the permission. If the application genuinely needs it, it is not something this build engine will produce without the request being made deliberately and reviewed.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        if let Some(shared) = root.attribute("android:sharedUserId") {
+            report.findings.push(Finding {
+                rule: "no-shared-user",
+                code: "EG008",
+                what: format!("The package shares a user identity, {shared}."),
+                why: "Every application signed with the same key and naming the same identity runs as one user: they read each other's files, databases and keys with no check of any kind. One weak application among them is a way into all of them, and Android has deprecated the whole idea.".to_string(),
+                remedy: "Remove android:sharedUserId. Where two applications must exchange something, let one expose it deliberately through a provider or a service and guard it with a signature permission.".to_string(),
+            });
+        }
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            if attribute(application, "android:requestLegacyExternalStorage") == Some("true") {
+                report.findings.push(Finding {
+                    rule: "no-legacy-storage",
+                    code: "EG009",
+                    what: "The application asks to opt out of scoped storage.".to_string(),
+                    why: "Legacy external storage lets the application read and write everything on shared storage, including what every other application has left there. It is what scoped storage exists to end.".to_string(),
+                    remedy: "Remove android:requestLegacyExternalStorage. Use the media store for what is shared, and the application's own folders for what is not.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "uses-permission" {
+                continue;
+            }
+            if attribute(element, "android:name") == Some("android.permission.QUERY_ALL_PACKAGES") {
+                report.findings.push(Finding {
+                    rule: "no-package-census",
+                    code: "EG010",
+                    what: "The package asks to see every application installed.".to_string(),
+                    why: "The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.".to_string(),
+                    remedy: "Remove the permission and declare a <queries> element naming the few applications or intents this one genuinely needs to find.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "activity" && element.name != "activity-alias" {
+                continue;
+            }
+
+            let exported = match attribute(element, "android:exported") {
+                Some("true") => true,
+                Some("false") => false,
+                _ => element.children_named("intent-filter").next().is_some(),
+            };
+            let mode = attribute(element, "android:launchMode").unwrap_or("standard");
+            if exported && (mode == "singleTask" || mode == "singleInstance") {
+                let named = attribute(element, "android:name").unwrap_or("an activity");
+                report.findings.push(Finding {
+                    rule: "no-task-hijacking",
+                    code: "EG011",
+                    what: format!("{named} is reachable from outside and launches as {mode}."),
+                    why: "An activity another application can start, in a task of its own, can have that task taken over: a malicious application declares the same affinity, gets placed in front, and what the person types next goes to it instead. This is task hijacking, and it looks exactly like the real screen.".to_string(),
+                    remedy: "Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        let targets = elements
+            .iter()
+            .find(|element| element.name == "uses-sdk")
+            .and_then(|element| attribute(element, "android:targetSdkVersion"))
+            .and_then(|held| held.parse::<i64>().ok())
+            .unwrap_or(0);
+        let a_game = application
+            .map(|held| attribute(held, "android:appCategory") == Some("game"))
+            .unwrap_or(false);
+        if targets >= ADAPTIVE_FROM_API && !a_game {
+            for element in &elements {
+                if element.name != "application" && element.name != "activity" {
+                    continue;
+                }
+                for (name, refused) in IGNORED_AT_37 {
+                    let Some(value) = attribute(element, name) else {
+                        continue;
+                    };
+                    if refused.is_some_and(|held| held != value) {
+                        continue;
+                    }
+                    let named = attribute(element, "android:name").unwrap_or(&element.name);
+                    report.findings.push(Finding {
+                        rule: "no-ignored-restriction",
+                        code: "EG012",
+                        what: format!("{named} sets {name}=\"{value}\"."),
+                        why: "An application targeting API 37 or later has this ignored on \
+                              any display wider than 600dp: the window fills the screen whatever \
+                              the attribute says. A restriction that looks like it is in force \
+                              and is not is worse than one that was never written."
+                            .to_string(),
+                        remedy: "Remove the attribute, and lay the screen out for whatever size \
+                                 it is given. Games are exempt, and say so with \
+                                 android:appCategory=\"game\"."
+                            .to_string(),
+                    });
+                }
+            }
+        }
+
+        report
+    }
+
+    pub fn said(code: &str) -> &'static str {
+        RULES
+            .iter()
+            .find(|(held, _, _)| *held == code)
+            .map(|(_, _, sentence)| *sentence)
+            .unwrap_or("The project does not meet the security policy.")
+    }
+
+    pub fn emit(report: &Report, sink: &mut Sink) {
+        for finding in &report.findings {
+            sink.emit(
+                Diagnostic::new(
+                    finding.code,
+                    Severity::Warning,
+                    FailureClass::SecurityFailure,
+                    "core.guard",
+                    said(finding.code),
+                )
+                .with_context(format!("Found: {}", finding.what))
+                .with_context(finding.why.clone())
+                .with_suggestion(finding.remedy.clone()),
+            );
+        }
+    }
+}
 
 pub mod axml {
     use crate::diag::{Diagnostic, Severity};
@@ -27338,34 +27841,76 @@ pub mod settings {
         pub fn to_json(&self) -> String {
             let mut w = Writer::pretty();
             w.begin_object(None);
+            w.note("This one file is what build.gradle.kts, libs.versions.toml,");
+            w.note("CMakeLists.txt and proguard-rules.pro are in an ordinary");
+            w.note("Android project. Everything is written out even when it holds");
+            w.note("nothing, so you can see what there is to fill in. Lines that");
+            w.note("start with // are ignored when this is read back.");
+            w.blank();
+            w.note("The name a device knows this application by. It is fixed once");
+            w.note("the application has been installed anywhere: changing it makes");
+            w.note("a different application rather than an update.");
+            w.note("Example: \"com.example.snake\"");
             w.field_str("package", &self.package);
+            w.blank();
+            w.note("What the generated R class and the sources are compiled under.");
+            w.note("Gradle calls this `namespace`. Usually the same as package.");
             w.field_str("namespace", &self.namespace);
+            w.blank();
+            w.note("What the store and the device see, which may differ from the");
+            w.note("namespace when one codebase ships twice.");
+            w.note("Example: \"com.example.snake.free\"");
             w.field_str("applicationId", &self.application_id);
+            w.blank();
+            w.note("The name under the icon.");
+            w.note("Example: \"Snake\"");
             w.field_str("label", &self.label);
+            w.blank();
+            w.note("name is what people read; code is what the store orders by and");
+            w.note("must go up with every upload.");
+            w.note("Example: name \"1.4.2\", code 42");
 
             w.begin_object(Some("version"));
             w.field_str("name", &self.version_name);
             w.field_u64("code", u64::from(self.version_code));
             w.end_object();
 
+            w.blank();
+            w.note("min is the oldest Android this runs on, target the newest it");
+            w.note("was written against, compile what it is compiled against.");
+            w.note("target and compile are normally the same and the newest.");
             w.begin_object(Some("sdk"));
             w.field_u64("min", u64::from(self.min_sdk));
             w.field_u64("target", u64::from(self.target_sdk));
             w.field_u64("compile", u64::from(self.compile_sdk));
             w.end_object();
 
+            w.blank();
+            w.note("Which of Java, Kotlin, C++ and Rust this project is written in.");
+            w.note("Every one of them gets a folder; only what is listed here is");
+            w.note("compiled, and anything left in the others is refused rather");
+            w.note("than quietly dropped.");
+            w.note("Example: [\"java\", \"kotlin\"]");
             w.begin_array(Some("languages"));
             for one in &self.languages {
                 w.element_str(one);
             }
             w.end_array();
 
+            w.blank();
+            w.note("The languages the interface is translated into. Each one is a");
+            w.note("Res/values-xx folder.");
+            w.note("Example: [\"en\", \"tr\", \"de\"]");
             w.begin_array(Some("locales"));
             for one in &self.locales {
                 w.element_str(one);
             }
             w.end_array();
 
+            w.blank();
+            w.note("Which processors the native libraries are built for. Leave it");
+            w.note("at arm64-v8a unless you know you need another.");
+            w.note("Example: [\"arm64-v8a\", \"x86_64\"]");
             w.begin_array(Some("abis"));
             for one in &self.abis {
                 w.element_str(one);
@@ -27382,17 +27927,31 @@ pub mod settings {
             }
             w.end_array();
 
+            w.blank();
+            w.note("shrink drops code nothing reaches; sealResources does the same");
+            w.note("for drawables and strings. Both make a smaller package and a");
+            w.note("slower build.");
             w.begin_object(Some("build"));
             w.field_bool("shrink", self.shrink);
             w.field_bool("sealResources", self.seal_resources);
             w.end_object();
 
+            w.blank();
+            w.note("The Java language level the sources are written in, and the");
+            w.note("bytecode level they compile to. jvm is what Kotlin targets.");
+            w.note("Example: \"17\", or \"21\"");
             w.begin_object(Some("java"));
             w.field_str("source", &self.java.source);
             w.field_str("target", &self.java.target);
             w.field_str("jvm", &self.java.jvm);
             w.end_object();
 
+            w.blank();
+            w.note("What Gradle calls buildTypes. debug is what you run while");
+            w.note("writing; release is what you hand out. minify and");
+            w.note("shrinkResources belong to release; applicationIdSuffix lets");
+            w.note("both sit on one device at once.");
+            w.note("Example: an applicationIdSuffix of \".debug\"");
             w.begin_array(Some("buildTypes"));
             for one in &self.variants {
                 w.begin_object(None);
@@ -27410,6 +27969,11 @@ pub mod settings {
             }
             w.end_array();
 
+            w.blank();
+            w.note("The C++ side, which CMakeLists.txt holds in a Gradle project.");
+            w.note("path is that file, standard the C++ version, targets the");
+            w.note("libraries it builds, libraries what to link against.");
+            w.note("Example: cppFlags [\"-frtti\", \"-fexceptions\"], libraries [\"log\"]");
             w.begin_object(Some("cmake"));
             w.field_str("path", &self.native.path);
             w.field_str("version", &self.native.cmake);
@@ -27429,6 +27993,10 @@ pub mod settings {
             }
             w.end_object();
 
+            w.blank();
+            w.note("What proguard-rules.pro holds. files are rule files beside the");
+            w.note("project; rules are single lines kept here instead.");
+            w.note("Example: \"-keep class com.example.snake.App { *; }\"");
             w.begin_object(Some("proguard"));
             for (key, held) in [
                 ("files", &self.shrinking.files),
@@ -27442,6 +28010,12 @@ pub mod settings {
             }
             w.end_object();
 
+            w.blank();
+            w.note("What to leave out of the package and what to keep the first of");
+            w.note("when two libraries carry the same file. legacyJni compresses");
+            w.note("the native libraries, which older devices wanted and newer ones");
+            w.note("are slower for.");
+            w.note("Example: excludes [\"META-INF/*.kotlin_module\"]");
             w.begin_object(Some("packaging"));
             for (key, held) in [
                 ("excludes", &self.packaging.excludes),
@@ -27456,6 +28030,11 @@ pub mod settings {
             w.field_bool("legacyJni", self.packaging.legacy_jni);
             w.end_object();
 
+            w.blank();
+            w.note("vectors draws vector drawables on older Android instead of");
+            w.note("shipping a picture per density. kept, when it holds anything,");
+            w.note("throws away every locale but these.");
+            w.note("Example: kept [\"en\", \"tr\"]");
             w.begin_object(Some("resources"));
             w.field_bool("vectors", self.resources.vectors);
             w.begin_array(Some("kept"));
@@ -27465,6 +28044,11 @@ pub mod settings {
             w.end_array();
             w.end_object();
 
+            w.blank();
+            w.note("What libs.versions.toml holds: a name for a version, so several");
+            w.note("libraries can be moved together. named are the versions,");
+            w.note("libraries and plugins what refer to them.");
+            w.note("Example: named {\"name\": \"agp\", \"value\": \"8.7.0\"}");
             w.begin_object(Some("versions"));
             w.begin_array(Some("named"));
             for one in &self.catalogue.versions {
@@ -27490,6 +28074,12 @@ pub mod settings {
             }
             w.end_object();
 
+            w.blank();
+            w.note("Which key signs the package, and which signature schemes go");
+            w.note("into it. No password is ever written here: the key is opened");
+            w.note("when you build, and what you type is not kept in the project.");
+            w.note("v2 and v3 are what a modern device wants; v31 carries a key");
+            w.note("rotation; v4 writes the side file a fast install wants.");
             w.begin_object(Some("signing"));
             w.field_str("alias", &self.key_alias);
             w.field_str("store", &self.signing.store);
@@ -28271,7 +28861,7 @@ pub mod scaffold {
         }
 
         pub fn manifest(&self) -> String {
-            let activity = format!("{}.MainActivity", self.package);
+            let activity = format!("{}.{ENTRY_CLASS}", self.package);
             let mut out = String::new();
             out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
             out.push_str(
@@ -28390,7 +28980,9 @@ pub mod scaffold {
         out.push_str("import android.webkit.WebSettings;\n");
         out.push_str("import android.webkit.WebView;\n");
         out.push_str("import android.webkit.WebViewClient;\n\n");
-        out.push_str("public final class MainActivity extends Activity {\n\n");
+        out.push_str(&format!(
+            "public final class {ENTRY_CLASS} extends Activity {{\n\n"
+        ));
         out.push_str(&format!(
             "    private static final String ADDRESS = {};\n\n",
             quoted(&web.address)
@@ -28462,34 +29054,145 @@ pub mod scaffold {
         out
     }
 
+    pub fn is_untouched_starter(root: &str, relative: &str) -> bool {
+        let Ok(Some(settings)) = crate::settings::held(root) else {
+            return false;
+        };
+        let spec = Spec {
+            package: settings.package.clone(),
+            label: settings.label.clone(),
+            version_name: settings.version_name.clone(),
+            version_code: settings.version_code,
+            min_sdk: settings.min_sdk,
+            target_sdk: settings.target_sdk,
+            languages: settings.languages.clone(),
+            locales: settings.locales.clone(),
+            abis: settings.abis.clone(),
+            ..Spec::default()
+        };
+        let Ok(held) = std::fs::read_to_string(std::path::Path::new(root).join(relative)) else {
+            return false;
+        };
+        for (language, folder, _, _) in LANGUAGES {
+            let (name, body) = starter_source(language, &spec);
+            if relative == format!("{folder}/{name}") {
+                return held == body;
+            }
+            for (beside, extra) in beside_the_starter(language, &spec) {
+                if relative == format!("{folder}/{beside}") {
+                    return held == extra;
+                }
+            }
+        }
+        false
+    }
+
+    fn beside_the_starter(language: &str, spec: &Spec) -> Vec<(String, String)> {
+        match language {
+            "cpp" => vec![
+                (
+                    format!("{ENTRY_CLASS}.hpp"),
+                    "#pragma once\n\n#include <jni.h>\n\nextern \"C\" {\n\n\
+                     jint JNI_OnLoad(JavaVM *vm, void *reserved);\n\n}\n"
+                        .to_string(),
+                ),
+                (CMAKE_FILE.to_string(), cmake_lists(&spec.label)),
+            ],
+            "rust" => vec![(CARGO_FILE.to_string(), cargo_manifest(&spec.label))],
+            _ => Vec::new(),
+        }
+    }
+
+    fn named_for_build(label: &str) -> String {
+        let mut out = String::with_capacity(label.len());
+        for one in label.chars() {
+            if one.is_ascii_alphanumeric() {
+                out.push(one.to_ascii_lowercase());
+            } else if !out.ends_with('_') {
+                out.push('_');
+            }
+        }
+        let trimmed = out.trim_matches('_').to_string();
+        if trimmed.is_empty() {
+            "app".to_string()
+        } else {
+            trimmed
+        }
+    }
+
+    pub fn cmake_lists(label: &str) -> String {
+        let named = named_for_build(label);
+        format!(
+            "cmake_minimum_required(VERSION 3.22.1)\n\
+             project({named} LANGUAGES CXX)\n\n\
+             set(CMAKE_CXX_STANDARD 17)\n\
+             set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n\
+             add_library({named} SHARED {ENTRY_CLASS}.cpp)\n\n\
+             target_include_directories({named} PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}})\n\n\
+             find_library(log-lib log)\n\
+             target_link_libraries({named} ${{log-lib}})\n"
+        )
+    }
+
+    pub fn cargo_manifest(label: &str) -> String {
+        let named = named_for_build(label);
+        format!(
+            "[package]\n\
+             name = \"{named}\"\n\
+             version = \"{FIRST_VERSION_NAME}\"\n\
+             edition = \"2021\"\n\n\
+             [lib]\n\
+             path = \"{ENTRY_CLASS}.rs\"\n\
+             crate-type = [\"staticlib\", \"cdylib\"]\n\n\
+             [dependencies]\n\n\
+             [profile.release]\n\
+             opt-level = \"z\"\n\
+             lto = true\n\
+             panic = \"abort\"\n\
+             strip = true\n"
+        )
+    }
+
+    pub fn proguard_rules(package: &str) -> String {
+        format!(
+            "-keep class {package}.{ENTRY_CLASS} {{ *; }}\n\n\
+             -keepclasseswithmembernames class * {{\n    native <methods>;\n}}\n\n\
+             -keepclassmembers class * extends android.app.Activity {{\n    \
+             public void *(android.view.View);\n}}\n\n\
+             -keepattributes Signature,InnerClasses,EnclosingMethod\n\
+             -keepattributes SourceFile,LineNumberTable\n\n\
+             -dontwarn android.**\n"
+        )
+    }
+
     fn starter_source(language: &str, spec: &Spec) -> (String, String) {
-        let class = format!("{}.MainActivity", spec.package);
+        let class = format!("{}.{ENTRY_CLASS}", spec.package);
         match language {
             "kotlin" => (
-                "MainActivity.kt".to_string(),
+                format!("{ENTRY_CLASS}.kt"),
                 format!(
-                    "package {}\n\nimport android.app.Activity\nimport android.os.Bundle\n\nclass MainActivity : Activity() {{\n    override fun onCreate(state: Bundle?) {{\n        super.onCreate(state)\n    }}\n}}\n",
+                    "package {}\n\nimport android.app.Activity\nimport android.os.Bundle\n\nclass {ENTRY_CLASS} : Activity() {{\n    override fun onCreate(state: Bundle?) {{\n        super.onCreate(state)\n    }}\n}}\n",
                     spec.package
                 ),
             ),
             "java" => (
-                "MainActivity.java".to_string(),
+                format!("{ENTRY_CLASS}.java"),
                 match &spec.web {
                     Some(web) => page_source(&spec.package, web),
                     None => format!(
-                        "package {};\n\nimport android.app.Activity;\nimport android.os.Bundle;\n\npublic final class MainActivity extends Activity {{\n    @Override\n    protected void onCreate(Bundle state) {{\n        super.onCreate(state);\n    }}\n}}\n",
+                        "package {};\n\nimport android.app.Activity;\nimport android.os.Bundle;\n\npublic final class {ENTRY_CLASS} extends Activity {{\n    @Override\n    protected void onCreate(Bundle state) {{\n        super.onCreate(state);\n    }}\n}}\n",
                         spec.package
                     ),
                 },
             ),
             "cpp" => (
-                "Main.cpp".to_string(),
+                format!("{ENTRY_CLASS}.cpp"),
                 format!(
                     "#include <jni.h>\n\nextern \"C\" JNIEXPORT jint JNICALL\nJNI_OnLoad(JavaVM *, void *) {{\n    return JNI_VERSION_1_6;\n}}\n\n// {class}\n"
                 ),
             ),
             "rust" => (
-                "Lib.rs".to_string(),
+                format!("{ENTRY_CLASS}.rs"),
                 format!(
                     "#![no_std]\n\n#[panic_handler]\nfn panic(_: &core::panic::PanicInfo) -> ! {{\n    loop {{}}\n}}\n\n#[no_mangle]\npub extern \"C\" fn omni_entry() -> i32 {{\n    0\n}}\n\n// {class}\n"
                 ),
@@ -28557,9 +29260,6 @@ pub mod scaffold {
         ];
 
         for (language, folder, _, _) in LANGUAGES {
-            if !spec.languages.iter().any(|chosen| chosen == language) {
-                continue;
-            }
             let directory = base.join(folder);
             std::fs::create_dir_all(&directory).map_err(|why| {
                 fail("EP022", "A language folder could not be made.")
@@ -28578,7 +29278,29 @@ pub mod scaffold {
                 })?;
             }
             files.push(format!("{folder}/{name}"));
+
+            for (beside, body) in beside_the_starter(language, spec) {
+                let path = directory.join(&beside);
+                if !path.exists() {
+                    std::fs::write(&path, body).map_err(|why| {
+                        fail("EP023", "A starter file could not be written.")
+                            .with_context(format!("File: {folder}/{beside}"))
+                            .with_context(format!("Reason: {why}"))
+                    })?;
+                }
+                files.push(format!("{folder}/{beside}"));
+            }
         }
+
+        let rules = base.join(RULES_FILE);
+        if !rules.exists() {
+            std::fs::write(&rules, proguard_rules(&spec.package)).map_err(|why| {
+                fail("EP029", "The shrinking rules could not be written.")
+                    .with_context(format!("File: {RULES_FILE}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+        }
+        files.push(RULES_FILE.to_string());
 
         std::fs::create_dir_all(base.join(RES_FOLDER)).map_err(|why| {
             fail("EP024", "The resource folder could not be made.")
@@ -28618,6 +29340,8 @@ pub mod scaffold {
             files.push(path);
         }
 
+        plant_icon(root, &spec.package)?;
+
         Ok(Created {
             root: root.to_string(),
             folders,
@@ -28644,6 +29368,14 @@ pub mod scaffold {
     }
 
     pub const RES_FOLDER: &str = "Res";
+
+    pub const ENTRY_CLASS: &str = "App";
+
+    pub const RULES_FILE: &str = "proguard-rules.pro";
+
+    pub const CMAKE_FILE: &str = "CMakeLists.txt";
+
+    pub const CARGO_FILE: &str = "Cargo.toml";
 
     pub const ICON_FILE: &str = "Icon.png";
 
@@ -28674,7 +29406,12 @@ pub mod scaffold {
                 .with_context(format!("Reason: {why}"))
         })?;
 
-        for made in crate::image::launcher_set(&bytes)? {
+        write_launcher_set(root, &bytes)?;
+        Ok(png)
+    }
+
+    pub fn write_launcher_set(root: &str, bytes: &[u8]) -> Result<(), Diagnostic> {
+        for made in crate::image::launcher_set(bytes)? {
             let folder = format!(
                 "{}/{RES_FOLDER}/{}",
                 root.trim_end_matches('/'),
@@ -28696,7 +29433,7 @@ pub mod scaffold {
                     .with_context(format!("Reason: {why}"))
             })?;
         }
-        Ok(png)
+        Ok(())
     }
 
     #[derive(Clone, Debug)]
@@ -28863,6 +29600,33 @@ pub mod scaffold {
             .find(|child| child.name == "string" && child.attribute("name") == Some(name))
             .map(|child| child.text.clone())
             .unwrap_or_else(|| declared.to_string())
+    }
+
+    pub fn plant_icon(root: &str, seed: &str) -> Result<bool, Diagnostic> {
+        if std::path::Path::new(&icon_path(root)).is_file() {
+            return Ok(false);
+        }
+        let already = std::path::Path::new(root)
+            .join(RES_FOLDER)
+            .join(crate::image::LAUNCHER_SIZES[0].0)
+            .join("ic_launcher.png");
+        if already.is_file() {
+            return Ok(false);
+        }
+        let drawn = crate::image::drawn_for(seed)?;
+        std::fs::create_dir_all(format!("{}/{RES_FOLDER}", root.trim_end_matches('/'))).map_err(
+            |why| {
+                fail("EP043", "The resource folder could not be made.")
+                    .with_context(format!("Reason: {why}"))
+            },
+        )?;
+        std::fs::write(icon_path(root), &drawn).map_err(|why| {
+            fail("EP042", "The image could not be stored with the project.")
+                .with_context(format!("Path: {}", icon_path(root)))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        write_launcher_set(root, &drawn)?;
+        Ok(true)
     }
 
     pub fn read_icon(root: &str) -> Option<crate::image::Png> {
@@ -31185,6 +31949,83 @@ pub mod image {
         out
     }
 
+    pub const DRAWN_EDGE: u32 = 512;
+
+    pub fn drawn_for(seed: &str) -> Result<Vec<u8>, Diagnostic> {
+        let mut mixed: u32 = 2_166_136_261;
+        for byte in seed.as_bytes() {
+            mixed ^= u32::from(*byte);
+            mixed = mixed.wrapping_mul(16_777_619);
+        }
+        let turn = (mixed % 360) as f32;
+        let back = from_wheel(turn, 0.62, 0.34);
+        let front = from_wheel((turn + 28.0) % 360.0, 0.74, 0.86);
+
+        let edge = DRAWN_EDGE;
+        let mut raster = Raster::new(edge, edge);
+        let middle = edge as f32 / 2.0;
+        let corner = edge as f32 * 0.22;
+        let ring = edge as f32 * 0.30;
+        let bar = edge as f32 * 0.085;
+
+        for y in 0..edge {
+            for x in 0..edge {
+                let fx = x as f32 + 0.5;
+                let fy = y as f32 + 0.5;
+                if !inside_rounded(fx, fy, edge as f32, corner) {
+                    raster.put(x, y, [0, 0, 0, 0]);
+                    continue;
+                }
+                let lift = 1.0 - (fy / edge as f32) * 0.28;
+                let mut pixel = [
+                    (back[0] as f32 * lift) as u8,
+                    (back[1] as f32 * lift) as u8,
+                    (back[2] as f32 * lift) as u8,
+                    255,
+                ];
+                let dx = fx - middle;
+                let dy = fy - middle;
+                let away = (dx * dx + dy * dy).sqrt();
+                let on_ring = (away - ring).abs() <= bar / 2.0 && fy <= middle + bar;
+                let on_stem =
+                    dx.abs() <= bar / 2.0 && fy >= middle - bar / 2.0 && fy <= middle + ring;
+                if on_ring || on_stem {
+                    pixel = [front[0], front[1], front[2], 255];
+                }
+                raster.put(x, y, pixel);
+            }
+        }
+        encode_smallest(&raster)
+    }
+
+    fn inside_rounded(x: f32, y: f32, edge: f32, corner: f32) -> bool {
+        let left = corner;
+        let right = edge - corner;
+        let near_x = x.clamp(left, right);
+        let near_y = y.clamp(left, right);
+        let dx = x - near_x;
+        let dy = y - near_y;
+        dx * dx + dy * dy <= corner * corner
+    }
+
+    fn from_wheel(turn: f32, saturation: f32, value: f32) -> [u8; 3] {
+        let sector = turn / 60.0;
+        let step = sector as i32 % 6;
+        let part = sector - sector.floor();
+        let p = value * (1.0 - saturation);
+        let q = value * (1.0 - saturation * part);
+        let t = value * (1.0 - saturation * (1.0 - part));
+        let (r, g, b) = match step {
+            0 => (value, t, p),
+            1 => (q, value, p),
+            2 => (p, value, t),
+            3 => (p, q, value),
+            4 => (t, p, value),
+            _ => (value, p, q),
+        };
+        [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
+    }
+
     pub fn launcher_set(source: &[u8]) -> Result<Vec<Launcher>, Diagnostic> {
         let raster = decode(source)?;
         let mut out = Vec::with_capacity(LAUNCHER_SIZES.len() * 2 + ADAPTIVE_SIZES.len() * 2 + 3);
@@ -32572,6 +33413,7 @@ pub mod workspace {
         pub bytes: u64,
         pub stripped: String,
         pub settings_written: bool,
+        pub icon_drawn: bool,
     }
 
     fn shared_prefix(names: &[String]) -> String {
@@ -32707,6 +33549,12 @@ pub mod workspace {
             crate::settings::write(into, &settings)?;
             out.settings_written = true;
         }
+        let named = crate::settings::held(into)
+            .ok()
+            .flatten()
+            .map(|held| held.package)
+            .unwrap_or_default();
+        out.icon_drawn = crate::scaffold::plant_icon(into, &named)?;
         Ok(out)
     }
 
@@ -35814,6 +36662,97 @@ pub mod builder {
         }
     }
 
+    pub const MOST_MENDING_ROUNDS: usize = 25;
+
+    pub const MOST_MENDING_FILES: usize = 4_000;
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Mended {
+        pub repairs: Vec<crate::compilers::java_fixer::Repair>,
+        pub left: Option<Diagnostic>,
+    }
+
+    impl Mended {
+        pub fn clean_enough(&self) -> bool {
+            self.left.is_none()
+        }
+    }
+
+    fn copy_tree(from: &std::path::Path, into: &std::path::Path, budget: &mut usize) -> bool {
+        let Ok(entries) = std::fs::read_dir(from) else {
+            return false;
+        };
+        if std::fs::create_dir_all(into).is_err() {
+            return false;
+        }
+        for entry in entries.flatten() {
+            if *budget == 0 {
+                return false;
+            }
+            let here = entry.path();
+            let there = into.join(entry.file_name());
+            if here.is_dir() {
+                if !copy_tree(&here, &there, budget) {
+                    return false;
+                }
+            } else {
+                *budget -= 1;
+                if std::fs::copy(&here, &there).is_err() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn what_refuses(root: &str) -> Option<Diagnostic> {
+        let held = check(root);
+        held.refusal
+    }
+
+    pub fn mendable(root: &str) -> Mended {
+        let mut out = Mended::default();
+        let scratch = std::env::temp_dir().join(format!(
+            "omni-mend-{}-{}",
+            std::process::id(),
+            &crate::hash::sha256(root.as_bytes()).to_hex()[..12]
+        ));
+        std::fs::remove_dir_all(&scratch).ok();
+        let mut budget = MOST_MENDING_FILES;
+        if !copy_tree(std::path::Path::new(root), &scratch, &mut budget) {
+            std::fs::remove_dir_all(&scratch).ok();
+            out.left = what_refuses(root);
+            return out;
+        }
+        let Some(copy) = scratch.to_str().map(str::to_string) else {
+            std::fs::remove_dir_all(&scratch).ok();
+            return out;
+        };
+
+        for _ in 0..MOST_MENDING_ROUNDS {
+            let Some(refusal) = what_refuses(&copy) else {
+                out.left = None;
+                break;
+            };
+            out.left = Some(refusal.clone());
+            let made = crate::compilers::java_fixer::repairs_for(&copy, &refusal);
+            let Some(next) = made.into_iter().find(|one| {
+                !out.repairs.iter().any(|held| {
+                    held.path == one.path && held.line == one.line && held.after == one.after
+                })
+            }) else {
+                break;
+            };
+            if crate::compilers::java_fixer::apply(&copy, &next).is_err() {
+                break;
+            }
+            out.repairs.push(next);
+        }
+
+        std::fs::remove_dir_all(&scratch).ok();
+        out
+    }
+
     pub fn r_field(name: &str) -> String {
         name.chars()
             .map(|held| match held {
@@ -35907,11 +36846,17 @@ public final class R {{
     }
 
     pub fn uncompiled_source(root: &str) -> Vec<(&'static str, String)> {
+        let declared = crate::settings::held(root)
+            .ok()
+            .flatten()
+            .map(|held| held.languages)
+            .unwrap_or_default();
         let mut found = Vec::new();
         for (language, folder, suffix, compiled) in crate::scaffold::LANGUAGES {
             if *compiled {
                 continue;
             }
+            let asked = declared.iter().any(|one| one == language);
             let here = std::path::Path::new(root).join(folder);
             let mut held = Vec::new();
             gather_by_suffix(&here, suffix, &mut held);
@@ -35923,6 +36868,9 @@ public final class R {{
                     .display()
                     .to_string()
                     .replace('\\', "/");
+                if !asked && crate::scaffold::is_untouched_starter(root, &named) {
+                    continue;
+                }
                 found.push((*language, named));
             }
         }
@@ -41306,6 +42254,85 @@ pub mod ffi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn omni_project_repairs(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let held = crate::builder::mendable(&root);
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_bool("looked", true);
+            w.field_str("root", &root);
+            w.field_u64("mendable", held.repairs.len() as u64);
+            crate::compilers::java_fixer::write_json(&held.repairs, &mut w, "repairs");
+            match held.left {
+                Some(error) => {
+                    w.field_bool("clean", false);
+                    w.field_str("left", &crate::speech::sentence(&error.message));
+                    w.field_str("leftCode", &error.code);
+                }
+                None => w.field_bool("clean", true),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_apply_repairs(
+        root: *const c_char,
+        repairs: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(repairs)) = (text_from(root), text_from(repairs)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            let listed = crate::json::read(&repairs)
+                .as_ref()
+                .and_then(|held| held.list().map(|one| one.to_vec()))
+                .unwrap_or_default();
+            let wanted: Vec<crate::compilers::java_fixer::Repair> = listed
+                .iter()
+                .filter_map(crate::compilers::java_fixer::Repair::from_json)
+                .collect();
+            if wanted.is_empty() {
+                w.field_bool("mended", false);
+                w.field_str("reason", "Nothing was named to repair.");
+                w.end_object();
+                return hand_back(w);
+            }
+            let mut done = 0u64;
+            let mut refusal = None;
+            for one in &wanted {
+                match crate::compilers::java_fixer::apply(&root, one) {
+                    Ok(()) => done += 1,
+                    Err(error) => {
+                        refusal = Some(error);
+                        break;
+                    }
+                }
+            }
+            match refusal {
+                Some(error) => {
+                    w.field_u64("repaired", done);
+                    write_failure(&mut w, "mended", &error);
+                }
+                None => {
+                    w.field_bool("mended", true);
+                    w.field_u64("repaired", done);
+                }
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn omni_search_project(
         root: *const c_char,
         needle: *const c_char,
@@ -41530,6 +42557,7 @@ pub mod ffi {
                     w.field_u64("folders", held.folders);
                     w.field_u64("bytes", held.bytes);
                     w.field_bool("settingsWritten", held.settings_written);
+                    w.field_bool("iconDrawn", held.icon_drawn);
                 }
                 Err(error) => write_failure(&mut w, "unpacked", &error),
             }

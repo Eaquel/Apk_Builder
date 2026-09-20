@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">Das Passwort, das du beim Erzeugen dieses Schlüssels gewählt hast.</string>
     <string name="omni_build_both_note">Ein Druck schreibt beides: ein signiertes Paket zum Installieren und ein Bundle zum Hochladen. Zuerst läuft die Sicherheitsrichtlinie; lehnt sie ab, wird keines geschrieben.</string>
     <string name="omni_build_done">Fertig in %1$d ms</string>
+    <string name="omni_mend_title">Was sich richten lässt</string>
+    <string name="omni_mend_note">Dieser Build würde verweigern. %1$d davon lässt sich für dich schreiben; bisher wurde nichts geändert.</string>
+    <string name="omni_mend_one">Richten</string>
+    <string name="omni_mend_all">Alles richten</string>
+    <string name="omni_mend_skip">Trotzdem bauen</string>
+    <string name="omni_mend_done">%1$d gerichtet</string>
     <string name="omni_built_title">Hier gebaut</string>
     <string name="omni_built_none">Noch nichts gebaut.</string>
     <string name="omni_result_package">Paket</string>

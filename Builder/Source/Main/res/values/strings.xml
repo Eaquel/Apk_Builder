@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">The password you chose when you made this key.</string>
     <string name="omni_build_both_note">One press writes both: a signed package to install, and a bundle to upload. The security policy runs first, and neither is written if it refuses.</string>
     <string name="omni_build_done">Done in %1$d ms</string>
+    <string name="omni_mend_title">Things this can put right</string>
+    <string name="omni_mend_note">This build would refuse. %1$d of what stops it can be written for you; nothing has been changed yet.</string>
+    <string name="omni_mend_one">Fix</string>
+    <string name="omni_mend_all">Fix them all</string>
+    <string name="omni_mend_skip">Build anyway</string>
+    <string name="omni_mend_done">%1$d put right</string>
     <string name="omni_built_title">Built here</string>
     <string name="omni_built_none">Nothing built yet.</string>
     <string name="omni_result_package">Package</string>

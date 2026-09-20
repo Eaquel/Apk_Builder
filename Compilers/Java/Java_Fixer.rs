@@ -64,6 +64,38 @@ impl Repair {
         crate::speech::sentence(&self.title)
     }
 
+    pub fn from_json(held: &crate::json::Json) -> Option<Repair> {
+        let word = |key: &str| {
+            held.get(key)
+                .and_then(|one| one.text())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let code = word("code");
+        let path = word("path");
+        if code.is_empty() || path.is_empty() {
+            return None;
+        }
+        let confidence = match word("confidence").as_str() {
+            "CERTAIN" => Confidence::Certain,
+            "RISKY" => Confidence::Risky,
+            _ => Confidence::Likely,
+        };
+        Some(Repair {
+            code,
+            path,
+            title: word("english"),
+            line: held
+                .get("line")
+                .and_then(|one| one.integer())
+                .unwrap_or_default()
+                .max(0) as u32,
+            before: word("before"),
+            after: word("after"),
+            confidence,
+        })
+    }
+
     pub fn write_json(&self, w: &mut crate::json::Writer) {
         w.begin_object(None);
         w.field_str("code", &self.code);
@@ -273,6 +305,24 @@ fn number_made_long(line: &str) -> Option<String> {
         ));
     }
     None
+}
+
+fn known_as(root: &str, named: &str) -> Option<String> {
+    let found = crate::symbols::matching(root, named).ok()?;
+    let mut exact: Vec<&crate::symbols::Named> =
+        found.iter().filter(|one| one.simple == named).collect();
+    exact.sort_by(|left, right| {
+        right
+            .rank
+            .cmp(&left.rank)
+            .then_with(|| left.qualified.len().cmp(&right.qualified.len()))
+    });
+    let best = exact.first()?;
+    if best.qualified.contains('.') {
+        Some(best.qualified.clone())
+    } else {
+        None
+    }
 }
 
 fn declared_in(root: &str, named: &str) -> Option<String> {
@@ -504,7 +554,7 @@ fn java_repairs(root: &str, refusal: &Diagnostic) -> Vec<Repair> {
             {
                 return out;
             }
-            let Some(full) = declared_in(root, &wanted) else {
+            let Some(full) = declared_in(root, &wanted).or_else(|| known_as(root, &wanted)) else {
                 return out;
             };
             let (at, before, after) = import_line(&source);

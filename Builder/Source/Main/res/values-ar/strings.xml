@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">كلمة السر التي اخترتها عند إنشاء هذا المفتاح.</string>
     <string name="omni_build_both_note">ضغطة واحدة تكتب الاثنين: حزمة موقَّعة للتثبيت وحزمة تطبيق للرفع. تعمل سياسة الأمان أولًا، وإن رفضت لا يُكتب أي منهما.</string>
     <string name="omni_build_done">تم في %1$d ملّي ثانية</string>
+    <string name="omni_mend_title">ما يمكن إصلاحه</string>
+    <string name="omni_mend_note">سيرفض هذا البناء. %1$d مما يوقفه يمكن كتابته نيابة عنك؛ ولم يتغير شيء بعد.</string>
+    <string name="omni_mend_one">أصلح</string>
+    <string name="omni_mend_all">أصلح الكل</string>
+    <string name="omni_mend_skip">ابنِ على أي حال</string>
+    <string name="omni_mend_done">أُصلح %1$d</string>
     <string name="omni_built_title">ما بُني هنا</string>
     <string name="omni_built_none">لم يُبنَ شيء بعد.</string>
     <string name="omni_result_package">الحزمة</string>

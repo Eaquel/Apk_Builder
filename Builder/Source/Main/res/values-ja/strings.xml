@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">この鍵を作ったときに選んだパスワードです。</string>
     <string name="omni_build_both_note">一度押せば両方が書かれます。導入する署名済みパッケージと、送り出すバンドルです。先に安全方針が走り、拒まれればどちらも書かれません。</string>
     <string name="omni_build_done">%1$d ミリ秒で完了</string>
+    <string name="omni_mend_title">直せるもの</string>
+    <string name="omni_mend_note">このビルドは拒まれます。止めているもののうち %1$d 件はこちらで書けます。まだ何も変えていません。</string>
+    <string name="omni_mend_one">直す</string>
+    <string name="omni_mend_all">すべて直す</string>
+    <string name="omni_mend_skip">それでもビルド</string>
+    <string name="omni_mend_done">%1$d 件を直しました</string>
     <string name="omni_built_title">ここで作られたもの</string>
     <string name="omni_built_none">まだ何も作られていません。</string>
     <string name="omni_result_package">パッケージ</string>

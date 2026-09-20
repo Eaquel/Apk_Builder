@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">Le mot de passe que tu as choisi en créant cette clé.</string>
     <string name="omni_build_both_note">Une pression écrit les deux : un paquet signé à installer et un bundle à téléverser. La politique de sécurité passe d\'abord, et si elle refuse aucun n\'est écrit.</string>
     <string name="omni_build_done">Terminé en %1$d ms</string>
+    <string name="omni_mend_title">Ce qui peut être réparé</string>
+    <string name="omni_mend_note">Cette compilation refuserait. %1$d de ce qui l\'arrête peut être écrit pour vous ; rien n\'a encore été changé.</string>
+    <string name="omni_mend_one">Réparer</string>
+    <string name="omni_mend_all">Tout réparer</string>
+    <string name="omni_mend_skip">Compiler quand même</string>
+    <string name="omni_mend_done">%1$d réparés</string>
     <string name="omni_built_title">Construit ici</string>
     <string name="omni_built_none">Rien de construit pour l\'instant.</string>
     <string name="omni_result_package">Paquet</string>

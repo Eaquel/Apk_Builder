@@ -568,6 +568,31 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
                                          into_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectRepairs(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Looking for repairs needs a project.");
+    return nullptr;
+  }
+  return HandBack(env, omni_project_repairs(root_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeApplyRepairs(
+    JNIEnv *env, jobject , jstring root, jstring repairs) {
+  std::string root_text;
+  std::string repairs_text;
+  if (root == nullptr || repairs == nullptr ||
+      !JavaStringToUtf8(env, root, &root_text) ||
+      !JavaStringToUtf8(env, repairs, &repairs_text)) {
+    ThrowJava(env, kIllegalState,
+              "Applying repairs needs a project and the repairs to apply.");
+    return nullptr;
+  }
+  return HandBack(env,
+                  omni_apply_repairs(root_text.c_str(), repairs_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDigestFile(
     JNIEnv *env, jobject , jstring path) {
   std::string path_text;

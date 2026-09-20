@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">Пароль, который вы выбрали при создании этого ключа.</string>
     <string name="omni_build_both_note">Одно нажатие пишет оба: подписанный пакет для установки и bundle для загрузки. Сначала работает политика безопасности, и если она отказывает, не пишется ничего.</string>
     <string name="omni_build_done">Готово за %1$d мс</string>
+    <string name="omni_mend_title">Что можно поправить</string>
+    <string name="omni_mend_note">Эта сборка отказала бы. Из того, что её останавливает, %1$d можно написать за вас; пока ничего не изменено.</string>
+    <string name="omni_mend_one">Поправить</string>
+    <string name="omni_mend_all">Поправить всё</string>
+    <string name="omni_mend_skip">Собрать всё равно</string>
+    <string name="omni_mend_done">Поправлено: %1$d</string>
     <string name="omni_built_title">Собрано здесь</string>
     <string name="omni_built_none">Пока ничего не собрано.</string>
     <string name="omni_result_package">Пакет</string>

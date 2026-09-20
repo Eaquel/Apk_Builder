@@ -75,6 +75,10 @@ char *omni_write_file(const char *root, const char *relative, const char *conten
 
 char *omni_git_checkout(const char *pack_path, const char *head, const char *into);
 
+char *omni_project_repairs(const char *root);
+
+char *omni_apply_repairs(const char *root, const char *repairs);
+
 char *omni_digest_file(const char *path);
 
 char *omni_pack_archive(const char *root, const char *names, const char *into,

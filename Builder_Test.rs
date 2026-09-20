@@ -4471,6 +4471,14 @@ public class Written {
         assert_eq!(opened.files, 2);
         assert!(opened.settings_written, "a project it opens gets settings");
         assert!(
+            opened.icon_drawn,
+            "a project that brought no picture is given one"
+        );
+        assert!(
+            root.join("Res/mipmap-hdpi/ic_launcher.png").is_file(),
+            "the picture it was given reaches the launcher folders"
+        );
+        assert!(
             root.join("AndroidManifest.xml").is_file(),
             "the manifest sits at the root, not inside a wrapper"
         );
@@ -4488,6 +4496,121 @@ public class Written {
         assert!(
             crate::workspace::describe(root.to_str().unwrap()).is_some(),
             "what it wrote is a project this lists"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_build_that_would_refuse_says_first_what_it_could_mend() {
+        let directory = temp_directory("omni-mendable");
+        let root = directory.join("Mend");
+        let folder = root.to_str().unwrap().to_string();
+        crate::scaffold::create(
+            &folder,
+            &crate::scaffold::Spec {
+                package: "com.tr.yt.mend".to_string(),
+                label: "Mend".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        std::fs::write(
+            root.join("Java/App.java"),
+            "package com.tr.yt.mend;\n\n\
+             public final class App extends Activity {\n\n    \
+             @Override\n    protected void onCreate(Bundle state) {\n        \
+             super.onCreate(state);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let held = crate::builder::mendable(&folder);
+        assert!(
+            !held.repairs.is_empty(),
+            "a missing import is something it can mend: {:?}",
+            held.left.as_ref().map(|one| one.code.clone())
+        );
+        assert!(
+            held.repairs.iter().all(|one| one.path == "Java/App.java"),
+            "every repair names the file it is for: {:?}",
+            held.repairs
+                .iter()
+                .map(|one| one.path.clone())
+                .collect::<Vec<_>>()
+        );
+
+        let before = std::fs::read_to_string(root.join("Java/App.java")).unwrap();
+        assert!(
+            !before.contains("import android.app.Activity;"),
+            "looking for repairs does not change the project"
+        );
+
+        for one in &held.repairs {
+            crate::compilers::java_fixer::apply(&folder, one).expect("the repair applies");
+        }
+        let after = std::fs::read_to_string(root.join("Java/App.java")).unwrap();
+        assert!(
+            after.contains("import android.app.Activity;"),
+            "the import it offered is the one it wrote: {after}"
+        );
+
+        let again = crate::builder::mendable(&folder);
+        assert!(
+            again.repairs.len() < held.repairs.len() || again.clean_enough(),
+            "mending leaves less to mend"
+        );
+
+        eprintln!(
+            "mending: {} repairs offered before a build, none of them applied until asked",
+            held.repairs.len()
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_project_that_brought_no_picture_is_given_one_drawn_for_it() {
+        let directory = temp_directory("omni-drawn-icon");
+        let root = directory.join("Drawn");
+        let folder = root.to_str().unwrap().to_string();
+        crate::scaffold::create(
+            &folder,
+            &crate::scaffold::Spec {
+                package: "com.tr.yt.drawn".to_string(),
+                label: "Drawn".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let held = crate::scaffold::read_icon(&folder).expect("a project starts with a picture");
+        assert!(held.is_square(), "a launcher icon is square");
+        assert_eq!(held.width, crate::image::DRAWN_EDGE);
+
+        for (named, _) in crate::image::LAUNCHER_SIZES {
+            let path = root.join("Res").join(named).join("ic_launcher.png");
+            assert!(path.is_file(), "{} has no icon", named);
+        }
+
+        assert!(
+            !crate::scaffold::plant_icon(&folder, "com.tr.yt.drawn")
+                .expect("asking twice is not an error"),
+            "a project that already has a picture keeps the one it has"
+        );
+
+        let mine = std::fs::read(crate::scaffold::icon_path(&folder)).unwrap();
+        let theirs = crate::image::drawn_for("com.tr.yt.other").expect("another is drawn");
+        assert_ne!(mine, theirs, "two packages are not given the same picture");
+        assert_eq!(
+            mine,
+            crate::image::drawn_for("com.tr.yt.drawn").expect("it draws the same twice"),
+            "the same package is always given the same picture"
         );
 
         std::fs::remove_dir_all(&directory).ok();
@@ -4513,6 +4636,58 @@ public class Written {
         assert_eq!(error.code, "EP030");
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_settings_explain_themselves_and_are_still_read_back() {
+        let settings = crate::settings::Settings {
+            package: "com.example.snake".to_string(),
+            namespace: "com.example.snake".to_string(),
+            application_id: "com.example.snake".to_string(),
+            label: "Snake".to_string(),
+            ..Default::default()
+        };
+        let written = settings.to_json();
+
+        for said in [
+            "// This one file is what build.gradle.kts",
+            "// The name a device knows this application by",
+            "// Example: \"com.example.snake\"",
+            "// Which of Java, Kotlin, C++ and Rust",
+            "// What proguard-rules.pro holds",
+            "No password is ever written here",
+        ] {
+            assert!(written.contains(said), "the settings do not say {said:?}");
+        }
+
+        let notes = written
+            .lines()
+            .filter(|one| one.trim_start().starts_with("//"))
+            .count();
+        assert!(notes > 40, "only {notes} lines of explanation");
+
+        for one in written.lines() {
+            let held = one.trim_start();
+            assert!(
+                !held.starts_with("//") || one.starts_with("    "),
+                "a note sits where the key it explains sits: {one:?}"
+            );
+        }
+
+        let read = crate::settings::Settings::from_json(&written)
+            .expect("what it explains, it still reads");
+        assert_eq!(read, settings, "the notes changed what was read");
+
+        let bare = crate::settings::Settings::from_json(
+            "{\n// a note before anything\n\"package\": \"a.b.c\" /* and one inside */ }",
+        )
+        .expect("a hand-written file with notes reads");
+        assert_eq!(bare.package, "a.b.c");
+
+        eprintln!(
+            "settings: {notes} lines of explanation over {} of setting, and it reads back",
+            written.lines().count() - notes
+        );
     }
 
     #[test]
@@ -4681,7 +4856,7 @@ package com.tr.yt.lean;
 import android.app.Activity;
 import android.os.Bundle;
 
-public final class MainActivity extends Activity {
+public final class App extends Activity {
 
     @Override
     protected void onCreate(Bundle state) {
@@ -4731,7 +4906,7 @@ final class NeverCalled {
         let sources = root.join("Java");
         std::fs::create_dir_all(&sources).unwrap();
         for (name, text) in [
-            ("MainActivity.java", MAIN),
+            ("App.java", MAIN),
             ("Used.java", USED),
             ("NeverCalled.java", NEVER),
         ] {
@@ -4752,14 +4927,14 @@ final class NeverCalled {
         let package = "com.tr.yt.lean";
         let roots = crate::shrink::roots_from_manifest(&project.manifest, package);
         assert!(
-            roots.contains(&"Lcom/tr/yt/lean/MainActivity;".to_string()),
+            roots.contains(&"Lcom/tr/yt/lean/App;".to_string()),
             "the activity is a root: {roots:?}"
         );
 
         let (kept, trimmed) = crate::shrink::apply(project.code.clone(), &roots);
         let left: Vec<&str> = kept.iter().map(|one| one.descriptor.as_str()).collect();
         assert!(
-            left.contains(&"Lcom/tr/yt/lean/MainActivity;"),
+            left.contains(&"Lcom/tr/yt/lean/App;"),
             "the activity stays: {left:?}"
         );
         assert!(
@@ -5203,7 +5378,7 @@ final class Doubling extends Counter {
         };
         crate::scaffold::create(&folder, &spec).expect("the project must be made");
 
-        let written = std::fs::read_to_string(root.join("Java/MainActivity.java")).unwrap();
+        let written = std::fs::read_to_string(root.join("Java/App.java")).unwrap();
         assert!(
             written.contains("\"https://example.com/start\""),
             "the address the reader gave has to be the one the screen opens: {written}"
@@ -5226,7 +5401,7 @@ final class Doubling extends Counter {
         assert!(project
             .code
             .iter()
-            .any(|held| held.descriptor == "Lcom/tr/yt/page/MainActivity;"));
+            .any(|held| held.descriptor == "Lcom/tr/yt/page/App;"));
 
         let key = crate::rsa::generate(2048).expect("a key");
         let certificate = crate::certificate::self_signed(
@@ -11753,7 +11928,7 @@ import android.app.Activity;
 import android.os.Bundle;
 import android.widget.TextView;
 
-public final class MainActivity extends Activity {
+public final class App extends Activity {
     private int taps;
     private String label = "tapped ";
 
@@ -11801,9 +11976,7 @@ public final class MainActivity extends Activity {
     }
 }
 "#;
-        let written = root
-            .join(crate::scaffold::JAVA_FOLDER)
-            .join("MainActivity.java");
+        let written = root.join(crate::scaffold::JAVA_FOLDER).join("App.java");
         std::fs::write(&written, source).unwrap();
 
         std::fs::write(
@@ -11820,7 +11993,7 @@ public final class MainActivity extends Activity {
             .map(|one| one.descriptor.as_str())
             .collect();
         assert!(
-            names.contains(&"Lcom/tr/yt/MainActivity;"),
+            names.contains(&"Lcom/tr/yt/App;"),
             "the activity somebody wrote has to be the one packed: {names:?}"
         );
         assert!(names.contains(&"Lcom/tr/yt/Counter;"), "{names:?}");
@@ -11828,7 +12001,7 @@ public final class MainActivity extends Activity {
         let activity = project
             .code
             .iter()
-            .find(|one| one.descriptor == "Lcom/tr/yt/MainActivity;")
+            .find(|one| one.descriptor == "Lcom/tr/yt/App;")
             .unwrap();
         assert_eq!(activity.superclass, "Landroid/app/Activity;");
         let methods: Vec<&str> = activity
@@ -11858,7 +12031,7 @@ public final class MainActivity extends Activity {
         let mut sink = Sink::new();
         let inside = crate::dex::read(&dex, &mut sink).expect("our own reader must read it");
         assert!(
-            inside.class_names().contains(&"com.tr.yt.MainActivity"),
+            inside.class_names().contains(&"com.tr.yt.App"),
             "{:?}",
             inside.class_names()
         );
@@ -11876,7 +12049,7 @@ public final class MainActivity extends Activity {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(output.status.success(), "dexdump refused it:\n{said}");
-            assert!(said.contains("Lcom/tr/yt/MainActivity;"), "{said}");
+            assert!(said.contains("Lcom/tr/yt/App;"), "{said}");
             assert!(said.contains("packed-switch"), "the switch is in there");
             assert!(said.contains("move-exception"), "and so is the catch");
         }
@@ -12050,7 +12223,7 @@ public final class MainActivity extends Activity {
 
         let folder = root.join(crate::scaffold::JAVA_FOLDER);
         std::fs::write(
-            folder.join("MainActivity.java"),
+            folder.join("App.java"),
             r#"
 package com.tr.yt;
 
@@ -12064,7 +12237,7 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
 
-public final class MainActivity extends Activity {
+public final class App extends Activity {
     private static final String TAG = "Whole";
     private static int made;
 
@@ -12268,12 +12441,12 @@ public final class MainActivity extends Activity {
             .map(|one| one.descriptor.as_str())
             .collect();
         for wanted in [
-            "Lcom/tr/yt/MainActivity;",
-            "Lcom/tr/yt/MainActivity$Ticker;",
-            "Lcom/tr/yt/MainActivity$Point;",
-            "Lcom/tr/yt/MainActivity$Pair;",
-            "Lcom/tr/yt/MainActivity$Size;",
-            "Lcom/tr/yt/MainActivity$Watcher;",
+            "Lcom/tr/yt/App;",
+            "Lcom/tr/yt/App$Ticker;",
+            "Lcom/tr/yt/App$Point;",
+            "Lcom/tr/yt/App$Pair;",
+            "Lcom/tr/yt/App$Size;",
+            "Lcom/tr/yt/App$Watcher;",
         ] {
             assert!(names.contains(&wanted), "{names:?}");
         }
@@ -12329,14 +12502,14 @@ public final class MainActivity extends Activity {
             );
             assert!(output.status.success(), "dexdump refused it:\n{said}");
             for wanted in [
-                "Lcom/tr/yt/MainActivity;",
-                "Lcom/tr/yt/MainActivity$Size;",
+                "Lcom/tr/yt/App;",
+                "Lcom/tr/yt/App$Size;",
                 "packed-switch",
                 "move-exception",
                 "invoke-interface",
                 "$outer",
                 "line=",
-                "MainActivity.java",
+                "App.java",
             ] {
                 assert!(said.contains(wanted), "dexdump printed no {wanted:?}");
             }
@@ -12413,27 +12586,28 @@ public final class MainActivity extends Activity {
                 "Kotlin",
                 "Native",
                 "Res",
-                "Rust"
+                "Rust",
+                "proguard-rules.pro"
             ],
-            "the root holds the manifest, the language folders and the resource folder, \
-             and nothing else"
+            "the root holds the manifest, the language folders, the resource folder and \
+             the shrinking rules, and nothing else"
         );
 
-        for (folder, file) in [
-            ("Kotlin", "MainActivity.kt"),
-            ("Java", "MainActivity.java"),
-            ("Native", "Main.cpp"),
-            ("Rust", "Lib.rs"),
+        for (folder, wanted) in [
+            ("Kotlin", vec!["App.kt"]),
+            ("Java", vec!["App.java"]),
+            ("Native", vec!["App.cpp", "App.hpp", "CMakeLists.txt"]),
+            ("Rust", vec!["App.rs", "Cargo.toml"]),
         ] {
-            let inside: Vec<String> = std::fs::read_dir(root.join(folder))
+            let mut inside: Vec<String> = std::fs::read_dir(root.join(folder))
                 .unwrap()
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.file_name().to_string_lossy().to_string())
                 .collect();
+            inside.sort();
             assert_eq!(
-                inside,
-                vec![file],
-                "{folder} holds one starter file and no subfolder"
+                inside, wanted,
+                "{folder} holds its starter and its build file and no subfolder"
             );
         }
 
@@ -13601,7 +13775,10 @@ public final class MainActivity extends Activity {
             listed[0].target_sdk,
             u64::from(crate::scaffold::NEWEST_DESCRIBED)
         );
-        assert!(listed[0].icon.is_none());
+        assert!(
+            listed[0].icon.is_some(),
+            "a project shows the picture it was made with"
+        );
 
         let entries = crate::workspace::tree(&text).unwrap();
         assert!(entries
@@ -13663,8 +13840,8 @@ public final class MainActivity extends Activity {
         assert_eq!(thrown.name, "Binary.bin");
         assert_eq!(thrown.bytes, 4);
 
-        crate::workspace::rename(&text, "Kotlin/MainActivity.kt", "Kotlin/Screen.kt").unwrap();
-        assert!(!root.join("Kotlin/MainActivity.kt").exists());
+        crate::workspace::rename(&text, "Kotlin/App.kt", "Kotlin/Screen.kt").unwrap();
+        assert!(!root.join("Kotlin/App.kt").exists());
         assert!(root.join("Kotlin/Screen.kt").is_file());
         assert_eq!(
             crate::workspace::rename(&text, "Kotlin/Screen.kt", "AndroidManifest.xml")
@@ -14132,7 +14309,7 @@ public final class MainActivity extends Activity {
             "android:allowBackup(0x01010280)=false",
             "android:extractNativeLibs(0x010104ea)=false",
             "E: activity",
-            "android:name(0x01010003)=\"com.tr.yt.MainActivity\"",
+            "android:name(0x01010003)=\"com.tr.yt.App\"",
             "android:exported(0x01010010)=true",
             "android.intent.action.MAIN",
             "android.intent.category.LAUNCHER",
@@ -14146,7 +14323,7 @@ public final class MainActivity extends Activity {
             .unwrap();
         assert!(extracted.status.success());
         let classes = dex::read(&extracted.stdout, &mut Sink::new()).expect("our dex must read");
-        assert_eq!(classes.class_names(), vec!["com.tr.yt.MainActivity"]);
+        assert_eq!(classes.class_names(), vec!["com.tr.yt.App"]);
 
         let listed = std::process::Command::new("unzip")
             .args(["-l", universal.to_str().unwrap()])
@@ -15147,16 +15324,25 @@ public final class MainActivity extends Activity {
         here.sort();
         assert_eq!(
             here,
-            vec!["AndroidManifest.xml", "Builder.json", "Java", "Res"],
-            "the root holds the manifest, the folders for the languages chosen, and the \
-             resource folder"
+            vec![
+                "AndroidManifest.xml",
+                "Builder.json",
+                "Java",
+                "Kotlin",
+                "Native",
+                "Res",
+                "Rust",
+                "proguard-rules.pro",
+            ],
+            "the root holds the manifest, a folder for every language, the resource \
+             folder and the shrinking rules"
         );
 
         std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
-    fn only_the_languages_chosen_get_a_folder() {
+    fn every_language_gets_a_folder_and_the_chosen_one_is_what_gets_built() {
         let directory = temp_directory("omni-scaffold-one");
         let root = directory.join("OnlyRust");
         let spec = crate::scaffold::Spec {
@@ -15173,6 +15359,9 @@ public final class MainActivity extends Activity {
         assert_eq!(
             made.folders,
             vec![
+                "Java",
+                "Kotlin",
+                "Native",
                 "Rust",
                 "Res",
                 "Res/mipmap-mdpi",
@@ -15183,12 +15372,59 @@ public final class MainActivity extends Activity {
                 "Res/values",
                 "Res/values-tr",
             ],
-            "one folder per language chosen, one per density the launcher asks for, and \
-             one per locale chosen"
+            "every language gets its folder, one folder per density the launcher asks \
+             for, and one per locale chosen"
         );
-        assert!(!root.join("Kotlin").exists());
-        assert!(!root.join("Native").exists());
+        for named in [
+            "Java/App.java",
+            "Kotlin/App.kt",
+            "Native/App.cpp",
+            "Native/App.hpp",
+            "Native/CMakeLists.txt",
+            "Rust/App.rs",
+            "Rust/Cargo.toml",
+            "proguard-rules.pro",
+        ] {
+            assert!(root.join(named).is_file(), "{named} is not there");
+        }
         assert!(!root.join("Res/values-de").exists());
+        assert!(
+            !root.join("build.gradle.kts").exists(),
+            "a project made here is not a Gradle project"
+        );
+
+        let cmake = std::fs::read_to_string(root.join("Native/CMakeLists.txt")).unwrap();
+        assert!(
+            cmake.contains("add_library(only_rust SHARED App.cpp)"),
+            "{cmake}"
+        );
+        let cargo = std::fs::read_to_string(root.join("Rust/Cargo.toml")).unwrap();
+        assert!(cargo.contains("name = \"only_rust\""), "{cargo}");
+        assert!(cargo.contains("path = \"App.rs\""), "{cargo}");
+        let rules = std::fs::read_to_string(root.join("proguard-rules.pro")).unwrap();
+        assert!(rules.contains("-keep class com.tr.yt.App"), "{rules}");
+
+        assert!(
+            crate::builder::uncompiled_source(root.to_str().unwrap())
+                .iter()
+                .any(|(language, _)| *language == "rust"),
+            "the language the developer asked for is still reported as uncompiled"
+        );
+        assert!(
+            !crate::builder::uncompiled_source(root.to_str().unwrap())
+                .iter()
+                .any(|(language, _)| *language == "kotlin"),
+            "a starter nobody has touched is not source the developer wrote"
+        );
+
+        std::fs::write(root.join("Kotlin/App.kt"), "package com.tr.yt\n").unwrap();
+        assert!(
+            crate::builder::uncompiled_source(root.to_str().unwrap())
+                .iter()
+                .any(|(language, _)| *language == "kotlin"),
+            "once it is written in, it counts"
+        );
+
         std::fs::remove_dir_all(&directory).ok();
     }
 
@@ -17333,11 +17569,14 @@ class Screen
 
     #[test]
     fn every_rule_the_policy_applies_is_one_it_lists() {
-        let source = std::fs::read_to_string("Guard.rs").expect("this file must be here");
+        let source = std::fs::read_to_string("Builder.rs").expect("this file must be here");
         let at = source
             .find("pub fn inspect_manifest(root: &Element) -> Report {")
             .expect("the inspection is here");
-        let end = source[at..].find("\npub fn emit(").expect("and it ends") + at;
+        let end = source[at..]
+            .find("\n    pub fn emit(")
+            .expect("and it ends")
+            + at;
         let body = &source[at..end];
 
         let mut applied: Vec<String> = Vec::new();
@@ -17741,7 +17980,10 @@ class Screen
         assert_eq!(whole.asset_files, 0);
         assert_eq!(whole.library_files, 0);
 
-        assert!(!whole.has_icon);
+        assert!(
+            whole.has_icon,
+            "a project is given a picture when it is made"
+        );
         assert!(whole.uncompiled.is_empty());
 
         assert_eq!(whole.languages[0].folder, crate::health::BASE_VALUES);
@@ -17759,7 +18001,15 @@ class Screen
             );
             assert!(held.extra.is_empty(), "{}: {:?}", held.folder, held.extra);
         }
-        assert!(!whole.settled(), "a project with no picture is not settled");
+        assert!(
+            whole.settled(),
+            "a project made here starts settled, picture and all"
+        );
+
+        std::fs::remove_file(crate::scaffold::icon_path(&root)).unwrap();
+        let bare = crate::health::of(&root).expect("it must read");
+        assert!(!bare.has_icon, "the picture was the one that was removed");
+        assert!(!bare.settled(), "a project with no picture is not settled");
 
         let square = crate::image::Raster::new(48, 48);
         std::fs::write(

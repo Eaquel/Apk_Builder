@@ -88,6 +88,12 @@
     <string name="omni_build_your_password">वह पासवर्ड जो आपने यह कुंजी बनाते समय चुना था।</string>
     <string name="omni_build_both_note">एक दबाव दोनों लिखता है: लगाने के लिए हस्ताक्षरित पैकेज, और चढ़ाने के लिए बंडल। सुरक्षा नीति पहले चलती है, और उसके मना करने पर कोई भी नहीं लिखा जाता।</string>
     <string name="omni_build_done">%1$d ms में हुआ</string>
+    <string name="omni_mend_title">जो ठीक किया जा सकता है</string>
+    <string name="omni_mend_note">यह निर्माण मना कर देगा। उसे रोकने वालों में से %1$d आपके लिए लिखे जा सकते हैं; अभी कुछ नहीं बदला गया।</string>
+    <string name="omni_mend_one">ठीक करें</string>
+    <string name="omni_mend_all">सब ठीक करें</string>
+    <string name="omni_mend_skip">फिर भी बनाएँ</string>
+    <string name="omni_mend_done">%1$d ठीक किए गए</string>
     <string name="omni_built_title">यहाँ बने</string>
     <string name="omni_built_none">अभी कुछ नहीं बना।</string>
     <string name="omni_result_package">पैकेज</string>
