@@ -197,6 +197,7 @@
     <string name="omni_menu_other">その他</string>
     <string name="omni_language_default">既定: %1$s</string>
     <string name="omni_language_auto">自動</string>
+    <string name="omni_theme_soon">近日中 — これはまだ仕上がっていません。</string>
     <string name="omni_theme_note">アプリケーションの見た目を、好きなように整えます。</string>
     <string name="omni_theme_hacker_note">端末ふうの、緑を基調としたハッカーの装いです。玄人めいた電脳の見た目になります。</string>
     <string name="omni_theme_anime_note">アニメの意匠から採った、愛らしく今ふうの装いです。暗い色と桃色で、ほかにない見た目になります。</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">アプリを評価する</string>
     <string name="omni_rate_store">Play ストアで評価</string>
     <string name="omni_menu_help">ヘルプ</string>
-    <string name="omni_menu_theme">テーマを変更</string>
     <string name="omni_help_search">どんなことを知りたいですか？</string>
     <string name="omni_faq_search">質問を検索…</string>
     <string name="omni_docs_search">ガイドを検索…</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">プロジェクトの情報</string>
     <string name="omni_facts_name">プロジェクト名</string>
     <string name="omni_facts_activity">メインアクティビティ</string>
-    <string name="omni_facts_about">説明</string>
     <string name="omni_facts_span">既定の SDK 範囲</string>
     <string name="omni_facts_where">プロジェクトのフォルダー</string>
     <string name="omni_facts_made">作成日時</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">作った環境</string>
     <string name="omni_project_rename">プロジェクトの名前を変える</string>
     <string name="omni_project_picture">アプリの画像を替える</string>
-    <string name="omni_project_package">パッケージ名を編集</string>
     <string name="omni_project_clear">プロジェクトが作ったものを消す</string>
     <string name="omni_project_delete">プロジェクトを削除</string>
-    <string name="omni_project_export">プロジェクトを ZIP で書き出す</string>
     <string name="omni_project_share">プロジェクトを共有</string>
     <string name="omni_project_cleared">作られたファイルを %1$d 個消しました。</string>
-    <string name="omni_project_exported">プロジェクトを ZIP として書き出しました。</string>
     <string name="omni_help_more">まだ助けが要りますか？</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB の案内</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">心得</string>
     <string name="omni_talk_step_tips_note">一つの問いに一つの話題。ファイルを名指す。誤りをそのまま写す。大きく変える前に説明を求める。</string>
     <string name="omni_adb_first">始める前に</string>
-    <string name="omni_adb_open_first">• ADB は Android 標準の開発者ツールです。\n• 接続は Wi-Fi でも USB でもできます。\n• どちらの場合も開発者向けオプションが必要です。</string>
     <string name="omni_adb_desk_note">Android 端末をパソコンにつなぎ、Omni Builder のすべての機能を使います。以下の手順を順に進めてください。</string>
     <string name="omni_adb_alone_note">パソコンなしで、端末自身のワイヤレスデバッグを使って接続します。以下の手順を順に進めてください。</string>
-    <string name="omni_adb_o_three_note">パソコンがあれば USB、なければ無線を使います。それぞれ上のタブに分かれています。</string>
-    <string name="omni_adb_o_three">接続方法を選ぶ</string>
-    <string name="omni_adb_o_two_note">開発者向けオプションで USB デバッグまたはワイヤレスデバッグを有効にします。</string>
-    <string name="omni_adb_o_two">デバッグを有効にする</string>
-    <string name="omni_adb_o_one_note">設定 › 端末情報 › ソフトウェア情報 を開き、ビルド番号を 7 回タップします。</string>
-    <string name="omni_adb_o_one">開発者向けオプションを有効にする</string>
-    <string name="omni_adb_open_note">ADB（Android Debug Bridge）は Android 端末どうしでコマンドを運ぶ仕組みです。Omni Builder はアプリの導入とログの取得に使います。</string>
-    <string name="omni_adb_open_head">ADB とは？</string>
-    <string name="omni_adb_open">概要</string>
     <string name="omni_adb_alone">計算機なしでつなぐ</string>
     <string name="omni_adb_alone_first">これは Android 11 以降が備える無線デバッグを使います。その項目が端末にないなら、ソフトウェアの版を確かめてください。</string>
     <string name="omni_adb_desk">計算機とつなぐ</string>

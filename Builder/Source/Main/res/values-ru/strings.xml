@@ -197,6 +197,7 @@
     <string name="omni_menu_other">Прочее</string>
     <string name="omni_language_default">По умолчанию: %1$s</string>
     <string name="omni_language_auto">Автоматически</string>
+    <string name="omni_theme_soon">Скоро — этот ещё не готов.</string>
     <string name="omni_theme_note">Настройте внешний вид приложения.</string>
     <string name="omni_theme_hacker_note">Стиль терминала, хакерская тема в зелёных тонах. Профессиональный, киберный вид.</string>
     <string name="omni_theme_anime_note">Милая современная тема в духе аниме. Тёмные и розовые тона для особого вида.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">Оценить приложение</string>
     <string name="omni_rate_store">Оценить в Play Store</string>
     <string name="omni_menu_help">Помощь</string>
-    <string name="omni_menu_theme">Сменить тему</string>
     <string name="omni_help_search">С чем нужна помощь?</string>
     <string name="omni_faq_search">Поиск вопросов…</string>
     <string name="omni_docs_search">Поиск по руководству…</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">Сведения о проекте</string>
     <string name="omni_facts_name">Имя проекта</string>
     <string name="omni_facts_activity">Главная активность</string>
-    <string name="omni_facts_about">Описание</string>
     <string name="omni_facts_span">Диапазон SDK по умолчанию</string>
     <string name="omni_facts_where">Папка проекта</string>
     <string name="omni_facts_made">Создан</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">Собрано в</string>
     <string name="omni_project_rename">Переименовать проект</string>
     <string name="omni_project_picture">Сменить картинку приложения</string>
-    <string name="omni_project_package">Изменить имя пакета</string>
     <string name="omni_project_clear">Очистить собранное проектом</string>
     <string name="omni_project_delete">Удалить проект</string>
-    <string name="omni_project_export">Выгрузить проект как ZIP</string>
     <string name="omni_project_share">Поделиться проектом</string>
     <string name="omni_project_cleared">Удалено собранных файлов: %1$d.</string>
-    <string name="omni_project_exported">Проект записан как ZIP.</string>
     <string name="omni_help_more">Всё ещё нужна помощь?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Руководство по ADB</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">Советы</string>
     <string name="omni_talk_step_tips_note">Один предмет на вопрос. Назовите файл. Приведите ошибку целиком. Просите объяснение до крупной правки.</string>
     <string name="omni_adb_first">Прежде чем начать</string>
-    <string name="omni_adb_open_first">• ADB — собственный инструмент разработчика Android.\n• Связь возможна по Wi-Fi или по USB.\n• В обоих случаях нужны включённые параметры разработчика.</string>
     <string name="omni_adb_desk_note">Подключите устройство Android к компьютеру и пользуйтесь всеми возможностями Omni Builder. Выполните шаги по порядку.</string>
     <string name="omni_adb_alone_note">Подключайтесь без компьютера — по беспроводной отладке на самом устройстве. Выполните шаги по порядку.</string>
-    <string name="omni_adb_o_three_note">С компьютером — по USB, без него — по Wi-Fi. Для каждого пути есть своя вкладка выше.</string>
-    <string name="omni_adb_o_three">Выберите путь</string>
-    <string name="omni_adb_o_two_note">В параметрах разработчика включите отладку по USB или по Wi-Fi.</string>
-    <string name="omni_adb_o_two">Включите отладку</string>
-    <string name="omni_adb_o_one_note">Откройте Настройки › О телефоне › Сведения о ПО и семь раз коснитесь номера сборки.</string>
-    <string name="omni_adb_o_one">Включите параметры разработчика</string>
-    <string name="omni_adb_open_note">ADB (Android Debug Bridge) передаёт команды между устройствами Android. Omni Builder использует его, чтобы установить приложение и читать журналы.</string>
-    <string name="omni_adb_open_head">Что такое ADB?</string>
-    <string name="omni_adb_open">Общее</string>
     <string name="omni_adb_alone">Без компьютера</string>
     <string name="omni_adb_alone_first">Здесь работает беспроводная отладка, которую несут Android 11 и новее. Если такой настройки на устройстве нет, проверьте версию его прошивки.</string>
     <string name="omni_adb_desk">С компьютером</string>

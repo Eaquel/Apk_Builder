@@ -197,6 +197,7 @@
     <string name="omni_menu_other">其他</string>
     <string name="omni_language_default">默认：%1$s</string>
     <string name="omni_language_auto">自动</string>
+    <string name="omni_theme_soon">即将推出 — 这个还没做完。</string>
     <string name="omni_theme_note">个性化应用的外观。</string>
     <string name="omni_theme_hacker_note">终端风格，绿色调的黑客主题。专业而赛博的外观。</string>
     <string name="omni_theme_anime_note">取自动漫设计的可爱现代主题。深色与粉色调，自成一格。</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">评价此应用</string>
     <string name="omni_rate_store">在 Play 商店评分</string>
     <string name="omni_menu_help">帮助</string>
-    <string name="omni_menu_theme">更换主题</string>
     <string name="omni_help_search">想了解什么？</string>
     <string name="omni_faq_search">搜索问题…</string>
     <string name="omni_docs_search">在指南中搜索…</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">项目信息</string>
     <string name="omni_facts_name">项目名称</string>
     <string name="omni_facts_activity">主 Activity</string>
-    <string name="omni_facts_about">描述</string>
     <string name="omni_facts_span">默认 SDK 范围</string>
     <string name="omni_facts_where">项目目录</string>
     <string name="omni_facts_made">创建时间</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">构建环境</string>
     <string name="omni_project_rename">重命名项目</string>
     <string name="omni_project_picture">更换应用图片</string>
-    <string name="omni_project_package">编辑包名</string>
     <string name="omni_project_clear">清除项目构建出的文件</string>
     <string name="omni_project_delete">删除项目</string>
-    <string name="omni_project_export">把项目导出为 ZIP</string>
     <string name="omni_project_share">分享项目</string>
     <string name="omni_project_cleared">已删除 %1$d 个构建文件。</string>
-    <string name="omni_project_exported">项目已写为 ZIP。</string>
     <string name="omni_help_more">还需要帮忙吗？</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB 指南</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">小提示</string>
     <string name="omni_talk_step_tips_note">一个问题只谈一件事。说出文件名。把报错完整贴出来。大改之前先要解释。</string>
     <string name="omni_adb_first">开始之前</string>
-    <string name="omni_adb_open_first">• ADB 是 Android 自带的开发者工具。\n• 连接可以走 Wi-Fi，也可以走 USB。\n• 两种方式都需要打开开发者选项。</string>
     <string name="omni_adb_desk_note">把 Android 设备连到电脑，用上 Omni Builder 的全部能力。请按顺序完成下面的步骤。</string>
     <string name="omni_adb_alone_note">不用电脑，直接用设备自身的无线调试连接。请按顺序完成下面的步骤。</string>
-    <string name="omni_adb_o_three_note">有电脑就用 USB，没有就用无线。上方各有一个标签页。</string>
-    <string name="omni_adb_o_three">选择连接方式</string>
-    <string name="omni_adb_o_two_note">在开发者选项中打开 USB 调试或无线调试。</string>
-    <string name="omni_adb_o_two">打开调试</string>
-    <string name="omni_adb_o_one_note">打开 设置 › 关于手机 › 软件信息，连点版本号七次。</string>
-    <string name="omni_adb_o_one">打开开发者选项</string>
-    <string name="omni_adb_open_note">ADB（Android 调试桥）在 Android 设备之间传递命令。Omni Builder 用它安装应用并读取日志。</string>
-    <string name="omni_adb_open_head">什么是 ADB？</string>
-    <string name="omni_adb_open">概述</string>
     <string name="omni_adb_alone">不用电脑</string>
     <string name="omni_adb_alone_first">这用的是 Android 11 及以后自带的无线调试。设备上没有这个选项的话，检查一下系统版本。</string>
     <string name="omni_adb_desk">用电脑</string>

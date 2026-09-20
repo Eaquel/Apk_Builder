@@ -197,6 +197,7 @@
     <string name="omni_menu_other">Other</string>
     <string name="omni_language_default">Default: %1$s</string>
     <string name="omni_language_auto">Automatic</string>
+    <string name="omni_theme_soon">Yakında — this one is not finished yet.</string>
     <string name="omni_theme_note">Make the application look the way you want.</string>
     <string name="omni_theme_hacker_note">Terminal style, a hacker theme in shades of green. A professional, cyber look.</string>
     <string name="omni_theme_anime_note">A sweet, modern theme drawn from anime design. Dark and pink tones for a look of its own.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">Rate This App</string>
     <string name="omni_rate_store">Rate it on the Play Store</string>
     <string name="omni_menu_help">Help</string>
-    <string name="omni_menu_theme">Change the theme</string>
     <string name="omni_help_search">What do you want help with?</string>
     <string name="omni_faq_search">Search questions...</string>
     <string name="omni_docs_search">Search the guide...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">Project details</string>
     <string name="omni_facts_name">Project name</string>
     <string name="omni_facts_activity">Main activity</string>
-    <string name="omni_facts_about">Description</string>
     <string name="omni_facts_span">Default SDK range</string>
     <string name="omni_facts_where">Project folder</string>
     <string name="omni_facts_made">Created</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">Built with</string>
     <string name="omni_project_rename">Rename the project</string>
     <string name="omni_project_picture">Change the app picture</string>
-    <string name="omni_project_package">Edit the package name</string>
     <string name="omni_project_clear">Clear what the project built</string>
     <string name="omni_project_delete">Delete the project</string>
-    <string name="omni_project_export">Export the project as a ZIP</string>
     <string name="omni_project_share">Share the project</string>
     <string name="omni_project_cleared">%1$d built files removed.</string>
-    <string name="omni_project_exported">The project was written out as a ZIP.</string>
     <string name="omni_help_more">Still need a hand?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB guide</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">Tips</string>
     <string name="omni_talk_step_tips_note">One subject per question. Name the file. Quote the error whole. Ask for an explanation before a large change.</string>
     <string name="omni_adb_first">Before you start</string>
-    <string name="omni_adb_open_first">• ADB is Android’s own developer tool.\n• The link can be made over Wi-Fi or over USB.\n• Developer options must be on for either one.</string>
     <string name="omni_adb_desk_note">Link your Android device to a computer and use every part of Omni Builder. Follow the steps below in order.</string>
     <string name="omni_adb_alone_note">Connect without a computer, using wireless debugging on the device itself. Follow the steps below in order.</string>
-    <string name="omni_adb_o_three_note">With a computer, use USB. Without one, use wireless. Each has its own tab above.</string>
-    <string name="omni_adb_o_three">Pick the way in</string>
-    <string name="omni_adb_o_two_note">Inside developer options, turn on USB debugging or wireless debugging.</string>
-    <string name="omni_adb_o_two">Turn on debugging</string>
-    <string name="omni_adb_o_one_note">Open Settings › About phone › Software information and tap the build number seven times.</string>
-    <string name="omni_adb_o_one">Turn on developer options</string>
-    <string name="omni_adb_open_note">ADB (Android Debug Bridge) carries commands between one Android device and another. Omni Builder uses it to install your app and read its logs.</string>
-    <string name="omni_adb_open_head">What is ADB?</string>
-    <string name="omni_adb_open">General</string>
     <string name="omni_adb_alone">Wireless debugging</string>
     <string name="omni_adb_alone_first">This uses the Wireless debugging that Android 11 and later carry. If the option is not on your device, check its software version.</string>
     <string name="omni_adb_desk">With a computer</string>

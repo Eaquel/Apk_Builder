@@ -197,6 +197,7 @@
     <string name="omni_menu_other">기타</string>
     <string name="omni_language_default">기본: %1$s</string>
     <string name="omni_language_auto">자동</string>
+    <string name="omni_theme_soon">곧 — 이것은 아직 끝나지 않았습니다.</string>
     <string name="omni_theme_note">앱의 겉모습을 마음대로 꾸밉니다.</string>
     <string name="omni_theme_hacker_note">터미널풍의, 초록을 바탕으로 한 해커의 옷입니다. 전문가답고 사이버한 겉모습이 됩니다.</string>
     <string name="omni_theme_anime_note">애니메이션 디자인에서 따온, 사랑스럽고 현대적인 옷입니다. 어두운 색과 분홍으로 남다른 겉모습이 됩니다.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">앱 평가하기</string>
     <string name="omni_rate_store">Play 스토어에서 평가</string>
     <string name="omni_menu_help">도움말</string>
-    <string name="omni_menu_theme">테마 변경</string>
     <string name="omni_help_search">무엇을 도와드릴까요?</string>
     <string name="omni_faq_search">질문 검색…</string>
     <string name="omni_docs_search">설명서 검색…</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">프로젝트 정보</string>
     <string name="omni_facts_name">프로젝트 이름</string>
     <string name="omni_facts_activity">메인 액티비티</string>
-    <string name="omni_facts_about">설명</string>
     <string name="omni_facts_span">기본 SDK 범위</string>
     <string name="omni_facts_where">프로젝트 폴더</string>
     <string name="omni_facts_made">생성일</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">만든 환경</string>
     <string name="omni_project_rename">프로젝트 이름 바꾸기</string>
     <string name="omni_project_picture">앱 그림 바꾸기</string>
-    <string name="omni_project_package">패키지 이름 고치기</string>
     <string name="omni_project_clear">프로젝트가 만든 것 지우기</string>
     <string name="omni_project_delete">프로젝트 삭제</string>
-    <string name="omni_project_export">프로젝트를 ZIP으로 내보내기</string>
     <string name="omni_project_share">프로젝트 공유</string>
     <string name="omni_project_cleared">만들어진 파일 %1$d개를 지웠습니다.</string>
-    <string name="omni_project_exported">프로젝트를 ZIP으로 썼습니다.</string>
     <string name="omni_help_more">아직 도움이 필요하신가요?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB 안내</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">요령</string>
     <string name="omni_talk_step_tips_note">물음 하나에 주제 하나. 파일을 지목하기. 오류를 그대로 옮기기. 크게 바꾸기 전에 풀이를 청하기.</string>
     <string name="omni_adb_first">시작하기 전에</string>
-    <string name="omni_adb_open_first">• ADB는 Android가 제공하는 개발자 도구입니다.\n• 연결은 Wi-Fi나 USB로 할 수 있습니다.\n• 두 방법 모두 개발자 옵션이 켜져 있어야 합니다.</string>
     <string name="omni_adb_desk_note">Android 기기를 컴퓨터에 연결해 Omni Builder의 모든 기능을 사용하세요. 아래 단계를 순서대로 따르세요.</string>
     <string name="omni_adb_alone_note">컴퓨터 없이 기기 자체의 무선 디버깅으로 연결합니다. 아래 단계를 순서대로 따르세요.</string>
-    <string name="omni_adb_o_three_note">컴퓨터가 있으면 USB를, 없으면 무선을 쓰세요. 각각 위쪽 탭에 있습니다.</string>
-    <string name="omni_adb_o_three">연결 방법 선택</string>
-    <string name="omni_adb_o_two_note">개발자 옵션에서 USB 디버깅 또는 무선 디버깅을 켜세요.</string>
-    <string name="omni_adb_o_two">디버깅 켜기</string>
-    <string name="omni_adb_o_one_note">설정 › 휴대전화 정보 › 소프트웨어 정보를 열고 빌드번호를 일곱 번 누르세요.</string>
-    <string name="omni_adb_o_one">개발자 옵션 켜기</string>
-    <string name="omni_adb_open_note">ADB(Android Debug Bridge)는 Android 기기 사이에서 명령을 전달합니다. Omni Builder는 앱 설치와 로그 읽기에 이를 사용합니다.</string>
-    <string name="omni_adb_open_head">ADB란?</string>
-    <string name="omni_adb_open">개요</string>
     <string name="omni_adb_alone">컴퓨터 없이 잇기</string>
     <string name="omni_adb_alone_first">이것은 Android 11 이후가 지닌 무선 디버깅을 씁니다. 그 항목이 기기에 없다면 소프트웨어 버전을 살피세요.</string>
     <string name="omni_adb_desk">컴퓨터로 잇기</string>

@@ -197,6 +197,7 @@
     <string name="omni_menu_other">Outros</string>
     <string name="omni_language_default">Predefinido: %1$s</string>
     <string name="omni_language_auto">Automático</string>
+    <string name="omni_theme_soon">Em breve — este ainda não está pronto.</string>
     <string name="omni_theme_note">Personaliza o aspeto da aplicação.</string>
     <string name="omni_theme_hacker_note">Estilo terminal, um tema hacker em tons de verde. Um aspeto profissional e cibernético.</string>
     <string name="omni_theme_anime_note">Um tema doce e moderno inspirado no anime. Tons escuros e cor-de-rosa para um aspeto próprio.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">Avaliar a aplicação</string>
     <string name="omni_rate_store">Avaliar na Play Store</string>
     <string name="omni_menu_help">Ajuda</string>
-    <string name="omni_menu_theme">Mudar o tema</string>
     <string name="omni_help_search">Com o que precisas de ajuda?</string>
     <string name="omni_faq_search">Procurar perguntas...</string>
     <string name="omni_docs_search">Procurar no guia...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">Dados do projeto</string>
     <string name="omni_facts_name">Nome do projeto</string>
     <string name="omni_facts_activity">Atividade principal</string>
-    <string name="omni_facts_about">Descrição</string>
     <string name="omni_facts_span">Intervalo de SDK predefinido</string>
     <string name="omni_facts_where">Pasta do projeto</string>
     <string name="omni_facts_made">Criado</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">Construído com</string>
     <string name="omni_project_rename">Mudar o nome do projeto</string>
     <string name="omni_project_picture">Mudar a imagem da aplicação</string>
-    <string name="omni_project_package">Editar o nome do pacote</string>
     <string name="omni_project_clear">Apagar o que o projeto construiu</string>
     <string name="omni_project_delete">Eliminar o projeto</string>
-    <string name="omni_project_export">Exportar o projeto como ZIP</string>
     <string name="omni_project_share">Partilhar o projeto</string>
     <string name="omni_project_cleared">%1$d ficheiros construídos removidos.</string>
-    <string name="omni_project_exported">O projeto foi escrito como ZIP.</string>
     <string name="omni_help_more">Ainda precisas de ajuda?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Guia do ADB</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">Dicas</string>
     <string name="omni_talk_step_tips_note">Um assunto por pergunta. Nomeia o ficheiro. Cita o erro inteiro. Pede uma explicação antes de uma mudança grande.</string>
     <string name="omni_adb_first">Antes de começares</string>
-    <string name="omni_adb_open_first">• O ADB é a ferramenta de programação do próprio Android.\n• A ligação pode ser por Wi-Fi ou por USB.\n• As opções de programador têm de estar activas em ambos os casos.</string>
     <string name="omni_adb_desk_note">Ligue o seu dispositivo Android a um computador e use todo o Omni Builder. Siga os passos por ordem.</string>
     <string name="omni_adb_alone_note">Ligue sem computador, através da depuração sem fios do próprio dispositivo. Siga os passos por ordem.</string>
-    <string name="omni_adb_o_three_note">Com computador, use USB. Sem ele, use a via sem fios. Cada uma tem o seu separador acima.</string>
-    <string name="omni_adb_o_three">Escolha o caminho</string>
-    <string name="omni_adb_o_two_note">Nas opções de programador, active a depuração USB ou sem fios.</string>
-    <string name="omni_adb_o_two">Active a depuração</string>
-    <string name="omni_adb_o_one_note">Abra Definições › Acerca do telefone › Informações de software e toque sete vezes no número de compilação.</string>
-    <string name="omni_adb_o_one">Active as opções de programador</string>
-    <string name="omni_adb_open_note">O ADB (Android Debug Bridge) leva comandos entre dispositivos Android. O Omni Builder usa-o para instalar a sua aplicação e ler os registos.</string>
-    <string name="omni_adb_open_head">O que é o ADB?</string>
-    <string name="omni_adb_open">Geral</string>
     <string name="omni_adb_alone">Sem computador</string>
     <string name="omni_adb_alone_first">Isto usa a depuração sem fios que o Android 11 e seguintes trazem. Se a opção não estiver no teu aparelho, verifica a versão do software.</string>
     <string name="omni_adb_desk">Com um computador</string>

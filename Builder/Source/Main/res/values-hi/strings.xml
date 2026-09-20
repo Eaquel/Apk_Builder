@@ -197,6 +197,7 @@
     <string name="omni_menu_other">अन्य</string>
     <string name="omni_language_default">तयशुदा: %1$s</string>
     <string name="omni_language_auto">स्वचालित</string>
+    <string name="omni_theme_soon">जल्द ही — यह अभी पूरा नहीं हुआ।</string>
     <string name="omni_theme_note">ऐप्लिकेशन का रूप अपने मन के अनुसार बनाइए।</string>
     <string name="omni_theme_hacker_note">टर्मिनल शैली, हरे रंगों में एक हैकर रंगरूप। पेशेवर और साइबर दिखता है।</string>
     <string name="omni_theme_anime_note">ऐनिमे डिज़ाइन से लिया गया प्यारा और आधुनिक रंगरूप। गहरे और गुलाबी रंगों के साथ अपना ही अंदाज़।</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">ऐप को आँकिए</string>
     <string name="omni_rate_store">Play Store पर रेट करें</string>
     <string name="omni_menu_help">मदद</string>
-    <string name="omni_menu_theme">थीम बदलें</string>
     <string name="omni_help_search">किस बारे में मदद चाहिए?</string>
     <string name="omni_faq_search">प्रश्न खोजें...</string>
     <string name="omni_docs_search">गाइड में खोजें...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">परियोजना का ब्योरा</string>
     <string name="omni_facts_name">परियोजना का नाम</string>
     <string name="omni_facts_activity">मुख्य गतिविधि</string>
-    <string name="omni_facts_about">विवरण</string>
     <string name="omni_facts_span">डिफ़ॉल्ट SDK सीमा</string>
     <string name="omni_facts_where">परियोजना का फ़ोल्डर</string>
     <string name="omni_facts_made">बनाया गया</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">इससे बना</string>
     <string name="omni_project_rename">परियोजना का नाम बदलें</string>
     <string name="omni_project_picture">ऐप की तस्वीर बदलें</string>
-    <string name="omni_project_package">पैकेज नाम बदलें</string>
     <string name="omni_project_clear">परियोजना ने जो बनाया उसे हटाएँ</string>
     <string name="omni_project_delete">प्रोजेक्ट हटाएं</string>
-    <string name="omni_project_export">परियोजना को ZIP में बाहर लिखें</string>
     <string name="omni_project_share">प्रोजेक्ट साझा करें</string>
     <string name="omni_project_cleared">%1$d बनी हुई फ़ाइलें हटाई गईं।</string>
-    <string name="omni_project_exported">परियोजना ZIP के रूप में बाहर लिख दी गई।</string>
     <string name="omni_help_more">अब भी मदद चाहिए?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB मार्गदर्शिका</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">सुझाव</string>
     <string name="omni_talk_step_tips_note">एक प्रश्न में एक ही विषय। फ़ाइल का नाम लीजिए। त्रुटि पूरी उद्धृत कीजिए। बड़े बदलाव से पहले व्याख्या माँगिए।</string>
     <string name="omni_adb_first">शुरू करने से पहले</string>
-    <string name="omni_adb_open_first">• ADB एंड्रॉइड का अपना डेवलपर टूल है।\n• कनेक्शन Wi-Fi या USB से बनाया जा सकता है।\n• दोनों के लिए डेवलपर विकल्प चालू होने चाहिए।</string>
     <string name="omni_adb_desk_note">अपने एंड्रॉइड डिवाइस को कंप्यूटर से जोड़ें और Omni Builder का पूरा उपयोग करें। नीचे दिए चरणों का क्रम से पालन करें।</string>
     <string name="omni_adb_alone_note">बिना कंप्यूटर के, डिवाइस की अपनी वायरलेस डिबगिंग से जुड़ें। नीचे दिए चरणों का क्रम से पालन करें।</string>
-    <string name="omni_adb_o_three_note">कंप्यूटर हो तो USB, न हो तो वायरलेस चुनें। ऊपर दोनों के अलग टैब हैं।</string>
-    <string name="omni_adb_o_three">रास्ता चुनें</string>
-    <string name="omni_adb_o_two_note">डेवलपर विकल्पों में USB डिबगिंग या वायरलेस डिबगिंग चालू करें।</string>
-    <string name="omni_adb_o_two">डिबगिंग चालू करें</string>
-    <string name="omni_adb_o_one_note">सेटिंग्स › फ़ोन के बारे में › सॉफ़्टवेयर जानकारी खोलें और बिल्ड नंबर पर सात बार टैप करें।</string>
-    <string name="omni_adb_o_one">डेवलपर विकल्प चालू करें</string>
-    <string name="omni_adb_open_note">ADB (Android Debug Bridge) एक एंड्रॉइड डिवाइस से दूसरे तक आदेश पहुँचाता है। Omni Builder इसका उपयोग आपका ऐप इंस्टॉल करने और लॉग पढ़ने के लिए करता है।</string>
-    <string name="omni_adb_open_head">ADB क्या है?</string>
-    <string name="omni_adb_open">सामान्य जानकारी</string>
     <string name="omni_adb_alone">बिना तार का डिबगिंग</string>
     <string name="omni_adb_alone_first">यह उस बिना-तार डिबगिंग का उपयोग करता है जो Android 11 और उससे आगे रखते हैं। यदि यह विकल्प आपके उपकरण पर नहीं है, तो उसका सॉफ़्टवेयर संस्करण देखिए।</string>
     <string name="omni_adb_desk">कंप्यूटर के साथ</string>

@@ -197,6 +197,7 @@
     <string name="omni_menu_other">Diğer</string>
     <string name="omni_language_default">Varsayılan: %1$s</string>
     <string name="omni_language_auto">Otomatik</string>
+    <string name="omni_theme_soon">Yakında — bu henüz bitmedi.</string>
     <string name="omni_theme_note">Uygulamanın görünümünü kişiselleştirin.</string>
     <string name="omni_theme_hacker_note">Terminal tarzı, yeşil tonlarda hacker teması. Profesyonel ve siber bir görünüm sunar.</string>
     <string name="omni_theme_anime_note">Anime tasarımından ilham alan sevimli ve modern tema. Karanlık ve pembe tonlarla benzersiz bir deneyim sunar.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">Uygulamayı Değerlendir</string>
     <string name="omni_rate_store">Play Store\'da Değerlendir</string>
     <string name="omni_menu_help">Yardım</string>
-    <string name="omni_menu_theme">Tema Değiştir</string>
     <string name="omni_help_search">Ne hakkında yardım almak istiyorsun?</string>
     <string name="omni_faq_search">Soru ara...</string>
     <string name="omni_docs_search">Rehberde ara...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">Proje Bilgileri</string>
     <string name="omni_facts_name">Proje Adı</string>
     <string name="omni_facts_activity">Ana Aktivite</string>
-    <string name="omni_facts_about">Açıklama</string>
     <string name="omni_facts_span">Varsayılan SDK Aralığı</string>
     <string name="omni_facts_where">Proje Dizini</string>
     <string name="omni_facts_made">Oluşturulma tarihi</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">Derleme Ortamı</string>
     <string name="omni_project_rename">Projeyi Yeniden Adlandır</string>
     <string name="omni_project_picture">Uygulama Görselini Değiştir</string>
-    <string name="omni_project_package">Paket Adını Düzenle</string>
     <string name="omni_project_clear">Proje Önbelleğini Temizle</string>
     <string name="omni_project_delete">Projeyi Sil</string>
-    <string name="omni_project_export">Projeyi ZIP Olarak Dışa Aktar</string>
     <string name="omni_project_share">Projeyi Paylaş</string>
     <string name="omni_project_cleared">%1$d derlenmiş dosya silindi.</string>
-    <string name="omni_project_exported">Proje ZIP olarak yazıldı.</string>
     <string name="omni_help_more">Hâlâ yardıma mı ihtiyacın var?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">ADB Rehberi</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">İpuçları</string>
     <string name="omni_talk_step_tips_note">Her soruda tek bir konuya odaklanın. Dosya adını belirtin. Hata mesajını tam olarak paylaşın. Büyük değişikliklerden önce açıklama isteyin.</string>
     <string name="omni_adb_first">Önce Bilmeniz Gerekenler</string>
-    <string name="omni_adb_open_first">• ADB, Android\'in kendi geliştirici aracıdır.\n• Bağlantı kablosuz ya da USB ile kurulabilir.\n• Her iki yol için de geliştirici seçenekleri açık olmalıdır.</string>
     <string name="omni_adb_desk_note">Android cihazınızı bilgisayarınıza bağlayarak Omni Builder ile tüm özellikleri kullanın. Aşağıdaki adımları sırasıyla uygulayın.</string>
     <string name="omni_adb_alone_note">Bilgisayar olmadan, cihazın kendi kablosuz hata ayıklama özelliğiyle bağlanın. Aşağıdaki adımları sırasıyla uygulayın.</string>
-    <string name="omni_adb_o_three_note">Bilgisayarınız varsa USB yöntemini, yoksa kablosuz yöntemi kullanın. Her ikisi için yukarıda ayrı sekmeler var.</string>
-    <string name="omni_adb_o_three">Bağlantı Yolunu Seçin</string>
-    <string name="omni_adb_o_two_note">Geliştirici seçenekleri içinde USB hata ayıklama ya da kablosuz hata ayıklama seçeneğini açın.</string>
-    <string name="omni_adb_o_two">Hata Ayıklamayı Açın</string>
-    <string name="omni_adb_o_one_note">Ayarlar › Telefon hakkında › Yazılım bilgileri menüsüne gidin ve yapım numarasına yedi kez dokunun.</string>
-    <string name="omni_adb_o_one">Geliştirici Seçeneklerini Açın</string>
-    <string name="omni_adb_open_note">ADB (Android Debug Bridge), bir Android cihaz ile başka bir cihaz arasında komut taşıyan araçtır. Omni Builder, uygulamanızı kurmak ve günlüklerini okumak için onu kullanır.</string>
-    <string name="omni_adb_open_head">ADB Nedir?</string>
-    <string name="omni_adb_open">Genel Bilgi</string>
     <string name="omni_adb_alone">Bilgisayarsız Bağlantı</string>
     <string name="omni_adb_alone_first">Bu yöntem Android 11 ve üzeri sürümlerdeki Kablosuz Hata Ayıklama (Wireless Debugging) özelliğini kullanır. Cihazınızda bu seçenek görünmüyorsa, yazılım sürümünüzü kontrol edin.</string>
     <string name="omni_adb_desk">Bilgisayarlı Bağlantı</string>

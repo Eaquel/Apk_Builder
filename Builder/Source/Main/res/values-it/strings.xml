@@ -197,6 +197,7 @@
     <string name="omni_menu_other">Altro</string>
     <string name="omni_language_default">Predefinito: %1$s</string>
     <string name="omni_language_auto">Automatico</string>
+    <string name="omni_theme_soon">Presto — questo non è ancora finito.</string>
     <string name="omni_theme_note">Personalizza l’aspetto dell’applicazione.</string>
     <string name="omni_theme_hacker_note">Stile terminale, un tema hacker nei toni del verde. Un aspetto professionale e cyber.</string>
     <string name="omni_theme_anime_note">Un tema dolce e moderno ispirato agli anime. Toni scuri e rosa per un aspetto tutto suo.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">Valuta l’applicazione</string>
     <string name="omni_rate_store">Valuta su Play Store</string>
     <string name="omni_menu_help">Aiuto</string>
-    <string name="omni_menu_theme">Cambia tema</string>
     <string name="omni_help_search">Su cosa ti serve aiuto?</string>
     <string name="omni_faq_search">Cerca domande...</string>
     <string name="omni_docs_search">Cerca nella guida...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">Dati del progetto</string>
     <string name="omni_facts_name">Nome del progetto</string>
     <string name="omni_facts_activity">Attività principale</string>
-    <string name="omni_facts_about">Descrizione</string>
     <string name="omni_facts_span">Intervallo SDK predefinito</string>
     <string name="omni_facts_where">Cartella del progetto</string>
     <string name="omni_facts_made">Creato</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">Costruito con</string>
     <string name="omni_project_rename">Rinomina il progetto</string>
     <string name="omni_project_picture">Cambia l’immagine dell’app</string>
-    <string name="omni_project_package">Modifica il nome del pacchetto</string>
     <string name="omni_project_clear">Cancella ciò che il progetto ha costruito</string>
     <string name="omni_project_delete">Elimina il progetto</string>
-    <string name="omni_project_export">Esporta il progetto come ZIP</string>
     <string name="omni_project_share">Condividi il progetto</string>
     <string name="omni_project_cleared">%1$d file costruiti rimossi.</string>
-    <string name="omni_project_exported">Il progetto è stato scritto come ZIP.</string>
     <string name="omni_help_more">Ti serve ancora una mano?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Guida ADB</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">Suggerimenti</string>
     <string name="omni_talk_step_tips_note">Un argomento per domanda. Nomina il file. Cita l’errore per intero. Chiedi una spiegazione prima di un cambiamento grande.</string>
     <string name="omni_adb_first">Prima di cominciare</string>
-    <string name="omni_adb_open_first">• ADB è lo strumento per sviluppatori di Android.\n• Il collegamento può avvenire via Wi-Fi o via USB.\n• Le opzioni sviluppatore devono essere attive in entrambi i casi.</string>
     <string name="omni_adb_desk_note">Collega il tuo dispositivo Android a un computer e usa tutto Omni Builder. Segui i passi in ordine.</string>
     <string name="omni_adb_alone_note">Collegati senza computer, con il debug wireless del dispositivo stesso. Segui i passi in ordine.</string>
-    <string name="omni_adb_o_three_note">Con un computer usa l’USB, senza usa il wireless. Ognuno ha la sua scheda qui sopra.</string>
-    <string name="omni_adb_o_three">Scegli la via</string>
-    <string name="omni_adb_o_two_note">Nelle opzioni sviluppatore attiva il debug USB o quello wireless.</string>
-    <string name="omni_adb_o_two">Attiva il debug</string>
-    <string name="omni_adb_o_one_note">Apri Impostazioni › Info sul telefono › Informazioni software e tocca sette volte il numero build.</string>
-    <string name="omni_adb_o_one">Attiva le opzioni sviluppatore</string>
-    <string name="omni_adb_open_note">ADB (Android Debug Bridge) trasporta comandi tra dispositivi Android. Omni Builder lo usa per installare la tua app e leggerne i registri.</string>
-    <string name="omni_adb_open_head">Che cos’è ADB?</string>
-    <string name="omni_adb_open">Generale</string>
     <string name="omni_adb_alone">Senza computer</string>
     <string name="omni_adb_alone_first">Questo usa il debug senza fili che Android 11 e successivi portano con sé. Se l’opzione manca sul tuo dispositivo, controlla la sua versione software.</string>
     <string name="omni_adb_desk">Con un computer</string>

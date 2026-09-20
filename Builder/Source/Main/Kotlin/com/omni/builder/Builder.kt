@@ -1035,33 +1035,6 @@ data class SelfCheck(
     }
 }
 
-data class CoreState(
-    val version: String,
-    val status: String,
-    val abiVersion: Int,
-    val selfHosted: Boolean,
-    val subsystems: Int,
-    val toolchainVerified: Int,
-    val toolchainTotal: Int,
-) {
-    companion object {
-        fun parse(document: String): CoreState {
-            val root = JSONObject(document)
-            val core = root.getJSONObject("core")
-            val toolchain = root.getJSONObject("toolchain")
-            return CoreState(
-                version = core.getString("version"),
-                status = core.getString("status"),
-                abiVersion = core.getInt("abiVersion"),
-                selfHosted = core.getBoolean("selfHosted"),
-                subsystems = root.getJSONObject("subsystems").getInt("count"),
-                toolchainVerified = toolchain.getInt("verified"),
-                toolchainTotal = toolchain.getJSONArray("components").length(),
-            )
-        }
-    }
-}
-
 data class Palette(
     val key: String,
     val label: String,
@@ -1166,6 +1139,7 @@ object Preferences {
     private const val NEW_TARGET_SDK = "new_target_sdk"
     private const val SEARCHES = "searches"
     private const val SEARCHES_KEPT = 40
+    private val LOCKED_THEMES = setOf("hacker", "anime")
     private const val ASSISTANT_KEY = "assistant_key"
     private const val ASSISTANT_MODEL = "assistant_model"
     private const val ASSISTANT_EFFORT = "assistant_effort"
@@ -1236,8 +1210,14 @@ object Preferences {
         store(context).edit().putInt(NEW_MIN_SDK, minimum).putInt(NEW_TARGET_SDK, target).apply()
     }
 
-    fun palette(context: Context): Palette =
-        Palette.of(store(context).getString(THEME, Palette.DARK.key).orEmpty())
+    fun palette(context: Context): Palette {
+        val held = store(context).getString(THEME, Palette.DARK.key).orEmpty()
+        if (held in LOCKED_THEMES) {
+            setPalette(context, Palette.DARK.key)
+            return Palette.DARK
+        }
+        return Palette.of(held)
+    }
 
     fun setPalette(context: Context, key: String) {
         store(context).edit().putString(THEME, key).apply()
@@ -2452,7 +2432,7 @@ internal class TerminalView(
     }
 
     override fun onDraw(canvas: Canvas) {
-        canvas.drawColor(palette.background)
+        canvas.drawColor(Color.BLACK)
         paint.textSize = lettering
         val word = StringBuilder()
         for (r in 0 until screen.rows) {
@@ -3344,12 +3324,6 @@ class BuilderActivity : Activity() {
             listOf("adb", "fastboot", "etc1tool", "sqlite3"),
         )
 
-        val ADB_OPEN = listOf(
-            R.string.omni_adb_o_one to R.string.omni_adb_o_one_note,
-            R.string.omni_adb_o_two to R.string.omni_adb_o_two_note,
-            R.string.omni_adb_o_three to R.string.omni_adb_o_three_note,
-        )
-
         val ADB_ALONE = listOf(
             R.string.omni_adb_a_one to R.string.omni_adb_a_one_note,
             R.string.omni_adb_a_two to R.string.omni_adb_a_two_note,
@@ -3541,6 +3515,8 @@ class BuilderActivity : Activity() {
         const val SHELL_NAME_MOST = 14
 
         const val ASSISTANT_PATHS = 400
+
+        val LOCKED_THEMES = setOf("hacker", "anime")
 
         val SHELL_BAR = 0xFF000000.toInt()
 
@@ -4524,12 +4500,6 @@ class BuilderActivity : Activity() {
                     go(Screen.Terminal)
                 }
             )
-            if (listing) {
-                crown.addView(
-                    markControl(Mark.Shape.FIND, R.string.omni_find_project) { askToSearch() },
-                    each,
-                )
-            }
             if (here is Screen.NewProject) {
                 crown.addView(
                     markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
@@ -4963,9 +4933,6 @@ class BuilderActivity : Activity() {
         rows += MenuChoice(Mark.Shape.SPARK, getString(R.string.omni_menu_assistant)) {
             go(Screen.Assistant)
         }
-        rows += MenuChoice(Mark.Shape.BRUSH, getString(R.string.omni_menu_theme)) {
-            go(Screen.Theme)
-        }
         if (listing) {
             rows += MenuChoice(
                 Mark.Shape.SORT,
@@ -5352,6 +5319,11 @@ class BuilderActivity : Activity() {
                 here is Screen.Languages,
                 getString(R.string.omni_language_default, languageShown()),
             ) { leaveFor(Screen.Languages) }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.TRASH, R.string.omni_trash_title, here is Screen.Trash) {
+                leaveFor(Screen.Trash)
+            }
         )
         list.addView(
             drawerRow(Mark.Shape.SPEECH, R.string.omni_feedback_title, here is Screen.Feedback) {
@@ -9610,24 +9582,6 @@ class BuilderActivity : Activity() {
         return files to (folders - 1).coerceAtLeast(0)
     }
 
-    private fun projectNote(root: String): String = runCatching {
-        JSONObject(Builder.nativeReadFile(root, PROJECT_FILE))
-            .optJSONObject("read")
-            ?.optString("text")
-            ?.let { JSONObject(it).optString("description") }
-            .orEmpty()
-    }.getOrDefault("")
-
-    private fun keepProjectNote(root: String, said: String) {
-        val answer = runCatching {
-            JSONObject(Builder.nativeReadFile(root, PROJECT_FILE))
-        }.getOrNull()
-        val text = answer?.optJSONObject("read")?.optString("text").orEmpty()
-        val settings = runCatching { JSONObject(text) }.getOrDefault(JSONObject())
-        settings.put("description", said)
-        act(Builder.nativeWriteFile(root, PROJECT_FILE, settings.toString(2)), "saved")
-    }
-
     private fun mainActivityOf(root: String): String = runCatching {
         JSONObject(Builder.nativeManifestFacts(root))
             .optJSONObject("manifest")
@@ -9756,49 +9710,6 @@ class BuilderActivity : Activity() {
             rule(),
             LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { topMargin = gap(3) },
         )
-        sheet.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_facts_about)
-                setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setPadding(0, gap(3), 0, gap(2))
-            }
-        )
-        val note = TextView(this).apply {
-            text = projectNote(root)
-            setTextColor(palette.foreground)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        }
-        sheet.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                background = sheet(Color.TRANSPARENT, palette.divider)
-                setPadding(gap(3), gap(3), gap(3), gap(3))
-                addView(note, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                addView(
-                    View(context).apply {
-                        foreground = Mark(Mark.Shape.PEN, palette.foreground)
-                        isClickable = true
-                        isFocusable = true
-                        contentDescription = getString(R.string.omni_facts_about)
-                        readAs(Button::class.java.name)
-                        background = reacting(Color.TRANSPARENT, gap(5).toFloat(), palette.accent)
-                        setOnClickListener {
-                            askForName(
-                                getString(R.string.omni_facts_about),
-                                note.text.toString(),
-                            ) { said ->
-                                keepProjectNote(root, said)
-                                note.text = said
-                            }
-                        }
-                    },
-                    LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
-                )
-            },
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
-        )
         showSheet(Mark.Shape.INFO_FILL, getString(R.string.omni_facts_title), sheet)
     }
 
@@ -9879,28 +9790,6 @@ class BuilderActivity : Activity() {
         results.addView(notice(getString(R.string.omni_project_cleared, gone), palette.ok))
     }
 
-    private fun exportProject(root: String) {
-        val here = File(root)
-        working({
-            val into = File(builtFolder(), "${here.name}.zip")
-            java.util.zip.ZipOutputStream(FileOutputStream(into)).use { out ->
-                val outputs = File(here, PackageProvider.OUTPUTS).absolutePath
-                here.walkTopDown()
-                    .filter { it.isFile && !it.absolutePath.startsWith(outputs) }
-                    .forEach { one ->
-                    val at = one.absolutePath.removePrefix(here.absolutePath).trimStart('/')
-                    out.putNextEntry(java.util.zip.ZipEntry(at))
-                    one.inputStream().use { it.copyTo(out) }
-                    out.closeEntry()
-                }
-            }
-            into.absolutePath
-        }) { where ->
-            results.addView(notice(getString(R.string.omni_project_exported), palette.ok))
-            shareOutside(File(where))
-        }
-    }
-
     private fun shareProject(root: String) {
         val here = File(root)
         working({
@@ -9944,14 +9833,6 @@ class BuilderActivity : Activity() {
                 MenuChoice(Mark.Shape.IMAGE, getString(R.string.omni_project_picture)) {
                     chooseImage(root)
                 },
-                MenuChoice(Mark.Shape.DROID, getString(R.string.omni_project_package)) {
-                    askForName(
-                        getString(R.string.omni_form_package),
-                        summary?.packageName.orEmpty(),
-                    ) { asked ->
-                        act(Builder.nativeManifestSet(root, "package", asked.trim()), "set")
-                    }
-                },
                 MenuChoice(Mark.Shape.INFO, getString(R.string.omni_facts_title)) {
                     showProjectFacts(root)
                 },
@@ -9960,9 +9841,6 @@ class BuilderActivity : Activity() {
                     getString(R.string.omni_project_clear),
                     parted = true,
                 ) { clearProjectCache(root) },
-                MenuChoice(Mark.Shape.ARCHIVE, getString(R.string.omni_project_export)) {
-                    exportProject(root)
-                },
                 MenuChoice(Mark.Shape.SHARE, getString(R.string.omni_project_share)) {
                     shareProject(root)
                 },
@@ -11299,43 +11177,6 @@ class BuilderActivity : Activity() {
             )
         }
 
-    private fun mascot(art: Int, title: String, detail: String): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, gap(4), 0, gap(2))
-            addView(
-                ImageView(context).apply {
-                    setImageResource(art)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                },
-                LinearLayout.LayoutParams(gap(17), gap(17)).apply { marginEnd = gap(3) },
-            )
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        TextView(context).apply {
-                            text = title
-                            setTextColor(palette.foreground)
-                            typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-                            letterSpacing = 0.05f
-                        }
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = detail
-                            setTextColor(palette.muted)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                            setLineSpacing(gap(1).toFloat(), 1f)
-                        }
-                    )
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-            )
-        }
-
     private fun grid(across: Int, cells: List<View>): View {
         val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var at = 0
@@ -11503,48 +11344,6 @@ class BuilderActivity : Activity() {
                 },
             )
         }
-    }
-
-    private fun choice(title: String, on: Boolean, onPress: () -> Unit) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        minimumHeight = gap(TOUCH_UNITS)
-        setPadding(gap(3), gap(2), gap(3), gap(2))
-        isClickable = true
-        isFocusable = true
-        isSelected = on
-        contentDescription = title
-        readAs(android.widget.RadioButton::class.java.name)
-        background = touchable(
-            GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = gap(3).toFloat()
-                setColor(if (on) Ink.fade(palette.accent, 0.14f) else palette.raised)
-                setStroke(gap(1) / 2, if (on) palette.accent else palette.divider)
-            },
-            palette.accent,
-        )
-        setOnClickListener { onPress() }
-        addView(
-            View(context).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(if (on) palette.accent else Color.TRANSPARENT)
-                    setStroke(gap(1) / 2, if (on) palette.accent else palette.muted)
-                }
-            },
-            LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
-        )
-        addView(
-            TextView(context).apply {
-                text = title
-                setTextColor(if (on) palette.accent else palette.foreground)
-                typeface = Type.strong
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                maxLines = 2
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
     }
 
     private fun badge(mark: Mark.Shape, tint: Int) = FrameLayout(this).apply {
@@ -11758,7 +11557,12 @@ class BuilderActivity : Activity() {
         else -> R.string.omni_theme_dark_note
     }
 
-    private fun themeCard(shown: Palette, active: Boolean, onPress: () -> Unit): View {
+    private fun themeCard(
+        shown: Palette,
+        active: Boolean,
+        locked: Boolean,
+        onPress: () -> Unit,
+    ): View {
         val radio = View(this).apply {
             background = radioMark(active)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -11811,8 +11615,12 @@ class BuilderActivity : Activity() {
                     )
                     addView(
                         TextView(context).apply {
-                            text = getString(themeNote(shown))
-                            setTextColor(palette.muted)
+                            text = if (locked) {
+                                getString(R.string.omni_theme_soon)
+                            } else {
+                                getString(themeNote(shown))
+                            }
+                            setTextColor(if (locked) palette.warning else palette.muted)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                             setLineSpacing(gap(1) / 2f, 1f)
                             setPadding(0, gap(1), 0, 0)
@@ -11859,9 +11667,17 @@ class BuilderActivity : Activity() {
             rule(),
             LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(2) },
         )
-        for (shown in listOf(Palette.HACKER, Palette.ANIME, Palette.DARK)) {
+        for (shown in listOf(Palette.DARK, Palette.HACKER, Palette.ANIME)) {
+            val locked = shown.key in LOCKED_THEMES
             content.addView(
-                themeCard(shown, shown.key == palette.key) {
+                themeCard(shown, !locked && shown.key == palette.key, locked) {
+                    if (locked) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_theme_soon), palette.muted)
+                        )
+                        return@themeCard
+                    }
                     if (shown.key != palette.key) {
                         Preferences.setPalette(this, shown.key)
                         recreate()
@@ -11986,23 +11802,6 @@ class BuilderActivity : Activity() {
             noteCard(getString(R.string.omni_language_told), getString(R.string.omni_language_all))
         )
     }
-    private fun starRow(): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-        setPadding(0, gap(2), 0, gap(2))
-        var at = 0
-        while (at < 5) {
-            addView(
-                View(context).apply { foreground = Mark(Mark.Shape.STAR, palette.warning) },
-                LinearLayout.LayoutParams(gap(9), gap(9)).apply {
-                    marginStart = gap(1)
-                    marginEnd = gap(1)
-                },
-            )
-            at += 1
-        }
-    }
-
     private fun storeIntent(): Intent =
         Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName"))
 
@@ -13974,7 +13773,6 @@ class BuilderActivity : Activity() {
         content.addView(
             bandRow(
                 listOf(
-                    getString(R.string.omni_adb_open),
                     getString(R.string.omni_adb_alone),
                     getString(R.string.omni_adb_desk),
                 ),
@@ -13984,30 +13782,22 @@ class BuilderActivity : Activity() {
                 render(false)
             }
         )
-        val marked = when (adbTab) {
-            0 -> Mark.Shape.BULB
-            1 -> Mark.Shape.PHONE
-            else -> Mark.Shape.SCREEN
-        }
+        val marked = if (adbTab == 0) Mark.Shape.PHONE else Mark.Shape.SCREEN
         content.addView(
             guideHero(
                 marked,
                 palette.accent,
                 getString(
-                    when (adbTab) {
-                        0 -> R.string.omni_adb_open_head
-                        1 -> R.string.omni_adb_alone
-                        else -> R.string.omni_adb_desk
-                    }
+                    if (adbTab == 0) R.string.omni_adb_alone else R.string.omni_adb_desk
                 ),
                 getString(
-                    when (adbTab) {
-                        0 -> R.string.omni_adb_open_note
-                        1 -> R.string.omni_adb_alone_note
-                        else -> R.string.omni_adb_desk_note
+                    if (adbTab == 0) {
+                        R.string.omni_adb_alone_note
+                    } else {
+                        R.string.omni_adb_desk_note
                     }
                 ),
-                if (adbTab == 2) R.drawable.omni_art_adb_desk
+                if (adbTab == 1) R.drawable.omni_art_adb_desk
                 else R.drawable.omni_art_help_ask,
             )
         )
@@ -14015,34 +13805,26 @@ class BuilderActivity : Activity() {
             bulletCard(
                 getString(R.string.omni_adb_first),
                 getString(
-                    when (adbTab) {
-                        0 -> R.string.omni_adb_open_first
-                        1 -> R.string.omni_adb_alone_first
-                        else -> R.string.omni_adb_desk_first
+                    if (adbTab == 0) {
+                        R.string.omni_adb_alone_first
+                    } else {
+                        R.string.omni_adb_desk_first
                     }
                 ),
             )
         )
-        val steps = when (adbTab) {
-            0 -> ADB_OPEN
-            1 -> ADB_ALONE
-            else -> ADB_DESK
-        }
-        val art = when (adbTab) {
-            1 -> ADB_ALONE_ART
-            2 -> ADB_DESK_ART
-            else -> emptyList()
-        }
+        val steps = if (adbTab == 0) ADB_ALONE else ADB_DESK
+        val art = if (adbTab == 0) ADB_ALONE_ART else ADB_DESK_ART
         steps.forEachIndexed { index, step ->
             val extra = when {
-                adbTab == 2 && index == 0 -> listOf(
+                adbTab == 1 && index == 0 -> listOf(
                     linkPanel(
                         getString(R.string.omni_adb_tools_link),
                         getString(R.string.omni_adb_tools_url),
                     ),
                     noteStrip(getString(R.string.omni_adb_tools_only)),
                 )
-                adbTab == 2 && index == 1 -> osSteps()
+                adbTab == 1 && index == 1 -> osSteps()
                 else -> emptyList()
             }
             content.addView(
@@ -15186,36 +14968,6 @@ class BuilderActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = gap(1)
         }
-    }
-
-    private fun pictured(
-        picture: String,
-        title: String,
-        detail: String,
-        trailing: String,
-        trailingColour: Int = palette.muted,
-        onPress: () -> Unit,
-    ) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, gap(2), 0, gap(2))
-        minimumHeight = gap(TOUCH_UNITS)
-        background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
-        isClickable = true
-        isFocusable = true
-        contentDescription = said(title, detail, trailing)
-        isScreenReaderFocusable = true
-        readAs(Button::class.java.name)
-        setOnClickListener { onPress() }
-
-        addView(
-            thumbnail(picture, gap(11)),
-            LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
-        )
-        addView(
-            row(title, detail, trailing, trailingColour, onPress),
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
     }
 
     private fun row(

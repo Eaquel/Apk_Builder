@@ -197,6 +197,7 @@
     <string name="omni_menu_other">أخرى</string>
     <string name="omni_language_default">الافتراضي: %1$s</string>
     <string name="omni_language_auto">تلقائي</string>
+    <string name="omni_theme_soon">قريبًا — هذا لم يكتمل بعد.</string>
     <string name="omni_theme_note">خصّص مظهر التطبيق.</string>
     <string name="omni_theme_hacker_note">طراز الطرفية، سمة قرصنة بدرجات الأخضر. مظهر احترافي وسيبراني.</string>
     <string name="omni_theme_anime_note">سمة لطيفة وحديثة مستوحاة من الأنمي. درجات داكنة ووردية لمظهر خاص بها.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">قيّم التطبيق</string>
     <string name="omni_rate_store">قيّمه في متجر Play</string>
     <string name="omni_menu_help">مساعدة</string>
-    <string name="omni_menu_theme">تغيير السمة</string>
     <string name="omni_help_search">بماذا تريد المساعدة؟</string>
     <string name="omni_faq_search">ابحث في الأسئلة...</string>
     <string name="omni_docs_search">ابحث في الدليل...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">بيانات المشروع</string>
     <string name="omni_facts_name">اسم المشروع</string>
     <string name="omni_facts_activity">النشاط الرئيسي</string>
-    <string name="omni_facts_about">الوصف</string>
     <string name="omni_facts_span">نطاق SDK الافتراضي</string>
     <string name="omni_facts_where">مجلد المشروع</string>
     <string name="omni_facts_made">تاريخ الإنشاء</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">بُني بـ</string>
     <string name="omni_project_rename">غيّر اسم المشروع</string>
     <string name="omni_project_picture">غيّر صورة التطبيق</string>
-    <string name="omni_project_package">حرّر اسم الحزمة</string>
     <string name="omni_project_clear">امسح ما بناه المشروع</string>
     <string name="omni_project_delete">حذف المشروع</string>
-    <string name="omni_project_export">صدّر المشروع كملف ZIP</string>
     <string name="omni_project_share">مشاركة المشروع</string>
     <string name="omni_project_cleared">حُذف %1$d ملفًا مبنيًّا.</string>
-    <string name="omni_project_exported">كُتب المشروع ملف ZIP.</string>
     <string name="omni_help_more">أما زلت تحتاج عونًا؟</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">دليل ADB</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">إرشادات</string>
     <string name="omni_talk_step_tips_note">موضوع واحد لكل سؤال. سمِّ الملف. اذكر الخطأ كاملًا. اطلب شرحًا قبل تغيير كبير.</string>
     <string name="omni_adb_first">قبل أن تبدأ</string>
-    <string name="omni_adb_open_first">• ‏ADB أداة المطوّر الخاصة بأندرويد.\n• يمكن الاتصال عبر واي فاي أو عبر USB.\n• يجب تفعيل خيارات المطوّر في الحالتين.</string>
     <string name="omni_adb_desk_note">اربط جهاز أندرويد بحاسوب واستخدم Omni Builder بالكامل. اتبع الخطوات أدناه بالترتيب.</string>
     <string name="omni_adb_alone_note">اتصل بدون حاسوب عبر التصحيح اللاسلكي في الجهاز نفسه. اتبع الخطوات أدناه بالترتيب.</string>
-    <string name="omni_adb_o_three_note">مع حاسوب استخدم USB، وبدونه استخدم اللاسلكي. لكل منهما تبويب في الأعلى.</string>
-    <string name="omni_adb_o_three">اختر الطريقة</string>
-    <string name="omni_adb_o_two_note">من خيارات المطوّر، فعّل تصحيح USB أو التصحيح اللاسلكي.</string>
-    <string name="omni_adb_o_two">فعّل تصحيح الأخطاء</string>
-    <string name="omni_adb_o_one_note">افتح الإعدادات › حول الهاتف › معلومات البرنامج واضغط على رقم الإصدار سبع مرات.</string>
-    <string name="omni_adb_o_one">فعّل خيارات المطوّر</string>
-    <string name="omni_adb_open_note">‏ADB (جسر تصحيح أندرويد) ينقل الأوامر بين أجهزة أندرويد. يستخدمه Omni Builder لتثبيت تطبيقك وقراءة سجلاته.</string>
-    <string name="omni_adb_open_head">ما هو ADB؟</string>
-    <string name="omni_adb_open">معلومات عامة</string>
     <string name="omni_adb_alone">دون حاسوب</string>
     <string name="omni_adb_alone_first">يستعمل هذا تنقيح الأخطاء اللاسلكي الذي يحمله أندرويد 11 وما بعده. فإن لم يكن الخيار في جهازك فتحقق من إصدار برمجياته.</string>
     <string name="omni_adb_desk">بحاسوب</string>

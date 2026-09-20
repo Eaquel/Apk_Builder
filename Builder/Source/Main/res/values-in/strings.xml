@@ -197,6 +197,7 @@
     <string name="omni_menu_other">Lainnya</string>
     <string name="omni_language_default">Bawaan: %1$s</string>
     <string name="omni_language_auto">Otomatis</string>
+    <string name="omni_theme_soon">Segera — yang ini belum selesai.</string>
     <string name="omni_theme_note">Sesuaikan tampilan aplikasi.</string>
     <string name="omni_theme_hacker_note">Gaya terminal, tema peretas dalam nuansa hijau. Tampilan profesional dan siber.</string>
     <string name="omni_theme_anime_note">Tema manis dan modern yang diambil dari desain anime. Nuansa gelap dan merah muda untuk tampilan tersendiri.</string>
@@ -254,7 +255,6 @@
     <string name="omni_rate_title">Nilai Aplikasi Ini</string>
     <string name="omni_rate_store">Nilai di Play Store</string>
     <string name="omni_menu_help">Bantuan</string>
-    <string name="omni_menu_theme">Ganti tema</string>
     <string name="omni_help_search">Butuh bantuan soal apa?</string>
     <string name="omni_faq_search">Cari pertanyaan...</string>
     <string name="omni_docs_search">Cari di panduan...</string>
@@ -481,7 +481,6 @@
     <string name="omni_facts_title">Rincian proyek</string>
     <string name="omni_facts_name">Nama proyek</string>
     <string name="omni_facts_activity">Aktivitas utama</string>
-    <string name="omni_facts_about">Deskripsi</string>
     <string name="omni_facts_span">Rentang SDK bawaan</string>
     <string name="omni_facts_where">Map proyek</string>
     <string name="omni_facts_made">Dibuat</string>
@@ -493,13 +492,10 @@
     <string name="omni_facts_made_by">Dibangun dengan</string>
     <string name="omni_project_rename">Ganti nama proyek</string>
     <string name="omni_project_picture">Ganti gambar aplikasi</string>
-    <string name="omni_project_package">Sunting nama paket</string>
     <string name="omni_project_clear">Bersihkan yang dibangun proyek</string>
     <string name="omni_project_delete">Hapus proyek</string>
-    <string name="omni_project_export">Ekspor proyek sebagai ZIP</string>
     <string name="omni_project_share">Bagikan proyek</string>
     <string name="omni_project_cleared">%1$d berkas bangunan dihapus.</string>
-    <string name="omni_project_exported">Proyek ditulis keluar sebagai ZIP.</string>
     <string name="omni_help_more">Masih perlu bantuan?</string>
     <string name="omni_help_numbered">%1$d. %2$s</string>
     <string name="omni_help_adb">Panduan ADB</string>
@@ -567,18 +563,8 @@
     <string name="omni_talk_step_tips">Kiat</string>
     <string name="omni_talk_step_tips_note">Satu pokok per pertanyaan. Sebut berkasnya. Kutip kesalahannya utuh. Minta penjelasan sebelum perubahan besar.</string>
     <string name="omni_adb_first">Sebelum kamu mulai</string>
-    <string name="omni_adb_open_first">• ADB adalah alat pengembang bawaan Android.\n• Sambungan bisa lewat Wi-Fi atau lewat USB.\n• Opsi pengembang harus aktif untuk keduanya.</string>
     <string name="omni_adb_desk_note">Hubungkan perangkat Android Anda ke komputer dan pakai seluruh Omni Builder. Ikuti langkah di bawah berurutan.</string>
     <string name="omni_adb_alone_note">Sambungkan tanpa komputer, lewat pengawakutuan nirkabel di perangkat itu sendiri. Ikuti langkah di bawah berurutan.</string>
-    <string name="omni_adb_o_three_note">Dengan komputer pakai USB, tanpa komputer pakai nirkabel. Masing-masing ada tabnya di atas.</string>
-    <string name="omni_adb_o_three">Pilih jalurnya</string>
-    <string name="omni_adb_o_two_note">Di dalam opsi pengembang, aktifkan pengawakutuan USB atau nirkabel.</string>
-    <string name="omni_adb_o_two">Aktifkan pengawakutuan</string>
-    <string name="omni_adb_o_one_note">Buka Setelan › Tentang ponsel › Informasi perangkat lunak dan ketuk nomor build tujuh kali.</string>
-    <string name="omni_adb_o_one">Aktifkan opsi pengembang</string>
-    <string name="omni_adb_open_note">ADB (Android Debug Bridge) membawa perintah antar perangkat Android. Omni Builder memakainya untuk memasang aplikasi Anda dan membaca lognya.</string>
-    <string name="omni_adb_open_head">Apa itu ADB?</string>
-    <string name="omni_adb_open">Umum</string>
     <string name="omni_adb_alone">Tanpa komputer</string>
     <string name="omni_adb_alone_first">Ini memakai Wireless debugging yang dibawa Android 11 dan sesudahnya. Bila pilihan itu tak ada di perangkatmu, periksa versi perangkat lunaknya.</string>
     <string name="omni_adb_desk">Dengan komputer</string>
