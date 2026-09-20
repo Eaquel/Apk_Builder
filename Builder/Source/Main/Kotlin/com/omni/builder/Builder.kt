@@ -4096,6 +4096,7 @@ class BuilderActivity : Activity() {
         keepTheDraft()
         stopTheBuild()
         stopTheLog()
+        stopListeningForPairing()
         closeTheShell()
         OmniLog.flushSession()
         super.onDestroy()
@@ -8106,10 +8107,13 @@ class BuilderActivity : Activity() {
     }
 
     private fun installedApps(): List<Pair<String, String>> = runCatching {
-        packageManager.getInstalledApplications(0)
-            .map { held ->
+        val asked = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        packageManager.queryIntentActivities(asked, 0)
+            .mapNotNull { one ->
+                val held = one.activityInfo?.applicationInfo ?: return@mapNotNull null
                 packageManager.getApplicationLabel(held).toString() to held.packageName
             }
+            .distinctBy { it.second }
             .sortedBy { it.first.lowercase(Locale.getDefault()) }
     }.getOrDefault(emptyList())
 

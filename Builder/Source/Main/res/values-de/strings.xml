@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_version_shown">Beta</string>
+    <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">Hilfe-Center</string>
     <string name="omni_find_project">Im Projekt suchen</string>
     <string name="omni_tab_build">Bauen</string>

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="omni_app_name">Omni Builder</string>
-    <string name="omni_version_shown">测试版</string>
+    <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">帮助中心</string>
     <string name="omni_find_project">在项目中搜索</string>
     <string name="omni_tab_build">构建</string>
