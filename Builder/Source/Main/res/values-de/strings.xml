@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">In den anderen Bereich verschieben</string>
     <string name="omni_files_needs_name">Gib zuerst einen Namen ein.</string>
     <string name="omni_files_mirror">Andere Spalte angleichen</string>
+    <string name="omni_files_up">Eine Ebene höher</string>
     <string name="omni_files_folder">Ordner</string>
     <string name="omni_files_file">Datei</string>
     <string name="omni_editor_changed_elsewhere">Diese Datei wurde seit dem Öffnen anderswo geändert. Erneutes Speichern überschreibt diese Änderung.</string>

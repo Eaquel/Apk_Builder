@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">Déplacer dans l\'autre volet</string>
     <string name="omni_files_needs_name">Écris d\'abord un nom.</string>
     <string name="omni_files_mirror">Aligner l\'autre volet</string>
+    <string name="omni_files_up">Dossier parent</string>
     <string name="omni_files_folder">Dossier</string>
     <string name="omni_files_file">Fichier</string>
     <string name="omni_editor_changed_elsewhere">Ce fichier a changé ailleurs depuis son ouverture. Enregistrer à nouveau écrasera ce changement.</string>

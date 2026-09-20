@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">移动到另一侧</string>
     <string name="omni_files_needs_name">请先输入名称。</string>
     <string name="omni_files_mirror">同步另一侧目录</string>
+    <string name="omni_files_up">上一级文件夹</string>
     <string name="omni_files_folder">文件夹</string>
     <string name="omni_files_file">文件</string>
     <string name="omni_editor_changed_elsewhere">该文件自打开以来在别处已被更改。再次保存会覆盖那次更改。</string>

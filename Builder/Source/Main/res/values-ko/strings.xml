@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">건너편 창으로 이동</string>
     <string name="omni_files_needs_name">이름을 먼저 적으세요.</string>
     <string name="omni_files_mirror">반대쪽 창 맞추기</string>
+    <string name="omni_files_up">상위 폴더</string>
     <string name="omni_files_folder">폴더</string>
     <string name="omni_files_file">파일</string>
     <string name="omni_editor_changed_elsewhere">이 파일은 연 뒤에 다른 곳에서 바뀌었습니다. 다시 저장하면 그 변경을 덮어씁니다.</string>

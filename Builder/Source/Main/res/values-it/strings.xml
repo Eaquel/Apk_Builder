@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">Sposta nell\'altro riquadro</string>
     <string name="omni_files_needs_name">Scrivi prima un nome.</string>
     <string name="omni_files_mirror">Allinea l\'altro riquadro</string>
+    <string name="omni_files_up">Cartella superiore</string>
     <string name="omni_files_folder">Cartella</string>
     <string name="omni_files_file">File</string>
     <string name="omni_editor_changed_elsewhere">Questo file è cambiato altrove da quando è stato aperto. Salvare di nuovo sovrascrive quella modifica.</string>

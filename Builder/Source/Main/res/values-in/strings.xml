@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">Pindah ke panel seberang</string>
     <string name="omni_files_needs_name">Ketik nama dulu.</string>
     <string name="omni_files_mirror">Samakan panel lain</string>
+    <string name="omni_files_up">Naik satu folder</string>
     <string name="omni_files_folder">Folder</string>
     <string name="omni_files_file">Berkas</string>
     <string name="omni_editor_changed_elsewhere">Berkas ini berubah di tempat lain sejak dibuka. Menyimpannya lagi akan menimpa perubahan itu.</string>

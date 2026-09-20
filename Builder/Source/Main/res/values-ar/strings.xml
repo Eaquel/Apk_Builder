@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">نقل إلى اللوحة الأخرى</string>
     <string name="omni_files_needs_name">اكتب اسمًا أولًا.</string>
     <string name="omni_files_mirror">مطابقة اللوحة الأخرى</string>
+    <string name="omni_files_up">مجلد لأعلى</string>
     <string name="omni_files_folder">مجلد</string>
     <string name="omni_files_file">ملف</string>
     <string name="omni_editor_changed_elsewhere">تغيّر هذا الملف في مكان آخر منذ فتحه. الحفظ مرة أخرى يكتب فوق ذلك التغيير.</string>

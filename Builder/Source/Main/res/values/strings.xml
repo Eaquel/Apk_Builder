@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">Move to the other pane</string>
     <string name="omni_files_needs_name">Type a name first.</string>
     <string name="omni_files_mirror">Match the other pane</string>
+    <string name="omni_files_up">Up one folder</string>
     <string name="omni_files_folder">Folder</string>
     <string name="omni_files_file">File</string>
     <string name="omni_editor_changed_elsewhere">This file changed somewhere else since it was opened. Saving again writes over that change.</string>

@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">反対側のペインへ移動</string>
     <string name="omni_files_needs_name">先に名前を入力してください。</string>
     <string name="omni_files_mirror">反対側のペインを合わせる</string>
+    <string name="omni_files_up">一つ上のフォルダー</string>
     <string name="omni_files_folder">フォルダ</string>
     <string name="omni_files_file">ファイル</string>
     <string name="omni_editor_changed_elsewhere">このファイルは開いてから別の場所で変更されました。もう一度保存すると、その変更を上書きします。</string>

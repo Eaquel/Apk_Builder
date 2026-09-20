@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">Diğer bölmeye taşı</string>
     <string name="omni_files_needs_name">Önce bir ad yaz.</string>
     <string name="omni_files_mirror">Karşı dizini eşle</string>
+    <string name="omni_files_up">Bir üst klasör</string>
     <string name="omni_files_folder">Klasör</string>
     <string name="omni_files_file">Dosya</string>
     <string name="omni_editor_changed_elsewhere">Bu dosya açıldığından beri başka bir yerde değişti. Yeniden kaydetmek o değişikliğin üzerine yazar.</string>

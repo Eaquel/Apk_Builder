@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">Mover para o outro painel</string>
     <string name="omni_files_needs_name">Digite um nome primeiro.</string>
     <string name="omni_files_mirror">Alinhar o outro painel</string>
+    <string name="omni_files_up">Pasta acima</string>
     <string name="omni_files_folder">Pasta</string>
     <string name="omni_files_file">Arquivo</string>
     <string name="omni_editor_changed_elsewhere">Este arquivo mudou em outro lugar desde que foi aberto. Salvar de novo escreve por cima dessa mudança.</string>

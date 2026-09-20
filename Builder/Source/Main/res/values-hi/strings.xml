@@ -66,6 +66,7 @@
     <string name="omni_files_move_across">दूसरे पटल पर ले जाएँ</string>
     <string name="omni_files_needs_name">पहले नाम लिखिए।</string>
     <string name="omni_files_mirror">दूसरा फलक मिलाएँ</string>
+    <string name="omni_files_up">एक फ़ोल्डर ऊपर</string>
     <string name="omni_files_folder">फ़ोल्डर</string>
     <string name="omni_files_file">फ़ाइल</string>
     <string name="omni_editor_changed_elsewhere">खुलने के बाद यह फ़ाइल कहीं और बदली गई है। दोबारा सहेजने पर वह बदलाव मिट जाएगा।</string>

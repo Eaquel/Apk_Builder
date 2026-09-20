@@ -1,6 +1,9 @@
 package com.omni.builder
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.LayoutTransition
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Application
@@ -42,6 +45,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
@@ -2052,6 +2056,7 @@ internal object Motion {
 
     const val TAP = 70L
     const val REBOUND = 110L
+    const val HOLD = 350L
     const val LEAVE = 140L
     const val ENTER = 260L
     const val SWEEP = 420L
@@ -3008,32 +3013,27 @@ internal class Mark(
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }
 
-internal class Limb(
-    private val colour: Int,
-    private val down: Boolean,
-    private val across: Boolean,
-) : Drawable() {
+internal class Filling(private val colour: Int, private val radius: Float) : Drawable() {
 
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.BUTT
-    }
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val shape = RectF()
+
+    var much = 0f
+        set(value) {
+            field = value.coerceIn(0f, 1f)
+            invalidateSelf()
+        }
 
     override fun draw(canvas: Canvas) {
-        if (bounds.width() <= 0 || bounds.height() <= 0) return
+        if (much <= 0f || bounds.width() <= 0 || bounds.height() <= 0) return
         paint.color = colour
-        paint.strokeWidth = (bounds.width() / 28f).coerceAtLeast(1f)
-        val along = bounds.left + bounds.width() * 0.42f
-        val middle = bounds.exactCenterY()
-        if (down) {
-            canvas.drawLine(along, bounds.top.toFloat(), along, bounds.bottom.toFloat(), paint)
-        }
-        if (across) {
-            if (!down) {
-                canvas.drawLine(along, bounds.top.toFloat(), along, middle, paint)
-            }
-            canvas.drawLine(along, middle, bounds.right.toFloat(), middle, paint)
-        }
+        shape.set(
+            bounds.left.toFloat(),
+            bounds.top.toFloat(),
+            bounds.left + bounds.width() * much,
+            bounds.bottom.toFloat(),
+        )
+        canvas.drawRoundRect(shape, radius, radius, paint)
     }
 
     override fun setAlpha(alpha: Int) {
@@ -3189,7 +3189,6 @@ class BuilderActivity : Activity() {
 
         const val LOG_HELD = 600
 
-        const val TREE_DEEPEST = 8
         val TILE_UNTOUCHED = 0xFFF7F8FA.toInt()
         val LABEL_PILL = 0xFF33363A.toInt()
 
@@ -3661,7 +3660,6 @@ class BuilderActivity : Activity() {
     private var reposFound: List<Forge.Repository> = emptyList()
 
     private var raised = false
-    private val opened = mutableSetOf<String>()
     private val wentBefore = mutableListOf<String>()
     private var cameBefore: Screen? = null
     private var talkRoot: String? = null
@@ -4203,12 +4201,16 @@ class BuilderActivity : Activity() {
             is Screen.HelpFaq -> go(Screen.Help)
             is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Picture -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
-            is Screen.Files ->
-                if (here.folder.isEmpty()) {
+            is Screen.Files -> {
+                val beside = secondFolder.orEmpty()
+                if (paneRight && beside.isNotEmpty()) {
+                    stepPane(here.root, true, beside, beside.substringBeforeLast('/', ""))
+                } else if (here.folder.isEmpty()) {
                     go(Screen.Projects)
                 } else {
                     go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
                 }
+            }
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
             is Screen.NewKey -> go(Screen.Keys)
@@ -4777,6 +4779,12 @@ class BuilderActivity : Activity() {
         )
         footer.addView(
             footControl(Mark.Shape.CHEVRON_RIGHT, R.string.omni_action_forward, onward) { stepPane(1) },
+            LinearLayout.LayoutParams(0, gap(10), 1f),
+        )
+        footer.addView(
+            footControl(Mark.Shape.CHEVRON_UP, R.string.omni_files_up, paneFolder().isNotEmpty()) {
+                walkPane(paneFolder().substringBeforeLast('/', ""))
+            },
             LinearLayout.LayoutParams(0, gap(10), 1f),
         )
         footer.addView(
@@ -5367,14 +5375,6 @@ class BuilderActivity : Activity() {
     private fun trashFolder() = File(getExternalFilesDir(null) ?: filesDir, "Trash").absolutePath
 
     private fun openHere(root: String) {
-        if (openProject != root) {
-            opened.clear()
-            runCatching {
-                FileEntry.list(Builder.nativeProjectTree(root))
-                    .filter { it.folder && !it.path.contains('/') }
-                    .forEach { opened.add(it.path) }
-            }
-        }
         openProject = root
         go(Screen.Files(root, ""))
     }
@@ -5684,141 +5684,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun treeRow(
-        root: String,
-        entry: FileEntry,
-        guides: List<Boolean>,
-        more: Boolean,
-        entries: List<FileEntry>,
-    ): View {
-        val open = entry.path in opened
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = gap(ROW_UNITS)
-            setPadding(gap(2), gap(1), gap(3), gap(1))
-            isClickable = true
-            isFocusable = true
-            contentDescription = entry.path.substringAfterLast('/')
-            readAs(Button::class.java.name)
-            pressable()
-            setOnClickListener {
-                if (entry.folder) {
-                    if (open) opened.remove(entry.path) else opened.add(entry.path)
-                    render(false)
-                } else {
-                    openEntry(root, entry)
-                }
-            }
-            setOnLongClickListener {
-                showActions(root, entry.path.substringBeforeLast('/', ""), entry, null)
-                true
-            }
-            guides.forEach { carries ->
-                addView(
-                    View(context).apply {
-                        if (carries) {
-                            background = Limb(Ink.hot(palette.divider, 0.3f), true, false)
-                        }
-                    },
-                    LinearLayout.LayoutParams(gap(6), MATCH_PARENT),
-                )
-            }
-            addView(
-                View(context).apply {
-                    if (entry.folder) {
-                        foreground = Mark(
-                            if (open) Mark.Shape.CHEVRON_DOWN else Mark.Shape.CHEVRON_RIGHT,
-                            palette.foreground,
-                            1.9f,
-                        )
-                    } else {
-                        background = Limb(Ink.hot(palette.divider, 0.3f), more, true)
-                    }
-                },
-                LinearLayout.LayoutParams(gap(4), MATCH_PARENT),
-            )
-            addView(
-                treeMark(entry),
-                LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
-            )
-            addView(
-                TextView(context).apply {
-                    text = entry.path.substringAfterLast('/')
-                    setTextColor(palette.foreground)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                    maxLines = 1
-                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-            )
-        }
-    }
-
-    private fun growTree(
-        into: LinearLayout,
-        root: String,
-        folder: String,
-        depth: Int,
-        guides: List<Boolean>,
-        entries: List<FileEntry>,
-    ) {
-        if (depth > TREE_DEEPEST) {
-            return
-        }
-        val here = arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder })
-        here.forEachIndexed { index, one ->
-            val more = index < here.size - 1
-            into.addView(treeRow(root, one, guides, more, entries))
-            if (one.folder && one.path in opened) {
-                growTree(into, root, one.path, depth + 1, guides + more, entries)
-            }
-        }
-    }
-
-    private fun upRow(): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        minimumHeight = gap(ROW_UNITS)
-        setPadding(gap(3), gap(1), gap(3), gap(1))
-        isClickable = true
-        isFocusable = true
-        contentDescription = ".."
-        readAs(Button::class.java.name)
-        pressable()
-        setOnClickListener { go(Screen.Projects) }
-        addView(
-            View(context).apply { foreground = Mark(Mark.Shape.CHEVRON_LEFT, palette.marker) },
-            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
-        )
-        addView(
-            TextView(context).apply {
-                text = ".."
-                setTextColor(palette.foreground)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            }
-        )
-    }
-
-    private fun treePane(root: String, entries: List<FileEntry>): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(paneHead(root, "", true))
-            addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
-            val rows = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, gap(2), 0, gap(2))
-            }
-            rows.addView(upRow())
-            growTree(rows, root, "", 0, emptyList(), entries)
-            if (rows.childCount == 0) {
-                rows.addView(quiet(getString(R.string.omni_files_empty)).apply {
-                    setPadding(gap(4), gap(4), gap(4), gap(4))
-                })
-            }
-            addView(rows)
-        }
-
     private fun renderFiles(root: String, folder: String) {
         val entries = runCatching {
             FileEntry.list(Builder.nativeProjectTree(root))
@@ -5831,17 +5696,8 @@ class BuilderActivity : Activity() {
         val panes = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        val left = PaneBox(false).apply { addView(treePane(root, entries)) }
-        val right = PaneBox(true).apply {
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(paneHead(root, beside, false))
-                    addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
-                    addView(filePane(root, beside, entries, folder))
-                }
-            )
-        }
+        val left = PaneBox(false).apply { addView(onePane(root, folder, beside, entries, false)) }
+        val right = PaneBox(true).apply { addView(onePane(root, beside, folder, entries, true)) }
         panes.addView(
             left,
             LinearLayout.LayoutParams(0, MATCH_PARENT, 1f).apply { marginEnd = gap(1) / 2 },
@@ -5857,6 +5713,19 @@ class BuilderActivity : Activity() {
             panes,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { weight = 1f },
         )
+    }
+
+    private fun onePane(
+        root: String,
+        folder: String,
+        other: String,
+        entries: List<FileEntry>,
+        side: Boolean,
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(paneHead(root, folder, side))
+        addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+        addView(filePane(root, folder, entries, other, side))
     }
 
     private fun paneSkin(chosen: Boolean): Drawable = GradientDrawable().apply {
@@ -6318,24 +6187,25 @@ class BuilderActivity : Activity() {
         return row
     }
 
-    private fun besideUp(root: String, folder: String): View = LinearLayout(this).apply {
+    private fun besideUp(root: String, folder: String, side: Boolean): View =
+        LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        minimumHeight = gap(7)
-        setPadding(gap(6), 0, gap(2), 0)
+        minimumHeight = gap(ROW_UNITS)
+        setPadding(gap(3), gap(1), gap(3), gap(1))
         isClickable = true
         isFocusable = true
         contentDescription = ".."
         readAs(Button::class.java.name)
-        background = touchable(pill(Color.TRANSPARENT, 0f), palette.accent)
+        pressable()
         setOnClickListener {
             if (folder.isNotEmpty()) {
-                stepPane(root, folder, folder.substringBeforeLast('/', ""))
+                stepPane(root, side, folder, folder.substringBeforeLast('/', ""))
             }
         }
         addView(
-            View(context).apply { foreground = Mark(Mark.Shape.FOLDER, palette.marker) },
-            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
+            View(context).apply { foreground = Mark(Mark.Shape.CHEVRON_LEFT, palette.marker) },
+            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
         )
         addView(
             TextView(context).apply {
@@ -6351,13 +6221,14 @@ class BuilderActivity : Activity() {
         folder: String,
         entries: List<FileEntry>,
         other: String?,
+        side: Boolean,
     ): View {
         val holder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, gap(2), 0, gap(2))
         }
-        if (other != null) {
-            holder.addView(besideUp(root, folder))
+        if (folder.isNotEmpty()) {
+            holder.addView(besideUp(root, folder, side))
         }
         val here = arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder })
         if (here.isEmpty()) {
@@ -6366,7 +6237,7 @@ class BuilderActivity : Activity() {
             })
         }
         here.forEach { entry ->
-            holder.addView(fileRow(root, folder, entry, entries, other))
+            holder.addView(fileRow(root, folder, entry, entries, other, side))
         }
         if (other != null && picks(folder).isNotEmpty()) {
             holder.addView(transferRow(root, folder, other))
@@ -6374,9 +6245,9 @@ class BuilderActivity : Activity() {
         return holder
     }
 
-    private fun stepPane(root: String, pane: String, into: String) {
-        if (pane == secondFolder) {
-            besideBefore.add(pane)
+    private fun stepPane(root: String, side: Boolean, from: String, into: String) {
+        if (side) {
+            besideBefore.add(from)
             besideAfter.clear()
             secondFolder = into
             paneRight = true
@@ -6494,6 +6365,7 @@ class BuilderActivity : Activity() {
         entry: FileEntry,
         all: List<FileEntry>,
         other: String? = null,
+        side: Boolean = false,
     ): View {
         val name = entry.path.substringAfterLast('/')
         val absolute = File(root, entry.path).absolutePath
@@ -6508,17 +6380,13 @@ class BuilderActivity : Activity() {
             isFocusable = true
             contentDescription = name
             readAs(Button::class.java.name)
-            pressable()
+            pressable(onHeld = { showActions(root, folder, entry, other) })
             setOnClickListener {
-                if (entry.folder && other != null) {
-                    stepPane(root, folder, entry.path)
+                if (entry.folder) {
+                    stepPane(root, side, folder, entry.path)
                 } else {
                     openEntry(root, entry)
                 }
-            }
-            setOnLongClickListener {
-                showActions(root, folder, entry, other)
-                true
             }
 
             val chosen = picks(folder).contains(entry.path)
@@ -14787,28 +14655,99 @@ class BuilderActivity : Activity() {
     private fun touchable(background: GradientDrawable, ripple: Int): Drawable =
         RippleDrawable(ColorStateList.valueOf(ripple), background, null)
 
-    private fun View.pressable(radius: Float = gap(2).toFloat(), depth: Float = 0.97f) {
-        background = touchable(pill(Color.TRANSPARENT, radius), palette.accent)
+    private fun View.pressable(
+        radius: Float = gap(2).toFloat(),
+        depth: Float = 0.97f,
+        onHeld: (() -> Unit)? = null,
+    ) {
+        val filling = if (onHeld == null || Motion.still()) {
+            null
+        } else {
+            Filling(Ink.hot(palette.accent, 0.28f), radius)
+        }
+        background = if (filling == null) {
+            touchable(pill(Color.TRANSPARENT, radius), palette.accent)
+        } else {
+            RippleDrawable(
+                ColorStateList.valueOf(palette.accent),
+                LayerDrawable(arrayOf(pill(Color.TRANSPARENT, radius), filling)),
+                null,
+            )
+        }
         if (Motion.still()) {
+            if (onHeld != null) {
+                setOnLongClickListener {
+                    onHeld()
+                    true
+                }
+            }
             return
+        }
+        var held = false
+        var backwards = false
+        val fills = filling?.let { strip ->
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = Motion.of(Motion.HOLD)
+                interpolator = DecelerateInterpolator()
+                addUpdateListener { step -> strip.much = step.animatedValue as Float }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        if (strip.much < 1f) {
+                            return
+                        }
+                        held = true
+                        onHeld?.invoke()
+                    }
+                })
+            }
         }
         setOnTouchListener { view, event ->
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> view.animate()
-                    .scaleX(depth).scaleY(depth)
-                    .setDuration(Motion.of(Motion.TAP))
-                    .setInterpolator(DecelerateInterpolator())
-                    .start()
+                MotionEvent.ACTION_DOWN -> {
+                    held = false
+                    backwards = false
+                    view.animate()
+                        .scaleX(depth).scaleY(depth)
+                        .setDuration(Motion.of(Motion.TAP))
+                        .setInterpolator(DecelerateInterpolator())
+                        .start()
+                    fills?.start()
+                    false
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val inside = event.x >= 0f && event.y >= 0f &&
+                        event.x <= view.width && event.y <= view.height
+                    if (!inside && !backwards && fills != null && fills.isRunning) {
+                        backwards = true
+                        fills.reverse()
+                    }
+                    false
+                }
 
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL,
-                -> view.animate()
-                    .scaleX(1f).scaleY(1f)
-                    .setDuration(Motion.of(Motion.REBOUND))
-                    .setInterpolator(OvershootInterpolator(1.4f))
-                    .start()
+                -> {
+                    view.animate()
+                        .scaleX(1f).scaleY(1f)
+                        .setDuration(Motion.of(Motion.REBOUND))
+                        .setInterpolator(OvershootInterpolator(1.4f))
+                        .start()
+                    if (!backwards) {
+                        backwards = true
+                        fills?.reverse()
+                    }
+                    if (held) {
+                        view.isPressed = false
+                        held = false
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                else -> false
             }
-            false
         }
     }
 
