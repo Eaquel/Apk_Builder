@@ -356,6 +356,8 @@
     <string name="omni_brand_note">Android Geliştirme Ortamı</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_raise_open">Proje Aç</string>
+    <string name="omni_import_none">Buradaki hiçbir şey o dosyayı açamadı.</string>
+    <string name="omni_import_done">%1$d dosya bir projeye açıldı</string>
     <string name="omni_raise_more">Daha fazla</string>
     <string name="omni_files_sorting">Sıralama Seçenekleri</string>
     <string name="omni_action_forward">İleri</string>

@@ -356,6 +356,8 @@
     <string name="omni_brand_note">بيئة تطوير أندرويد</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_raise_open">افتح مشروعًا</string>
+    <string name="omni_import_none">لا شيء هنا استطاع فتح ذلك الملف.</string>
+    <string name="omni_import_done">فُتح %1$d ملفًا في مشروع</string>
     <string name="omni_raise_more">المزيد</string>
     <string name="omni_files_sorting">خيارات الترتيب</string>
     <string name="omni_action_forward">إلى الأمام</string>

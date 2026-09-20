@@ -568,6 +568,20 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
                                          into_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeOpenArchive(
+    JNIEnv *env, jobject , jstring archive_path, jstring into) {
+  std::string archive_text;
+  std::string into_text;
+  if (archive_path == nullptr || into == nullptr ||
+      !JavaStringToUtf8(env, archive_path, &archive_text) ||
+      !JavaStringToUtf8(env, into, &into_text)) {
+    ThrowJava(env, kIllegalState,
+              "Opening an archive needs the archive and a folder to write into.");
+    return nullptr;
+  }
+  return HandBack(env, omni_open_archive(archive_text.c_str(), into_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
     JNIEnv *env, jobject , jstring root, jstring relative) {
   std::string root_text;

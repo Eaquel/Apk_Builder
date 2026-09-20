@@ -356,6 +356,8 @@
     <string name="omni_brand_note">Lingkungan pengembangan Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_raise_open">Buka Proyek</string>
+    <string name="omni_import_none">Tidak ada di sini yang dapat membuka berkas itu.</string>
+    <string name="omni_import_done">%1$d berkas dibuka menjadi sebuah proyek</string>
     <string name="omni_raise_more">Lainnya</string>
     <string name="omni_files_sorting">Pilihan urutan</string>
     <string name="omni_action_forward">Maju</string>

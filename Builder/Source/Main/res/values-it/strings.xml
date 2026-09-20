@@ -356,6 +356,8 @@
     <string name="omni_brand_note">Ambiente di sviluppo Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_raise_open">Apri progetto</string>
+    <string name="omni_import_none">Niente qui è riuscito ad aprire quel file.</string>
+    <string name="omni_import_done">%1$d file aperti in un progetto</string>
     <string name="omni_raise_more">Altro</string>
     <string name="omni_files_sorting">Opzioni di ordinamento</string>
     <string name="omni_action_forward">Avanti</string>

@@ -4431,6 +4431,91 @@ public class Written {
     }
 
     #[test]
+    fn a_zip_of_a_project_opens_into_one_with_its_wrapper_folder_taken_off() {
+        let directory = temp_directory("omni-open-archive");
+        std::fs::create_dir_all(&directory).ok();
+
+        let manifest = concat!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
+            "    package=\"com.tr.yt.zipped\"\n",
+            "    android:versionCode=\"7\" android:versionName=\"2.1\">\n",
+            "    <uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\" />\n",
+            "    <application android:label=\"Zipped\" />\n",
+            "</manifest>\n"
+        );
+
+        let mut packed = crate::archive::Builder::new();
+        packed
+            .add(
+                "Zipped-main/AndroidManifest.xml",
+                manifest.as_bytes().to_vec(),
+            )
+            .expect("the manifest is added");
+        packed
+            .add(
+                "Zipped-main/Java/com/tr/yt/zipped/MainActivity.java",
+                b"package com.tr.yt.zipped;\n".to_vec(),
+            )
+            .expect("a source file is added");
+        let bytes = packed.finish().expect("the archive is written");
+
+        let held = directory.join("Zipped.zip");
+        std::fs::write(&held, &bytes).expect("the archive lands on disk");
+        let root = directory.join("Zipped");
+
+        let opened = crate::workspace::unpack(held.to_str().unwrap(), root.to_str().unwrap())
+            .expect("the archive opens into a project");
+
+        assert_eq!(opened.stripped, "Zipped-main/");
+        assert_eq!(opened.files, 2);
+        assert!(opened.settings_written, "a project it opens gets settings");
+        assert!(
+            root.join("AndroidManifest.xml").is_file(),
+            "the manifest sits at the root, not inside a wrapper"
+        );
+        assert!(root
+            .join("Java/com/tr/yt/zipped/MainActivity.java")
+            .is_file());
+
+        let written = crate::settings::held(root.to_str().unwrap())
+            .expect("the settings read")
+            .expect("the settings are there");
+        assert_eq!(written.package, "com.tr.yt.zipped");
+        assert_eq!(written.version_code, 7);
+        assert_eq!(written.version_name, "2.1");
+
+        assert!(
+            crate::workspace::describe(root.to_str().unwrap()).is_some(),
+            "what it wrote is a project this lists"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn an_archive_that_holds_no_manifest_is_refused_rather_than_left_half_open() {
+        let directory = temp_directory("omni-open-archive-bare");
+        std::fs::create_dir_all(&directory).ok();
+
+        let mut packed = crate::archive::Builder::new();
+        packed
+            .add("notes.txt", b"nothing that makes a project".to_vec())
+            .expect("a file is added");
+        let bytes = packed.finish().expect("the archive is written");
+
+        let held = directory.join("Bare.zip");
+        std::fs::write(&held, &bytes).expect("the archive lands on disk");
+        let root = directory.join("Bare");
+
+        let error = crate::workspace::unpack(held.to_str().unwrap(), root.to_str().unwrap())
+            .expect_err("it is refused");
+        assert_eq!(error.code, "EP030");
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn everything_the_four_build_files_hold_survives_a_trip_through_the_settings() {
         let mut settings = crate::settings::Settings {
             package: "com.tr.yt.whole".to_string(),

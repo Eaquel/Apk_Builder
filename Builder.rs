@@ -31991,6 +31991,153 @@ pub mod workspace {
         Ok(contents.len() as u64)
     }
 
+    pub const MOST_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Unpacked {
+        pub files: u64,
+        pub folders: u64,
+        pub bytes: u64,
+        pub stripped: String,
+        pub settings_written: bool,
+    }
+
+    fn shared_prefix(names: &[String]) -> String {
+        let manifest: Option<&String> = names
+            .iter()
+            .filter(|name| name.ends_with("AndroidManifest.xml"))
+            .min_by_key(|name| name.matches('/').count());
+        if let Some(found) = manifest {
+            return match found.rfind('/') {
+                Some(cut) => found[..=cut].to_string(),
+                None => String::new(),
+            };
+        }
+        let mut first: Option<&str> = None;
+        for name in names {
+            let Some(cut) = name.find('/') else {
+                return String::new();
+            };
+            let head = &name[..=cut];
+            match first {
+                None => first = Some(head),
+                Some(seen) if seen == head => {}
+                Some(_) => return String::new(),
+            }
+        }
+        first.unwrap_or("").to_string()
+    }
+
+    pub fn unpack(archive_path: &str, into: &str) -> Result<Unpacked, Diagnostic> {
+        let bytes = std::fs::read(archive_path).map_err(|why| {
+            fail("EW170", "That archive could not be read.")
+                .with_context(format!("Path: {archive_path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        let mut sink = crate::diag::Sink::new();
+        let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+            let said = sink
+                .entries()
+                .first()
+                .map(|one| one.message.clone())
+                .unwrap_or_else(|| "It is not an archive this reads.".to_string());
+            return Err(fail("EW171", "That archive could not be opened.")
+                .with_context(format!("Path: {archive_path}"))
+                .with_context(format!("Reported: {said}"))
+                .with_suggestion("A project is imported from a .zip written as one."));
+        };
+        let names: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        let stripped = shared_prefix(&names);
+        let here = std::path::Path::new(into);
+        std::fs::create_dir_all(here).map_err(|why| {
+            fail("EW172", "The folder for the project could not be made.")
+                .with_context(format!("Path: {into}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+
+        let mut out = Unpacked {
+            stripped: stripped.clone(),
+            ..Unpacked::default()
+        };
+        let mut had_settings = false;
+        for entry in archive.entries() {
+            let named = match entry.name.strip_prefix(stripped.as_str()) {
+                Some(rest) => rest,
+                None => continue,
+            };
+            if named.is_empty() {
+                continue;
+            }
+            let target = inside(into, named.trim_end_matches('/'))?;
+            if entry.is_directory() {
+                std::fs::create_dir_all(&target).map_err(|why| {
+                    fail("EW173", "A folder in the archive could not be made.")
+                        .with_context(format!("Path: {named}"))
+                        .with_context(format!("Reason: {why}"))
+                })?;
+                out.folders += 1;
+                continue;
+            }
+            if out.bytes.saturating_add(entry.uncompressed_size) > MOST_UNPACKED_BYTES {
+                return Err(
+                    fail("EW174", "The archive unpacks to more than this opens.")
+                        .with_context(format!("Largest: {MOST_UNPACKED_BYTES} bytes"))
+                        .with_suggestion("Unpack it elsewhere and open the folder it leaves."),
+                );
+            }
+            let content = archive.content(&bytes, entry)?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|why| {
+                    fail("EW175", "A folder in the archive could not be made.")
+                        .with_context(format!("Path: {named}"))
+                        .with_context(format!("Reason: {why}"))
+                })?;
+            }
+            std::fs::write(&target, &content).map_err(|why| {
+                fail("EW176", "A file in the archive could not be written.")
+                    .with_context(format!("Path: {named}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            if named == crate::settings::FILE_NAME {
+                had_settings = true;
+            }
+            out.files += 1;
+            out.bytes += content.len() as u64;
+        }
+
+        let manifest = crate::scaffold::read_manifest(into)?;
+        if !had_settings {
+            let mut settings = crate::settings::Settings::default();
+            let mut quiet = crate::diag::Sink::new();
+            if let Some(parsed) = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut quiet) {
+                settings.package = parsed.attribute("package").unwrap_or_default().to_string();
+                settings.namespace = settings.package.clone();
+                settings.application_id = settings.package.clone();
+                if let Some(found) = parsed.attribute("android:versionName") {
+                    settings.version_name = found.to_string();
+                }
+                if let Some(found) = parsed
+                    .attribute("android:versionCode")
+                    .and_then(|text| text.parse::<u32>().ok())
+                {
+                    settings.version_code = found.max(1);
+                }
+            }
+            settings.label = std::path::Path::new(into)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            crate::settings::write(into, &settings)?;
+            out.settings_written = true;
+        }
+        Ok(out)
+    }
+
     pub fn create_folder(root: &str, relative: &str) -> Result<(), Diagnostic> {
         let path = inside(root, relative)?;
         std::fs::create_dir_all(&path).map_err(|why| {
@@ -40714,6 +40861,36 @@ pub mod ffi {
                         }
                     }
                 },
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_open_archive(
+        archive_path: *const c_char,
+        into: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(archive_path), Some(into)) = (text_from(archive_path), text_from(into))
+            else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::unpack(&archive_path, &into) {
+                Ok(held) => {
+                    w.field_bool("unpacked", true);
+                    w.field_str("root", &into);
+                    w.field_str("stripped", &held.stripped);
+                    w.field_u64("files", held.files);
+                    w.field_u64("folders", held.folders);
+                    w.field_u64("bytes", held.bytes);
+                    w.field_bool("settingsWritten", held.settings_written);
+                }
+                Err(error) => write_failure(&mut w, "unpacked", &error),
             }
             w.end_object();
             hand_back(w)

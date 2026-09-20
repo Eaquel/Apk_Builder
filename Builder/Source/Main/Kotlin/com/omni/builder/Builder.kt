@@ -619,6 +619,8 @@ object Builder {
 
     external fun nativeGitCheckout(packPath: String, head: String, into: String): String
 
+    external fun nativeOpenArchive(archivePath: String, into: String): String
+
     external fun nativeNewFolder(root: String, relative: String): String
 
     external fun nativeRemovePath(root: String, relative: String, trashRoot: String): String
@@ -3213,6 +3215,8 @@ class BuilderActivity : Activity() {
 
         const val SHOT_REQUEST = 3
 
+        const val ARCHIVE_REQUEST = 4
+
         const val LOG_HELD = 600
 
         val TILE_UNTOUCHED = 0xFFF7F8FA.toInt()
@@ -4956,7 +4960,8 @@ class BuilderActivity : Activity() {
             raise.addView(
                 raiseAction(R.string.omni_raise_open, Mark.Shape.FOLDER_OPEN) {
                     raised = false
-                    go(Screen.Projects)
+                    drawRaise()
+                    askForAProjectArchive()
                 }
             )
             raise.addView(
@@ -14438,6 +14443,72 @@ class BuilderActivity : Activity() {
             }
     }
 
+    private fun askForAProjectArchive() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"),
+            )
+        }
+        runCatching { startActivityForResult(intent, ARCHIVE_REQUEST) }
+            .onFailure {
+                results.removeAllViews()
+                results.addView(notice(getString(R.string.omni_import_none), palette.warning))
+            }
+    }
+
+    private fun namedBy(uri: Uri): String {
+        val asked = runCatching {
+            contentResolver.query(uri, null, null, null, null)?.use { row ->
+                val at = row.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (at >= 0 && row.moveToFirst()) row.getString(at) else null
+            }
+        }.getOrNull()
+        val named = asked ?: uri.lastPathSegment?.substringAfterLast('/')
+        return (named ?: "Project").substringBeforeLast('.')
+    }
+
+    private fun stageArchive(uri: Uri): File? {
+        val held = File(cacheDir, "Imported.zip")
+        return runCatching {
+            contentResolver.openInputStream(uri).use { from ->
+                if (from == null) {
+                    return null
+                }
+                held.outputStream().use { into -> from.copyTo(into) }
+            }
+            held
+        }.getOrNull()
+    }
+
+    private fun openTheArchive(uri: Uri) {
+        results.removeAllViews()
+        val staged = stageArchive(uri)
+        if (staged == null || !staged.isFile) {
+            results.addView(notice(getString(R.string.omni_import_none), palette.error))
+            return
+        }
+        val root = freeFolder(namedBy(uri))
+        working({ Builder.nativeOpenArchive(staged.absolutePath, root.absolutePath) })
+        finished@{ answer ->
+            staged.delete()
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+            if (!document.optBoolean("unpacked", false)) {
+                root.deleteRecursively()
+                showRefusal(Refusal.parse(document), results)
+                return@finished
+            }
+            flash(
+                getString(R.string.omni_import_done, document.optInt("files")),
+                palette.ok,
+                Mark.Shape.ARCHIVE,
+            )
+            openHere(root.absolutePath)
+        }
+    }
+
     private fun stageImage(uri: Uri): File? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         runCatching {
@@ -14501,6 +14572,10 @@ class BuilderActivity : Activity() {
         if (requestCode == SHOT_REQUEST) {
             feedbackShot = data?.data?.toString()
             render(false)
+            return
+        }
+        if (requestCode == ARCHIVE_REQUEST) {
+            data?.data?.let { openTheArchive(it) }
             return
         }
         if (requestCode != IMAGE_REQUEST) {

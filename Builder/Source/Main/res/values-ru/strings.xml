@@ -356,6 +356,8 @@
     <string name="omni_brand_note">Среда разработки Android</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_raise_open">Открыть проект</string>
+    <string name="omni_import_none">Здесь ничто не смогло открыть этот файл.</string>
+    <string name="omni_import_done">%1$d файлов открыто в проект</string>
     <string name="omni_raise_more">Ещё</string>
     <string name="omni_files_sorting">Параметры сортировки</string>
     <string name="omni_action_forward">Вперёд</string>

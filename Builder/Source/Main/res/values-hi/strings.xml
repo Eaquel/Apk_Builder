@@ -356,6 +356,8 @@
     <string name="omni_brand_note">Android विकास का परिवेश</string>
     <string name="omni_app_shown">Omni Builder %1$s</string>
     <string name="omni_raise_open">परियोजना खोलें</string>
+    <string name="omni_import_none">यहाँ कुछ भी उस फ़ाइल को नहीं खोल सका।</string>
+    <string name="omni_import_done">%1$d फ़ाइलें एक परियोजना में खोली गईं</string>
     <string name="omni_raise_more">और</string>
     <string name="omni_files_sorting">क्रम विकल्प</string>
     <string name="omni_action_forward">आगे</string>
