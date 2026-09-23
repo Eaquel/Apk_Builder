@@ -878,10 +878,25 @@ pub mod diag {
             w.end_object();
         }
 
+        pub fn localized_message(&self) -> String {
+            let said = crate::speech::sentence(&self.message);
+            if said != self.message {
+                return said;
+            }
+            if self.code.starts_with("EJ") && crate::speech::chosen() != "en" {
+                if let Some(translated) = crate::compilers::java_diagnostic::explain(&self.code) {
+                    if translated != self.message {
+                        return translated;
+                    }
+                }
+            }
+            said
+        }
+
         pub fn write_body(&self, w: &mut Writer, done: &str, held: bool) {
             w.field_bool(done, held);
             w.field_str("code", &self.code);
-            w.field_str("error", &crate::speech::sentence(&self.message));
+            w.field_str("error", &self.localized_message());
             w.field_str("english", &self.message);
             if let Some(suggestion) = &self.suggestion {
                 w.field_str("suggestion", &crate::speech::sentence(suggestion));
@@ -27590,12 +27605,15 @@ pub mod shrink {
                 },
             );
         }
-        let seen = reachable(&classes, roots);
-        let anchored = classes
+        let present: std::collections::BTreeSet<&str> = classes
             .iter()
             .filter_map(|one| named_in(&one.descriptor))
-            .any(|held| seen.contains(held));
-        if !anchored {
+            .collect();
+        let any_root_present = roots
+            .iter()
+            .filter_map(|one| named_in(one))
+            .any(|held| present.contains(held));
+        if !any_root_present {
             let kept = classes.len();
             return (
                 classes,
@@ -27606,6 +27624,7 @@ pub mod shrink {
                 },
             );
         }
+        let seen = reachable(&classes, roots);
         let mut names = Vec::new();
         let mut out = Vec::with_capacity(classes.len());
         for one in classes {
@@ -38355,7 +38374,7 @@ pub mod builder {
             }
             if let Some(refusal) = &self.refusal {
                 w.field_str("code", &refusal.code);
-                w.field_str("error", &crate::speech::sentence(&refusal.message));
+                w.field_str("error", &refusal.localized_message());
                 w.field_str("english", &refusal.message);
                 if let Some(suggestion) = &refusal.suggestion {
                     w.field_str("suggestion", &crate::speech::sentence(suggestion));
@@ -38688,7 +38707,7 @@ public final class R {{
         let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
-        if sources.is_empty() {
+        if sources.is_empty() && generated.is_empty() {
             return library_classes(root, &[]);
         }
 
@@ -43228,12 +43247,29 @@ pub mod ffi {
         }
     }
 
+    pub(crate) fn write_one(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let beside = format!("{path}.part");
+        let done = std::fs::write(&beside, bytes).and_then(|()| std::fs::rename(&beside, path));
+        if done.is_err() {
+            std::fs::remove_file(&beside).ok();
+        }
+        done
+    }
+
     pub(crate) fn write_both(
         first_path: &str,
         first: &[u8],
         second_path: &str,
         second: &[u8],
     ) -> std::io::Result<()> {
+        if first_path == second_path {
+            return write_one(first_path, first);
+        }
         let beside = |path: &str| format!("{path}.part");
         let clear = |path: &str| {
             std::fs::remove_file(path).ok();
@@ -44483,40 +44519,38 @@ pub mod ffi {
 
             let mut ready = false;
             match outcome {
-                Ok((project, made, asked)) => {
-                    match write_both(&package_path, &made.package, &package_path, &made.package) {
-                        Ok(()) => {
-                            ready = true;
-                            w.field_bool("prepared", true);
-                            w.field_str("path", &package_path);
-                            w.field_u64("entries", made.entries as u64);
-                            w.field_u64("minSdk", u64::from(made.minimum_sdk));
-                            w.field_u64("maxSdk", u64::from(crate::builder::NEWEST_PLATFORM));
-                            w.field_bool("carriesCode", !project.code.is_empty());
-                            w.field_str("toSignV2", &crate::der::to_hex(&asked.v2));
-                            match &asked.v3 {
-                                Some(three) => {
-                                    w.field_str("toSignV3", &crate::der::to_hex(three));
-                                }
-                                None => w.field_str("toSignV3", ""),
+                Ok((project, made, asked)) => match write_one(&package_path, &made.package) {
+                    Ok(()) => {
+                        ready = true;
+                        w.field_bool("prepared", true);
+                        w.field_str("path", &package_path);
+                        w.field_u64("entries", made.entries as u64);
+                        w.field_u64("minSdk", u64::from(made.minimum_sdk));
+                        w.field_u64("maxSdk", u64::from(crate::builder::NEWEST_PLATFORM));
+                        w.field_bool("carriesCode", !project.code.is_empty());
+                        w.field_str("toSignV2", &crate::der::to_hex(&asked.v2));
+                        match &asked.v3 {
+                            Some(three) => {
+                                w.field_str("toSignV3", &crate::der::to_hex(three));
                             }
-                            match &asked.v31 {
-                                Some(rotated) => {
-                                    w.field_str("toSignV31", &crate::der::to_hex(rotated));
-                                }
-                                None => w.field_str("toSignV31", ""),
+                            None => w.field_str("toSignV3", ""),
+                        }
+                        match &asked.v31 {
+                            Some(rotated) => {
+                                w.field_str("toSignV31", &crate::der::to_hex(rotated));
                             }
-                            made.guard.write_json(&mut w, "policy");
+                            None => w.field_str("toSignV31", ""),
                         }
-                        Err(why) => {
-                            w.field_bool("prepared", false);
-                            w.field_str(
-                                "error",
-                                &format!("what was built could not be written: {why}"),
-                            );
-                        }
+                        made.guard.write_json(&mut w, "policy");
                     }
-                }
+                    Err(why) => {
+                        w.field_bool("prepared", false);
+                        w.field_str(
+                            "error",
+                            &format!("what was built could not be written: {why}"),
+                        );
+                    }
+                },
                 Err(error) => write_failure(&mut w, "prepared", &error),
             }
             crate::progress::finish(ready);

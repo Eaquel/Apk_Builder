@@ -2661,6 +2661,37 @@ mod core {
     }
 
     #[test]
+    fn a_java_error_reaches_the_app_in_the_chosen_language() {
+        let _turn = crate::progress::one_at_a_time();
+        let source =
+            "package com.my.app;\nfinal class Broken {\n    String said = \"never closed;\n}\n";
+        let refusal =
+            crate::compilers::java::compile(source, &crate::compilers::java::Classpath::new())
+                .expect_err("an unclosed string is refused");
+        assert_eq!(refusal.code, "EJ005");
+
+        crate::speech::choose("tr");
+        let mut w = crate::json::Writer::new();
+        w.begin_object(None);
+        refusal.write_body(&mut w, "built", false);
+        w.end_object();
+        let body = w.finish();
+        let shown = refusal.localized_message();
+        crate::speech::choose("en");
+
+        assert_ne!(shown, refusal.message, "the Java error stayed in English");
+        assert!(
+            body.contains("Bir dizgi ya da metin bloğu açıldı ve hiç kapatılmadı."),
+            "the Java error the app reads is translated: {body}"
+        );
+        assert!(
+            body.contains(&refusal.message),
+            "the compiler's own English is kept beside it: {body}"
+        );
+        assert_eq!(refusal.localized_message(), refusal.message);
+    }
+
+    #[test]
     fn the_body_the_app_reads_is_written_in_the_chosen_language() {
         let _turn = crate::progress::one_at_a_time();
         let refusal = Diagnostic::new(
@@ -2819,6 +2850,22 @@ mod core {
         .is_err());
         assert!(!package.exists(), "a package was left without its bundle");
         assert!(!package.with_extension("apk.part").exists());
+
+        let alone = directory.join("alone.apk");
+        crate::ffi::write_both(
+            alone.to_str().unwrap(),
+            b"one package",
+            alone.to_str().unwrap(),
+            b"one package",
+        )
+        .expect("one path named twice is written once");
+        assert_eq!(std::fs::read(&alone).unwrap(), b"one package");
+        assert!(!alone.with_extension("apk.part").exists());
+
+        let deeper = directory.join("made").join("later").join("sealed.apk");
+        crate::ffi::write_one(deeper.to_str().unwrap(), b"sealed")
+            .expect("a folder that is not there yet is made");
+        assert_eq!(std::fs::read(&deeper).unwrap(), b"sealed");
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -4957,6 +5004,44 @@ final class NeverCalled {
     }
 
     #[test]
+    fn generated_sources_are_compiled_even_when_the_java_folder_is_empty() {
+        let directory = temp_directory("omni-generated");
+        let root = directory.join("Gen");
+        let folder = root.to_str().unwrap().to_string();
+        crate::scaffold::create(
+            &folder,
+            &crate::scaffold::Spec {
+                package: "com.test.gen".to_string(),
+                label: "Gen".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let sources = root.join("Java");
+        let _ = std::fs::remove_dir_all(&sources);
+        std::fs::create_dir_all(&sources).unwrap();
+
+        let generated = vec![(
+            "R.java".to_string(),
+            "package com.test.gen; public final class R { public static final int one = 1; }"
+                .to_string(),
+        )];
+        let out = crate::builder::compiled_java(&folder, generated)
+            .expect("a generated source is still compiled when the disk holds none");
+        let named: Vec<&str> = out.iter().map(|one| one.descriptor.as_str()).collect();
+        assert!(
+            named.contains(&"Lcom/test/gen/R;"),
+            "the generated R was thrown away: {named:?}"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn nothing_is_dropped_when_there_is_no_root_to_start_from() {
         let held = vec![crate::dexwrite::Class {
             descriptor: "Lcom/tr/yt/only/Alone;".to_string(),
@@ -4977,6 +5062,58 @@ final class NeverCalled {
             "with no roots nothing is reachable, so nothing goes"
         );
         assert_eq!(trimmed.dropped, 0);
+    }
+
+    #[test]
+    fn nothing_is_dropped_when_no_named_root_is_in_the_classes() {
+        let bare = |descriptor: &str| crate::dexwrite::Class {
+            descriptor: descriptor.to_string(),
+            superclass: "Ljava/lang/Object;".to_string(),
+            interfaces: Vec::new(),
+            access_flags: crate::dexwrite::ACC_PUBLIC,
+            source_file: None,
+            annotations: Vec::new(),
+            direct_methods: Vec::new(),
+            virtual_methods: Vec::new(),
+            static_fields: Vec::new(),
+            instance_fields: Vec::new(),
+        };
+        let held = vec![bare("Lcom/my/girl/OmniSeal;"), bare("Lcom/my/girl/Other;")];
+        let roots = vec!["Lcom/my/girl/MainActivity;".to_string()];
+        let (kept, trimmed) = crate::shrink::apply(held.clone(), &roots);
+        assert_eq!(
+            kept.len(),
+            2,
+            "the seal is always reachable, but with the manifest's own root \
+             missing the shrinker cannot tell what is dead, so it keeps everything"
+        );
+        assert_eq!(trimmed.dropped, 0);
+    }
+
+    #[test]
+    fn a_present_root_still_lets_the_shrinker_drop_the_dead() {
+        let bare = |descriptor: &str| crate::dexwrite::Class {
+            descriptor: descriptor.to_string(),
+            superclass: "Ljava/lang/Object;".to_string(),
+            interfaces: Vec::new(),
+            access_flags: crate::dexwrite::ACC_PUBLIC,
+            source_file: None,
+            annotations: Vec::new(),
+            direct_methods: Vec::new(),
+            virtual_methods: Vec::new(),
+            static_fields: Vec::new(),
+            instance_fields: Vec::new(),
+        };
+        let held = vec![
+            bare("Lcom/my/girl/MainActivity;"),
+            bare("Lcom/my/girl/NeverCalled;"),
+        ];
+        let roots = vec!["Lcom/my/girl/MainActivity;".to_string()];
+        let (kept, trimmed) = crate::shrink::apply(held, &roots);
+        let left: Vec<&str> = kept.iter().map(|one| one.descriptor.as_str()).collect();
+        assert!(left.contains(&"Lcom/my/girl/MainActivity;"));
+        assert!(!left.contains(&"Lcom/my/girl/NeverCalled;"));
+        assert_eq!(trimmed.dropped, 1);
     }
 
     #[test]
@@ -23078,6 +23215,27 @@ mod java {
             "the refusal names the method it is missing: {}",
             error.message
         );
+    }
+
+    #[test]
+    fn the_platform_answers_class_cast_and_objects_and_list_of() {
+        let source = r#"
+            package com.my.app;
+
+            import java.util.List;
+            import java.util.Objects;
+
+            final class Uses {
+                String bend(Object held, Class<String> kind) {
+                    String said = kind.cast(held);
+                    String safe = Objects.requireNonNullElseGet(said, () -> "fallback");
+                    List<String> few = List.of("one", "two", safe);
+                    return few.get(0);
+                }
+            }
+        "#;
+        compile(source.trim_start(), &empty())
+            .expect("Class.cast, Objects.requireNonNullElseGet and List.of all resolve");
     }
 
     #[test]

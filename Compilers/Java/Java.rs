@@ -8297,6 +8297,8 @@ public class Class<T> {
     public native boolean isAnnotationPresent(Class held);
     public native T[] getEnumConstants();
     public native java.lang.reflect.RecordComponent[] getRecordComponents();
+    public native T cast(Object one);
+    public native <U> Class<? extends U> asSubclass(Class<U> held);
     public static native Class forName(String name) throws java.lang.ClassNotFoundException ;
 }
 
@@ -9401,7 +9403,10 @@ public class Objects {
     public static native String toString(Object one, String fallback);
     public static native <T> T requireNonNull(T one);
     public static native <T> T requireNonNull(T one, String message);
+    public static native <T> T requireNonNull(T one, java.util.function.Supplier<String> message);
     public static native <T> T requireNonNullElse(T one, T fallback);
+    public static native <T> T requireNonNullElseGet(T one, java.util.function.Supplier<T> fallback);
+    public static native int checkIndex(int at, int length);
     public static native boolean isNull(Object one);
     public static native boolean nonNull(Object one);
     public static native int compare(Object left, Object right, Comparator by);
