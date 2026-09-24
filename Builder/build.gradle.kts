@@ -151,6 +151,7 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
         inputs.file(coreDirectory.resolve("Terminal.rs"))
         inputs.file(coreDirectory.resolve("Terminal_Speech.rs"))
         inputs.file(coreDirectory.resolve("Vibe_Coding.rs"))
+        inputs.file(coreDirectory.resolve("Android_Debug_Bridge.rs"))
         inputs.dir(coreDirectory.resolve("Compilers"))
         outputs.file(archivePath)
 

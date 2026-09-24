@@ -999,6 +999,9 @@ pub mod terminal_speech;
 #[path = "Vibe_Coding.rs"]
 pub mod vibe_coding;
 
+#[path = "Android_Debug_Bridge.rs"]
+pub mod android_debug_bridge;
+
 pub mod caps {
     use crate::json::Writer;
 
