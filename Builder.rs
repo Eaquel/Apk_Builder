@@ -456,6 +456,11 @@ pub mod json {
             self.write_escaped(value);
         }
 
+        pub fn element_u64(&mut self, value: u64) {
+            self.separate();
+            self.buf.push_str(&value.to_string());
+        }
+
         pub fn finish(self) -> String {
             assert!(
                 self.needs_comma.is_empty(),
@@ -990,6 +995,9 @@ pub mod terminal;
 
 #[path = "Terminal_Speech.rs"]
 pub mod terminal_speech;
+
+#[path = "Vibe_Coding.rs"]
+pub mod vibe_coding;
 
 pub mod caps {
     use crate::json::Writer;
@@ -43368,6 +43376,18 @@ pub mod ffi {
         let result = catch_unwind(|| {
             let asked = text_from(tag).unwrap_or_default();
             match CString::new(crate::terminal::docs_json(&asked)) {
+                Ok(answer) => answer.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_vibe(request: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let asked = text_from(request).unwrap_or_default();
+            match CString::new(crate::vibe_coding::answer(&asked)) {
                 Ok(answer) => answer.into_raw(),
                 Err(_) => std::ptr::null_mut(),
             }

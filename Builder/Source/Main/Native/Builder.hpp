@@ -27,6 +27,8 @@ char *omni_speak(const char *tag);
 
 char *omni_terminal_docs(const char *tag);
 
+char *omni_vibe(const char *request);
+
 char *omni_verify_self(const char *package_path,
                        const char *expected_certificate);
 

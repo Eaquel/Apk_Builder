@@ -33,6 +33,7 @@ CORE = ROOT / "Builder.rs"
 SPEECH = ROOT / "Diagnostic_Speech.rs"
 TERMINAL = ROOT / "Terminal.rs"
 TERMINAL_SPEECH = ROOT / "Terminal_Speech.rs"
+VIBE_CODING = ROOT / "Vibe_Coding.rs"
 CORE_TESTS = ROOT / "Builder_Test.rs"
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -124,6 +125,7 @@ def check_layout() -> str:
         SPEECH,
         TERMINAL,
         TERMINAL_SPEECH,
+        VIBE_CODING,
         CORE_TESTS,
         ROOT / "Cargo.toml",
         ROOT / "Builder_Test.py",
@@ -168,7 +170,7 @@ def check_layout() -> str:
     if stray:
         raise AssertionError(f"tests live in Builder_Test.py alone, found {stray}")
 
-    sources = [CORE, SPEECH, TERMINAL, TERMINAL_SPEECH, ANDROID]
+    sources = [CORE, SPEECH, TERMINAL, TERMINAL_SPEECH, VIBE_CODING, ANDROID]
     sources += sorted(COMPILERS.glob("*.rs"))
     sources += sorted((COMPILERS / "Java").glob("*.rs"))
     carried = [
@@ -195,6 +197,7 @@ def check_comments() -> str:
         SPEECH,
         TERMINAL,
         TERMINAL_SPEECH,
+        VIBE_CODING,
         CORE_TESTS,
         KOTLIN,
         ROOT / "Builder_Test.py",

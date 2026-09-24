@@ -882,6 +882,16 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTerminalDocs(
   return HandBack(env, omni_terminal_docs(held.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVibe(
+    JNIEnv *env, jobject , jstring request) {
+  std::string held;
+  if (request == nullptr || !JavaStringToUtf8(env, request, &held)) {
+    ThrowJava(env, kIllegalState, "A request has to be given as text.");
+    return nullptr;
+  }
+  return HandBack(env, omni_vibe(held.c_str()));
+}
+
 JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeBuildExpect(
     JNIEnv *env, jobject , jstring timings) {
   if (timings == nullptr) {

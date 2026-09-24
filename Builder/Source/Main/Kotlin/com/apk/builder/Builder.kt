@@ -561,6 +561,8 @@ object Builder {
 
     external fun nativeTerminalDocs(tag: String): String
 
+    external fun nativeVibe(request: String): String
+
     external fun nativeShellOpen(folder: String, home: String, rows: Int, columns: Int): Int
 
     external fun nativeShellRead(handle: Int, into: ByteArray, wait: Int): Int

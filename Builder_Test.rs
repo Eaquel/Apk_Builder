@@ -34662,3 +34662,489 @@ mod terminal {
         );
     }
 }
+
+mod vibe_coding {
+    use crate::json::{self, Json};
+    use crate::vibe_coding::{
+        answer, backoff, barred, chain, classify, fill, pluck, provider, route, setting, settle,
+        Ask, Custom, Effort, Filling, Ledger, Outcome, Task, Tier, Verdict, BARRED, PROVIDERS,
+    };
+
+    fn efforts_of(provider_id: &str, model_id: &str) -> Vec<Effort> {
+        provider(provider_id)
+            .and_then(|held| held.model(model_id))
+            .map(|model| model.efforts.to_vec())
+            .unwrap_or_default()
+    }
+
+    fn keys(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|one| one.to_string()).collect()
+    }
+
+    fn picked(ask: &Ask, keyed: &[&str], ledger: &Ledger, now: u64) -> Vec<String> {
+        route(ask, &keys(keyed), Effort::High, ledger, now)
+            .choices
+            .iter()
+            .map(|one| format!("{}/{}", one.provider.id, one.model.id))
+            .collect()
+    }
+
+    const SIMPLE: Ask = Ask {
+        tokens: 120,
+        files: 0,
+        code: false,
+        failure: false,
+    };
+
+    #[test]
+    fn nothing_on_the_blacklist_is_in_the_catalogue() {
+        for held in PROVIDERS {
+            assert!(barred(held.base).is_none(), "{} is barred", held.id);
+            for one in BARRED {
+                assert_ne!(held.shown, one.name);
+            }
+        }
+        for gone in [
+            "https://integrate.api.nvidia.com/v1",
+            "https://api.mistral.ai/v1",
+            "https://api.x.ai/v1",
+            "https://api.together.xyz/v1",
+            "https://api.fireworks.ai/inference/v1",
+        ] {
+            assert!(barred(gone).is_some(), "{gone} slipped through");
+        }
+        assert!(barred("https://box.ai/v1").is_none());
+        let ids: Vec<&str> = PROVIDERS.iter().map(|one| one.id).collect();
+        for kept in [
+            "groq",
+            "cerebras",
+            "sambanova",
+            "google",
+            "openrouter",
+            "copilot",
+            "anthropic",
+            "openai",
+            "deepseek",
+            "pollinations",
+            "keylessai",
+            "openzoo",
+            "kilo",
+            "maximumsats",
+            "llm7",
+        ] {
+            assert!(ids.contains(&kept), "{kept} is missing");
+        }
+    }
+
+    #[test]
+    fn every_model_offers_only_the_levels_it_really_has() {
+        use Effort::{Deep, High, Low, Medium};
+        assert_eq!(efforts_of("groq", "llama-3.3-70b-versatile"), [Low, High]);
+        assert_eq!(
+            efforts_of("sambanova", "Meta-Llama-3.3-70B-Instruct"),
+            [Low, High]
+        );
+        assert_eq!(efforts_of("cerebras", "gpt-oss-120b"), [Low, Medium, High]);
+        assert_eq!(
+            efforts_of("google", "gemini-2.5-flash"),
+            [Low, Medium, High]
+        );
+        assert_eq!(
+            efforts_of("google", "gemini-2.5-pro"),
+            [Low, Medium, High, Deep]
+        );
+        assert_eq!(efforts_of("anthropic", "claude-opus-5-5"), [High, Deep]);
+        assert_eq!(efforts_of("copilot", "claude-opus-5.5"), [High, Deep]);
+        assert_eq!(
+            efforts_of("anthropic", "claude-sonnet-5"),
+            [Low, Medium, High]
+        );
+        assert_eq!(efforts_of("openai", "gpt-5.2"), [Low, Medium, High, Deep]);
+        assert_eq!(efforts_of("copilot", "gpt-5.2"), [Low, Medium, High, Deep]);
+        assert_eq!(efforts_of("deepseek", "deepseek-v4-pro"), [High, Deep]);
+        assert_eq!(
+            efforts_of("deepseek", "deepseek-v4.1-flash"),
+            [Low, Medium, High]
+        );
+        for held in PROVIDERS {
+            for model in held.models {
+                let mut sorted = model.efforts.to_vec();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(sorted, model.efforts, "{}/{}", held.id, model.id);
+            }
+        }
+        assert!(Effort::parse("off").is_none());
+    }
+
+    #[test]
+    fn a_level_the_model_lacks_settles_on_the_nearest_it_has() {
+        use Effort::{Deep, High, Low, Medium};
+        assert_eq!(settle(&[Low, High], Medium), Some(High));
+        assert_eq!(settle(&[Low, High], Deep), Some(High));
+        assert_eq!(settle(&[High, Deep], Low), Some(High));
+        assert_eq!(settle(&[Low, Medium, High], Deep), Some(High));
+        assert_eq!(settle(&[Low, Medium, High], Medium), Some(Medium));
+        assert_eq!(settle(&[], High), None);
+    }
+
+    #[test]
+    fn each_level_reaches_the_wire_the_way_its_api_expects() {
+        let opus = provider("anthropic")
+            .and_then(|held| held.model("claude-opus-5-5"))
+            .unwrap();
+        let deep = setting(opus.wire, Effort::Deep);
+        assert_eq!((deep.param, deep.value.as_str()), ("effort", "max"));
+        let gpt = provider("openai")
+            .and_then(|held| held.model("gpt-5.2"))
+            .unwrap();
+        assert_eq!(setting(gpt.wire, Effort::Deep).value, "xhigh");
+        assert_eq!(setting(gpt.wire, Effort::Low).param, "reasoning_effort");
+        let pro = provider("google")
+            .and_then(|held| held.model("gemini-2.5-pro"))
+            .unwrap();
+        let thought = setting(pro.wire, Effort::Deep);
+        assert_eq!((thought.param, thought.value.as_str()), ("budget", "32768"));
+        assert!(thought.most_tokens > 32_768);
+        let llama = provider("groq")
+            .and_then(|held| held.model("llama-3.3-70b-versatile"))
+            .unwrap();
+        let quick = setting(llama.wire, Effort::Low);
+        assert_eq!(quick.param, "hint");
+        assert!(!quick.hint.is_empty());
+        assert!(quick.most_tokens < setting(llama.wire, Effort::High).most_tokens);
+    }
+
+    #[test]
+    fn a_task_is_weighed_by_its_size_its_files_and_its_failure() {
+        assert_eq!(classify(&SIMPLE), Task::Simple);
+        assert_eq!(
+            classify(&Ask {
+                code: true,
+                ..SIMPLE
+            }),
+            Task::Medium
+        );
+        assert_eq!(classify(&Ask { files: 3, ..SIMPLE }), Task::Complex);
+        assert_eq!(
+            classify(&Ask {
+                tokens: 30_000,
+                ..SIMPLE
+            }),
+            Task::Complex
+        );
+        assert_eq!(
+            classify(&Ask {
+                tokens: 5_000,
+                failure: true,
+                ..SIMPLE
+            }),
+            Task::Complex
+        );
+    }
+
+    #[test]
+    fn a_simple_task_starts_on_groq_and_openrouter_is_the_last_resort() {
+        let ledger = Ledger::default();
+        let order = picked(&SIMPLE, &["groq", "cerebras", "openrouter"], &ledger, 1_000);
+        assert_eq!(order[0], "groq/llama-3.3-70b-versatile");
+        assert_eq!(order[1], "cerebras/gpt-oss-120b");
+        assert_eq!(
+            order.last().map(String::as_str),
+            Some("openrouter/meta-llama/llama-3.3-70b-instruct:free")
+        );
+        assert!(order.iter().any(|one| one.starts_with("kilo/")));
+        assert!(!order.iter().any(|one| one.starts_with("sambanova/")));
+        let medium = picked(
+            &Ask {
+                code: true,
+                ..SIMPLE
+            },
+            &["groq", "cerebras", "sambanova"],
+            &ledger,
+            1_000,
+        );
+        assert_eq!(medium[0], "cerebras/gpt-oss-120b");
+        assert_eq!(medium[1], "sambanova/Meta-Llama-3.3-70B-Instruct");
+        for task in [Task::Simple, Task::Medium, Task::Complex] {
+            let last = chain(task).last().copied();
+            assert_eq!(last.map(|one| one.0), Some("openrouter"));
+            let lasts = PROVIDERS.iter().filter(|one| one.last_resort).count();
+            assert_eq!(lasts, 1);
+        }
+    }
+
+    #[test]
+    fn a_complex_task_asks_for_the_users_own_key() {
+        let wide = Ask {
+            tokens: 30_000,
+            ..SIMPLE
+        };
+        let bare = route(&wide, &keys(&["groq"]), Effort::Deep, &Ledger::default(), 9);
+        assert_eq!(bare.task, Task::Complex);
+        assert_eq!(bare.warning, "own_key_task");
+        assert!(bare
+            .choices
+            .iter()
+            .all(|one| one.provider.tier != Tier::Own));
+        let owned = route(
+            &wide,
+            &keys(&["anthropic", "deepseek"]),
+            Effort::Low,
+            &Ledger::default(),
+            9,
+        );
+        assert_eq!(owned.warning, "");
+        assert_eq!(owned.choices[0].model.id, "claude-opus-5-5");
+        assert_eq!(owned.choices[0].level, Some(Effort::High));
+        assert_eq!(owned.choices[1].model.id, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn groq_rests_after_a_refusal_and_the_route_moves_on() {
+        let groq = provider("groq").unwrap();
+        let mut ledger = Ledger::default();
+        let refused = Outcome {
+            status: 429,
+            ..Outcome::default()
+        };
+        assert_eq!(ledger.record("groq", groq.quota, 1_000, refused), 60);
+        assert_eq!(ledger.record("groq", groq.quota, 1_000, refused), 120);
+        assert_eq!(backoff(60, 9, 960), 960);
+        assert!(matches!(
+            ledger.verdict(groq, 1_010, 100),
+            Verdict::Wait(110)
+        ));
+        let order = picked(&SIMPLE, &["groq", "cerebras"], &ledger, 1_010);
+        assert_eq!(order[0], "cerebras/gpt-oss-120b");
+        assert_eq!(
+            order.last().map(String::as_str),
+            Some("groq/llama-3.3-70b-versatile")
+        );
+        let fine = Outcome {
+            status: 200,
+            tokens: 50,
+            ..Outcome::default()
+        };
+        assert_eq!(ledger.record("groq", groq.quota, 1_200, fine), 0);
+        assert_eq!(ledger.verdict(groq, 1_200, 100), Verdict::Ready);
+    }
+
+    #[test]
+    fn the_buckets_and_windows_hold_every_free_quota() {
+        let cerebras = provider("cerebras").unwrap();
+        let mut ledger = Ledger::default();
+        let fine = Outcome {
+            status: 200,
+            tokens: 10,
+            ..Outcome::default()
+        };
+        for _ in 0..5 {
+            ledger.record("cerebras", cerebras.quota, 500, fine);
+        }
+        assert_eq!(ledger.verdict(cerebras, 500, 10), Verdict::Wait(12));
+        assert_eq!(ledger.verdict(cerebras, 512, 10), Verdict::Ready);
+
+        let router = provider("openrouter").unwrap();
+        let mut day = Ledger::default();
+        for at in 0..50 {
+            day.record("openrouter", router.quota, 10_000 + at * 10, fine);
+        }
+        assert_eq!(day.verdict(router, 10_600, 10), Verdict::Spent);
+        assert_eq!(
+            day.verdict(router, 10_000 + 86_400 + 600, 10),
+            Verdict::Ready
+        );
+
+        let groq = provider("groq").unwrap();
+        assert_eq!(Ledger::default().verdict(groq, 5, 7_000), Verdict::Spent);
+        let mut minute = Ledger::default();
+        let heavy = Outcome {
+            status: 200,
+            tokens: 5_000,
+            ..Outcome::default()
+        };
+        minute.record("groq", groq.quota, 100, heavy);
+        assert_eq!(minute.verdict(groq, 130, 2_000), Verdict::Wait(30));
+
+        let mut raised = Ledger::default();
+        let dev = Outcome {
+            status: 200,
+            tokens: 1,
+            limit_day: 144_000,
+            ..Outcome::default()
+        };
+        raised.record("groq", groq.quota, 1, dev);
+        assert_eq!(
+            raised.account("groq").unwrap().quota(groq.quota).rpd,
+            144_000
+        );
+    }
+
+    #[test]
+    fn a_ledger_survives_being_written_and_read() {
+        let groq = provider("groq").unwrap();
+        let mut ledger = Ledger::default();
+        ledger.record(
+            "groq",
+            groq.quota,
+            7_000,
+            Outcome {
+                status: 200,
+                tokens: 321,
+                ..Outcome::default()
+            },
+        );
+        ledger.record(
+            "groq",
+            groq.quota,
+            7_001,
+            Outcome {
+                status: 503,
+                ..Outcome::default()
+            },
+        );
+        let again = Ledger::read(&ledger.text());
+        assert_eq!(again, ledger);
+        assert_eq!(Ledger::read("not a ledger"), Ledger::default());
+    }
+
+    #[test]
+    fn a_narrow_window_offers_the_million_token_gemini() {
+        let big = Ask {
+            tokens: 20_000,
+            code: false,
+            ..SIMPLE
+        };
+        let held = route(
+            &big,
+            &keys(&["cerebras"]),
+            Effort::High,
+            &Ledger::default(),
+            3,
+        );
+        assert!(!held.choices.iter().any(|one| one.provider.id == "cerebras"));
+        let larger = held.larger.expect("gemini is offered");
+        assert_eq!(larger.provider.id, "google");
+        assert_eq!(larger.window, 1_048_576);
+        let fits = crate::vibe_coding::fit("cerebras", "gpt-oss-120b", 0, 9_000, Effort::High);
+        assert_eq!(fits.get("fits").and_then(Json::boolean), Some(false));
+        assert_eq!(fits.get("window").and_then(Json::integer), Some(8_192));
+        assert!(fits.get("larger").is_some());
+    }
+
+    #[test]
+    fn a_custom_provider_needs_a_safe_address_and_the_signed_disclaimer() {
+        let read = |text: &str| Custom::read(&json::read(text).unwrap());
+        let good = read(
+            r#"{"name":"Local","base":"http://127.0.0.1:11434/v1/","format":"openai","model":"qwen3:8b","window":32768,"efforts":["low","high","deep"],"accepted":true}"#,
+        );
+        assert!(good.problems().is_empty(), "{:?}", good.problems());
+        assert_eq!(good.base, "http://127.0.0.1:11434/v1");
+        assert_eq!(good.efforts, [Effort::Low, Effort::High]);
+        let open = read(
+            r#"{"name":"Open","base":"http://example.com/v1","format":"openai","model":"m","window":8000,"accepted":true}"#,
+        );
+        assert_eq!(open.problems(), ["base"]);
+        let unsigned = read(
+            r#"{"name":"Mine","base":"https://example.com/v1","format":"anthropic","model":"m","window":8000}"#,
+        );
+        assert_eq!(unsigned.problems(), ["accepted"]);
+        let banned = read(
+            r#"{"name":"Mistral","base":"https://api.mistral.ai/v1","format":"openai","model":"m","window":8000,"accepted":true}"#,
+        );
+        assert_eq!(banned.problems(), ["barred"]);
+        let raw = read(
+            r#"{"name":"Raw","base":"https://example.com/ask","format":"raw","model":"m","window":8000,"template":"{\"model\": {{model}}, \"input\": {{prompt}}","reply":"out","accepted":true}"#,
+        );
+        assert_eq!(raw.problems(), ["template"]);
+        let odd = read(r#"{"name":"","base":"ftp://x","format":"dvm","model":"a b","window":5}"#);
+        assert_eq!(
+            odd.problems(),
+            ["name", "base", "format", "model", "window", "accepted"]
+        );
+    }
+
+    #[test]
+    fn a_raw_template_is_filled_and_its_reply_is_found() {
+        let body = fill(
+            r#"{"model": {{model}}, "input": {{prompt}}, "most": {{max_tokens}}, "history": {{messages}}}"#,
+            &Filling {
+                model: "m-1",
+                prompt: "say \"hi\"\n",
+                system: "",
+                messages: r#"[{"role":"user","content":"x"}]"#,
+                most_tokens: 99,
+                effort: "low",
+            },
+        );
+        let held = json::read(&body).expect("the body is JSON");
+        assert_eq!(held.get("input").and_then(Json::text), Some("say \"hi\"\n"));
+        assert_eq!(held.get("most").and_then(Json::integer), Some(99));
+        let reply = json::read(r#"{"choices":[{"message":{"content":"done"}}]}"#).unwrap();
+        assert_eq!(
+            pluck(&reply, "result|choices.0.message.content"),
+            Some("done".to_string())
+        );
+        assert_eq!(pluck(&reply, "nothing.here"), None);
+    }
+
+    #[test]
+    fn the_bridge_answers_every_question_in_json() {
+        let catalog = json::read(&answer(r#"{"op":"catalog"}"#)).unwrap();
+        let providers = catalog.get("providers").and_then(Json::list).unwrap();
+        assert_eq!(providers.len(), PROVIDERS.len());
+        let routed = json::read(&answer(
+            r#"{"op":"route","tokens":50,"keyed":["groq"],"now":5}"#,
+        ))
+        .unwrap();
+        assert_eq!(routed.get("task").and_then(Json::text), Some("simple"));
+        let first = routed
+            .get("choices")
+            .and_then(Json::list)
+            .and_then(|all| all.first())
+            .unwrap();
+        assert_eq!(first.get("provider").and_then(Json::text), Some("groq"));
+        assert_eq!(
+            first
+                .get("setting")
+                .and_then(|one| one.get("param"))
+                .and_then(Json::text),
+            Some("hint")
+        );
+        let custom = json::read(&answer(r#"{"op":"custom","name":"x"}"#)).unwrap();
+        assert_eq!(custom.get("ok").and_then(Json::boolean), Some(false));
+        let lost = json::read(&answer(r#"{"op":"nothing"}"#)).unwrap();
+        assert_eq!(lost.get("error").and_then(Json::text), Some("op"));
+        let plucked = json::read(&answer(
+            r#"{"op":"pluck","reply":"{\"result\":\"sats\"}","path":""}"#,
+        ))
+        .unwrap();
+        assert_eq!(plucked.get("text").and_then(Json::text), Some("sats"));
+    }
+
+    #[test]
+    fn the_ledger_file_is_kept_between_calls() {
+        let folder = std::env::temp_dir().join(format!("vibe-ledger-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("ledger.json");
+        let path = path.to_str().unwrap();
+        let said = answer(&format!(
+            r#"{{"op":"record","ledger":"{path}","provider":"groq","status":429,"now":100}}"#
+        ));
+        let held = json::read(&said).unwrap();
+        assert_eq!(held.get("rest").and_then(Json::integer), Some(60));
+        assert_eq!(held.get("kept").and_then(Json::boolean), Some(true));
+        let routed = json::read(&answer(&format!(
+            r#"{{"op":"route","ledger":"{path}","tokens":50,"keyed":["groq","cerebras"],"now":110}}"#
+        )))
+        .unwrap();
+        let first = routed
+            .get("choices")
+            .and_then(Json::list)
+            .and_then(|all| all.first())
+            .unwrap();
+        assert_eq!(first.get("provider").and_then(Json::text), Some("cerebras"));
+        std::fs::remove_dir_all(&folder).ok();
+    }
+}
