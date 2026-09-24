@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">Menurut ukuran</string>
     <string name="omni_files_by_changed">Menurut tanggal ubah</string>
     <string name="omni_files_by_kind">Menurut jenis</string>
-    <string name="omni_files_copy_across">Salin ke panel seberang</string>
-    <string name="omni_files_move_across">Pindah ke panel seberang</string>
     <string name="omni_files_needs_name">Ketik nama dulu.</string>
     <string name="omni_files_mirror">Samakan panel lain</string>
     <string name="omni_files_up">Naik satu folder</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Isi</string>
     <string name="omni_result_languages">Bahasa</string>
     <string name="omni_result_signature">Tanda tangan</string>
-    <string name="omni_result_policy">Kebijakan keamanan</string>
     <string name="omni_trash_title">Tempat sampah</string>
     <string name="omni_trash_none">Tempat sampah kosong.</string>
     <string name="omni_trash_note">Yang dihapus menunggu sehari di tempat sampah sebelum lenyap.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Ubah</string>
     <string name="omni_action_rename">Ganti nama</string>
     <string name="omni_action_copy">Salin</string>
+    <string name="omni_action_cut">Potong</string>
+    <string name="omni_action_paste">Tempel</string>
+    <string name="omni_files_held">%1$s siap ditempel</string>
     <string name="omni_action_clear">Buang</string>
     <string name="omni_action_tools">Perkakas</string>
     <string name="omni_action_compress">Mampatkan</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Izin yang dimintanya</string>
     <string name="omni_open_activities">Layar yang dinyatakannya</string>
     <string name="omni_open_largest">Yang memakan ruang</string>
-    <string name="omni_policy_title">Terhadap apa ia diperiksa</string>
-    <string name="omni_policy_all">Semua %1$d aturan terpenuhi.</string>
-    <string name="omni_policy_some">%1$d dari %2$d aturan tidak terpenuhi. Sebuah bangunan akan ditolak.</string>
     <string name="omni_build_said">%1$d hal yang disampaikan bangunan</string>
     <string name="omni_menu_title">Menu</string>
     <string name="omni_menu_home">Beranda</string>

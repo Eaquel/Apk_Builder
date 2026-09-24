@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">حسب الحجم</string>
     <string name="omni_files_by_changed">حسب تاريخ التعديل</string>
     <string name="omni_files_by_kind">حسب النوع</string>
-    <string name="omni_files_copy_across">نسخ إلى اللوحة الأخرى</string>
-    <string name="omni_files_move_across">نقل إلى اللوحة الأخرى</string>
     <string name="omni_files_needs_name">اكتب اسمًا أولًا.</string>
     <string name="omni_files_mirror">مطابقة اللوحة الأخرى</string>
     <string name="omni_files_up">مجلد لأعلى</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">المحتوى</string>
     <string name="omni_result_languages">اللغات</string>
     <string name="omni_result_signature">التوقيع</string>
-    <string name="omni_result_policy">سياسة الأمان</string>
     <string name="omni_trash_title">المهملات</string>
     <string name="omni_trash_none">المهملات فارغة.</string>
     <string name="omni_trash_note">ما يُحذف ينتظر يومًا في المهملات قبل أن يزول.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">غيّر</string>
     <string name="omni_action_rename">أعد التسمية</string>
     <string name="omni_action_copy">انسخ</string>
+    <string name="omni_action_cut">قص</string>
+    <string name="omni_action_paste">لصق</string>
+    <string name="omni_files_held">%1$s جاهز للصق</string>
     <string name="omni_action_clear">أزل</string>
     <string name="omni_action_tools">الأدوات</string>
     <string name="omni_action_compress">ضغط</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">الأذونات المطلوبة</string>
     <string name="omni_open_activities">الشاشات المعلنة</string>
     <string name="omni_open_largest">ما يشغل المساحة</string>
-    <string name="omni_policy_title">بأي قواعد يُفحص</string>
-    <string name="omni_policy_all">القواعد الـ%1$d كلها متحققة.</string>
-    <string name="omni_policy_some">%1$d من %2$d قواعد غير متحققة. سيُرفض البناء.</string>
     <string name="omni_build_said">‏%1$d أمور كان للبناء أن يقولها</string>
     <string name="omni_menu_title">القائمة</string>
     <string name="omni_menu_home">الرئيسية</string>

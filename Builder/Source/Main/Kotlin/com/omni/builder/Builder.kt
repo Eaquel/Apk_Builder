@@ -990,8 +990,6 @@ data class BuildOutcome(
     val entries: Long,
     val signed: Boolean,
     val carriesCode: Boolean,
-    val guardVerdict: String?,
-    val rulesApplied: Long,
     val findings: List<String>,
     val error: String?,
     val developerKey: Boolean,
@@ -1010,14 +1008,7 @@ data class BuildOutcome(
         fun parse(document: String): BuildOutcome {
             val root = JSONObject(document)
             val packaged = root.optJSONObject("package")
-            val guard = packaged?.optJSONObject("guard")
             val findings = mutableListOf<String>()
-            guard?.optJSONArray("findings")?.let { array ->
-                for (index in 0 until array.length()) {
-                    val item = array.getJSONObject(index)
-                    findings.add("${item.getString("what")} ${item.getString("remedy")}")
-                }
-            }
             root.optJSONArray("diagnostics")?.let { array ->
                 for (index in 0 until array.length()) {
                     val item = array.getJSONObject(index)
@@ -1032,8 +1023,6 @@ data class BuildOutcome(
                 entries = packaged?.optLong("entries") ?: 0L,
                 signed = packaged?.optBoolean("signed", false) ?: false,
                 carriesCode = packaged?.optBoolean("carriesCode", false) ?: false,
-                guardVerdict = guard?.optString("verdict")?.ifEmpty { null },
-                rulesApplied = guard?.optLong("rulesApplied") ?: 0L,
                 findings = findings,
                 error = root.optString("error").ifEmpty { null },
                 developerKey = root.optBoolean("developerKey", false),
@@ -3787,6 +3776,7 @@ class BuilderActivity : Activity() {
     private var formImage: String? = null
     private var imageForProject: String? = null
     private var secondFolder: String? = null
+    private var fileClip: FileClip? = null
     private var paneRight = false
     private val besideBefore = mutableListOf<String>()
     private val besideAfter = mutableListOf<String>()
@@ -5111,6 +5101,12 @@ class BuilderActivity : Activity() {
             LinearLayout.LayoutParams(0, gap(10), 1f),
         )
         footer.addView(
+            footControl(Mark.Shape.CLIP, R.string.omni_action_paste, canPaste(here.root, paneFolder())) {
+                pasteInto(here.root, paneFolder())
+            },
+            LinearLayout.LayoutParams(0, gap(10), 1f),
+        )
+        footer.addView(
             footControl(Mark.Shape.SWAP, R.string.omni_files_mirror, true) {
                 val mine = paneFolder()
                 if (paneRight) {
@@ -5293,8 +5289,11 @@ class BuilderActivity : Activity() {
         val picked: Boolean? = null,
         val tint: Int? = null,
         val parted: Boolean = false,
+        val enabled: Boolean = true,
         val onPress: () -> Unit,
     )
+
+    private data class FileClip(val root: String, val path: String, val cut: Boolean)
 
     private fun sheetCell(row: MenuChoice, shown: () -> AlertDialog?): View =
         LinearLayout(this).apply {
@@ -5409,13 +5408,17 @@ class BuilderActivity : Activity() {
                     minimumHeight = gap(10)
                     minimumWidth = gap(44)
                     setPadding(gap(3), gap(1), gap(4), gap(1))
-                    isClickable = true
-                    isFocusable = true
+                    isClickable = row.enabled
+                    isFocusable = row.enabled
+                    isEnabled = row.enabled
+                    alpha = if (row.enabled) 1f else 0.38f
                     readAs(Button::class.java.name)
                     background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
                     setOnClickListener {
-                        hideMenus()
-                        row.onPress()
+                        if (row.enabled) {
+                            hideMenus()
+                            row.onPress()
+                        }
                     }
                     addView(
                         View(context).apply {
@@ -6402,60 +6405,6 @@ class BuilderActivity : Activity() {
         return (0 until array.length()).joinToString(", ") { array.getString(it) }
     }
 
-    private fun showPolicy(answer: String) {
-        val rules = runCatching {
-            JSONObject(answer).optJSONObject("code")?.optJSONArray("rules")
-        }.getOrNull() ?: return
-        if (rules.length() == 0) {
-            return
-        }
-        var broken = 0
-        for (index in 0 until rules.length()) {
-            if (rules.optJSONObject(index)?.optBoolean("held", true) == false) broken += 1
-        }
-        results.addView(heading(getString(R.string.omni_policy_title)))
-        results.addView(
-            notice(
-                if (broken == 0) {
-                    getString(R.string.omni_policy_all, rules.length())
-                } else {
-                    getString(R.string.omni_policy_some, broken, rules.length())
-                },
-                if (broken == 0) palette.ok else palette.error,
-            )
-        )
-        val listed = card()
-        for (index in 0 until rules.length()) {
-            val one = rules.optJSONObject(index) ?: continue
-            val held = one.optBoolean("held", true)
-            if (index > 0) {
-                listed.addView(rule(), MATCH_PARENT, 1)
-            }
-            listed.addView(
-                keyValue(
-                    one.optString("says"),
-                    one.optString("rule"),
-                    if (held) "OK" else one.optString("code"),
-                    if (held) palette.ok else palette.error,
-                )
-            )
-        }
-        results.addView(listed)
-
-        val findings = runCatching {
-            JSONObject(answer).optJSONObject("code")
-                ?.optJSONObject("policy")?.optJSONArray("findings")
-        }.getOrNull() ?: return
-        for (index in 0 until findings.length()) {
-            val one = findings.optJSONObject(index) ?: continue
-            val said = card()
-            said.addView(notice(one.optString("what"), palette.error))
-            said.addView(body(one.optString("why")))
-            said.addView(quiet(one.optString("remedy")))
-            results.addView(said)
-        }
-    }
-
     private class SearchHit(val path: String, val line: Int, val column: Int)
 
     private fun goToHit(root: String, one: SearchHit) {
@@ -6620,7 +6569,7 @@ class BuilderActivity : Activity() {
                 }
             }.getOrNull()
             val read = answer?.let { runCatching { JSONObject(it) }.getOrNull() }
-            if (read != null && read.optBoolean("done", false)) {
+            if (read != null && read.optBoolean(if (moving) "moved" else "copied", false)) {
                 done += 1
             } else if (refused == null && read != null) {
                 refused = Refusal.parse(read)
@@ -6639,6 +6588,10 @@ class BuilderActivity : Activity() {
 
     private fun transferRow(root: String, from: String, into: String): View {
         val many = picks(from).size
+        val clash = picks(from).any { path ->
+            val target = joined(into, path.substringAfterLast('/'))
+            target != path && File(root, target).exists()
+        }
         val row = FlowLayout(this, gap(2), gap(2)).apply {
             setPadding(0, gap(1), 0, gap(1))
         }
@@ -6654,12 +6607,12 @@ class BuilderActivity : Activity() {
         row.addView(
             tool(getString(R.string.omni_files_copy_over), palette.accent) {
                 carryOver(root, from, into, false)
-            }
+            }.apply { isEnabled = !clash }
         )
         row.addView(
             tool(getString(R.string.omni_files_move_over), palette.warning) {
                 carryOver(root, from, into, true)
-            }
+            }.apply { isEnabled = !clash }
         )
         row.addView(
             tool(getString(R.string.omni_files_clear_picks), palette.muted) {
@@ -6720,7 +6673,7 @@ class BuilderActivity : Activity() {
             })
         }
         here.forEach { entry ->
-            holder.addView(fileRow(root, folder, entry, entries, other, side))
+            holder.addView(fileRow(root, folder, entry, entries, side))
         }
         if (other != null && picks(folder).isNotEmpty()) {
             holder.addView(transferRow(root, folder, other))
@@ -6847,7 +6800,6 @@ class BuilderActivity : Activity() {
         folder: String,
         entry: FileEntry,
         all: List<FileEntry>,
-        other: String? = null,
         side: Boolean = false,
     ): View {
         val name = entry.path.substringAfterLast('/')
@@ -6863,7 +6815,7 @@ class BuilderActivity : Activity() {
             isFocusable = true
             contentDescription = name
             readAs(Button::class.java.name)
-            pressable(onHeld = { showActions(root, folder, entry, other) })
+            pressable(onHeld = { showActions(root, folder, entry) })
             setOnClickListener {
                 if (entry.folder) {
                     stepPane(root, side, folder, entry.path)
@@ -6982,27 +6934,58 @@ class BuilderActivity : Activity() {
         )
     }
 
-    private fun showActions(root: String, folder: String, entry: FileEntry, other: String?) {
+    private fun holdForPaste(root: String, entry: FileEntry, cut: Boolean) {
+        fileClip = FileClip(root, entry.path, cut)
+        flash(
+            getString(R.string.omni_files_held, entry.path.substringAfterLast('/')),
+            palette.ok,
+            if (cut) Mark.Shape.EXPORT else Mark.Shape.COPY,
+        )
+        drawFooter()
+    }
+
+    private fun canPaste(root: String, into: String): Boolean {
+        val clip = fileClip ?: return false
+        if (clip.root != root || !File(root, clip.path).exists()) {
+            return false
+        }
+        if (into == clip.path || into.startsWith(clip.path + "/")) {
+            return false
+        }
+        return !File(File(root, into), clip.path.substringAfterLast('/')).exists()
+    }
+
+    private fun pasteInto(root: String, into: String) {
+        val clip = fileClip ?: return
+        if (!canPaste(root, into)) {
+            return
+        }
+        val target = joined(into, clip.path.substringAfterLast('/'))
+        if (clip.cut) {
+            fileClip = null
+            act(Builder.nativeRenamePath(root, clip.path, target), "moved")
+        } else {
+            act(Builder.nativeCopyPath(root, clip.path, target), "copied")
+        }
+    }
+
+    private fun showActions(root: String, folder: String, entry: FileEntry) {
         val name = entry.path.substringAfterLast('/')
         val here = File(root, entry.path)
+        val pasteTo = if (entry.folder) entry.path else folder
         val rows = listOf(
-            MenuChoice(
-                Mark.Shape.COPY,
-                getString(R.string.omni_files_copy_across),
-                picked = other != null,
-            ) {
-                if (other != null) {
-                    act(Builder.nativeCopyPath(root, entry.path, joined(other, name)), "copied")
-                }
+            MenuChoice(Mark.Shape.COPY, getString(R.string.omni_action_copy)) {
+                holdForPaste(root, entry, false)
+            },
+            MenuChoice(Mark.Shape.EXPORT, getString(R.string.omni_action_cut)) {
+                holdForPaste(root, entry, true)
             },
             MenuChoice(
-                Mark.Shape.EXPORT,
-                getString(R.string.omni_files_move_across),
-                picked = other != null,
+                Mark.Shape.CLIP,
+                getString(R.string.omni_action_paste),
+                enabled = canPaste(root, pasteTo),
             ) {
-                if (other != null) {
-                    act(Builder.nativeRenamePath(root, entry.path, joined(other, name)), "moved")
-                }
+                pasteInto(root, pasteTo)
             },
             MenuChoice(
                 Mark.Shape.TRASH,
@@ -7040,7 +7023,7 @@ class BuilderActivity : Activity() {
             MenuChoice(
                 Mark.Shape.SHARE,
                 getString(R.string.omni_action_share),
-                picked = !entry.folder,
+                enabled = !entry.folder,
             ) {
                 if (!entry.folder) {
                     shareOutside(here)
@@ -7189,29 +7172,49 @@ class BuilderActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         }
         val secret = styledField("", getString(R.string.omni_pack_password), secret = true)
-        val shaped = TextView(this).apply {
-            text = format
-            setTextColor(palette.accent)
-            typeface = Type.strong
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            minimumHeight = gap(10)
-            gravity = Gravity.CENTER_VERTICAL
-            isClickable = true
-            isFocusable = true
-            contentDescription = getString(R.string.omni_pack_format)
-            readAs(Button::class.java.name)
-            setPadding(gap(2), gap(1), gap(2), gap(1))
-            pressable()
+        val shapes = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, gap(1), 0, gap(1))
         }
-        shaped.setOnClickListener {
-            pickOne(getString(R.string.omni_pack_format), PACK_FORMATS) { which ->
-                format = PACK_FORMATS[which]
-                shaped.text = format
-                ending.text = "." + format
-                secret.isEnabled = format == "zip"
-                secret.alpha = if (secret.isEnabled) 1f else 0.38f
+        fun paintShapes() {
+            for (at in 0 until shapes.childCount) {
+                val chip = shapes.getChildAt(at) as TextView
+                val on = PACK_FORMATS[at] == format
+                chip.setTextColor(if (on) Color.WHITE else palette.foreground)
+                chip.typeface = if (on) Type.strong else Type.body
+                chip.background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(5).toFloat()
+                    setColor(if (on) palette.accent else Ink.fade(palette.accent, 0.1f))
+                    setStroke(1, if (on) palette.accent else Ink.fade(palette.accent, 0.35f))
+                }
             }
+            ending.text = "." + format
+            secret.isEnabled = format == "zip"
+            secret.alpha = if (secret.isEnabled) 1f else 0.38f
         }
+        PACK_FORMATS.forEach { one ->
+            shapes.addView(
+                TextView(this).apply {
+                    text = "." + one
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    gravity = Gravity.CENTER
+                    minimumHeight = gap(9)
+                    setPadding(gap(5), gap(2), gap(5), gap(2))
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = getString(R.string.omni_pack_format) + " " + one
+                    readAs(Button::class.java.name)
+                    setOnClickListener {
+                        format = one
+                        paintShapes()
+                    }
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = gap(2) },
+            )
+        }
+        paintShapes()
 
         dialogShell(
             getString(R.string.omni_action_compress),
@@ -7234,7 +7237,7 @@ class BuilderActivity : Activity() {
                     LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
                 )
                 addView(label(getString(R.string.omni_pack_format)))
-                addView(shaped, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(shapes, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                 addView(label(getString(R.string.omni_pack_password)))
                 addView(secret, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                 addView(quiet(getString(R.string.omni_pack_password_note)))
@@ -16599,16 +16602,7 @@ class BuilderActivity : Activity() {
                     if (soundly) palette.ok else palette.error,
                 )
             )
-            facts.addView(
-                keyValue(
-                    getString(R.string.omni_result_policy),
-                    "${outcome.rulesApplied}",
-                    outcome.guardVerdict ?: "?",
-                    if (outcome.guardVerdict == "PASSED") palette.ok else palette.error,
-                )
-            )
             results.addView(facts)
-            showPolicy(answer)
 
             if (outcome.findings.isNotEmpty()) {
                 results.addView(

@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">By size</string>
     <string name="omni_files_by_changed">By date changed</string>
     <string name="omni_files_by_kind">By kind</string>
-    <string name="omni_files_copy_across">Copy to the other pane</string>
-    <string name="omni_files_move_across">Move to the other pane</string>
     <string name="omni_files_needs_name">Type a name first.</string>
     <string name="omni_files_mirror">Match the other pane</string>
     <string name="omni_files_up">Up one folder</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Contents</string>
     <string name="omni_result_languages">Languages</string>
     <string name="omni_result_signature">Signature</string>
-    <string name="omni_result_policy">Security policy</string>
     <string name="omni_trash_title">Trash</string>
     <string name="omni_trash_none">The trash is empty.</string>
     <string name="omni_trash_note">What is deleted waits a day in the trash before it goes.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Change</string>
     <string name="omni_action_rename">Rename</string>
     <string name="omni_action_copy">Copy</string>
+    <string name="omni_action_cut">Cut</string>
+    <string name="omni_action_paste">Paste</string>
+    <string name="omni_files_held">%1$s is ready to paste</string>
     <string name="omni_action_clear">Remove</string>
     <string name="omni_action_tools">Tools</string>
     <string name="omni_action_compress">Compress</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Permissions it asks for</string>
     <string name="omni_open_activities">Screens it declares</string>
     <string name="omni_open_largest">What is taking the room</string>
-    <string name="omni_policy_title">What it is checked against</string>
-    <string name="omni_policy_all">All %1$d rules hold.</string>
-    <string name="omni_policy_some">%1$d of %2$d rules do not hold. A build would be refused.</string>
     <string name="omni_build_said">%1$d things the build had to say</string>
     <string name="omni_menu_title">Menu</string>
     <string name="omni_menu_home">Home</string>

@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">आकार से</string>
     <string name="omni_files_by_changed">बदलने की तिथि से</string>
     <string name="omni_files_by_kind">किस्म से</string>
-    <string name="omni_files_copy_across">दूसरे पटल पर नकल करें</string>
-    <string name="omni_files_move_across">दूसरे पटल पर ले जाएँ</string>
     <string name="omni_files_needs_name">पहले नाम लिखिए।</string>
     <string name="omni_files_mirror">दूसरा फलक मिलाएँ</string>
     <string name="omni_files_up">एक फ़ोल्डर ऊपर</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">सामग्री</string>
     <string name="omni_result_languages">भाषाएँ</string>
     <string name="omni_result_signature">हस्ताक्षर</string>
-    <string name="omni_result_policy">सुरक्षा नीति</string>
     <string name="omni_trash_title">कूड़ादान</string>
     <string name="omni_trash_none">कूड़ादान खाली है।</string>
     <string name="omni_trash_note">जो मिटाया जाता है वह जाने से पहले एक दिन कूड़ेदान में ठहरता है।</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">बदलें</string>
     <string name="omni_action_rename">नाम बदलें</string>
     <string name="omni_action_copy">नकल करें</string>
+    <string name="omni_action_cut">काटें</string>
+    <string name="omni_action_paste">चिपकाएँ</string>
+    <string name="omni_files_held">%1$s चिपकाने के लिए तैयार है</string>
     <string name="omni_action_clear">हटाएँ</string>
     <string name="omni_action_tools">औज़ार</string>
     <string name="omni_action_compress">संपीड़ित करें</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">जो अनुमतियाँ यह माँगता है</string>
     <string name="omni_open_activities">जो परदे यह घोषित करता है</string>
     <string name="omni_open_largest">जगह किसने घेरी है</string>
-    <string name="omni_policy_title">किसके विरुद्ध जाँचा जाता है</string>
-    <string name="omni_policy_all">सभी %1$d नियम खरे उतरते हैं।</string>
-    <string name="omni_policy_some">%2$d में से %1$d नियम खरे नहीं उतरते। बनावट मना कर दी जाएगी।</string>
     <string name="omni_build_said">%1$d बातें जो बनावट को कहनी थीं</string>
     <string name="omni_menu_title">मेन्यू</string>
     <string name="omni_menu_home">घर</string>

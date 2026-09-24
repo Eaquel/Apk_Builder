@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">Nach Größe</string>
     <string name="omni_files_by_changed">Nach Änderungsdatum</string>
     <string name="omni_files_by_kind">Nach Art</string>
-    <string name="omni_files_copy_across">In den anderen Bereich kopieren</string>
-    <string name="omni_files_move_across">In den anderen Bereich verschieben</string>
     <string name="omni_files_needs_name">Gib zuerst einen Namen ein.</string>
     <string name="omni_files_mirror">Andere Spalte angleichen</string>
     <string name="omni_files_up">Eine Ebene höher</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Inhalt</string>
     <string name="omni_result_languages">Sprachen</string>
     <string name="omni_result_signature">Signatur</string>
-    <string name="omni_result_policy">Sicherheitsrichtlinie</string>
     <string name="omni_trash_title">Papierkorb</string>
     <string name="omni_trash_none">Der Papierkorb ist leer.</string>
     <string name="omni_trash_note">Gelöschtes wartet einen Tag im Papierkorb, bevor es geht.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Ändern</string>
     <string name="omni_action_rename">Umbenennen</string>
     <string name="omni_action_copy">Kopieren</string>
+    <string name="omni_action_cut">Ausschneiden</string>
+    <string name="omni_action_paste">Einfügen</string>
+    <string name="omni_files_held">%1$s ist bereit zum Einfügen</string>
     <string name="omni_action_clear">Entfernen</string>
     <string name="omni_action_tools">Werkzeuge</string>
     <string name="omni_action_compress">Packen</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Angeforderte Berechtigungen</string>
     <string name="omni_open_activities">Deklarierte Bildschirme</string>
     <string name="omni_open_largest">Was den Platz belegt</string>
-    <string name="omni_policy_title">Wogegen es geprüft wird</string>
-    <string name="omni_policy_all">Alle %1$d Regeln halten.</string>
-    <string name="omni_policy_some">%1$d von %2$d Regeln halten nicht. Ein Build würde abgelehnt.</string>
     <string name="omni_build_said">%1$d Dinge, die der Build anzumerken hatte</string>
     <string name="omni_menu_title">Menü</string>
     <string name="omni_menu_home">Startseite</string>

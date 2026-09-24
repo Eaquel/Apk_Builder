@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">Per dimensione</string>
     <string name="omni_files_by_changed">Per data di modifica</string>
     <string name="omni_files_by_kind">Per tipo</string>
-    <string name="omni_files_copy_across">Copia nell\'altro riquadro</string>
-    <string name="omni_files_move_across">Sposta nell\'altro riquadro</string>
     <string name="omni_files_needs_name">Scrivi prima un nome.</string>
     <string name="omni_files_mirror">Allinea l\'altro riquadro</string>
     <string name="omni_files_up">Cartella superiore</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Contenuto</string>
     <string name="omni_result_languages">Lingue</string>
     <string name="omni_result_signature">Firma</string>
-    <string name="omni_result_policy">Politica di sicurezza</string>
     <string name="omni_trash_title">Cestino</string>
     <string name="omni_trash_none">Il cestino è vuoto.</string>
     <string name="omni_trash_note">Ciò che viene eliminato attende un giorno nel cestino prima di sparire.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Cambia</string>
     <string name="omni_action_rename">Rinomina</string>
     <string name="omni_action_copy">Copia</string>
+    <string name="omni_action_cut">Taglia</string>
+    <string name="omni_action_paste">Incolla</string>
+    <string name="omni_files_held">%1$s è pronto da incollare</string>
     <string name="omni_action_clear">Rimuovi</string>
     <string name="omni_action_tools">Strumenti</string>
     <string name="omni_action_compress">Comprimi</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Permessi richiesti</string>
     <string name="omni_open_activities">Schermate dichiarate</string>
     <string name="omni_open_largest">Cosa occupa lo spazio</string>
-    <string name="omni_policy_title">Rispetto a cosa viene controllato</string>
-    <string name="omni_policy_all">Tutte le %1$d regole reggono.</string>
-    <string name="omni_policy_some">%1$d regole su %2$d non reggono. Una costruzione verrebbe rifiutata.</string>
     <string name="omni_build_said">%1$d cose che la costruzione aveva da dire</string>
     <string name="omni_menu_title">Menu</string>
     <string name="omni_menu_home">Home</string>

@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">按大小</string>
     <string name="omni_files_by_changed">按修改日期</string>
     <string name="omni_files_by_kind">按类型</string>
-    <string name="omni_files_copy_across">复制到另一侧</string>
-    <string name="omni_files_move_across">移动到另一侧</string>
     <string name="omni_files_needs_name">请先输入名称。</string>
     <string name="omni_files_mirror">同步另一侧目录</string>
     <string name="omni_files_up">上一级文件夹</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">内容</string>
     <string name="omni_result_languages">语言</string>
     <string name="omni_result_signature">签名</string>
-    <string name="omni_result_policy">安全策略</string>
     <string name="omni_trash_title">回收站</string>
     <string name="omni_trash_none">回收站是空的。</string>
     <string name="omni_trash_note">删除的东西会在回收站里等一天才消失。</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">更换</string>
     <string name="omni_action_rename">重命名</string>
     <string name="omni_action_copy">复制</string>
+    <string name="omni_action_cut">剪切</string>
+    <string name="omni_action_paste">粘贴</string>
+    <string name="omni_files_held">%1$s 已可粘贴</string>
     <string name="omni_action_clear">移除</string>
     <string name="omni_action_tools">工具</string>
     <string name="omni_action_compress">压缩</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">申请的权限</string>
     <string name="omni_open_activities">声明的界面</string>
     <string name="omni_open_largest">占用空间的内容</string>
-    <string name="omni_policy_title">依据哪些规则检查</string>
-    <string name="omni_policy_all">%1$d 条规则全部满足。</string>
-    <string name="omni_policy_some">%2$d 条规则中有 %1$d 条不满足。构建会被拒绝。</string>
     <string name="omni_build_said">构建有 %1$d 处要说的</string>
     <string name="omni_menu_title">菜单</string>
     <string name="omni_menu_home">主页</string>

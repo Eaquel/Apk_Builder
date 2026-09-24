@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">크기순</string>
     <string name="omni_files_by_changed">바뀐 때순</string>
     <string name="omni_files_by_kind">갈래순</string>
-    <string name="omni_files_copy_across">건너편 창으로 복사</string>
-    <string name="omni_files_move_across">건너편 창으로 이동</string>
     <string name="omni_files_needs_name">이름을 먼저 적으세요.</string>
     <string name="omni_files_mirror">반대쪽 창 맞추기</string>
     <string name="omni_files_up">상위 폴더</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">내용</string>
     <string name="omni_result_languages">언어</string>
     <string name="omni_result_signature">서명</string>
-    <string name="omni_result_policy">보안 방침</string>
     <string name="omni_trash_title">휴지통</string>
     <string name="omni_trash_none">휴지통이 비어 있습니다.</string>
     <string name="omni_trash_note">지운 것은 사라지기 전에 휴지통에서 하루를 기다립니다.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">바꾸기</string>
     <string name="omni_action_rename">이름 바꾸기</string>
     <string name="omni_action_copy">복사</string>
+    <string name="omni_action_cut">잘라내기</string>
+    <string name="omni_action_paste">붙여넣기</string>
+    <string name="omni_files_held">%1$s을(를) 붙여넣을 수 있습니다</string>
     <string name="omni_action_clear">없애기</string>
     <string name="omni_action_tools">도구</string>
     <string name="omni_action_compress">압축</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">요구하는 권한</string>
     <string name="omni_open_activities">선언하는 화면</string>
     <string name="omni_open_largest">자리를 차지하는 것</string>
-    <string name="omni_policy_title">무엇에 비추어 확인했는가</string>
-    <string name="omni_policy_all">규칙 %1$d개가 모두 지켜집니다.</string>
-    <string name="omni_policy_some">규칙 %2$d개 가운데 %1$d개가 지켜지지 않습니다. 빌드는 거부됩니다.</string>
     <string name="omni_build_said">빌드가 남긴 말 %1$d건</string>
     <string name="omni_menu_title">메뉴</string>
     <string name="omni_menu_home">홈</string>

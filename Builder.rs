@@ -20714,20 +20714,6 @@ pub mod guard {
             "no-task-hijacking",
             "Another application cannot place its own screen inside this one's task.",
         ),
-        (
-            "EG012",
-            "no-ignored-restriction",
-            "It does not carry a restriction the platform it targets ignores.",
-        ),
-    ];
-
-    pub const ADAPTIVE_FROM_API: i64 = 37;
-
-    const IGNORED_AT_37: &[(&str, Option<&str>)] = &[
-        ("android:screenOrientation", None),
-        ("android:resizeableActivity", Some("false")),
-        ("android:minAspectRatio", None),
-        ("android:maxAspectRatio", None),
     ];
 
     pub fn fired(report: &Report, code: &str) -> bool {
@@ -20951,47 +20937,6 @@ pub mod guard {
                     why: "An activity another application can start, in a task of its own, can have that task taken over: a malicious application declares the same affinity, gets placed in front, and what the person types next goes to it instead. This is task hijacking, and it looks exactly like the real screen.".to_string(),
                     remedy: "Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.".to_string(),
                 });
-            }
-        }
-
-        report.rules_applied += 1;
-        let targets = elements
-            .iter()
-            .find(|element| element.name == "uses-sdk")
-            .and_then(|element| attribute(element, "android:targetSdkVersion"))
-            .and_then(|held| held.parse::<i64>().ok())
-            .unwrap_or(0);
-        let a_game = application
-            .map(|held| attribute(held, "android:appCategory") == Some("game"))
-            .unwrap_or(false);
-        if targets >= ADAPTIVE_FROM_API && !a_game {
-            for element in &elements {
-                if element.name != "application" && element.name != "activity" {
-                    continue;
-                }
-                for (name, refused) in IGNORED_AT_37 {
-                    let Some(value) = attribute(element, name) else {
-                        continue;
-                    };
-                    if refused.is_some_and(|held| held != value) {
-                        continue;
-                    }
-                    let named = attribute(element, "android:name").unwrap_or(&element.name);
-                    report.findings.push(Finding {
-                        rule: "no-ignored-restriction",
-                        code: "EG012",
-                        what: format!("{named} sets {name}=\"{value}\"."),
-                        why: "An application targeting API 37 or later has this ignored on \
-                              any display wider than 600dp: the window fills the screen whatever \
-                              the attribute says. A restriction that looks like it is in force \
-                              and is not is worse than one that was never written."
-                            .to_string(),
-                        remedy: "Remove the attribute, and lay the screen out for whatever size \
-                                 it is given. Games are exempt, and say so with \
-                                 android:appCategory=\"game\"."
-                            .to_string(),
-                    });
-                }
             }
         }
 
@@ -33793,6 +33738,23 @@ pub mod trash {
         remove_tree(from)
     }
 
+    fn stored_as(name: &str) -> &str {
+        if name.is_empty() || name == RECORD_FILE {
+            PAYLOAD
+        } else {
+            name
+        }
+    }
+
+    fn payload(held: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let named = held.join(stored_as(name));
+        if named.exists() {
+            named
+        } else {
+            held.join(PAYLOAD)
+        }
+    }
+
     fn record(entry: &Entry) -> String {
         format!(
             "name={}\norigin={}\nfolder={}\nbytes={}\ndeleted={}\n",
@@ -33825,7 +33787,7 @@ pub mod trash {
                 _ => {}
             }
         }
-        if entry.name.is_empty() || !held.join(PAYLOAD).exists() {
+        if entry.name.is_empty() || !payload(&held, &entry.name).exists() {
             return None;
         }
         entry.expires_at = match held_for(root) {
@@ -33960,7 +33922,7 @@ pub mod trash {
                  it back, so it stays where it is.",
             )
         })?;
-        shift(source, &held.join(PAYLOAD)).map_err(|why| {
+        shift(source, &held.join(stored_as(&entry.name))).map_err(|why| {
             let _ = std::fs::remove_dir_all(&held);
             fail("ET007", "That could not be moved to the trash.")
                 .with_context(format!("Path: {path}"))
@@ -34009,7 +33971,7 @@ pub mod trash {
             })?;
         }
         let held = std::path::Path::new(root).join(id);
-        shift(&held.join(PAYLOAD), back).map_err(|why| {
+        shift(&payload(&held, &entry.name), back).map_err(|why| {
             fail("ET014", "That could not be put back.")
                 .with_context(format!("Path: {}", entry.origin))
                 .with_context(format!("Reason: {why}"))
@@ -35345,13 +35307,6 @@ pub mod workspace {
         trash_root: &str,
         now: i64,
     ) -> Result<crate::trash::Entry, Diagnostic> {
-        if relative == "AndroidManifest.xml" {
-            return Err(fail("EW140", "The manifest is what makes this a project.")
-                .with_suggestion(
-                    "Edit it instead. A project folder without a manifest is not a project, \
-                     and nothing here would find it again.",
-                ));
-        }
         let trimmed = relative.trim_start_matches("./").trim_matches('/');
         if trimmed == crate::trash::FOLDER
             || trimmed.starts_with(&format!("{}/", crate::trash::FOLDER))
@@ -35387,10 +35342,6 @@ pub mod workspace {
     }
 
     pub fn copy(root: &str, from: &str, to: &str) -> Result<String, Diagnostic> {
-        if to == "AndroidManifest.xml" {
-            return Err(fail("EW160", "The manifest is what makes this a project.")
-                .with_suggestion("Putting something else there would leave a folder nothing here recognises as a project."));
-        }
         let source = inside(root, from)?;
         let target = inside(root, to)?;
         if !source.exists() {
@@ -35443,13 +35394,6 @@ pub mod workspace {
     }
 
     pub fn rename(root: &str, from: &str, to: &str) -> Result<String, Diagnostic> {
-        if from == "AndroidManifest.xml" || to == "AndroidManifest.xml" {
-            return Err(fail("EW150", "The manifest is what makes this a project.")
-                .with_suggestion(
-                    "It is found by its name, so moving it or putting something else \
-                     there would leave a folder nothing here recognises as a project.",
-                ));
-        }
         let source = inside(root, from)?;
         let target = inside(root, to)?;
         if !source.exists() {
@@ -39346,7 +39290,6 @@ public final class R {{
         }
 
         let report = guard::inspect_manifest(&root);
-        guard::emit(&report, sink);
 
         let package = package_name(&root);
         Ok(Prepared {

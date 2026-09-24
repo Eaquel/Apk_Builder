@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">По размеру</string>
     <string name="omni_files_by_changed">По дате изменения</string>
     <string name="omni_files_by_kind">По типу</string>
-    <string name="omni_files_copy_across">Копировать в другую панель</string>
-    <string name="omni_files_move_across">Переместить в другую панель</string>
     <string name="omni_files_needs_name">Сначала введите имя.</string>
     <string name="omni_files_mirror">Синхронизировать вторую панель</string>
     <string name="omni_files_up">На папку вверх</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Содержимое</string>
     <string name="omni_result_languages">Языки</string>
     <string name="omni_result_signature">Подпись</string>
-    <string name="omni_result_policy">Политика безопасности</string>
     <string name="omni_trash_title">Корзина</string>
     <string name="omni_trash_none">Корзина пуста.</string>
     <string name="omni_trash_note">Удалённое ждёт в корзине сутки, прежде чем исчезнуть.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Заменить</string>
     <string name="omni_action_rename">Переименовать</string>
     <string name="omni_action_copy">Копировать</string>
+    <string name="omni_action_cut">Вырезать</string>
+    <string name="omni_action_paste">Вставить</string>
+    <string name="omni_files_held">%1$s готово к вставке</string>
     <string name="omni_action_clear">Убрать</string>
     <string name="omni_action_tools">Инструменты</string>
     <string name="omni_action_compress">Упаковать</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Запрашиваемые разрешения</string>
     <string name="omni_open_activities">Объявленные экраны</string>
     <string name="omni_open_largest">Что занимает место</string>
-    <string name="omni_policy_title">По каким правилам проверяется</string>
-    <string name="omni_policy_all">Все %1$d правил соблюдены.</string>
-    <string name="omni_policy_some">%1$d из %2$d правил не соблюдены. Сборка была бы отклонена.</string>
     <string name="omni_build_said">%1$d замечаний от сборки</string>
     <string name="omni_menu_title">Меню</string>
     <string name="omni_menu_home">Главная</string>

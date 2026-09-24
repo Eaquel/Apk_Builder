@@ -12209,56 +12209,6 @@ public final class App extends Activity {
     }
 
     #[test]
-    fn a_restriction_android_17_ignores_is_refused_rather_than_written() {
-        let ignored = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.tr.yt">
-    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="37" />
-    <application android:label="Held" android:allowBackup="false">
-        <activity android:name=".MainActivity" android:exported="false"
-            android:screenOrientation="portrait" />
-    </application>
-</manifest>
-"#;
-        let mut sink = Sink::new();
-        let root = crate::xml::parse(ignored, "AndroidManifest.xml", &mut sink).unwrap();
-        let report = crate::guard::inspect_manifest(&root);
-        assert!(
-            crate::guard::fired(&report, "EG012"),
-            "{:?}",
-            report.findings
-        );
-        let said = report
-            .findings
-            .iter()
-            .find(|held| held.code == "EG012")
-            .unwrap();
-        assert!(said.what.contains("screenOrientation"), "{}", said.what);
-
-        let older = ignored.replace("targetSdkVersion=\"37\"", "targetSdkVersion=\"36\"");
-        let root = crate::xml::parse(&older, "AndroidManifest.xml", &mut sink).unwrap();
-        assert!(
-            !crate::guard::fired(&crate::guard::inspect_manifest(&root), "EG012"),
-            "a platform that still honours it is left alone"
-        );
-
-        let game = ignored.replace(
-            "<application android:label=\"Held\"",
-            "<application android:appCategory=\"game\" android:label=\"Held\"",
-        );
-        let root = crate::xml::parse(&game, "AndroidManifest.xml", &mut sink).unwrap();
-        assert!(
-            !crate::guard::fired(&crate::guard::inspect_manifest(&root), "EG012"),
-            "games keep the restriction, and the platform keeps honouring it"
-        );
-
-        let adaptive = ignored.replace("\n            android:screenOrientation=\"portrait\"", "");
-        let root = crate::xml::parse(&adaptive, "AndroidManifest.xml", &mut sink).unwrap();
-        let clean = crate::guard::inspect_manifest(&root);
-        assert_eq!(clean.verdict(), crate::guard::Verdict::Passed, "{clean:?}");
-        assert!(clean.rules_applied >= crate::guard::RULES.len());
-    }
-
-    #[test]
     fn what_this_builds_carries_a_seal_against_the_key_that_signed_it() {
         let _turn = crate::progress::one_at_a_time();
         let directory = temp_directory("omni-sealed");
@@ -13966,12 +13916,6 @@ public final class App extends Activity {
 
         let bin = directory.join("Trash").to_str().unwrap().to_string();
         let now = 1_787_000_000;
-        assert_eq!(
-            crate::workspace::remove(&text, "AndroidManifest.xml", &bin, now)
-                .unwrap_err()
-                .code,
-            "EW140"
-        );
         let thrown = crate::workspace::remove(&text, "Kotlin/Binary.bin", &bin, now).unwrap();
         assert!(!root.join("Kotlin/Binary.bin").exists());
         assert_eq!(thrown.name, "Binary.bin");
@@ -13980,12 +13924,6 @@ public final class App extends Activity {
         crate::workspace::rename(&text, "Kotlin/App.kt", "Kotlin/Screen.kt").unwrap();
         assert!(!root.join("Kotlin/App.kt").exists());
         assert!(root.join("Kotlin/Screen.kt").is_file());
-        assert_eq!(
-            crate::workspace::rename(&text, "Kotlin/Screen.kt", "AndroidManifest.xml")
-                .unwrap_err()
-                .code,
-            "EW150"
-        );
         assert_eq!(
             crate::workspace::rename(&text, "Kotlin", "Kotlin/Inside")
                 .unwrap_err()
@@ -14158,6 +14096,88 @@ public final class App extends Activity {
         crate::workspace::remove(&text, "Kotlin", &bin, now).unwrap();
         assert_eq!(crate::trash::empty(&bin), 1);
         assert!(crate::trash::list(&bin, now).is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_trash_keeps_what_it_holds_under_its_own_name() {
+        let directory = temp_directory("omni-trash-named");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
+        let bin = directory
+            .join(crate::trash::FOLDER)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let now = 1_787_000_000;
+
+        crate::workspace::write_text(&text, "Kotlin/Screen.kt", "class Screen\n").unwrap();
+        let thrown = crate::workspace::remove(&text, "Kotlin/Screen.kt", &bin, now).unwrap();
+        let held = std::path::Path::new(&bin).join(&thrown.id);
+        assert!(
+            held.join("Screen.kt").is_file(),
+            "what the trash holds is shown under the name it had"
+        );
+        assert!(!held.join(crate::trash::PAYLOAD).exists());
+
+        crate::workspace::write_text(&text, "Kotlin/Origin", "named like the note\n").unwrap();
+        let clash = crate::workspace::remove(&text, "Kotlin/Origin", &bin, now + 1).unwrap();
+        assert_eq!(clash.name, "Origin");
+        assert_eq!(crate::trash::list(&bin, now + 1).len(), 2);
+        crate::trash::restore(&bin, &clash.id, now + 1).unwrap();
+        assert_eq!(
+            crate::workspace::read_text(&text, "Kotlin/Origin").unwrap(),
+            "named like the note\n"
+        );
+
+        let legacy = std::path::Path::new(&bin).join("2026-01-01/00-00-00-0000");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let back = root.join("Kotlin/Old.kt");
+        std::fs::write(
+            legacy.join(crate::trash::RECORD_FILE),
+            format!(
+                "name=Old.kt\norigin={}\nfolder=false\nbytes=10\ndeleted={now}\n",
+                back.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(legacy.join(crate::trash::PAYLOAD), "class Old\n").unwrap();
+        assert!(crate::trash::list(&bin, now)
+            .iter()
+            .any(|entry| entry.name == "Old.kt"));
+        crate::trash::restore(&bin, "2026-01-01/00-00-00-0000", now).unwrap();
+        assert_eq!(std::fs::read_to_string(&back).unwrap(), "class Old\n");
+
+        crate::trash::restore(&bin, &thrown.id, now).unwrap();
+        assert!(root.join("Kotlin/Screen.kt").is_file());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_manifest_is_a_file_like_any_other() {
+        let directory = temp_directory("omni-manifest-free");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
+        let bin = directory
+            .join(crate::trash::FOLDER)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let now = 1_787_000_000;
+
+        crate::workspace::copy(&text, "AndroidManifest.xml", "Manifest.copy.xml").unwrap();
+        crate::workspace::rename(&text, "AndroidManifest.xml", "Manifest.old.xml").unwrap();
+        assert!(!root.join("AndroidManifest.xml").exists());
+        crate::workspace::rename(&text, "Manifest.copy.xml", "AndroidManifest.xml").unwrap();
+        assert!(root.join("AndroidManifest.xml").is_file());
+        let thrown = crate::workspace::remove(&text, "AndroidManifest.xml", &bin, now).unwrap();
+        assert_eq!(thrown.name, "AndroidManifest.xml");
+        assert!(!root.join("AndroidManifest.xml").exists());
+        crate::trash::restore(&bin, &thrown.id, now).unwrap();
+        assert!(root.join("AndroidManifest.xml").is_file());
 
         std::fs::remove_dir_all(&directory).ok();
     }

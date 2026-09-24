@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">Par taille</string>
     <string name="omni_files_by_changed">Par date de modification</string>
     <string name="omni_files_by_kind">Par type</string>
-    <string name="omni_files_copy_across">Copier dans l\'autre volet</string>
-    <string name="omni_files_move_across">Déplacer dans l\'autre volet</string>
     <string name="omni_files_needs_name">Écris d\'abord un nom.</string>
     <string name="omni_files_mirror">Aligner l\'autre volet</string>
     <string name="omni_files_up">Dossier parent</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Contenu</string>
     <string name="omni_result_languages">Langues</string>
     <string name="omni_result_signature">Signature</string>
-    <string name="omni_result_policy">Politique de sécurité</string>
     <string name="omni_trash_title">Corbeille</string>
     <string name="omni_trash_none">La corbeille est vide.</string>
     <string name="omni_trash_note">Ce qui est supprimé attend un jour dans la corbeille avant de disparaître.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Changer</string>
     <string name="omni_action_rename">Renommer</string>
     <string name="omni_action_copy">Copier</string>
+    <string name="omni_action_cut">Couper</string>
+    <string name="omni_action_paste">Coller</string>
+    <string name="omni_files_held">%1$s est prêt à être collé</string>
     <string name="omni_action_clear">Retirer</string>
     <string name="omni_action_tools">Outils</string>
     <string name="omni_action_compress">Compresser</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Permissions demandées</string>
     <string name="omni_open_activities">Écrans déclarés</string>
     <string name="omni_open_largest">Ce qui prend la place</string>
-    <string name="omni_policy_title">Ce contre quoi il est vérifié</string>
-    <string name="omni_policy_all">Les %1$d règles tiennent.</string>
-    <string name="omni_policy_some">%1$d des %2$d règles ne tiennent pas. Une construction serait refusée.</string>
     <string name="omni_build_said">%1$d choses que la construction avait à dire</string>
     <string name="omni_menu_title">Menu</string>
     <string name="omni_menu_home">Accueil</string>

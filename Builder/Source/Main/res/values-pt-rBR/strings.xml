@@ -62,8 +62,6 @@
     <string name="omni_files_by_size">Por tamanho</string>
     <string name="omni_files_by_changed">Por data de alteração</string>
     <string name="omni_files_by_kind">Por tipo</string>
-    <string name="omni_files_copy_across">Copiar para o outro painel</string>
-    <string name="omni_files_move_across">Mover para o outro painel</string>
     <string name="omni_files_needs_name">Digite um nome primeiro.</string>
     <string name="omni_files_mirror">Alinhar o outro painel</string>
     <string name="omni_files_up">Pasta acima</string>
@@ -101,7 +99,6 @@
     <string name="omni_result_contents">Conteúdo</string>
     <string name="omni_result_languages">Idiomas</string>
     <string name="omni_result_signature">Assinatura</string>
-    <string name="omni_result_policy">Política de segurança</string>
     <string name="omni_trash_title">Lixeira</string>
     <string name="omni_trash_none">A lixeira está vazia.</string>
     <string name="omni_trash_note">O que é excluído espera um dia na lixeira antes de sumir.</string>
@@ -128,6 +125,9 @@
     <string name="omni_action_change">Mudar</string>
     <string name="omni_action_rename">Renomear</string>
     <string name="omni_action_copy">Copiar</string>
+    <string name="omni_action_cut">Recortar</string>
+    <string name="omni_action_paste">Colar</string>
+    <string name="omni_files_held">%1$s está pronto para colar</string>
     <string name="omni_action_clear">Remover</string>
     <string name="omni_action_tools">Ferramentas</string>
     <string name="omni_action_compress">Compactar</string>
@@ -215,9 +215,6 @@
     <string name="omni_open_permissions">Permissões que pede</string>
     <string name="omni_open_activities">Telas que declara</string>
     <string name="omni_open_largest">O que está ocupando o espaço</string>
-    <string name="omni_policy_title">Contra o que é conferido</string>
-    <string name="omni_policy_all">Todas as %1$d regras valem.</string>
-    <string name="omni_policy_some">%1$d de %2$d regras não valem. Uma compilação seria recusada.</string>
     <string name="omni_build_said">%1$d coisas que a compilação teve a dizer</string>
     <string name="omni_menu_title">Menu</string>
     <string name="omni_menu_home">Início</string>
