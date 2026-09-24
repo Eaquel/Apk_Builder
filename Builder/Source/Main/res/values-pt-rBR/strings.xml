@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Aplicativo</string>
     <string name="omni_log_apps_any">Tudo neste aparelho</string>
     <string name="omni_log_apps_none">Não foi possível listar nenhum aplicativo.</string>
+    <string name="omni_log_apps_find">Procurar um aplicativo</string>
+    <string name="omni_log_wireless">Depuração por Wi-Fi</string>
+    <string name="omni_log_wireless_open">Abrir a chave dela nas Opções do desenvolvedor</string>
+    <string name="omni_log_developer_off">As opções do desenvolvedor estão desativadas</string>
+    <string name="omni_log_developer_off_note">Abra Sobre o telefone e toque sete vezes em Número da versão. As Opções do desenvolvedor aparecem nas Configurações, e a Depuração por Wi-Fi fica dentro delas.</string>
+    <string name="omni_log_developer_about">Abrir Sobre o telefone</string>
+    <string name="omni_log_crashes">Só falhas</string>
+    <string name="omni_log_crashes_on">O buffer de falhas: o que parou e por quê</string>
+    <string name="omni_log_crashes_off">Todas as mensagens</string>
     <string name="omni_log_written">Saída do registro</string>
     <string name="omni_log_empty_note">Toque em Iniciar para começar a ler o registro.</string>
     <string name="omni_log_about">Sobre o registro</string>

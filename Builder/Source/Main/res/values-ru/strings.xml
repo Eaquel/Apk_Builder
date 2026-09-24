@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Приложение</string>
     <string name="omni_log_apps_any">Всё на этом устройстве</string>
     <string name="omni_log_apps_none">Ни одно приложение не удалось перечислить.</string>
+    <string name="omni_log_apps_find">Найти приложение</string>
+    <string name="omni_log_wireless">Отладка по Wi-Fi</string>
+    <string name="omni_log_wireless_open">Открыть её переключатель в разделе «Для разработчиков»</string>
+    <string name="omni_log_developer_off">Параметры разработчика выключены</string>
+    <string name="omni_log_developer_off_note">Откройте «О телефоне» и нажмите «Номер сборки» семь раз. После этого в настройках появится раздел «Для разработчиков», а в нём — отладка по Wi-Fi.</string>
+    <string name="omni_log_developer_about">Открыть «О телефоне»</string>
+    <string name="omni_log_crashes">Только сбои</string>
+    <string name="omni_log_crashes_on">Буфер сбоев: что остановилось и почему</string>
+    <string name="omni_log_crashes_off">Все сообщения</string>
     <string name="omni_log_written">Вывод журнала</string>
     <string name="omni_log_empty_note">Нажмите «Начать», чтобы начать читать журнал.</string>
     <string name="omni_log_about">О журнале</string>

@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Application</string>
     <string name="omni_log_apps_any">Tout sur cet appareil</string>
     <string name="omni_log_apps_none">Aucune application n\'a pu être listée.</string>
+    <string name="omni_log_apps_find">Rechercher une application</string>
+    <string name="omni_log_wireless">Débogage sans fil</string>
+    <string name="omni_log_wireless_open">Ouvrir son interrupteur dans les Options pour les développeurs</string>
+    <string name="omni_log_developer_off">Les options pour les développeurs sont désactivées</string>
+    <string name="omni_log_developer_off_note">Ouvrez À propos du téléphone et appuyez sept fois sur Numéro de build. Les Options pour les développeurs apparaissent alors dans les Paramètres, et le Débogage sans fil s\'y trouve.</string>
+    <string name="omni_log_developer_about">Ouvrir À propos du téléphone</string>
+    <string name="omni_log_crashes">Plantages seulement</string>
+    <string name="omni_log_crashes_on">Le tampon des plantages : ce qui s\'est arrêté, et pourquoi</string>
+    <string name="omni_log_crashes_off">Tous les messages</string>
     <string name="omni_log_written">Sortie du journal</string>
     <string name="omni_log_empty_note">Touche Démarrer pour commencer à lire le journal.</string>
     <string name="omni_log_about">À propos du journal</string>

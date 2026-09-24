@@ -3746,6 +3746,22 @@ class BuilderActivity : Activity() {
 
         const val LIBRARY_METADATA = "module"
 
+        const val LOG_CRASH_BUFFER = "crash"
+
+        const val LOG_OWNER_FORMAT = "uid"
+
+        const val LOG_BUFFER_BANNER = "---------"
+
+        const val LOG_USER_RANGE = 100_000
+
+        const val LOG_FIRST_APPLICATION = 10_000
+
+        const val SETTINGS_HIGHLIGHT = ":settings:fragment_args_key"
+
+        const val SETTINGS_ARGUMENTS = ":settings:show_fragment_args"
+
+        const val WIRELESS_DEBUGGING_KEY = "toggle_adb_wireless"
+
         const val LIBRARY_SHOWN = 12
 
         const val LIBRARY_OPEN_MILLIS = 20_000
@@ -3967,6 +3983,7 @@ class BuilderActivity : Activity() {
     private var logHollow: View? = null
     private var logSieve = ""
     private var logArgs = ""
+    private var logCrashes = false
     private var logPackage = ""
     private var logPackageShown = ""
 
@@ -9903,9 +9920,17 @@ class BuilderActivity : Activity() {
 
     private fun logCommand(): List<String> {
         val said = mutableListOf("logcat", "-v", "time")
+        if (logCrashes) {
+            said.add("-b")
+            said.add(LOG_CRASH_BUFFER)
+        }
         val uid = uidOf(logPackage)
         when {
-            uid > 0 -> said.add("--uid=" + uid)
+            uid > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> said.add("--uid=" + uid)
+            uid > 0 -> {
+                said.add("-v")
+                said.add(LOG_OWNER_FORMAT)
+            }
             !logReadsAll() -> said.add("--pid=" + android.os.Process.myPid())
         }
         logArgs.trim().split(Regex("\\s+")).forEach { one ->
@@ -9914,6 +9939,25 @@ class BuilderActivity : Activity() {
             }
         }
         return said
+    }
+
+    private fun ownerName(uid: Int): String {
+        val user = uid / LOG_USER_RANGE
+        val app = uid % LOG_USER_RANGE
+        return if (app >= LOG_FIRST_APPLICATION) "u${user}_a${app - LOG_FIRST_APPLICATION}" else ""
+    }
+
+    private fun loggedBy(line: String, uid: Int): Boolean {
+        if (line.startsWith(LOG_BUFFER_BANNER)) {
+            return true
+        }
+        val open = line.indexOf('(')
+        val colon = if (open < 0) -1 else line.indexOf(':', open + 1)
+        if (colon < 0) {
+            return false
+        }
+        val who = line.substring(open + 1, colon).trim()
+        return who == uid.toString() || who == ownerName(uid)
     }
 
     private fun uidOf(named: String): Int {
@@ -9943,9 +9987,7 @@ class BuilderActivity : Activity() {
             results.addView(notice(getString(R.string.omni_log_apps_none), palette.warning))
             return
         }
-        val named = listOf(getString(R.string.omni_log_apps_any)) +
-            apps.map { it.first + "  \u00b7  " + it.second }
-        pickOne(getString(R.string.omni_log_apps), named) { which ->
+        pickAnApp(apps) { which ->
             if (which == 0) {
                 logPackage = ""
                 logPackageShown = ""
@@ -9993,9 +10035,143 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private fun pickAnApp(apps: List<Pair<String, String>>, onPick: (Int) -> Unit) {
+        lateinit var shown: AlertDialog
+        val rows = mutableListOf<Pair<View, String>>()
+        val icons = mutableListOf<Pair<ImageView, String>>()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val choices = listOf(getString(R.string.omni_log_apps_any) to "") + apps
+        choices.forEachIndexed { at, (label, named) ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = gap(12)
+                setPadding(gap(2), gap(1), gap(2), gap(1))
+                isClickable = true
+                isFocusable = true
+                readAs(Button::class.java.name)
+                contentDescription = label
+                background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
+                setOnClickListener {
+                    shown.dismiss()
+                    onPick(at)
+                }
+            }
+            if (named.isEmpty()) {
+                row.addView(
+                    View(this).apply { foreground = Mark(Mark.Shape.DROID, palette.accent) },
+                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                )
+            } else {
+                val icon = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+                icons.add(icon to named)
+                row.addView(
+                    icon,
+                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                )
+            }
+            row.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = label
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                        }
+                    )
+                    if (named.isNotEmpty()) {
+                        addView(
+                            TextView(context).apply {
+                                text = named
+                                setTextColor(palette.muted)
+                                typeface = Type.data
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                maxLines = 1
+                                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                            }
+                        )
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            rows.add(row to (label + " " + named).lowercase(Locale.getDefault()))
+            list.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        val holder = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(
+                EditText(context).apply {
+                    hint = getString(R.string.omni_log_apps_find)
+                    setHintTextColor(palette.muted)
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    isSingleLine = true
+                    background = sheet(palette.raised, palette.divider)
+                    setPadding(gap(3), gap(2), gap(3), gap(2))
+                    addTextChangedListener(object : TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                        override fun afterTextChanged(s: Editable?) {
+                            val wanted = s?.toString().orEmpty().trim().lowercase(Locale.getDefault())
+                            rows.forEachIndexed { at, (row, known) ->
+                                row.visibility = if (at == 0 || wanted.isEmpty() || known.contains(wanted)) {
+                                    View.VISIBLE
+                                } else {
+                                    View.GONE
+                                }
+                            }
+                        }
+                    })
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = gap(2) },
+            )
+            addView(list)
+        }
+        shown = dialogShell(
+            getString(R.string.omni_log_apps),
+            holder,
+            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+        )
+        Thread {
+            icons.forEach { (view, named) ->
+                val drawn = runCatching { packageManager.getApplicationIcon(named) }.getOrNull()
+                    ?: return@forEach
+                runOnUiThread { view.setImageDrawable(drawn) }
+            }
+        }.start()
+    }
+
+    private fun developerOptionsOn(): Boolean = runCatching {
+        Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) != 0
+    }.getOrDefault(true)
+
     private fun openDeveloperOptions() {
+        if (!developerOptionsOn()) {
+            dialogShell(
+                getString(R.string.omni_log_developer_off),
+                body(getString(R.string.omni_log_developer_off_note)),
+                listOf(
+                    getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                    getString(R.string.omni_log_developer_about) to { it: AlertDialog ->
+                        it.dismiss()
+                        hand(
+                            Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    },
+                ),
+            )
+            return
+        }
+        val pointed = Bundle().apply { putString(SETTINGS_HIGHLIGHT, WIRELESS_DEBUGGING_KEY) }
         hand(
             Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                .putExtra(SETTINGS_HIGHLIGHT, WIRELESS_DEBUGGING_KEY)
+                .putExtra(SETTINGS_ARGUMENTS, pointed)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
     }
@@ -10141,6 +10317,7 @@ class BuilderActivity : Activity() {
         logRefused = ""
         logReading = true
         val spoken = logCommand()
+        val owner = if (spoken.contains(LOG_OWNER_FORMAT)) uidOf(logPackage) else -1
         Thread {
             val reading = runCatching {
                 ProcessBuilder(spoken).redirectErrorStream(true).start()
@@ -10160,6 +10337,9 @@ class BuilderActivity : Activity() {
                 reading.inputStream.bufferedReader().use { reader ->
                     while (logReading) {
                         val line = reader.readLine() ?: break
+                        if (owner > 0 && !loggedBy(line, owner)) {
+                            continue
+                        }
                         synchronized(logHeld) {
                             logHeld.addLast(line)
                             while (logHeld.size > LOG_HELD) {
@@ -13413,6 +13593,23 @@ class BuilderActivity : Activity() {
                 },
             )
         }
+        if (!reading) {
+            bound.addView(rule(), MATCH_PARENT, 1)
+            bound.addView(
+                factRow(
+                    getString(R.string.omni_log_wireless),
+                    getString(
+                        if (developerOptionsOn()) {
+                            R.string.omni_log_wireless_open
+                        } else {
+                            R.string.omni_log_developer_off
+                        }
+                    ),
+                    Mark.Shape.LINK,
+                    R.string.omni_log_wireless,
+                ) { openDeveloperOptions() }
+            )
+        }
         content.addView(bound)
 
         content.addView(
@@ -13513,6 +13710,27 @@ class BuilderActivity : Activity() {
                 Mark.Shape.DROID,
                 R.string.omni_log_apps,
             ) { chooseTheLoggedApp() }
+        )
+        sieve.addView(
+            factRow(
+                getString(R.string.omni_log_crashes),
+                getString(
+                    if (logCrashes) {
+                        R.string.omni_log_crashes_on
+                    } else {
+                        R.string.omni_log_crashes_off
+                    }
+                ),
+                Mark.Shape.INFO,
+                R.string.omni_log_crashes,
+            ) {
+                logCrashes = !logCrashes
+                if (logReading) {
+                    stopTheLog()
+                    startTheLog()
+                }
+                render(false)
+            }
         )
         sieve.addView(
             quiet(logCommand().joinToString(" "))

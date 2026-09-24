@@ -475,6 +475,15 @@
     <string name="omni_log_apps">앱</string>
     <string name="omni_log_apps_any">이 기기의 모든 것</string>
     <string name="omni_log_apps_none">앱을 하나도 나열하지 못했습니다.</string>
+    <string name="omni_log_apps_find">앱 찾기</string>
+    <string name="omni_log_wireless">무선 디버깅</string>
+    <string name="omni_log_wireless_open">개발자 옵션에서 스위치 열기</string>
+    <string name="omni_log_developer_off">개발자 옵션이 꺼져 있습니다</string>
+    <string name="omni_log_developer_off_note">휴대전화 정보를 열고 빌드 번호를 일곱 번 누르세요. 그러면 설정에 개발자 옵션이 나타나고, 그 안에 무선 디버깅이 있습니다.</string>
+    <string name="omni_log_developer_about">휴대전화 정보 열기</string>
+    <string name="omni_log_crashes">비정상 종료만</string>
+    <string name="omni_log_crashes_on">비정상 종료 버퍼: 무엇이 멈췄고 왜 멈췄는지</string>
+    <string name="omni_log_crashes_off">모든 메시지</string>
     <string name="omni_log_written">기록 출력</string>
     <string name="omni_log_empty_note">기록을 읽기 시작하려면 시작을 누르십시오.</string>
     <string name="omni_log_about">기록에 대하여</string>

@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Applicazione</string>
     <string name="omni_log_apps_any">Tutto su questo dispositivo</string>
     <string name="omni_log_apps_none">Non si è potuto elencare nessuna applicazione.</string>
+    <string name="omni_log_apps_find">Cerca un\'applicazione</string>
+    <string name="omni_log_wireless">Debug wireless</string>
+    <string name="omni_log_wireless_open">Apri il suo interruttore nelle Opzioni sviluppatore</string>
+    <string name="omni_log_developer_off">Le opzioni sviluppatore sono disattivate</string>
+    <string name="omni_log_developer_off_note">Apri Informazioni sul telefono e tocca sette volte Numero build. Le Opzioni sviluppatore compaiono allora nelle Impostazioni, e il Debug wireless è al loro interno.</string>
+    <string name="omni_log_developer_about">Apri Informazioni sul telefono</string>
+    <string name="omni_log_crashes">Solo arresti anomali</string>
+    <string name="omni_log_crashes_on">Il buffer degli arresti: cosa si è fermato e perché</string>
+    <string name="omni_log_crashes_off">Ogni messaggio</string>
     <string name="omni_log_written">Uscita del registro</string>
     <string name="omni_log_empty_note">Tocca Avvia per cominciare a leggere il registro.</string>
     <string name="omni_log_about">Sul registro</string>

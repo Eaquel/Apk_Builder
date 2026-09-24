@@ -475,6 +475,15 @@
     <string name="omni_log_apps">アプリ</string>
     <string name="omni_log_apps_any">この端末のすべて</string>
     <string name="omni_log_apps_none">アプリを一覧できませんでした。</string>
+    <string name="omni_log_apps_find">アプリを探す</string>
+    <string name="omni_log_wireless">ワイヤレス デバッグ</string>
+    <string name="omni_log_wireless_open">開発者向けオプションでスイッチを開く</string>
+    <string name="omni_log_developer_off">開発者向けオプションがオフです</string>
+    <string name="omni_log_developer_off_note">「デバイス情報」を開き、「ビルド番号」を 7 回タップしてください。設定に開発者向けオプションが現れ、その中にワイヤレス デバッグがあります。</string>
+    <string name="omni_log_developer_about">「デバイス情報」を開く</string>
+    <string name="omni_log_crashes">クラッシュのみ</string>
+    <string name="omni_log_crashes_on">クラッシュ バッファ: 何が止まり、なぜか</string>
+    <string name="omni_log_crashes_off">すべてのメッセージ</string>
     <string name="omni_log_written">ログの出力</string>
     <string name="omni_log_empty_note">記録を読みはじめるには「開始」に触れてください。</string>
     <string name="omni_log_about">ログについて</string>

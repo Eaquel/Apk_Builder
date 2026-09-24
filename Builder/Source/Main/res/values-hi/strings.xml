@@ -475,6 +475,15 @@
     <string name="omni_log_apps">ऐप्लिकेशन</string>
     <string name="omni_log_apps_any">इस उपकरण पर सब कुछ</string>
     <string name="omni_log_apps_none">कोई ऐप्लिकेशन सूचीबद्ध नहीं हो सका।</string>
+    <string name="omni_log_apps_find">ऐप खोजें</string>
+    <string name="omni_log_wireless">वायरलेस डीबगिंग</string>
+    <string name="omni_log_wireless_open">डेवलपर विकल्पों में इसका स्विच खोलें</string>
+    <string name="omni_log_developer_off">डेवलपर विकल्प बंद हैं</string>
+    <string name="omni_log_developer_off_note">फ़ोन के बारे में खोलें और बिल्ड नंबर पर सात बार टैप करें। इसके बाद सेटिंग में डेवलपर विकल्प दिखते हैं, और वायरलेस डीबगिंग उन्हीं में है।</string>
+    <string name="omni_log_developer_about">फ़ोन के बारे में खोलें</string>
+    <string name="omni_log_crashes">सिर्फ़ क्रैश</string>
+    <string name="omni_log_crashes_on">क्रैश बफ़र: क्या रुका और क्यों</string>
+    <string name="omni_log_crashes_off">हर संदेश</string>
     <string name="omni_log_written">लॉग का लेखा</string>
     <string name="omni_log_empty_note">लॉग पढ़ना शुरू करने के लिए शुरू दबाइए।</string>
     <string name="omni_log_about">लॉग के बारे में</string>

@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Aplikasi</string>
     <string name="omni_log_apps_any">Semua di perangkat ini</string>
     <string name="omni_log_apps_none">Tidak ada aplikasi yang bisa didaftar.</string>
+    <string name="omni_log_apps_find">Cari aplikasi</string>
+    <string name="omni_log_wireless">Proses debug nirkabel</string>
+    <string name="omni_log_wireless_open">Buka tombolnya di Opsi developer</string>
+    <string name="omni_log_developer_off">Opsi developer nonaktif</string>
+    <string name="omni_log_developer_off_note">Buka Tentang ponsel dan ketuk Nomor build tujuh kali. Opsi developer lalu muncul di Setelan, dan Proses debug nirkabel ada di dalamnya.</string>
+    <string name="omni_log_developer_about">Buka Tentang ponsel</string>
+    <string name="omni_log_crashes">Hanya error</string>
+    <string name="omni_log_crashes_on">Buffer error: apa yang berhenti, dan mengapa</string>
+    <string name="omni_log_crashes_off">Semua pesan</string>
     <string name="omni_log_written">Keluaran catatan</string>
     <string name="omni_log_empty_note">Ketuk Mulai untuk mulai membaca log.</string>
     <string name="omni_log_about">Tentang catatan</string>

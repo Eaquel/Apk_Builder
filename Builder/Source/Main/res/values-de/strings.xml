@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Anwendung</string>
     <string name="omni_log_apps_any">Alles auf diesem Gerät</string>
     <string name="omni_log_apps_none">Es ließ sich keine Anwendung auflisten.</string>
+    <string name="omni_log_apps_find">Anwendung suchen</string>
+    <string name="omni_log_wireless">Kabelloses Debugging</string>
+    <string name="omni_log_wireless_open">Den Schalter in den Entwickleroptionen öffnen</string>
+    <string name="omni_log_developer_off">Entwickleroptionen sind aus</string>
+    <string name="omni_log_developer_off_note">Öffnen Sie „Über das Telefon“ und tippen Sie siebenmal auf „Build-Nummer“. Danach erscheinen die Entwickleroptionen in den Einstellungen, und dort ist das kabellose Debugging.</string>
+    <string name="omni_log_developer_about">„Über das Telefon“ öffnen</string>
+    <string name="omni_log_crashes">Nur Abstürze</string>
+    <string name="omni_log_crashes_on">Der Absturzpuffer: was angehalten hat und warum</string>
+    <string name="omni_log_crashes_off">Jede Meldung</string>
     <string name="omni_log_written">Protokollausgabe</string>
     <string name="omni_log_empty_note">Tippe auf Starten, um das Protokoll zu lesen.</string>
     <string name="omni_log_about">Über das Protokoll</string>

@@ -475,6 +475,15 @@
     <string name="omni_log_apps">应用</string>
     <string name="omni_log_apps_any">这台设备上的一切</string>
     <string name="omni_log_apps_none">没能列出任何应用。</string>
+    <string name="omni_log_apps_find">查找应用</string>
+    <string name="omni_log_wireless">无线调试</string>
+    <string name="omni_log_wireless_open">在开发者选项中打开它的开关</string>
+    <string name="omni_log_developer_off">开发者选项已关闭</string>
+    <string name="omni_log_developer_off_note">打开“关于手机”，连续点按“版本号”七次。之后“设置”中会出现开发者选项，无线调试就在其中。</string>
+    <string name="omni_log_developer_about">打开“关于手机”</string>
+    <string name="omni_log_crashes">仅崩溃</string>
+    <string name="omni_log_crashes_on">崩溃缓冲区：什么停止了，以及原因</string>
+    <string name="omni_log_crashes_off">所有消息</string>
     <string name="omni_log_written">日志输出</string>
     <string name="omni_log_empty_note">点按“开始”以读取日志。</string>
     <string name="omni_log_about">关于日志</string>

@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Uygulama</string>
     <string name="omni_log_apps_any">Bu cihazdaki her şey</string>
     <string name="omni_log_apps_none">Hiçbir uygulama sayılamadı.</string>
+    <string name="omni_log_apps_find">Uygulama ara</string>
+    <string name="omni_log_wireless">Kablosuz hata ayıklama</string>
+    <string name="omni_log_wireless_open">Geliştirici seçeneklerindeki anahtarını aç</string>
+    <string name="omni_log_developer_off">Geliştirici seçenekleri kapalı</string>
+    <string name="omni_log_developer_off_note">Telefon hakkında bölümünü açın ve Derleme numarasına yedi kez dokunun. Ardından Ayarlar\'da Geliştirici seçenekleri görünür; Kablosuz hata ayıklama onun içindedir.</string>
+    <string name="omni_log_developer_about">Telefon hakkında\'yı aç</string>
+    <string name="omni_log_crashes">Yalnızca çökmeler</string>
+    <string name="omni_log_crashes_on">Çökme arabelleği: ne durdu ve neden</string>
+    <string name="omni_log_crashes_off">Her ileti</string>
     <string name="omni_log_written">Logcat Çıktısı</string>
     <string name="omni_log_empty_note">Logcat\'i başlatmak için \'Başlat\' düğmesine tıklayın.</string>
     <string name="omni_log_about">Logcat Hakkında</string>

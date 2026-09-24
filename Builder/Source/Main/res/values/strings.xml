@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Application</string>
     <string name="omni_log_apps_any">Anything on this device</string>
     <string name="omni_log_apps_none">No application could be listed.</string>
+    <string name="omni_log_apps_find">Find an application</string>
+    <string name="omni_log_wireless">Wireless debugging</string>
+    <string name="omni_log_wireless_open">Open its switch in Developer options</string>
+    <string name="omni_log_developer_off">Developer options are off</string>
+    <string name="omni_log_developer_off_note">Open About phone and tap Build number seven times. Developer options then appear in Settings, and Wireless debugging is inside them.</string>
+    <string name="omni_log_developer_about">Open About phone</string>
+    <string name="omni_log_crashes">Only crashes</string>
+    <string name="omni_log_crashes_on">The crash buffer: what stopped, and why</string>
+    <string name="omni_log_crashes_off">Every message</string>
     <string name="omni_log_written">Log output</string>
     <string name="omni_log_empty_note">Tap Start to begin reading the log.</string>
     <string name="omni_log_about">About the log</string>

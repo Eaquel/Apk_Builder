@@ -475,6 +475,15 @@
     <string name="omni_log_apps">Aplicación</string>
     <string name="omni_log_apps_any">Todo lo de este dispositivo</string>
     <string name="omni_log_apps_none">No se pudo listar ninguna aplicación.</string>
+    <string name="omni_log_apps_find">Buscar una aplicación</string>
+    <string name="omni_log_wireless">Depuración inalámbrica</string>
+    <string name="omni_log_wireless_open">Abrir su interruptor en Opciones para desarrolladores</string>
+    <string name="omni_log_developer_off">Las opciones para desarrolladores están desactivadas</string>
+    <string name="omni_log_developer_off_note">Abra Información del teléfono y toque Número de compilación siete veces. Entonces aparecen las Opciones para desarrolladores en Ajustes, y dentro está la Depuración inalámbrica.</string>
+    <string name="omni_log_developer_about">Abrir Información del teléfono</string>
+    <string name="omni_log_crashes">Solo fallos</string>
+    <string name="omni_log_crashes_on">El búfer de fallos: qué se detuvo y por qué</string>
+    <string name="omni_log_crashes_off">Todos los mensajes</string>
     <string name="omni_log_written">Salida del registro</string>
     <string name="omni_log_empty_note">Toca Iniciar para empezar a leer el registro.</string>
     <string name="omni_log_about">Sobre el registro</string>

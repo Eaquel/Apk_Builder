@@ -475,6 +475,15 @@
     <string name="omni_log_apps">التطبيق</string>
     <string name="omni_log_apps_any">كل شيء على هذا الجهاز</string>
     <string name="omni_log_apps_none">تعذر سرد أي تطبيق.</string>
+    <string name="omni_log_apps_find">ابحث عن تطبيق</string>
+    <string name="omni_log_wireless">تصحيح الأخطاء اللاسلكي</string>
+    <string name="omni_log_wireless_open">افتح مفتاحه في خيارات المطوّرين</string>
+    <string name="omni_log_developer_off">خيارات المطوّرين مغلقة</string>
+    <string name="omni_log_developer_off_note">افتح «لمحة عن الهاتف» واضغط على «رقم الإصدار» سبع مرات. بعدها تظهر خيارات المطوّرين في الإعدادات، وفيها تصحيح الأخطاء اللاسلكي.</string>
+    <string name="omni_log_developer_about">افتح «لمحة عن الهاتف»</string>
+    <string name="omni_log_crashes">الأعطال فقط</string>
+    <string name="omni_log_crashes_on">مخزن الأعطال: ما الذي توقف ولماذا</string>
+    <string name="omni_log_crashes_off">كل الرسائل</string>
     <string name="omni_log_written">مخرجات السجل</string>
     <string name="omni_log_empty_note">المس ابدأ لتبدأ قراءة السجلّ.</string>
     <string name="omni_log_about">عن السجل</string>
