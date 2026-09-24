@@ -126,6 +126,7 @@ import java.nio.file.attribute.PosixFilePermission
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
+import java.util.GregorianCalendar
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
@@ -3284,7 +3285,9 @@ private sealed interface Screen {
 
     data object HelpFaq : Screen
 
-    data class Legal(val terms: Boolean) : Screen
+    data class Legal(val kind: Int) : Screen
+
+    data object Developer : Screen
 }
 
 class BuilderActivity : Activity() {
@@ -3573,6 +3576,20 @@ class BuilderActivity : Activity() {
         const val WATCH_CODE_MILLIS = 1_200L
 
         const val OFFER_MILLIS = 220L
+
+        const val LEGAL_POLICY = 0
+
+        const val LEGAL_TERMS = 1
+
+        const val LEGAL_RIGHTS = 2
+
+        const val LEGAL_YEAR = 2026
+
+        const val LEGAL_MONTH = 8
+
+        const val LEGAL_DAY = 24
+
+        const val DEVELOPER_PAGE = "https://github.com/Eaquel"
 
         const val OFFER_LEAST = 2
 
@@ -4344,7 +4361,8 @@ class BuilderActivity : Activity() {
             is Screen.Feedback -> renderFeedback()
             is Screen.Rate -> renderRate()
             is Screen.About -> renderAbout()
-            is Screen.Legal -> renderLegal(here.terms)
+            is Screen.Legal -> renderLegal(here.kind)
+            is Screen.Developer -> renderDeveloper()
             is Screen.Help -> renderHelp()
             is Screen.HelpAdb -> renderHelpAdb()
             is Screen.HelpTalk -> renderHelpTalk()
@@ -4434,6 +4452,7 @@ class BuilderActivity : Activity() {
             is Screen.Keys -> go(keysCameFrom ?: Screen.Projects)
             is Screen.NewKey -> go(Screen.Keys)
             is Screen.Legal -> go(Screen.About)
+            is Screen.Developer -> go(Screen.About)
             else -> go(Screen.Projects)
         }
     }
@@ -4516,8 +4535,12 @@ class BuilderActivity : Activity() {
             is Screen.NewKey -> R.string.omni_keys_new
             is Screen.Trash -> R.string.omni_trash_title
             is Screen.Build -> R.string.omni_tab_build
-            is Screen.Legal ->
-                if (here.terms) R.string.omni_about_terms else R.string.omni_about_policy
+            is Screen.Legal -> when (here.kind) {
+                LEGAL_TERMS -> R.string.omni_about_terms
+                LEGAL_RIGHTS -> R.string.omni_about_rights_title
+                else -> R.string.omni_about_policy
+            }
+            is Screen.Developer -> R.string.omni_about_developer
             else -> R.string.omni_brand_note
         }
     )
@@ -6158,42 +6181,90 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun renderLegal(terms: Boolean) {
-        val sections = if (terms) {
-            listOf(
-                R.string.omni_terms_one_head to R.string.omni_terms_one_body,
-                R.string.omni_terms_two_head to R.string.omni_terms_two_body,
-                R.string.omni_terms_three_head to R.string.omni_terms_three_body,
-                R.string.omni_terms_four_head to R.string.omni_terms_four_body,
-                R.string.omni_terms_five_head to R.string.omni_terms_five_body,
-                R.string.omni_terms_six_head to R.string.omni_terms_six_body,
+    private fun legalSections(kind: Int): List<Pair<Int, Int>> = when (kind) {
+        LEGAL_TERMS -> listOf(
+            R.string.omni_terms_one_head to R.string.omni_terms_one_body,
+            R.string.omni_terms_two_head to R.string.omni_terms_two_body,
+            R.string.omni_terms_three_head to R.string.omni_terms_three_body,
+            R.string.omni_terms_four_head to R.string.omni_terms_four_body,
+            R.string.omni_terms_five_head to R.string.omni_terms_five_body,
+            R.string.omni_terms_six_head to R.string.omni_terms_six_body,
+            R.string.omni_terms_seven_head to R.string.omni_terms_seven_body,
+            R.string.omni_terms_eight_head to R.string.omni_terms_eight_body,
+            R.string.omni_terms_nine_head to R.string.omni_terms_nine_body,
+            R.string.omni_terms_ten_head to R.string.omni_terms_ten_body,
+        )
+        LEGAL_RIGHTS -> listOf(
+            R.string.omni_rights_one_head to R.string.omni_rights_one_body,
+            R.string.omni_rights_two_head to R.string.omni_rights_two_body,
+            R.string.omni_rights_three_head to R.string.omni_rights_three_body,
+            R.string.omni_rights_four_head to R.string.omni_rights_four_body,
+            R.string.omni_rights_five_head to R.string.omni_rights_five_body,
+        )
+        else -> listOf(
+            R.string.omni_policy_one_head to R.string.omni_policy_one_body,
+            R.string.omni_policy_two_head to R.string.omni_policy_two_body,
+            R.string.omni_policy_three_head to R.string.omni_policy_three_body,
+            R.string.omni_policy_four_head to R.string.omni_policy_four_body,
+            R.string.omni_policy_five_head to R.string.omni_policy_five_body,
+            R.string.omni_policy_six_head to R.string.omni_policy_six_body,
+            R.string.omni_policy_seven_head to R.string.omni_policy_seven_body,
+            R.string.omni_policy_eight_head to R.string.omni_policy_eight_body,
+            R.string.omni_policy_nine_head to R.string.omni_policy_nine_body,
+            R.string.omni_policy_ten_head to R.string.omni_policy_ten_body,
+        )
+    }
+
+    private fun legalDate(): String {
+        val spoken = resources.configuration.locales.get(0) ?: Locale.getDefault()
+        val day = GregorianCalendar(LEGAL_YEAR, LEGAL_MONTH, LEGAL_DAY).time
+        return java.text.DateFormat.getDateInstance(java.text.DateFormat.LONG, spoken).format(day)
+    }
+
+    private fun renderLegal(kind: Int) {
+        val year = Calendar.getInstance().get(Calendar.YEAR).toString()
+        val (lead, under, summary) = when (kind) {
+            LEGAL_TERMS -> Triple(
+                R.string.omni_about_terms,
+                R.string.omni_about_terms_note,
+                R.string.omni_legal_terms_summary,
             )
-        } else {
-            listOf(
-                R.string.omni_policy_one_head to R.string.omni_policy_one_body,
-                R.string.omni_policy_two_head to R.string.omni_policy_two_body,
-                R.string.omni_policy_three_head to R.string.omni_policy_three_body,
-                R.string.omni_policy_four_head to R.string.omni_policy_four_body,
-                R.string.omni_policy_five_head to R.string.omni_policy_five_body,
-                R.string.omni_policy_six_head to R.string.omni_policy_six_body,
+            LEGAL_RIGHTS -> Triple(
+                R.string.omni_about_rights_title,
+                R.string.omni_about_rights_note,
+                R.string.omni_legal_rights_summary,
+            )
+            else -> Triple(
+                R.string.omni_about_policy,
+                R.string.omni_about_policy_note,
+                R.string.omni_legal_policy_summary,
             )
         }
-        val lead = if (terms) R.string.omni_about_terms else R.string.omni_about_policy
-        val under = if (terms) R.string.omni_about_terms_note else R.string.omni_about_policy_note
+        val (mark, tint) = when (kind) {
+            LEGAL_TERMS -> Mark.Shape.NOTE_FILL to 0xFFB06BFF.toInt()
+            LEGAL_RIGHTS -> Mark.Shape.COPYRIGHT to palette.marker
+            else -> Mark.Shape.SHIELD to palette.accent
+        }
 
         content.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, gap(2), 0, gap(1))
+                setPadding(0, gap(2), 0, gap(2))
                 addView(
-                    View(context).apply {
-                        foreground = Mark(
-                            if (terms) Mark.Shape.NOTE_FILL else Mark.Shape.SHIELD,
-                            if (terms) 0xFFB06BFF.toInt() else palette.accent,
+                    FrameLayout(context).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = gap(4).toFloat()
+                            setColor(Ink.fade(tint, 0.16f))
+                            setStroke(1, Ink.fade(tint, 0.4f))
+                        }
+                        addView(
+                            View(context).apply { foreground = Mark(mark, tint, 1.2f) },
+                            FrameLayout.LayoutParams(gap(8), gap(8), Gravity.CENTER),
                         )
                     },
-                    LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(4) },
+                    LinearLayout.LayoutParams(gap(14), gap(14)).apply { marginEnd = gap(4) },
                 )
                 addView(
                     LinearLayout(context).apply {
@@ -6211,7 +6282,19 @@ class BuilderActivity : Activity() {
                                 text = getString(under)
                                 setTextColor(palette.muted)
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setPadding(0, gap(1) / 2, 0, gap(1))
                             }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.omni_legal_updated, legalDate())
+                                setTextColor(Ink.hot(tint, 0.5f))
+                                typeface = Type.label
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                                setPadding(gap(3), gap(1), gap(3), gap(1))
+                                background = pill(Ink.fade(tint, 0.14f), gap(3).toFloat())
+                            },
+                            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
                         )
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
@@ -6219,7 +6302,38 @@ class BuilderActivity : Activity() {
             }
         )
 
-        sections.forEachIndexed { at, (head, said) ->
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(gap(4), gap(3), gap(4), gap(3))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(3).toFloat()
+                    setColor(Ink.fade(tint, 0.1f))
+                    setStroke(1, Ink.fade(tint, 0.45f))
+                }
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_legal_summary_head)
+                        setTextColor(Ink.hot(tint, 0.35f))
+                        typeface = Type.strong
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(summary)
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setLineSpacing(gap(1).toFloat(), 1f)
+                        setPadding(0, gap(1), 0, 0)
+                    }
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = gap(2) },
+        )
+
+        legalSections(kind).forEachIndexed { at, (head, said) ->
             val block = card()
             block.addView(
                 LinearLayout(this).apply {
@@ -6227,14 +6341,14 @@ class BuilderActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     addView(
                         TextView(context).apply {
-                            text = (at + 1).toString()
-                            setTextColor(palette.marker)
+                            text = String.format(Locale.ROOT, "%02d", at + 1)
+                            setTextColor(tint)
                             typeface = Type.data
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                             gravity = Gravity.CENTER
-                            background = pill(Ink.fade(palette.accent, 0.16f), gap(5) / 2f)
+                            background = pill(Ink.fade(tint, 0.16f), gap(5) / 2f)
                         },
-                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
+                        LinearLayout.LayoutParams(gap(8), gap(7)).apply { marginEnd = gap(3) },
                     )
                     addView(
                         TextView(context).apply {
@@ -6249,24 +6363,182 @@ class BuilderActivity : Activity() {
             )
             block.addView(
                 TextView(this).apply {
-                    text = getString(said)
-                    setTextColor(palette.muted)
+                    text = if (kind == LEGAL_RIGHTS && head == R.string.omni_rights_one_head) {
+                        getString(said, year)
+                    } else {
+                        getString(said)
+                    }
+                    setTextColor(Ink.hot(palette.muted, 0.2f))
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setLineSpacing(gap(3) / 2f, 1f)
+                    setTextIsSelectable(true)
                     setPadding(0, gap(2), 0, gap(2))
                 }
             )
             content.addView(block)
         }
 
+        val reach = card()
+        reach.addView(
+            aboutRow(
+                Mark.Shape.MAIL_FILL,
+                palette.ok,
+                getString(R.string.omni_about_contact),
+                getString(R.string.omni_about_contact_note),
+            ) { go(Screen.Feedback) }
+        )
+        content.addView(reach)
+
+        content.addView(
+            quiet(getString(R.string.omni_legal_stamp, versionShown(), year)).apply {
+                gravity = Gravity.CENTER
+                setPadding(gap(1), gap(3), gap(1), gap(6))
+            }
+        )
+    }
+
+    private fun renderDeveloper() {
+        content.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(gap(4), gap(6), gap(4), gap(5))
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.TL_BR,
+                    intArrayOf(Ink.fade(palette.accent, 0.28f), Ink.fade(0xFFB06BFF.toInt(), 0.18f)),
+                ).apply { cornerRadius = gap(5).toFloat() }
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_about_developer_name).take(1).uppercase(Locale.ROOT)
+                        setTextColor(Color.WHITE)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 34f)
+                        gravity = Gravity.CENTER
+                        background = GradientDrawable(
+                            GradientDrawable.Orientation.TL_BR,
+                            intArrayOf(palette.accent, 0xFFB06BFF.toInt()),
+                        ).apply { shape = GradientDrawable.OVAL }
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(gap(22), gap(22)),
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_about_developer_name)
+                        setTextColor(palette.foreground)
+                        typeface = Type.heading
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                        gravity = Gravity.CENTER
+                        setPadding(0, gap(3), 0, 0)
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_developer_role)
+                        setTextColor(Ink.hot(palette.muted, 0.3f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        gravity = Gravity.CENTER
+                        setPadding(0, gap(1), 0, gap(3))
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_about_version, versionShown())
+                        setTextColor(Ink.hot(palette.accent, 0.66f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                        setPadding(gap(4), gap(3) / 2, gap(4), gap(3) / 2)
+                        background = pill(Ink.fade(palette.accent, 0.15f), gap(3).toFloat())
+                    },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+                )
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = gap(3) },
+        )
+
+        content.addView(heading(getString(R.string.omni_developer_about_head)))
+        val about = card()
+        about.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_developer_about)
+                setTextColor(Ink.hot(palette.muted, 0.2f))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setLineSpacing(gap(3) / 2f, 1f)
+                setPadding(0, gap(1), 0, gap(1))
+            }
+        )
+        content.addView(about)
+
+        content.addView(heading(getString(R.string.omni_developer_work_head)))
+        val work = card()
+        work.addView(
+            grid(
+                2,
+                listOf(
+                    featureCell(
+                        Mark.Shape.BOLT,
+                        R.string.omni_developer_core,
+                        R.string.omni_developer_core_note,
+                        0xFFF08A24.toInt(),
+                    ),
+                    featureCell(
+                        Mark.Shape.CODE,
+                        R.string.omni_developer_face,
+                        R.string.omni_developer_face_note,
+                        0xFFB06BFF.toInt(),
+                    ),
+                    featureCell(
+                        Mark.Shape.PHONE,
+                        R.string.omni_developer_local,
+                        R.string.omni_developer_local_note,
+                        palette.ok,
+                    ),
+                    featureCell(
+                        Mark.Shape.SHIELD,
+                        R.string.omni_developer_free,
+                        R.string.omni_developer_free_note,
+                        palette.accent,
+                    ),
+                ),
+            )
+        )
+        content.addView(work)
+
+        content.addView(heading(getString(R.string.omni_developer_links_head)))
+        val links = card()
+        links.addView(
+            aboutRow(
+                Mark.Shape.WEB,
+                palette.accent,
+                "GitHub",
+                getString(R.string.omni_developer_github_note),
+            ) {
+                hand(
+                    Intent(Intent.ACTION_VIEW, Uri.parse(DEVELOPER_PAGE))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        )
+        links.addView(rule(), MATCH_PARENT, 1)
+        links.addView(
+            aboutRow(
+                Mark.Shape.MAIL_FILL,
+                palette.ok,
+                getString(R.string.omni_feedback_title),
+                getString(R.string.omni_developer_feedback_note),
+            ) { go(Screen.Feedback) }
+        )
+        content.addView(links)
+
         content.addView(
             quiet(
                 getString(
-                    R.string.omni_legal_stamp,
-                    versionShown(),
+                    R.string.omni_about_rights,
                     Calendar.getInstance().get(Calendar.YEAR).toString(),
                 )
-            ).apply { setPadding(gap(1), gap(3), gap(1), gap(6)) }
+            ).apply {
+                gravity = Gravity.CENTER
+                setPadding(gap(1), gap(3), gap(1), gap(6))
+            }
         )
     }
 
@@ -13438,7 +13710,7 @@ class BuilderActivity : Activity() {
                 palette.accent,
                 getString(R.string.omni_about_policy),
                 getString(R.string.omni_about_policy_note),
-            ) { go(Screen.Legal(false)) }
+            ) { go(Screen.Legal(LEGAL_POLICY)) }
         )
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
@@ -13447,7 +13719,7 @@ class BuilderActivity : Activity() {
                 0xFFB06BFF.toInt(),
                 getString(R.string.omni_about_terms),
                 getString(R.string.omni_about_terms_note),
-            ) { go(Screen.Legal(true)) }
+            ) { go(Screen.Legal(LEGAL_TERMS)) }
         )
         rows.addView(rule(), MATCH_PARENT, 1)
         rows.addView(
@@ -13467,7 +13739,7 @@ class BuilderActivity : Activity() {
                 palette.warning,
                 getString(R.string.omni_about_developer),
                 getString(R.string.omni_about_developer_name),
-            ) { go(Screen.Help) }
+            ) { go(Screen.Developer) }
         )
         who.addView(rule(), MATCH_PARENT, 1)
         who.addView(
@@ -13479,7 +13751,7 @@ class BuilderActivity : Activity() {
                     R.string.omni_about_rights,
                     Calendar.getInstance().get(Calendar.YEAR).toString(),
                 ),
-            ) { go(Screen.Legal(true)) }
+            ) { go(Screen.Legal(LEGAL_RIGHTS)) }
         )
         content.addView(who)
 
