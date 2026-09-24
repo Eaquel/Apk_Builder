@@ -5374,10 +5374,12 @@ impl Classpath {
                 .with_suggestion("A dependency is a jar, which is a zip of class files."));
         };
         let mut learned = 0usize;
+        let mut offered = 0usize;
         for entry in archive.entries() {
             if entry.is_directory() || !entry.name.ends_with(".class") {
                 continue;
             }
+            offered += 1;
             let from = entry.data_offset as usize;
             let to = from.saturating_add(entry.compressed_size as usize);
             let Some(held) = bytes.get(from..to) else {
@@ -5399,7 +5401,7 @@ impl Classpath {
                 learned += 1;
             }
         }
-        if learned == 0 {
+        if learned == 0 && offered > 0 {
             return Err(at("EJ255", 1, 1, "That archive holds no class files.")
                 .with_suggestion("A dependency is a jar, which is a zip of class files."));
         }
@@ -19025,6 +19027,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
             let Some(known) = classpath.get(owner) else {
                 continue;
             };
+            let seen = classpath.seen_from_within(&unit.internal_name(), &[], owner, 0);
             for candidate in &known.methods {
                 if candidate.name != method.name
                     || candidate.static_
@@ -19036,11 +19039,31 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     continue;
                 }
 
+                let variable = |at: usize, theirs: &Type, ours: &Type| match candidate
+                    .taken_stands_for
+                    .get(at)
+                {
+                    None => candidate.taken_stands_for.is_empty(),
+                    Some(Standing::OfTheMethod(_)) => true,
+                    Some(standing @ (Standing::OfTheClass(_) | Standing::ArrayOf(_))) => {
+                        match &seen {
+                            Some(arguments) => standing.filled(theirs, arguments, &[]) == *ours,
+                            None => true,
+                        }
+                    }
+                    Some(_) => false,
+                };
                 let fits = candidate
                     .parameters
                     .iter()
                     .zip(&parameters)
-                    .all(|(theirs, ours)| theirs.is_reference() && ours.is_reference())
+                    .enumerate()
+                    .all(|(at, (theirs, ours))| {
+                        theirs == ours
+                            || (theirs.is_reference()
+                                && ours.is_reference()
+                                && variable(at, theirs, ours))
+                    })
                     && (returns == candidate.returns
                         || (returns.is_reference() && candidate.returns.is_reference()));
                 if !fits {

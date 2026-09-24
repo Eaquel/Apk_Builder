@@ -9053,7 +9053,9 @@ pub mod xml {
         }
 
         fn starts_with(&self, prefix: &str) -> bool {
-            self.source[self.offset..].starts_with(prefix)
+            self.text
+                .get(self.offset..)
+                .is_some_and(|rest| rest.starts_with(prefix.as_bytes()))
         }
 
         fn advance(&mut self) -> Option<u8> {
@@ -9523,10 +9525,12 @@ pub mod xml {
                         }
                     }
                 }
-                let raw = &self.source[start..self.offset];
+                let raw = self.source[start..self.offset]
+                    .replace("\r\n", " ")
+                    .replace(['\r', '\n', '\t'], " ");
                 self.advance();
 
-                let value = self.decode(raw, at, sink)?;
+                let value = self.decode(&raw, at, sink)?;
 
                 if attributes
                     .iter()
@@ -10506,13 +10510,30 @@ pub mod resources {
                 None => (body, false),
             };
 
-            let (package, rest) = match body.split_once(':') {
-                Some((package, rest)) if !package.is_empty() => (Some(package.to_string()), rest),
-                Some(_) => return None,
-                None => (None, body),
+            let slash = body.find('/');
+            let colon = body.find(':');
+            let (package, kind_name, name) = match (slash, colon) {
+                (Some(slash), Some(colon)) if slash < colon => {
+                    let (kind_name, rest) = body.split_at(slash);
+                    let (package, name) = rest[1..].split_once(':')?;
+                    if package.is_empty() {
+                        return None;
+                    }
+                    (Some(package.to_string()), kind_name, name)
+                }
+                (_, Some(_)) => {
+                    let (package, rest) = body.split_once(':')?;
+                    if package.is_empty() {
+                        return None;
+                    }
+                    let (kind_name, name) = rest.split_once('/')?;
+                    (Some(package.to_string()), kind_name, name)
+                }
+                (_, None) => {
+                    let (kind_name, name) = body.split_once('/')?;
+                    (None, kind_name, name)
+                }
             };
-
-            let (kind_name, name) = rest.split_once('/')?;
             let kind = Kind::parse(kind_name)?;
             if name.is_empty() {
                 return None;
@@ -10764,6 +10785,61 @@ pub mod resources {
         package_id: u8,
         entries: Vec<Entry>,
         styleables: Vec<Styleable>,
+
+        macros: Vec<(String, String)>,
+    }
+
+    pub const MACRO: &str = "macro";
+
+    pub const MACRO_REFERENCE: &str = "@macro/";
+
+    pub const MACRO_DEPTH: usize = 16;
+
+    pub fn macros_in(text: &str) -> Vec<(String, String)> {
+        let mut sink = Sink::new();
+        let Some(root) = xml::parse(text, "", &mut sink) else {
+            return Vec::new();
+        };
+        root.children_named(MACRO)
+            .filter_map(|held| {
+                let name = held.attribute("name")?.trim().to_string();
+                Some((name, held.text.trim().to_string()))
+            })
+            .collect()
+    }
+
+    fn macro_expanded(value: &str, macros: &[(String, String)]) -> Option<String> {
+        let mut now = value.trim().to_string();
+        let mut changed = false;
+        for _ in 0..MACRO_DEPTH {
+            let Some(name) = now.strip_prefix(MACRO_REFERENCE) else {
+                break;
+            };
+            let name = name.rsplit(':').next().unwrap_or(name);
+            let (_, held) = macros.iter().find(|(named, _)| named == name)?;
+            now = held.clone();
+            changed = true;
+        }
+        changed.then_some(now)
+    }
+
+    pub fn expand_macros(element: &mut Element, macros: &[(String, String)]) {
+        if macros.is_empty() {
+            return;
+        }
+        for attribute in &mut element.attributes {
+            if let Some(held) = macro_expanded(&attribute.value, macros) {
+                attribute.value = held;
+            }
+        }
+        if element.children.is_empty() {
+            if let Some(held) = macro_expanded(&element.text, macros) {
+                element.text = held;
+            }
+        }
+        for child in &mut element.children {
+            expand_macros(child, macros);
+        }
     }
 
     impl Table {
@@ -10776,6 +10852,15 @@ pub mod resources {
                 package_id,
                 entries: Vec::new(),
                 styleables: Vec::new(),
+                macros: Vec::new(),
+            }
+        }
+
+        pub fn know_macros(&mut self, macros: &[(String, String)]) {
+            for (name, held) in macros {
+                if !self.macros.iter().any(|(named, _)| named == name) {
+                    self.macros.push((name.clone(), held.clone()));
+                }
             }
         }
 
@@ -10884,9 +10969,10 @@ pub mod resources {
             config: Config,
             sink: &mut Sink,
         ) -> bool {
-            let Some(root) = xml::parse(text, origin, sink) else {
+            let Some(mut root) = xml::parse(text, origin, sink) else {
                 return false;
             };
+            expand_macros(&mut root, &self.macros);
 
             if root.name != "resources" {
                 sink.emit(
@@ -10904,7 +10990,7 @@ pub mod resources {
 
             let mut ok = true;
             for child in &root.children {
-                if child.name == "skip" || child.name == "eat-comment" {
+                if child.name == "skip" || child.name == "eat-comment" || child.name == MACRO {
                     continue;
                 }
                 ok &= self.read_entry(child, origin, config, sink);
@@ -11192,6 +11278,9 @@ pub mod resources {
 
             let mut attributes: Vec<StyleableAttribute> = Vec::new();
             for child in &element.children {
+                if child.name == "eat-comment" || child.name == "skip" {
+                    continue;
+                }
                 if child.name != "attr" {
                     sink.emit(
                         self.problem(
@@ -11275,26 +11364,8 @@ pub mod resources {
                 }
 
                 let declares = child.attribute("format").is_some() || !child.children.is_empty();
-                if declares {
-                    if platform {
-                        sink.emit(
-                            self.problem(
-                                "E9075",
-                                "That attribute is the framework's to declare.",
-                                origin,
-                                child.position,
-                            )
-                            .with_context(format!("Reference: {written}"))
-                            .with_suggestion(
-                                "Name it without a format to read it; what it accepts \
-                                 is what the framework says it accepts.",
-                            ),
-                        );
-                        return false;
-                    }
-                    if !self.read_attr(local, child, origin, config, sink) {
-                        return false;
-                    }
+                if declares && !platform && !self.read_attr(local, child, origin, config, sink) {
+                    return false;
                 }
 
                 attributes.push(StyleableAttribute {
@@ -11953,6 +12024,13 @@ pub mod resources {
     ) -> Option<Value> {
         let trimmed = text.trim();
 
+        if trimmed == "@null" || trimmed == "@empty" {
+            return Some(Value::Typed {
+                source: trimmed.to_string(),
+                as_what: if trimmed == "@null" { 0x01 } else { 0x00 },
+                data: u32::from(trimmed == "@empty"),
+            });
+        }
         if trimmed.starts_with('@') {
             let Some(reference) = Reference::parse(trimmed) else {
                 sink.emit(
@@ -11987,6 +12065,15 @@ pub mod resources {
             }
             Kind::Dimension => match parse_dimension(trimmed) {
                 Ok((milli, unit)) => Some(Value::Dimension { milli, unit }),
+                Err(_) if parse_fraction(trimmed).is_ok() => {
+                    let (milli, of_parent) = parse_fraction(trimmed).ok()?;
+                    Some(Value::Fraction { milli, of_parent })
+                }
+                Err(_) if trimmed.parse::<f32>().is_ok_and(f32::is_finite) => Some(Value::Typed {
+                    source: trimmed.to_string(),
+                    as_what: 0x04,
+                    data: trimmed.parse::<f32>().ok()?.to_bits(),
+                }),
                 Err(reason) => {
                     sink.emit(reject("E9042", reason, origin, position).with_suggestion(
                         "Dimensions are a number and a unit, for example 16dp or 14sp.",
@@ -12366,7 +12453,12 @@ pub mod resources {
         };
 
         let mut items: Vec<(BagKey, Value)> = Vec::new();
-        for (at, child) in element.children.iter().enumerate() {
+        for (at, child) in element
+            .children
+            .iter()
+            .filter(|child| child.name != "eat-comment" && child.name != "skip")
+            .enumerate()
+        {
             if child.name != "item" {
                 sink.emit(
                     reject(
@@ -12475,6 +12567,7 @@ pub mod resources {
             Some((package, rest)) => (Some(package.to_string()), rest),
             None => (None, named.as_str()),
         };
+        let bare = bare.strip_prefix("style/").unwrap_or(bare);
         Some(Some(Reference {
             package,
             kind: Kind::Style,
@@ -12767,7 +12860,7 @@ pub mod resources {
                     .max(from);
                 out.push(Piece::Text(element.text.get(from..at).unwrap_or("")));
                 from = at;
-                let kept = !child.name.starts_with("xliff:");
+                let kept = !child.name.contains(':');
                 if kept {
                     let mut tag = child.name.clone();
                     for attribute in &child.attributes {
@@ -21275,6 +21368,8 @@ pub mod axml {
 
     pub const OWN_NAMESPACE: &str = "http://schemas.android.com/apk/res-auto";
 
+    pub const TOOLS_NAMESPACE: &str = "http://schemas.android.com/tools";
+
     pub fn framework_attribute(local: &str) -> Option<Says> {
         crate::compilers::android::THE_FRAMEWORK_ATTRIBUTES
             .iter()
@@ -21542,19 +21637,17 @@ pub mod axml {
         }
 
         fn add_other(&mut self, text: &str) {
-            if !self.keyed.iter().any(|held| held == text)
-                && !self.others.iter().any(|held| held == text)
-            {
+            if !self.others.iter().any(|held| held == text) {
                 self.others.push(text.to_string());
             }
         }
 
         fn index_of(&self, text: &str) -> Result<u32, Diagnostic> {
-            if let Some(at) = self.keyed.iter().position(|held| held == text) {
-                return Ok(at as u32);
-            }
             if let Some(at) = self.others.iter().position(|held| held == text) {
                 return Ok((self.keyed.len() + at) as u32);
+            }
+            if let Some(at) = self.keyed.iter().position(|held| held == text) {
+                return Ok(at as u32);
             }
             Err(
                 fail("EA001", "A string was not collected before it was written.")
@@ -21624,14 +21717,26 @@ pub mod axml {
         Namespace::None
     }
 
-    fn collect_rest(element: &Element, pool: &mut Pool) -> Result<(), Diagnostic> {
+    fn collect_rest(
+        element: &Element,
+        bound: &[(String, String)],
+        own: &[Declared],
+        pool: &mut Pool,
+    ) -> Result<(), Diagnostic> {
         pool.add_other(&element.name);
         for attribute in &element.attributes {
             let (prefix, local) = split_name(&attribute.name);
             if prefix == Some("xmlns") {
                 continue;
             }
-            pool.add_other(local);
+            let keyed = match which_namespace(prefix, bound) {
+                Namespace::Platform => attribute_id(local).is_some(),
+                Namespace::Own => own.iter().any(|held| held.name == local),
+                Namespace::None => false,
+            };
+            if !keyed {
+                pool.add_other(local);
+            }
 
             if !attribute.value.starts_with(['@', '?'])
                 || matches!(classify(&attribute.value)?, Value::Text)
@@ -21640,7 +21745,7 @@ pub mod axml {
             }
         }
         for child in &element.children {
-            collect_rest(child, pool)?;
+            collect_rest(child, bound, own, pool)?;
         }
         Ok(())
     }
@@ -21769,6 +21874,16 @@ pub mod axml {
             (None, None) => left.1.cmp(right.1),
         });
 
+        let counted_from_one = |wanted: &str, name: &str| -> u16 {
+            attributes
+                .iter()
+                .position(|(uri, local, ..)| *uri == wanted && *local == name)
+                .map_or(0, |at| at as u16 + 1)
+        };
+        let id_index = counted_from_one(bound[0].1.as_str(), "id");
+        let class_index = counted_from_one("", "class");
+        let style_index = counted_from_one("", "style");
+
         let size = 16 + 20 + attributes.len() * 20;
         node_header(out, RES_XML_START_ELEMENT_TYPE, size, line);
         out.extend_from_slice(&NO_ENTRY.to_le_bytes());
@@ -21776,9 +21891,9 @@ pub mod axml {
         out.extend_from_slice(&20u16.to_le_bytes());
         out.extend_from_slice(&20u16.to_le_bytes());
         out.extend_from_slice(&(attributes.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&id_index.to_le_bytes());
+        out.extend_from_slice(&class_index.to_le_bytes());
+        out.extend_from_slice(&style_index.to_le_bytes());
 
         for (uri, local, raw, id, declared) in &attributes {
             let namespace = if uri.is_empty() {
@@ -22294,7 +22409,45 @@ pub mod axml {
         })
     }
 
+    fn without_tools(element: &Element, inherited: &[String]) -> Element {
+        let mut prefixes = inherited.to_vec();
+        for attribute in &element.attributes {
+            if let Some(prefix) = attribute.name.strip_prefix("xmlns:") {
+                if attribute.value == TOOLS_NAMESPACE {
+                    prefixes.push(prefix.to_string());
+                }
+            }
+        }
+        Element {
+            name: element.name.clone(),
+            attributes: element
+                .attributes
+                .iter()
+                .filter(|attribute| {
+                    let (prefix, local) = split_name(&attribute.name);
+                    let named = if prefix == Some("xmlns") {
+                        Some(local)
+                    } else {
+                        prefix
+                    };
+                    !named.is_some_and(|named| prefixes.iter().any(|held| held == named))
+                })
+                .cloned()
+                .collect(),
+            children: element
+                .children
+                .iter()
+                .map(|child| without_tools(child, &prefixes))
+                .collect(),
+            text: element.text.clone(),
+            position: element.position,
+            child_at: element.child_at.clone(),
+        }
+    }
+
     pub fn encode_knowing(root: &Element, own: &[Declared]) -> Result<Vec<u8>, Diagnostic> {
+        let kept = without_tools(root, &[]);
+        let root = &kept;
         let namespace_uri = root
             .attributes
             .iter()
@@ -22320,7 +22473,7 @@ pub mod axml {
             pool.add_other(prefix);
             pool.add_other(uri);
         }
-        collect_rest(root, &mut pool)?;
+        collect_rest(root, &bound, own, &mut pool)?;
 
         let string_pool = encode_string_pool(&pool)?;
         let resource_map = encode_resource_map(&pool);
@@ -22367,9 +22520,11 @@ pub mod dexwrite {
     use crate::diag::{Diagnostic, Severity};
     use crate::hash::sha1;
     use crate::FailureClass;
+    use std::collections::{HashMap, HashSet};
 
     pub const ACC_PUBLIC: u32 = 0x1;
     pub const ACC_CONSTRUCTOR: u32 = 0x1_0000;
+    pub const ACC_DECLARED_SYNCHRONIZED: u32 = 0x2_0000;
 
     const OP_RETURN_VOID: u16 = 0x000e;
     const OP_INVOKE_DIRECT: u16 = 0x0070;
@@ -22431,7 +22586,7 @@ pub mod dexwrite {
         }
     }
 
-    #[derive(Clone, PartialEq, Eq, Debug)]
+    #[derive(Clone, PartialEq, Eq, Hash, Debug)]
     pub struct MethodRef {
         pub class: String,
         pub name: String,
@@ -22523,7 +22678,7 @@ pub mod dexwrite {
         pub catches: Vec<(Option<String>, u32)>,
     }
 
-    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
     pub struct FieldRef {
         pub class: String,
         pub name: String,
@@ -22625,70 +22780,88 @@ pub mod dexwrite {
         fields: Vec<FieldRef>,
 
         named_methods: Vec<MethodRef>,
+
+        string_at: HashMap<String, u32>,
+        type_at: HashMap<String, u32>,
+        proto_at: HashMap<(String, Vec<String>), u32>,
+        method_at: HashMap<(String, String, usize), u32>,
+        field_at: HashMap<FieldRef, u32>,
+    }
+
+    fn positions<T: Clone + Eq + std::hash::Hash>(held: &[T]) -> HashMap<T, u32> {
+        held.iter()
+            .enumerate()
+            .map(|(at, one)| (one.clone(), at as u32))
+            .collect()
     }
 
     impl Pools {
         fn string(&mut self, text: &str) {
-            if !self.strings.iter().any(|held| held == text) {
+            if !self.string_at.contains_key(text) {
+                self.string_at
+                    .insert(text.to_string(), self.strings.len() as u32);
                 self.strings.push(text.to_string());
             }
         }
 
         fn kind(&mut self, descriptor: &str) {
             self.string(descriptor);
-            if !self.types.iter().any(|held| held == descriptor) {
+            if !self.type_at.contains_key(descriptor) {
+                self.type_at
+                    .insert(descriptor.to_string(), self.types.len() as u32);
                 self.types.push(descriptor.to_string());
             }
         }
 
+        fn field(&mut self, reference: &FieldRef) {
+            if !self.field_at.contains_key(reference) {
+                self.field_at
+                    .insert(reference.clone(), self.fields.len() as u32);
+                self.fields.push(reference.clone());
+            }
+        }
+
+        fn string_order(&self, text: &str) -> u32 {
+            self.string_at.get(text).copied().unwrap_or(0)
+        }
+
+        fn type_order(&self, descriptor: &str) -> u32 {
+            self.type_at.get(descriptor).copied().unwrap_or(0)
+        }
+
         fn index_of_string(&self, text: &str) -> Result<u32, Diagnostic> {
-            self.strings
-                .iter()
-                .position(|held| held == text)
-                .map(|at| at as u32)
-                .ok_or_else(|| {
-                    fail("EW001", "A string was never interned.")
-                        .with_context(format!("Text: {text:?}"))
-                })
+            self.string_at.get(text).copied().ok_or_else(|| {
+                fail("EW001", "A string was never interned.")
+                    .with_context(format!("Text: {text:?}"))
+            })
         }
 
         fn index_of_type(&self, descriptor: &str) -> Result<u32, Diagnostic> {
-            self.types
-                .iter()
-                .position(|held| held == descriptor)
-                .map(|at| at as u32)
-                .ok_or_else(|| {
-                    fail("EW002", "A type was never interned.")
-                        .with_context(format!("Descriptor: {descriptor:?}"))
-                })
+            self.type_at.get(descriptor).copied().ok_or_else(|| {
+                fail("EW002", "A type was never interned.")
+                    .with_context(format!("Descriptor: {descriptor:?}"))
+            })
         }
 
         fn index_of_proto(&self, reference: &MethodRef) -> Result<u32, Diagnostic> {
-            self.protos
-                .iter()
-                .position(|(_, ret, params)| {
-                    *ret == reference.return_type && *params == reference.parameters
-                })
-                .map(|at| at as u32)
+            self.proto_at
+                .get(&(reference.return_type.clone(), reference.parameters.clone()))
+                .copied()
                 .ok_or_else(|| fail("EW003", "A prototype was never interned."))
         }
 
         fn index_of_method(&self, reference: &MethodRef) -> Result<u32, Diagnostic> {
             let proto = self.index_of_proto(reference)? as usize;
-            self.methods
-                .iter()
-                .position(|(class, name, held)| {
-                    *class == reference.class && *name == reference.name && *held == proto
-                })
-                .map(|at| at as u32)
+            self.method_at
+                .get(&(reference.class.clone(), reference.name.clone(), proto))
+                .copied()
                 .ok_or_else(|| fail("EW004", "A method was never interned."))
         }
 
         fn index_of_field(&self, reference: &FieldRef) -> Result<u32, Diagnostic> {
-            self.fields
-                .iter()
-                .position(|held| held == reference)
-                .map(|at| at as u32)
+            self.field_at
+                .get(reference)
+                .copied()
                 .ok_or_else(|| fail("EW005", "A field was never interned."))
         }
     }
@@ -22736,9 +22909,7 @@ pub mod dexwrite {
                     name: name.clone(),
                     descriptor: descriptor.clone(),
                 };
-                if !pools.fields.contains(&reference) {
-                    pools.fields.push(reference);
-                }
+                pools.field(&reference);
             }
             Element::Nested(inside) => learn_annotation(pools, inside),
             Element::List(held) => {
@@ -22932,17 +23103,24 @@ pub mod dexwrite {
         strings: Vec<String>,
         fields: Vec<FieldRef>,
         methods: Vec<MethodRef>,
+
+        seen_types: HashSet<String>,
+        seen_strings: HashSet<String>,
+        seen_fields: HashSet<FieldRef>,
+        seen_methods: HashSet<MethodRef>,
     }
 
     impl Needs {
         fn kind(&mut self, descriptor: &str) {
-            if !self.types.iter().any(|held| held == descriptor) {
+            if !self.seen_types.contains(descriptor) {
+                self.seen_types.insert(descriptor.to_string());
                 self.types.push(descriptor.to_string());
             }
         }
 
         fn text(&mut self, value: &str) {
-            if !self.strings.iter().any(|held| held == value) {
+            if !self.seen_strings.contains(value) {
+                self.seen_strings.insert(value.to_string());
                 self.strings.push(value.to_string());
             }
         }
@@ -22951,7 +23129,7 @@ pub mod dexwrite {
             self.kind(&reference.class);
             self.kind(&reference.descriptor);
             self.text(&reference.name);
-            if !self.fields.contains(reference) {
+            if self.seen_fields.insert(reference.clone()) {
                 self.fields.push(reference.clone());
             }
         }
@@ -22964,7 +23142,7 @@ pub mod dexwrite {
             }
             self.text(&reference.name);
             self.text(&reference.shorty());
-            if !self.methods.contains(reference) {
+            if self.seen_methods.insert(reference.clone()) {
                 self.methods.push(reference.clone());
             }
         }
@@ -23074,23 +23252,23 @@ pub mod dexwrite {
         let mut running = Needs::default();
         for class in classes {
             let needs = needs_of(class);
-            let would = |mine: &[String], theirs: &[String]| -> usize {
-                mine.len() + theirs.iter().filter(|one| !mine.contains(one)).count()
+            let would = |mine: &HashSet<String>, theirs: &[String]| -> usize {
+                mine.len() + theirs.iter().filter(|one| !mine.contains(*one)).count()
             };
-            let types = would(&running.types, &needs.types) + shared.types.len();
-            let strings = would(&running.strings, &needs.strings) + shared.strings.len();
+            let types = would(&running.seen_types, &needs.types) + shared.types.len();
+            let strings = would(&running.seen_strings, &needs.strings) + shared.strings.len();
             let fields = running.fields.len()
                 + needs
                     .fields
                     .iter()
-                    .filter(|one| !running.fields.contains(one))
+                    .filter(|one| !running.seen_fields.contains(*one))
                     .count()
                 + shared.fields.len();
             let methods = running.methods.len()
                 + needs
                     .methods
                     .iter()
-                    .filter(|one| !running.methods.contains(one))
+                    .filter(|one| !running.seen_methods.contains(*one))
                     .count()
                 + shared.methods.len();
 
@@ -23183,9 +23361,7 @@ pub mod dexwrite {
                 pools.kind(&field.reference.class);
                 pools.kind(&field.reference.descriptor);
                 pools.string(&field.reference.name);
-                if !pools.fields.contains(&field.reference) {
-                    pools.fields.push(field.reference.clone());
-                }
+                pools.field(&field.reference);
             }
 
             for method in class.direct_methods.iter() {
@@ -23240,9 +23416,7 @@ pub mod dexwrite {
                             pools.kind(&reference.class);
                             pools.kind(&reference.descriptor);
                             pools.string(&reference.name);
-                            if !pools.fields.contains(reference) {
-                                pools.fields.push(reference.clone());
-                            }
+                            pools.field(reference);
                         }
                         Operand::Type(descriptor) => pools.kind(descriptor),
                         Operand::Text(text) => pools.string(text),
@@ -23271,77 +23445,71 @@ pub mod dexwrite {
 
         pools.strings.sort_by(|a, b| utf16_order(a, b));
         pools.types.sort_by(|a, b| utf16_order(a, b));
+        pools.string_at = positions(&pools.strings);
+        pools.type_at = positions(&pools.types);
 
         for reference in &references {
-            let proto = (
-                reference.shorty(),
-                reference.return_type.clone(),
-                reference.parameters.clone(),
-            );
-            if !pools
-                .protos
-                .iter()
-                .any(|(_, ret, params)| *ret == proto.1 && *params == proto.2)
-            {
-                pools.protos.push(proto);
+            let key = (reference.return_type.clone(), reference.parameters.clone());
+            if !pools.proto_at.contains_key(&key) {
+                pools.proto_at.insert(key, pools.protos.len() as u32);
+                pools.protos.push((
+                    reference.shorty(),
+                    reference.return_type.clone(),
+                    reference.parameters.clone(),
+                ));
             }
         }
-        let types_snapshot = pools.types.clone();
-        let position_of_type = |descriptor: &str| -> u32 {
-            types_snapshot
-                .iter()
-                .position(|held| held == descriptor)
-                .unwrap_or(0) as u32
-        };
-
-        let argument_order = |parameters: &[String]| -> Vec<u32> {
-            parameters.iter().map(|one| position_of_type(one)).collect()
-        };
-        pools.protos.sort_by(|a, b| {
-            position_of_type(&a.1)
-                .cmp(&position_of_type(&b.1))
-                .then_with(|| argument_order(&a.2).cmp(&argument_order(&b.2)))
-        });
+        {
+            let mut protos = std::mem::take(&mut pools.protos);
+            protos.sort_by_cached_key(|(_, ret, params)| {
+                (
+                    pools.type_order(ret),
+                    params
+                        .iter()
+                        .map(|one| pools.type_order(one))
+                        .collect::<Vec<u32>>(),
+                )
+            });
+            pools.protos = protos;
+        }
+        pools.proto_at = pools
+            .protos
+            .iter()
+            .enumerate()
+            .map(|(at, (_, ret, params))| ((ret.clone(), params.clone()), at as u32))
+            .collect();
 
         {
-            let types = pools.types.clone();
-            let strings = pools.strings.clone();
-            let at_type = |descriptor: &str| -> usize {
-                types
-                    .iter()
-                    .position(|held| held == descriptor)
-                    .unwrap_or(0)
-            };
-            let at_string =
-                |text: &str| -> usize { strings.iter().position(|held| held == text).unwrap_or(0) };
-            pools.fields.sort_by(|left, right| {
-                at_type(&left.class)
-                    .cmp(&at_type(&right.class))
-                    .then_with(|| at_string(&left.name).cmp(&at_string(&right.name)))
-                    .then_with(|| at_type(&left.descriptor).cmp(&at_type(&right.descriptor)))
+            let mut fields = std::mem::take(&mut pools.fields);
+            fields.sort_by_cached_key(|one| {
+                (
+                    pools.type_order(&one.class),
+                    pools.string_order(&one.name),
+                    pools.type_order(&one.descriptor),
+                )
             });
+            pools.fields = fields;
         }
+        pools.field_at = positions(&pools.fields);
 
         for reference in &references {
             let proto = pools.index_of_proto(reference)? as usize;
             let entry = (reference.class.clone(), reference.name.clone(), proto);
-            if !pools.methods.contains(&entry) {
+            if !pools.method_at.contains_key(&entry) {
+                pools
+                    .method_at
+                    .insert(entry.clone(), pools.methods.len() as u32);
                 pools.methods.push(entry);
             }
         }
-        let strings_snapshot = pools.strings.clone();
-        let position_of_string = |text: &str| -> u32 {
-            strings_snapshot
-                .iter()
-                .position(|held| held == text)
-                .unwrap_or(0) as u32
-        };
-        pools.methods.sort_by(|a, b| {
-            position_of_type(&a.0)
-                .cmp(&position_of_type(&b.0))
-                .then_with(|| position_of_string(&a.1).cmp(&position_of_string(&b.1)))
-                .then_with(|| a.2.cmp(&b.2))
-        });
+        {
+            let mut methods = std::mem::take(&mut pools.methods);
+            methods.sort_by_cached_key(|(class, name, proto)| {
+                (pools.type_order(class), pools.string_order(name), *proto)
+            });
+            pools.methods = methods;
+        }
+        pools.method_at = positions(&pools.methods);
 
         let header_size = 0x70usize;
         let string_ids_off = header_size;
@@ -23780,9 +23948,14 @@ pub mod dexwrite {
             for list in [&class.direct_methods, &class.virtual_methods] {
                 let mut entries = Vec::with_capacity(list.len());
                 for method in list {
+                    let made = matches!(method.reference.name.as_str(), "<init>" | "<clinit>");
                     entries.push((
                         pools.index_of_method(&method.reference)?,
-                        method.access_flags,
+                        if made {
+                            method.access_flags | ACC_CONSTRUCTOR
+                        } else {
+                            method.access_flags
+                        },
                         code_offsets[index][walked],
                     ));
                     walked += 1;
@@ -23962,6 +24135,14 @@ pub mod dalvik {
     use crate::jvm;
     use crate::FailureClass;
 
+    fn typed(name: &str) -> String {
+        if name.starts_with('[') {
+            name.to_string()
+        } else {
+            format!("L{name};")
+        }
+    }
+
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
             code,
@@ -24099,6 +24280,9 @@ pub mod dalvik {
 
         kinds_at: std::collections::BTreeMap<usize, Vec<Slot>>,
         max_outputs: u16,
+
+        lock: Option<u16>,
+        guard: Option<(u32, u32, u32)>,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24220,6 +24404,14 @@ pub mod dalvik {
                 scratch: low + code.max_locals + code.max_stack,
                 kinds_at: std::collections::BTreeMap::new(),
                 max_outputs: 0,
+                lock: None,
+                guard: None,
+            }
+        }
+
+        fn unlock(&mut self) {
+            if let Some(lock) = self.lock {
+                self.push(Insn::raw(vec![0x001e | (lock << 8)]));
             }
         }
 
@@ -24476,6 +24668,12 @@ pub mod dalvik {
             edges.sort_unstable();
             edges.dedup();
 
+            if let Some((from, to, _)) = self.guard {
+                edges.push(from);
+                edges.push(to);
+                edges.sort_unstable();
+                edges.dedup();
+            }
             for pair in edges.windows(2) {
                 let (start, end) = (pair[0], pair[1]);
                 let mut catches: Vec<(Option<String>, u32)> = Vec::new();
@@ -24488,6 +24686,12 @@ pub mod dalvik {
                         continue;
                     }
                     catches.push(held);
+                }
+                if let Some((from, to, handler)) = self.guard {
+                    if from <= start && end <= to && !catches.iter().any(|(held, _)| held.is_none())
+                    {
+                        catches.push((None, handler));
+                    }
                 }
                 if catches.is_empty() {
                     continue;
@@ -24600,7 +24804,7 @@ pub mod dalvik {
                     self.push(Insn::pointing(
                         vec![0x001c | (to << 8), 0],
                         1,
-                        Operand::Type(format!("L{name};")),
+                        Operand::Type(typed(&name)),
                     ));
                     self.puts(Kept::Reference);
                     Ok(())
@@ -24678,7 +24882,7 @@ pub mod dalvik {
             let width = width_of(&descriptor);
             let holds = Kept::of(&descriptor);
             let reference = FieldRef {
-                class: format!("L{class};"),
+                class: typed(&class),
                 name,
                 descriptor: descriptor.clone(),
             };
@@ -25142,7 +25346,7 @@ pub mod dalvik {
             let dalvik = self.invoked_by(opcode, &class, &name, &descriptor);
 
             let reference = MethodRef {
-                class: format!("L{class};"),
+                class: typed(&class),
                 name,
                 return_type: returns.clone(),
                 parameters,
@@ -25430,8 +25634,27 @@ pub mod dalvik {
                 }
 
                 0xc2 | 0xc3 => {
-                    let register = self.slot(1);
+                    let mut register = self.slot(1);
                     self.shrink(1)?;
+                    if opcode == 0xc2 {
+                        let mut same = vec![register];
+                        let from = self.code.len().saturating_sub(3);
+                        for insn in &self.code[from..] {
+                            let first = insn.units.first().copied().unwrap_or(0);
+                            let (into, out_of) = match first & 0xff {
+                                0x07 => ((first >> 8) & 0x0f, first >> 12),
+                                0x08 => ((first >> 8), insn.units.get(1).copied().unwrap_or(0)),
+                                _ => continue,
+                            };
+                            if same.contains(&out_of) && !same.contains(&into) {
+                                same.push(into);
+                            }
+                        }
+                        if let Some(local) = same.iter().copied().find(|one| *one < self.stack_base)
+                        {
+                            register = local;
+                        }
+                    }
                     if register > 255 {
                         return Err(fail(
                             "ED007",
@@ -25462,19 +25685,25 @@ pub mod dalvik {
                 0xac | 0xae => {
                     let register = self.slot(1);
                     self.shrink(1)?;
+                    self.unlock();
                     self.push(Insn::raw(vec![0x000f | (register << 8)]));
                 }
                 0xad | 0xaf => {
                     let register = self.slot(2);
                     self.shrink(2)?;
+                    self.unlock();
                     self.push(Insn::raw(vec![0x0010 | (register << 8)]));
                 }
                 0xb0 => {
                     let register = self.slot(1);
                     self.shrink(1)?;
+                    self.unlock();
                     self.push(Insn::raw(vec![0x0011 | (register << 8)]));
                 }
-                0xb1 => self.push(Insn::raw(vec![0x000e])),
+                0xb1 => {
+                    self.unlock();
+                    self.push(Insn::raw(vec![0x000e]));
+                }
 
                 0xb2..=0xb5 => {
                     let index = Self::u16_at(bytes, *at);
@@ -26145,6 +26374,215 @@ pub mod dalvik {
                 Operand::Method(reference),
             ));
         }
+    }
+
+    pub const NEST_BRIDGE: &str = "-$$Nest$m";
+
+    fn shorty_width(descriptor: &str) -> u16 {
+        if descriptor == "J" || descriptor == "D" {
+            2
+        } else {
+            1
+        }
+    }
+
+    pub fn open_nests(mut classes: Vec<crate::dexwrite::Class>) -> Vec<crate::dexwrite::Class> {
+        use crate::dexwrite::{Method, MethodRef, Operand};
+        const PRIVATE: u32 = 0x0002;
+        let at: std::collections::BTreeMap<String, usize> = classes
+            .iter()
+            .enumerate()
+            .map(|(index, one)| (one.descriptor.clone(), index))
+            .collect();
+
+        let mut fields: Vec<(usize, String, String)> = Vec::new();
+        let mut methods: Vec<(usize, MethodRef)> = Vec::new();
+        let mut bridged: Vec<(usize, MethodRef)> = Vec::new();
+        for class in &classes {
+            for method in class
+                .direct_methods
+                .iter()
+                .chain(class.virtual_methods.iter())
+            {
+                for insn in &method.instructions {
+                    match &insn.operand {
+                        Operand::Field(reference) if reference.class != class.descriptor => {
+                            let Some(&owner) = at.get(&reference.class) else {
+                                continue;
+                            };
+                            let hidden = classes[owner]
+                                .static_fields
+                                .iter()
+                                .chain(classes[owner].instance_fields.iter())
+                                .any(|one| {
+                                    one.reference.name == reference.name
+                                        && one.reference.descriptor == reference.descriptor
+                                        && one.access_flags & PRIVATE != 0
+                                });
+                            if hidden {
+                                fields.push((
+                                    owner,
+                                    reference.name.clone(),
+                                    reference.descriptor.clone(),
+                                ));
+                            }
+                        }
+                        Operand::Method(reference) if reference.class != class.descriptor => {
+                            let Some(&owner) = at.get(&reference.class) else {
+                                continue;
+                            };
+                            let Some(found) = classes[owner]
+                                .direct_methods
+                                .iter()
+                                .find(|one| one.reference == *reference)
+                            else {
+                                continue;
+                            };
+                            if found.access_flags & PRIVATE == 0 {
+                                continue;
+                            }
+                            let opcode = insn.units.first().copied().unwrap_or(0) & 0xff;
+                            let instance = found.access_flags & 0x0008 == 0
+                                && reference.name != "<init>"
+                                && matches!(opcode, 0x6e | 0x70 | 0x72 | 0x74 | 0x76 | 0x78);
+                            if instance {
+                                if !bridged
+                                    .iter()
+                                    .any(|(held, one)| *held == owner && one == reference)
+                                {
+                                    bridged.push((owner, reference.clone()));
+                                }
+                            } else {
+                                methods.push((owner, reference.clone()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if fields.is_empty() && methods.is_empty() && bridged.is_empty() {
+            return classes;
+        }
+
+        for (owner, name, descriptor) in fields {
+            let held = &mut classes[owner];
+            for one in held
+                .static_fields
+                .iter_mut()
+                .chain(held.instance_fields.iter_mut())
+            {
+                if one.reference.name == name && one.reference.descriptor == descriptor {
+                    one.access_flags &= !PRIVATE;
+                }
+            }
+        }
+        for (owner, reference) in methods {
+            for one in classes[owner].direct_methods.iter_mut() {
+                if one.reference == reference {
+                    one.access_flags &= !PRIVATE;
+                }
+            }
+        }
+
+        let bridge_of = |reference: &MethodRef| MethodRef {
+            class: reference.class.clone(),
+            name: format!("{NEST_BRIDGE}{}", reference.name),
+            return_type: reference.return_type.clone(),
+            parameters: std::iter::once(reference.class.clone())
+                .chain(reference.parameters.iter().cloned())
+                .collect(),
+        };
+        for (owner, reference) in &bridged {
+            let bridge = bridge_of(reference);
+            if classes[*owner]
+                .direct_methods
+                .iter()
+                .any(|one| one.reference == bridge)
+            {
+                continue;
+            }
+            let words: u16 = bridge.parameters.iter().map(|one| shorty_width(one)).sum();
+            let registers = words + 2;
+            let first = 2u16;
+            let mut instructions = Vec::new();
+            if words <= 5 {
+                let mut packed = 0u16;
+                for step in 0..words.min(4) {
+                    packed |= (first + step) << (4 * step);
+                }
+                let fifth = if words == 5 { first + 4 } else { 0 };
+                instructions.push(crate::dexwrite::Insn::pointing(
+                    vec![(words << 12) | (fifth << 8) | 0x0070, 0, packed],
+                    1,
+                    Operand::Method(reference.clone()),
+                ));
+            } else {
+                instructions.push(crate::dexwrite::Insn::pointing(
+                    vec![(words << 8) | 0x0076, 0, first],
+                    1,
+                    Operand::Method(reference.clone()),
+                ));
+            }
+            match bridge.return_type.as_str() {
+                "V" => instructions.push(crate::dexwrite::Insn::raw(vec![0x000e])),
+                "J" | "D" => {
+                    instructions.push(crate::dexwrite::Insn::raw(vec![0x000b]));
+                    instructions.push(crate::dexwrite::Insn::raw(vec![0x0010]));
+                }
+                wide if wide.starts_with('L') || wide.starts_with('[') => {
+                    instructions.push(crate::dexwrite::Insn::raw(vec![0x000c]));
+                    instructions.push(crate::dexwrite::Insn::raw(vec![0x0011]));
+                }
+                _ => {
+                    instructions.push(crate::dexwrite::Insn::raw(vec![0x000a]));
+                    instructions.push(crate::dexwrite::Insn::raw(vec![0x000f]));
+                }
+            }
+            classes[*owner].direct_methods.push(Method {
+                reference: bridge,
+                access_flags: 0x0008 | 0x1000,
+                registers,
+                inputs: words,
+                outputs: words,
+                instructions,
+                lines: Vec::new(),
+                annotations: Vec::new(),
+                parameter_annotations: Vec::new(),
+                tries: Vec::new(),
+            });
+        }
+
+        for class in classes.iter_mut() {
+            let own = class.descriptor.clone();
+            for method in class
+                .direct_methods
+                .iter_mut()
+                .chain(class.virtual_methods.iter_mut())
+            {
+                for insn in method.instructions.iter_mut() {
+                    let Operand::Method(reference) = &insn.operand else {
+                        continue;
+                    };
+                    if reference.class == own || !bridged.iter().any(|(_, one)| one == reference) {
+                        continue;
+                    }
+                    let Some(first) = insn.units.first_mut() else {
+                        continue;
+                    };
+                    let opcode = *first & 0xff;
+                    let into = match opcode {
+                        0x6e | 0x70 | 0x72 => 0x71,
+                        0x74 | 0x76 | 0x78 => 0x77,
+                        _ => continue,
+                    };
+                    *first = (*first & 0xff00) | into;
+                    let bridge = bridge_of(reference);
+                    insn.operand = Operand::Method(bridge);
+                }
+            }
+        }
+        classes
     }
 
     pub struct Synthesised {
@@ -26931,12 +27369,14 @@ pub mod dalvik {
             }
         }
 
-        let low = if code.max_locals + code.max_stack + room >= 16 {
+        let synchronized = method.access_flags & 0x0020 != 0 && method.access_flags & 0x0100 == 0;
+        let guarded = if synchronized { 2 } else { 0 };
+        let low = if code.max_locals + code.max_stack + room + guarded >= 16 {
             LOW_ROOM
         } else {
             0
         };
-        let total = low + code.max_locals + code.max_stack + room + inputs;
+        let total = low + code.max_locals + code.max_stack + room + guarded + inputs;
         if total > 255 {
             return Err(fail(
                 "ED021",
@@ -26951,7 +27391,19 @@ pub mod dalvik {
 
         let mut translator = Translator::new(class, code, low, made);
 
-        let mut at = low + code.max_locals + code.max_stack + room;
+        let lock = low + code.max_locals + code.max_stack + room;
+        let mut at = lock + guarded;
+        if synchronized {
+            if is_static {
+                translator.push(Insn::pointing(
+                    vec![0x001c | (lock << 8), 0],
+                    1,
+                    Operand::Type(typed(&class.name.replace('.', "/"))),
+                ));
+            } else {
+                translator.push(move_register(0x07, lock, at));
+            }
+        }
         let mut local = low;
         if !is_static {
             translator.push(move_register(0x07, local, at));
@@ -26979,14 +27431,35 @@ pub mod dalvik {
                 class.name, method.name, method.descriptor
             ))
         };
-        translator.walk(&code.bytes).map_err(named)?;
+        if synchronized {
+            translator.push(Insn::raw(vec![0x001d | (lock << 8)]));
+            translator.lock = Some(lock);
+            let from = units(&translator.code) as u32;
+            translator.walk(&code.bytes).map_err(named)?;
+            let to = units(&translator.code) as u32;
+            let caught = lock + 1;
+            translator.push(Insn::raw(vec![0x000d | (caught << 8)]));
+            translator.push(Insn::raw(vec![0x001e | (lock << 8)]));
+            translator.push(Insn::raw(vec![0x0027 | (caught << 8)]));
+            translator.guard = Some((from, to, to));
+        } else {
+            translator.walk(&code.bytes).map_err(named)?;
+        }
         let outputs = translator.max_outputs;
         let lines = translator.where_they_landed(&code.lines);
         let (instructions, tries) = translator.finish().map_err(named)?;
 
+        let mut flags = u32::from(method.access_flags);
+        if synchronized {
+            flags = (flags & !0x0020) | crate::dexwrite::ACC_DECLARED_SYNCHRONIZED;
+        }
+        if method.name == "<init>" || method.name == "<clinit>" {
+            flags |= crate::dexwrite::ACC_CONSTRUCTOR;
+        }
+
         Ok(Method {
             reference,
-            access_flags: u32::from(method.access_flags),
+            access_flags: flags,
             registers: total.max(1),
             inputs,
             outputs,
@@ -27270,6 +27743,10 @@ pub mod seal {
     }
 
     pub fn source(package: &str, fingerprint: &str) -> String {
+        source_as(package, package, fingerprint)
+    }
+
+    pub fn source_as(package: &str, installed: &str, fingerprint: &str) -> String {
         let plain: String = fingerprint
             .chars()
             .filter(|held| held.is_ascii_hexdigit())
@@ -27352,7 +27829,7 @@ public final class {class_name} extends ContentProvider {{
     }}
 
     public static boolean namedAsItWasBuilt(Context context) {{
-        return "{package}".equals(context.getPackageName());
+        return "{installed}".equals(context.getPackageName());
     }}
 
     public static boolean intact(Context context) {{
@@ -27361,7 +27838,7 @@ public final class {class_name} extends ContentProvider {{
 
     public static String whyItIsNot(Context context) {{
         if (!namedAsItWasBuilt(context)) {{
-            return "built as {package}, running as " + context.getPackageName();
+            return "built as {installed}, running as " + context.getPackageName();
         }}
         if (builtForDebugging(context)) {{
             return "the package is marked debuggable";
@@ -27414,6 +27891,7 @@ public final class {class_name} extends ContentProvider {{
 }}
 "####,
             package = package,
+            installed = installed,
             class_name = CLASS,
             plain = plain,
         )
@@ -27650,6 +28128,20 @@ pub mod shrink {
                     }
                 }
             }
+            if here.name == "meta-data" || here.name == "application" {
+                for attribute in [
+                    "android:name",
+                    "android:value",
+                    "android:appComponentFactory",
+                    "android:backupAgent",
+                ] {
+                    if let Some(named) = here.attribute(attribute) {
+                        if looks_like_a_class(named) {
+                            out.push(descriptor_of(named, package));
+                        }
+                    }
+                }
+            }
             for child in &here.children {
                 waiting.push(child);
             }
@@ -27657,6 +28149,65 @@ pub mod shrink {
         out.sort();
         out.dedup();
         out
+    }
+
+    fn looks_like_a_class(said: &str) -> bool {
+        let said = said.trim();
+        !said.is_empty()
+            && (said.contains('.') || said.starts_with('.'))
+            && !said.starts_with('@')
+            && !said.starts_with('?')
+            && said.split('.').filter(|part| !part.is_empty()).all(|part| {
+                part.chars()
+                    .next()
+                    .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+                    && part
+                        .chars()
+                        .all(|one| one.is_alphanumeric() || one == '_' || one == '$')
+            })
+    }
+
+    pub fn beyond_the_package(classes: &[Class], package: &str) -> Vec<String> {
+        if package.is_empty() {
+            return Vec::new();
+        }
+        let own = format!("L{}/", package.replace('.', "/"));
+        classes
+            .iter()
+            .filter(|one| !one.descriptor.starts_with(&own))
+            .map(|one| one.descriptor.clone())
+            .collect()
+    }
+
+    pub fn named_in_resources(texts: &[String], classes: &[Class], package: &str) -> Vec<String> {
+        let present: BTreeSet<&str> = classes.iter().map(|one| one.descriptor.as_str()).collect();
+        let mut out = BTreeSet::new();
+        let offer = |said: &str, out: &mut BTreeSet<String>| {
+            if looks_like_a_class(said) {
+                let wanted = descriptor_of(said.trim(), package);
+                if present.contains(wanted.as_str()) {
+                    out.insert(wanted);
+                }
+            }
+        };
+        for text in texts {
+            let mut sink = crate::diag::Sink::new();
+            let Some(root) = crate::xml::parse(text, "resource.xml", &mut sink) else {
+                continue;
+            };
+            let mut waiting = vec![&root];
+            while let Some(here) = waiting.pop() {
+                offer(&here.name, &mut out);
+                for attribute in &here.attributes {
+                    offer(&attribute.value, &mut out);
+                }
+                offer(&here.text, &mut out);
+                for child in &here.children {
+                    waiting.push(child);
+                }
+            }
+        }
+        out.into_iter().collect()
     }
 
     fn named_in(descriptor: &str) -> Option<&str> {
@@ -28712,6 +29263,7 @@ pub mod gradle {
     pub const BUILD_FILES: &[&str] = &["build.gradle.kts", "build.gradle"];
     pub const SETTINGS_FILES: &[&str] = &["settings.gradle.kts", "settings.gradle"];
     pub const CATALOGUE_FILE: &str = "gradle/libs.versions.toml";
+    pub const PROPERTIES_FILE: &str = "gradle.properties";
     pub const APPLICATION_PLUGIN: &str = "com.android.application";
     pub const LIBRARY_PLUGIN: &str = "com.android.library";
     pub const MOST_BYTES: u64 = 4 * 1024 * 1024;
@@ -29217,7 +29769,137 @@ pub mod gradle {
         Some((format!("{group}:{name}"), version))
     }
 
+    pub const LOCAL_LIBRARIES: &str = "libs";
+
+    pub fn properties(text: &str, known: &mut std::collections::BTreeMap<String, String>) {
+        let mut take = |said: &str| {
+            let said = said.trim();
+            let said = said
+                .strip_prefix("ext.")
+                .or_else(|| said.strip_prefix("rootProject.ext."))
+                .unwrap_or(said);
+            let (name, value) = if let Some(rest) = said.strip_prefix("extra[") {
+                let Some((name, value)) = rest.split_once(']') else {
+                    return;
+                };
+                (
+                    unquoted(name).unwrap_or_default(),
+                    value.trim().trim_start_matches('=').to_string(),
+                )
+            } else if let Some(rest) = said
+                .strip_prefix("set(")
+                .or_else(|| said.strip_prefix("extra.set("))
+            {
+                let Some((name, value)) = rest.trim_end_matches(')').split_once(',') else {
+                    return;
+                };
+                (unquoted(name).unwrap_or_default(), value.to_string())
+            } else {
+                let Some((name, value)) = said.split_once('=') else {
+                    return;
+                };
+                let name = name.trim().trim_start_matches("def ").trim();
+                (name.to_string(), value.to_string())
+            };
+            let value = value.trim();
+            if name.is_empty() || !name.chars().all(|here| is_name(here) || here == '.') {
+                return;
+            }
+            if let Some(held) = unquoted(value) {
+                known.entry(name).or_insert(held);
+            } else if value.starts_with('[') {
+                for pair in value.trim_matches(['[', ']']).split(',') {
+                    if let Some((key, held)) = pair.split_once(':') {
+                        if let Some(held) = unquoted(held) {
+                            known
+                                .entry(format!("{name}.{}", key.trim()))
+                                .or_insert(held);
+                        }
+                    }
+                }
+            } else if value
+                .chars()
+                .all(|here| here.is_ascii_digit() || here == '.')
+            {
+                known.entry(name).or_insert(value.to_string());
+            }
+        };
+        for place in [Some(text.to_string()), block(text, "buildscript")]
+            .into_iter()
+            .flatten()
+        {
+            for said in statements(&place) {
+                if said.starts_with("ext.")
+                    || said.starts_with("rootProject.ext.")
+                    || said.starts_with("extra")
+                {
+                    take(&said);
+                }
+            }
+            if let Some(body) = block(&place, "ext") {
+                for said in statements(&body) {
+                    take(&said);
+                }
+            }
+        }
+    }
+
+    pub fn filled(said: &str, known: &std::collections::BTreeMap<String, String>) -> String {
+        if !said.contains('$') {
+            return said.to_string();
+        }
+        let held: Vec<char> = said.chars().collect();
+        let mut out = String::with_capacity(said.len());
+        let mut at = 0usize;
+        while at < held.len() {
+            if held[at] != '$' {
+                out.push(held[at]);
+                at += 1;
+                continue;
+            }
+            let braced = held.get(at + 1) == Some(&'{');
+            let start = if braced { at + 2 } else { at + 1 };
+            let mut end = start;
+            while end < held.len() && (is_name(held[end]) || held[end] == '.') {
+                end += 1;
+            }
+            let name: String = held[start..end].iter().collect::<String>();
+            let name = name.trim_end_matches('.');
+            let bare = name
+                .strip_prefix("rootProject.ext.")
+                .or_else(|| name.strip_prefix("rootProject."))
+                .or_else(|| name.strip_prefix("project.ext."))
+                .or_else(|| name.strip_prefix("project."))
+                .unwrap_or(name);
+            let shut = if braced && held.get(end) == Some(&'}') {
+                end + 1
+            } else {
+                end
+            };
+            match known.get(bare).or_else(|| known.get(name)) {
+                Some(value) if !name.is_empty() => {
+                    out.push_str(value);
+                    at = if braced { shut } else { start + name.len() };
+                }
+                _ => {
+                    out.push('$');
+                    at += 1;
+                }
+            }
+        }
+        out
+    }
+
     pub fn dependencies(text: &str, held: &crate::settings::Catalogue, into: &mut Read) {
+        dependencies_knowing(text, held, &std::collections::BTreeMap::new(), into);
+    }
+
+    pub fn dependencies_knowing(
+        text: &str,
+        held: &crate::settings::Catalogue,
+        known: &std::collections::BTreeMap<String, String>,
+        into: &mut Read,
+    ) {
         let Some(body) = block(text, "dependencies") else {
             return;
         };
@@ -29228,18 +29910,36 @@ pub mod gradle {
             if !kept && !processing {
                 continue;
             }
-            let argument = inner_text(&said[configuration.len()..]);
-            if argument.starts_with("project") {
-                if let Some(named) = unquoted(&inner_text(&argument)) {
-                    let named = named.trim_start_matches(':').to_string();
+            let raw = said[configuration.len()..].trim();
+            let raw = match raw.strip_prefix('(') {
+                Some(inside) => inside.strip_suffix(')').unwrap_or(inside).trim(),
+                None => raw,
+            };
+            if raw.starts_with("project") {
+                if let Some(named) = unquoted(&inner_text(raw)) {
+                    let named = named.trim_start_matches(':').replace(':', "/");
                     if !named.is_empty() && !into.modules.contains(&named) {
                         into.modules.push(named);
                     }
                 }
                 continue;
             }
-            if argument.starts_with("files") || argument.starts_with("fileTree") {
-                if let Some(named) = unquoted(&inner_text(&argument)) {
+            if raw.starts_with("fileTree") {
+                let inside = inner_text(raw);
+                let local = inside
+                    .split(',')
+                    .find_map(|one| {
+                        let (key, value) = one.split_once([':', '='])?;
+                        (key.trim() == "dir").then(|| unquoted(value)).flatten()
+                    })
+                    .or_else(|| unquoted(&inside));
+                if local.as_deref() != Some(LOCAL_LIBRARIES) {
+                    into.unread.push(said.trim().to_string());
+                }
+                continue;
+            }
+            if raw.starts_with("files") {
+                if let Some(named) = unquoted(&inner_text(raw)) {
                     into.settings.dependencies.push(Dependency {
                         name: named.clone(),
                         version: String::new(),
@@ -29248,8 +29948,26 @@ pub mod gradle {
                 }
                 continue;
             }
-            let found = match unquoted(&argument) {
-                Some(held) => coordinate(&held),
+            let argument = raw.to_string();
+            let mapped = if argument.contains("group:") && argument.contains("name:") {
+                let part = |key: &str| {
+                    argument.split(',').find_map(|one| {
+                        let (named, value) = one.split_once(':')?;
+                        (named.trim() == key).then(|| unquoted(value)).flatten()
+                    })
+                };
+                match (part("group"), part("name")) {
+                    (Some(group), Some(name)) => Some(format!(
+                        "{group}:{name}:{}",
+                        part("version").unwrap_or_default()
+                    )),
+                    _ => None,
+                }
+            } else {
+                unquoted(&argument)
+            };
+            let found = match mapped {
+                Some(held) => coordinate(&filled(&held, known)),
                 None => {
                     let alias = argument
                         .trim()
@@ -29309,10 +30027,14 @@ pub mod gradle {
         }
         for said in statements(text) {
             let said = said.trim();
-            if !said.starts_with("apply plugin") {
+            let Some(rest) = said
+                .strip_prefix("apply plugin")
+                .or_else(|| said.strip_prefix("apply(plugin"))
+            else {
                 continue;
-            }
-            if let Some(named) = unquoted(said) {
+            };
+            let rest = rest.trim_start().trim_start_matches([':', '=']);
+            if let Some(named) = unquoted(rest.trim_end_matches(')')) {
                 if !into.plugins.contains(&named) {
                     into.plugins.push(named);
                 }
@@ -29450,7 +30172,28 @@ pub mod gradle {
         };
         found.settings.catalogue = held.clone();
         plugins(&text, &mut found);
-        dependencies(&text, &held, &mut found);
+
+        let mut known = std::collections::BTreeMap::new();
+        properties(&text, &mut known);
+        if !module.is_empty() {
+            if let Some(outer) = build_file(here).and_then(|path| text_of(&path)) {
+                properties(&plain(&outer), &mut known);
+            }
+        }
+        if let Some(listed) = text_of(&here.join(PROPERTIES_FILE)) {
+            for line in listed.lines() {
+                let line = line.trim();
+                if line.starts_with('#') || line.starts_with('!') {
+                    continue;
+                }
+                if let Some((name, value)) = line.split_once(['=', ':']) {
+                    known
+                        .entry(name.trim().to_string())
+                        .or_insert(value.trim().to_string());
+                }
+            }
+        }
+        dependencies_knowing(&text, &held, &known, &mut found);
 
         if let Some(path) = settings_file(here) {
             if let Some(text) = text_of(&path) {
@@ -29472,7 +30215,21 @@ pub mod gradle {
             found.settings.application_id = held;
         }
         if found.settings.namespace.is_empty() {
-            found.settings.namespace = found.settings.application_id.clone();
+            let declared = [
+                folder.join("src/main/AndroidManifest.xml"),
+                here.join("AndroidManifest.xml"),
+            ]
+            .iter()
+            .find_map(|path| text_of(path))
+            .and_then(|text| {
+                let mut quiet = crate::diag::Sink::new();
+                crate::xml::parse(&text, "AndroidManifest.xml", &mut quiet)?
+                    .attribute("package")
+                    .map(str::to_string)
+            })
+            .filter(|held| !held.is_empty());
+            found.settings.namespace =
+                declared.unwrap_or_else(|| found.settings.application_id.clone());
         }
         if found.settings.application_id.is_empty() {
             found.settings.application_id = found.settings.namespace.clone();
@@ -29750,6 +30507,10 @@ pub mod gradle {
             processors: found.processors.clone(),
             unread: found.unread.clone(),
         };
+        for one in &found.processors {
+            out.unread
+                .push(format!("annotationProcessor {}:{}", one.name, one.version));
+        }
         adopt_module(here, &module, true, &mut out)?;
         for one in &found.modules {
             adopt_module(here, one, false, &mut out)?;
@@ -29800,6 +30561,7 @@ pub mod maven {
 
     pub const CENTRAL: &str = "https://repo1.maven.org/maven2";
     pub const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
+    pub const MIRROR: &str = "https://maven-central.storage-download.googleapis.com/maven2";
     pub const CACHE: &str = "Maven";
     pub const MOST_ROUNDS: usize = 24;
     pub const MOST_LIBRARIES: usize = 400;
@@ -29815,6 +30577,9 @@ pub mod maven {
     ];
 
     pub const POM: &str = "pom";
+    pub const MODULE: &str = "module";
+    pub const ALIGNED_FAMILIES: &[&str] = &["org.jetbrains.kotlin:kotlin-stdlib"];
+    pub const GRADLE_METADATA: &str = "published-with-gradle-metadata";
     pub const JAR: &str = "jar";
     pub const AAR: &str = "aar";
 
@@ -29875,6 +30640,10 @@ pub mod maven {
             format!("{}-{}.{kind}", self.artifact, self.version)
         }
 
+        pub fn stored(&self, kind: &str) -> String {
+            format!("{}.{}", self.group, self.file(kind))
+        }
+
         pub fn from_google(&self) -> bool {
             GOOGLE_GROUPS
                 .iter()
@@ -29884,9 +30653,17 @@ pub mod maven {
         pub fn urls(&self, kind: &str) -> Vec<String> {
             let tail = format!("{}/{}", self.under(), self.file(kind));
             if self.from_google() {
-                vec![format!("{GOOGLE}/{tail}"), format!("{CENTRAL}/{tail}")]
+                vec![
+                    format!("{GOOGLE}/{tail}"),
+                    format!("{CENTRAL}/{tail}"),
+                    format!("{MIRROR}/{tail}"),
+                ]
             } else {
-                vec![format!("{CENTRAL}/{tail}"), format!("{GOOGLE}/{tail}")]
+                vec![
+                    format!("{CENTRAL}/{tail}"),
+                    format!("{MIRROR}/{tail}"),
+                    format!("{GOOGLE}/{tail}"),
+                ]
             }
         }
     }
@@ -29946,13 +30723,17 @@ pub mod maven {
     }
 
     pub fn pom_path(root: &str, one: &Coordinate) -> std::path::PathBuf {
-        cache_of(root).join(one.file(POM))
+        cache_of(root).join(one.stored(POM))
+    }
+
+    pub fn module_path(root: &str, one: &Coordinate) -> std::path::PathBuf {
+        cache_of(root).join(one.stored(MODULE))
     }
 
     pub fn library_path(root: &str, one: &Coordinate, kind: &str) -> std::path::PathBuf {
         std::path::Path::new(root)
             .join(crate::scaffold::LIBRARY_FOLDER)
-            .join(one.file(kind))
+            .join(one.stored(kind))
     }
 
     fn text_of(path: &std::path::Path) -> Option<String> {
@@ -29990,71 +30771,141 @@ pub mod maven {
         out.trim().to_string()
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Need {
+        pub coordinate: Coordinate,
+        pub strictly: bool,
+        pub excluded: Vec<(String, String)>,
+    }
+
     #[derive(Clone, Debug, Default)]
     pub struct Pom {
         pub packaging: String,
         pub parent: Option<Coordinate>,
-        pub needs: Vec<Coordinate>,
+        pub needs: Vec<Need>,
         pub managed: Vec<Coordinate>,
+        pub imported: Vec<Coordinate>,
+        pub relocated: Option<Coordinate>,
+        pub gradle: bool,
+        pub properties: std::collections::BTreeMap<String, String>,
     }
 
-    pub fn read_pom(text: &str, of: &Coordinate) -> Option<Pom> {
+    #[derive(Clone, Debug, Default)]
+    pub struct Described {
+        pub kind: String,
+        pub needs: Vec<Need>,
+        pub aligned: Vec<Coordinate>,
+        pub moved: Option<Coordinate>,
+    }
+
+    pub fn read_pom(
+        text: &str,
+        of: &Coordinate,
+        inherited: &std::collections::BTreeMap<String, String>,
+    ) -> Option<Pom> {
         let mut quiet = Sink::new();
         let root = crate::xml::parse(text, "pom.xml", &mut quiet)?;
         if root.name != "project" {
             return None;
         }
-        let mut known: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
+        let mut known = inherited.clone();
         known.insert("project.version".to_string(), of.version.clone());
         known.insert("project.groupId".to_string(), of.group.clone());
         known.insert("project.artifactId".to_string(), of.artifact.clone());
         known.insert("pom.version".to_string(), of.version.clone());
         known.insert("version".to_string(), of.version.clone());
+
+        let parent = root.children_named("parent").next().and_then(|held| {
+            let version = filled(&child(held, "version").unwrap_or_default(), &known);
+            known.insert("project.parent.version".to_string(), version.clone());
+            known.insert("parent.version".to_string(), version.clone());
+            Coordinate::parse(&format!(
+                "{}:{}:{}",
+                filled(&child(held, "groupId").unwrap_or_default(), &known),
+                filled(&child(held, "artifactId").unwrap_or_default(), &known),
+                version,
+            ))
+        });
         if let Some(held) = root.children_named("properties").next() {
             for one in &held.children {
                 known.insert(one.name.clone(), one.text.trim().to_string());
             }
         }
+        for _ in 0..4 {
+            let settled: Vec<(String, String)> = known
+                .iter()
+                .filter(|(_, value)| value.contains("${"))
+                .map(|(name, value)| (name.clone(), filled(value, &known)))
+                .collect();
+            if settled.is_empty() {
+                break;
+            }
+            known.extend(settled);
+        }
 
-        let parent = root.children_named("parent").next().and_then(|held| {
-            Coordinate::parse(&format!(
-                "{}:{}:{}",
-                filled(&child(held, "groupId").unwrap_or_default(), &known),
-                filled(&child(held, "artifactId").unwrap_or_default(), &known),
-                filled(&child(held, "version").unwrap_or_default(), &known),
-            ))
-        });
+        let relocated = root
+            .children_named("distributionManagement")
+            .next()
+            .and_then(|held| held.children_named("relocation").next())
+            .and_then(|held| {
+                let group = child(held, "groupId").unwrap_or_else(|| of.group.clone());
+                let artifact = child(held, "artifactId").unwrap_or_else(|| of.artifact.clone());
+                let version = child(held, "version").unwrap_or_else(|| of.version.clone());
+                Coordinate::parse(&format!(
+                    "{}:{}:{}",
+                    filled(&group, &known),
+                    filled(&artifact, &known),
+                    filled(&version, &known)
+                ))
+            })
+            .filter(|moved| moved != of);
 
         let mut out = Pom {
             packaging: child(&root, "packaging").unwrap_or_else(|| JAR.to_string()),
             parent,
+            relocated,
+            gradle: text.contains(GRADLE_METADATA),
             ..Pom::default()
         };
 
         if let Some(held) = root.children_named("dependencies").next() {
-            out.needs = carried(held, &known, true);
+            out.needs = carried(held, &known);
         }
         if let Some(held) = root
             .children_named("dependencyManagement")
             .next()
             .and_then(|one| one.children_named("dependencies").next())
         {
-            out.managed = carried(held, &known, false);
+            for one in held.children_named("dependency") {
+                let group = filled(&child(one, "groupId").unwrap_or_default(), &known);
+                let artifact = filled(&child(one, "artifactId").unwrap_or_default(), &known);
+                let version = filled(&child(one, "version").unwrap_or_default(), &known);
+                let Some(found) = Coordinate::parse(&format!("{group}:{artifact}:{version}"))
+                else {
+                    continue;
+                };
+                let scope = child(one, "scope").unwrap_or_default();
+                let kind = child(one, "type").unwrap_or_default();
+                if scope == "import" && kind == "pom" {
+                    out.imported.push(found);
+                } else if !out.managed.iter().any(|held| held.named() == found.named()) {
+                    out.managed.push(found);
+                }
+            }
         }
+        out.properties = known;
         Some(out)
     }
 
     fn carried(
         held: &crate::xml::Element,
         known: &std::collections::BTreeMap<String, String>,
-        only_compiled: bool,
-    ) -> Vec<Coordinate> {
-        let mut out = Vec::new();
+    ) -> Vec<Need> {
+        let mut out: Vec<Need> = Vec::new();
         for one in held.children_named("dependency") {
             let scope = child(one, "scope").unwrap_or_else(|| "compile".to_string());
             let optional = child(one, "optional").unwrap_or_default() == "true";
-            if only_compiled && (optional || !(scope == "compile" || scope == "runtime")) {
+            if optional || !(scope == "compile" || scope == "runtime") {
                 continue;
             }
             let group = filled(&child(one, "groupId").unwrap_or_default(), known);
@@ -30063,100 +30914,539 @@ pub mod maven {
             let Some(found) = Coordinate::parse(&format!("{group}:{artifact}:{version}")) else {
                 continue;
             };
-            if !out.contains(&found) {
-                out.push(found);
+            let excluded = one
+                .children_named("exclusions")
+                .next()
+                .map(|held| {
+                    held.children_named("exclusion")
+                        .map(|gone| {
+                            (
+                                filled(&child(gone, "groupId").unwrap_or_default(), known),
+                                filled(&child(gone, "artifactId").unwrap_or_default(), known),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !out.iter().any(|held| held.coordinate == found) {
+                out.push(Need {
+                    coordinate: found,
+                    strictly: false,
+                    excluded,
+                });
             }
         }
         out
     }
 
-    pub fn plan(root: &str) -> Result<Plan, Diagnostic> {
-        let mut out = Plan::default();
-        let Some(settings) = crate::settings::held(root)? else {
-            out.done = true;
-            return Ok(out);
-        };
+    pub fn read_module(text: &str) -> Option<Described> {
+        use crate::json::Json;
+        let held = crate::json::read(text)?;
+        let variants = held.get("variants")?.list()?;
+        let mut best: Option<(i32, &Json)> = None;
+        for one in variants {
+            let attributes = one.get("attributes");
+            let said = |key: &str| {
+                attributes
+                    .and_then(|held| held.get(key))
+                    .and_then(Json::text)
+                    .unwrap_or("")
+            };
+            if said("org.gradle.usage") != "java-runtime" || !said("org.gradle.docstype").is_empty()
+            {
+                continue;
+            }
+            let mut score = match said("org.gradle.category") {
+                "" | "library" => 100,
+                "platform" | "enforced-platform" => 0,
+                _ => continue,
+            };
+            score += match said("org.jetbrains.kotlin.platform.type") {
+                "androidJvm" => 30,
+                "jvm" => 20,
+                "" => 10,
+                _ => continue,
+            };
+            score += match said("com.android.build.api.attributes.BuildTypeAttr") {
+                "release" => 5,
+                "" => 0,
+                _ => -5,
+            };
+            score += match said("org.gradle.jvm.environment") {
+                "android" => 3,
+                "standard-jvm" => 1,
+                _ => 0,
+            };
+            if best.as_ref().is_none_or(|(held, _)| score > *held) {
+                best = Some((score, one));
+            }
+        }
+        let (_, chosen) = best?;
+        let mut out = Described::default();
+        if let Some(elsewhere) = chosen.get("available-at") {
+            out.moved = Coordinate::parse(&format!(
+                "{}:{}:{}",
+                elsewhere.get("group")?.text()?,
+                elsewhere.get("module")?.text()?,
+                elsewhere.get("version")?.text()?
+            ));
+            return Some(out);
+        }
+        for one in chosen
+            .get("dependencies")
+            .and_then(Json::list)
+            .unwrap_or(&[])
+        {
+            if let Some(need) = module_need(one) {
+                out.needs.push(need);
+            }
+        }
+        for one in chosen
+            .get("dependencyConstraints")
+            .and_then(Json::list)
+            .unwrap_or(&[])
+        {
+            if let Some(need) = module_need(one) {
+                out.aligned.push(need.coordinate);
+            }
+        }
+        out.kind = chosen
+            .get("files")
+            .and_then(Json::list)
+            .and_then(|files| files.first())
+            .and_then(|file| file.get("name"))
+            .and_then(Json::text)
+            .map(|name| {
+                if name.ends_with(".aar") {
+                    AAR.to_string()
+                } else {
+                    JAR.to_string()
+                }
+            })
+            .unwrap_or_default();
+        Some(out)
+    }
 
-        let mut wanted: Vec<Coordinate> = Vec::new();
+    fn module_need(one: &crate::json::Json) -> Option<Need> {
+        use crate::json::Json;
+        let group = one.get("group")?.text()?;
+        let module = one.get("module")?.text()?;
+        let version = one.get("version");
+        let said = |key: &str| version.and_then(|held| held.get(key)).and_then(Json::text);
+        let (text, strictly) = match (said("strictly"), said("requires"), said("prefers")) {
+            (Some(held), _, _) => (held, true),
+            (None, Some(held), _) => (held, false),
+            (None, None, Some(held)) => (held, false),
+            (None, None, None) => ("", false),
+        };
+        let coordinate = Coordinate::parse(&format!("{group}:{module}:{text}"))?;
+        let excluded = one
+            .get("excludes")
+            .and_then(Json::list)
+            .unwrap_or(&[])
+            .iter()
+            .map(|gone| {
+                (
+                    gone.get("group")
+                        .and_then(Json::text)
+                        .unwrap_or("*")
+                        .to_string(),
+                    gone.get("module")
+                        .and_then(Json::text)
+                        .unwrap_or("*")
+                        .to_string(),
+                )
+            })
+            .collect();
+        Some(Need {
+            coordinate,
+            strictly,
+            excluded,
+        })
+    }
+
+    pub fn newer(left: &str, right: &str) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        #[derive(PartialEq)]
+        enum Part {
+            Number(u64),
+            Word(String),
+        }
+        fn parts(said: &str) -> Vec<Part> {
+            let mut out = Vec::new();
+            let mut held = String::new();
+            let mut digits = false;
+            let close = |held: &mut String, digits: bool, out: &mut Vec<Part>| {
+                if held.is_empty() {
+                    return;
+                }
+                if digits {
+                    out.push(Part::Number(held.parse().unwrap_or(u64::MAX)));
+                } else {
+                    out.push(Part::Word(held.to_ascii_lowercase()));
+                }
+                held.clear();
+            };
+            for here in said.chars() {
+                if matches!(here, '.' | '-' | '_' | '+') {
+                    close(&mut held, digits, &mut out);
+                    continue;
+                }
+                let number = here.is_ascii_digit();
+                if !held.is_empty() && number != digits {
+                    close(&mut held, digits, &mut out);
+                }
+                digits = number;
+                held.push(here);
+            }
+            close(&mut held, digits, &mut out);
+            out
+        }
+        fn rank(word: &str) -> i32 {
+            match word {
+                "dev" => 0,
+                "alpha" | "a" => 1,
+                "beta" | "b" => 2,
+                "milestone" | "m" => 3,
+                "rc" | "cr" => 4,
+                "snapshot" => 5,
+                "final" | "ga" | "release" => 7,
+                "sp" => 8,
+                _ => 6,
+            }
+        }
+        let (one, other) = (parts(left), parts(right));
+        for at in 0..one.len().max(other.len()) {
+            let found = match (one.get(at), other.get(at)) {
+                (None, None) => Ordering::Equal,
+                (Some(Part::Number(a)), Some(Part::Number(b))) => a.cmp(b),
+                (Some(Part::Number(_)), Some(Part::Word(_))) => Ordering::Greater,
+                (Some(Part::Word(_)), Some(Part::Number(_))) => Ordering::Less,
+                (Some(Part::Word(a)), Some(Part::Word(b))) => {
+                    rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+                }
+                (None, Some(Part::Number(_))) => Ordering::Less,
+                (Some(Part::Number(_)), None) => Ordering::Greater,
+                (None, Some(Part::Word(word))) => {
+                    if rank(word) >= 7 {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (Some(Part::Word(word)), None) => {
+                    if rank(word) >= 7 {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+            };
+            if found != Ordering::Equal {
+                return found;
+            }
+        }
+        Ordering::Equal
+    }
+
+    struct Looked {
+        described: std::collections::BTreeMap<String, Option<Described>>,
+        missing: Vec<(Coordinate, &'static str)>,
+        unresolved: Vec<String>,
+    }
+
+    impl Looked {
+        fn lack(&mut self, one: &Coordinate, kind: &'static str) {
+            if !self
+                .missing
+                .iter()
+                .any(|(held, what)| held == one && *what == kind)
+            {
+                self.missing.push((one.clone(), kind));
+            }
+        }
+
+        fn pom(&mut self, root: &str, one: &Coordinate, depth: usize) -> Option<Pom> {
+            let Some(text) = text_of(&pom_path(root, one)) else {
+                self.lack(one, POM);
+                return None;
+            };
+            let empty = std::collections::BTreeMap::new();
+            let bare = read_pom(&text, one, &empty)?;
+            let above = match &bare.parent {
+                Some(parent) if depth < 12 => Some(self.pom(root, parent, depth + 1)?),
+                _ => None,
+            };
+            let inherited = above
+                .as_ref()
+                .map(|held| held.properties.clone())
+                .unwrap_or_default();
+            let mut held = read_pom(&text, one, &inherited)?;
+            let mut managed = held.managed.clone();
+            if let Some(above) = &above {
+                managed.extend(above.managed.iter().cloned());
+            }
+            for bill in held.imported.clone() {
+                if depth < 12 {
+                    if let Some(found) = self.pom(root, &bill, depth + 1) {
+                        managed.extend(found.managed);
+                    }
+                }
+            }
+            let mut seen: Vec<String> = Vec::new();
+            managed.retain(|one| {
+                let named = one.named();
+                if seen.contains(&named) {
+                    return false;
+                }
+                seen.push(named);
+                true
+            });
+            held.managed = managed;
+            Some(held)
+        }
+
+        fn describe(&mut self, root: &str, one: &Coordinate) -> Option<Described> {
+            let key = one.text();
+            if let Some(found) = self.described.get(&key) {
+                return found.clone();
+            }
+            let found = self.look(root, one);
+            self.described.insert(key, found.clone());
+            found
+        }
+
+        fn look(&mut self, root: &str, one: &Coordinate) -> Option<Described> {
+            let pom = self.pom(root, one, 0)?;
+            if pom.gradle {
+                let path = module_path(root, one);
+                match std::fs::metadata(&path) {
+                    Ok(held) if held.len() > 0 => {
+                        if let Some(found) = text_of(&path).as_deref().and_then(read_module) {
+                            return Some(found);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        self.lack(one, MODULE);
+                        return None;
+                    }
+                }
+            }
+            if let Some(moved) = pom.relocated {
+                return Some(Described {
+                    moved: Some(moved),
+                    ..Described::default()
+                });
+            }
+            let mut needs = Vec::new();
+            for mut need in pom.needs {
+                if need.coordinate.version.is_empty() {
+                    match pom
+                        .managed
+                        .iter()
+                        .find(|held| held.named() == need.coordinate.named())
+                    {
+                        Some(found) => need.coordinate.version = found.version.clone(),
+                        None => {
+                            self.unresolved.push(need.coordinate.named());
+                            continue;
+                        }
+                    }
+                }
+                needs.push(need);
+            }
+            let kind = match pom.packaging.as_str() {
+                "pom" => String::new(),
+                AAR => AAR.to_string(),
+                _ => JAR.to_string(),
+            };
+            Some(Described {
+                kind,
+                needs,
+                ..Described::default()
+            })
+        }
+    }
+
+    fn left_out(excluded: &[(String, String)], one: &Coordinate) -> bool {
+        excluded.iter().any(|(group, artifact)| {
+            (group == "*" || *group == one.group) && (artifact == "*" || *artifact == one.artifact)
+        })
+    }
+
+    pub struct Resolved {
+        pub chosen: Vec<(Coordinate, String)>,
+        pub missing: Vec<(Coordinate, &'static str)>,
+        pub unresolved: Vec<String>,
+        pub rounds: usize,
+    }
+
+    pub fn resolve(root: &str, roots: &[Need]) -> Resolved {
+        let mut looked = Looked {
+            described: std::collections::BTreeMap::new(),
+            missing: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        let mut chosen: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut kept: Vec<(Coordinate, String)> = Vec::new();
+        let mut rounds = 0usize;
+        while rounds < MOST_ROUNDS * 4 {
+            rounds += 1;
+            let mut asked: std::collections::BTreeMap<String, Vec<(String, bool)>> =
+                std::collections::BTreeMap::new();
+            let mut aligned: Vec<Coordinate> = Vec::new();
+            let mut walked: Vec<String> = Vec::new();
+            let mut reached: Vec<(Coordinate, String)> = Vec::new();
+            let mut waiting: std::collections::VecDeque<Need> = roots.iter().cloned().collect();
+            while let Some(need) = waiting.pop_front() {
+                let named = need.coordinate.named();
+                asked
+                    .entry(named.clone())
+                    .or_default()
+                    .push((need.coordinate.version.clone(), need.strictly));
+                if walked.contains(&named) || walked.len() >= MOST_LIBRARIES {
+                    continue;
+                }
+                walked.push(named.clone());
+                let here = Coordinate {
+                    version: chosen
+                        .get(&named)
+                        .cloned()
+                        .unwrap_or_else(|| need.coordinate.version.clone()),
+                    ..need.coordinate.clone()
+                };
+                let Some(described) = looked.describe(root, &here) else {
+                    continue;
+                };
+                if let Some(moved) = described.moved {
+                    waiting.push_back(Need {
+                        coordinate: moved,
+                        strictly: false,
+                        excluded: need.excluded.clone(),
+                    });
+                    continue;
+                }
+                aligned.extend(described.aligned.iter().cloned());
+                if !described.kind.is_empty() {
+                    reached.push((here.clone(), described.kind.clone()));
+                }
+                for next in &described.needs {
+                    if left_out(&need.excluded, &next.coordinate) {
+                        continue;
+                    }
+                    let mut carried = next.clone();
+                    carried.excluded.extend(need.excluded.iter().cloned());
+                    waiting.push_back(carried);
+                }
+            }
+            for one in aligned {
+                if let Some(held) = asked.get_mut(&one.named()) {
+                    held.push((one.version, false));
+                }
+            }
+            let mut next: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            for (named, versions) in &asked {
+                let strict = versions
+                    .iter()
+                    .filter(|(held, strict)| *strict && !held.is_empty())
+                    .map(|(held, _)| held)
+                    .max_by(|a, b| newer(a, b));
+                let picked = strict.or_else(|| {
+                    versions
+                        .iter()
+                        .map(|(held, _)| held)
+                        .filter(|held| !held.is_empty())
+                        .max_by(|a, b| newer(a, b))
+                });
+                match picked {
+                    Some(held) => {
+                        next.insert(named.clone(), held.clone());
+                    }
+                    None => looked.unresolved.push(named.clone()),
+                }
+            }
+            for family in ALIGNED_FAMILIES {
+                let top = next
+                    .iter()
+                    .filter(|(named, _)| named.starts_with(family))
+                    .map(|(_, held)| held.clone())
+                    .max_by(|a, b| newer(a, b));
+                if let Some(top) = top {
+                    for (named, held) in next.iter_mut() {
+                        if named.starts_with(family) {
+                            *held = top.clone();
+                        }
+                    }
+                }
+            }
+            kept = reached;
+            if !looked.missing.is_empty() || next == chosen {
+                break;
+            }
+            chosen = next;
+        }
+        looked.unresolved.sort();
+        looked.unresolved.dedup();
+        Resolved {
+            chosen: kept,
+            missing: looked.missing,
+            unresolved: looked.unresolved,
+            rounds,
+        }
+    }
+
+    pub type Roots = (Vec<Need>, Vec<String>);
+
+    pub fn wanted_roots(root: &str) -> Result<Option<Roots>, Diagnostic> {
+        let Some(settings) = crate::settings::held(root)? else {
+            return Ok(None);
+        };
+        let mut roots: Vec<Need> = Vec::new();
+        let mut unresolved = Vec::new();
         for one in &settings.dependencies {
             if !one.file.is_empty() {
                 continue;
             }
             let Some(found) = Coordinate::parse(&format!("{}:{}", one.name, one.version)) else {
-                out.unresolved.push(one.name.clone());
+                unresolved.push(one.name.clone());
                 continue;
             };
             if found.version.is_empty() {
-                out.unresolved.push(found.named());
+                unresolved.push(found.named());
                 continue;
             }
-            if !wanted.contains(&found) {
-                wanted.push(found);
+            if !roots.iter().any(|held| held.coordinate == found) {
+                roots.push(Need {
+                    coordinate: found,
+                    strictly: false,
+                    excluded: Vec::new(),
+                });
             }
         }
+        Ok(Some((roots, unresolved)))
+    }
 
-        let mut poms: std::collections::BTreeMap<String, Pom> = std::collections::BTreeMap::new();
-        let mut missing: Vec<Coordinate> = Vec::new();
-        let mut seen: Vec<Coordinate> = Vec::new();
-        let mut round = 0usize;
-        while !wanted.is_empty() && round < MOST_ROUNDS && seen.len() < MOST_LIBRARIES {
-            round += 1;
-            let mut next: Vec<Coordinate> = Vec::new();
-            for one in wanted.drain(..) {
-                if seen.contains(&one) {
-                    continue;
-                }
-                seen.push(one.clone());
-                let Some(text) = text_of(&pom_path(root, &one)) else {
-                    if !missing.contains(&one) {
-                        missing.push(one);
-                    }
-                    continue;
-                };
-                let Some(held) = read_pom(&text, &one) else {
-                    out.unresolved.push(one.text());
-                    continue;
-                };
-                for mut need in held.needs.clone() {
-                    if need.version.is_empty() {
-                        let known = held
-                            .managed
-                            .iter()
-                            .find(|managed| managed.named() == need.named());
-                        match known {
-                            Some(found) => need.version = found.version.clone(),
-                            None => {
-                                out.unresolved.push(need.named());
-                                continue;
-                            }
-                        }
-                    }
-                    if !seen.contains(&need) && !next.contains(&need) {
-                        next.push(need);
-                    }
-                }
-                if let Some(parent) = held.parent.clone() {
-                    if !seen.contains(&parent) && !next.contains(&parent) {
-                        next.push(parent);
-                    }
-                }
-                poms.insert(one.text(), held);
-            }
-            wanted = next;
-        }
-        out.rounds = round;
+    pub fn plan(root: &str) -> Result<Plan, Diagnostic> {
+        let mut out = Plan::default();
+        let Some((roots, unresolved)) = wanted_roots(root)? else {
+            out.done = true;
+            return Ok(out);
+        };
+        out.unresolved = unresolved;
+        let resolved = resolve(root, &roots);
+        out.rounds = resolved.rounds;
+        out.unresolved.extend(resolved.unresolved);
 
-        for one in &missing {
+        for (one, kind) in &resolved.missing {
+            let file = one.stored(kind);
             out.wanted.push(Want {
                 coordinate: one.text(),
-                kind: POM.to_string(),
-                urls: one.urls(POM),
-                path: format!(
-                    "{}/{}/{}",
-                    crate::scaffold::LIBRARY_FOLDER,
-                    CACHE,
-                    one.file(POM)
-                ),
+                kind: kind.to_string(),
+                urls: one.urls(kind),
+                path: format!("{}/{}/{}", crate::scaffold::LIBRARY_FOLDER, CACHE, file),
             });
         }
         if !out.wanted.is_empty() {
@@ -30165,15 +31455,15 @@ pub mod maven {
             return Ok(out);
         }
 
-        for one in &seen {
-            let held = poms.get(&one.text());
-            let packaging = held
-                .map(|pom| pom.packaging.clone())
-                .unwrap_or_else(|| JAR.to_string());
-            if packaging == "pom" {
-                continue;
-            }
-            let kind = if packaging == AAR { AAR } else { JAR };
+        if resolved.chosen.len() >= MOST_LIBRARIES {
+            return Err(fail(
+                "EM301",
+                "This asks for more libraries than one build pulls in.",
+            )
+            .with_context(format!("Most: {MOST_LIBRARIES}"))
+            .with_suggestion("Name the few the project uses directly and let the rest go."));
+        }
+        for (one, kind) in &resolved.chosen {
             if library_path(root, one, kind).is_file()
                 || library_path(root, one, if kind == AAR { JAR } else { AAR }).is_file()
             {
@@ -30184,21 +31474,31 @@ pub mod maven {
                 coordinate: one.text(),
                 kind: kind.to_string(),
                 urls: one.urls(kind),
-                path: format!("{}/{}", crate::scaffold::LIBRARY_FOLDER, one.file(kind)),
+                path: format!("{}/{}", crate::scaffold::LIBRARY_FOLDER, one.stored(kind)),
             });
         }
         out.unresolved.sort();
         out.unresolved.dedup();
         out.done = out.wanted.is_empty();
-        if seen.len() >= MOST_LIBRARIES {
-            return Err(fail(
-                "EM301",
-                "This asks for more libraries than one build pulls in.",
-            )
-            .with_context(format!("Most: {MOST_LIBRARIES}"))
-            .with_suggestion("Name the few the project uses directly and let the rest go."));
-        }
         Ok(out)
+    }
+
+    pub fn chosen_files(root: &str) -> Option<Vec<String>> {
+        let (roots, _) = wanted_roots(root).ok()??;
+        if roots.is_empty() {
+            return None;
+        }
+        let resolved = resolve(root, &roots);
+        if !resolved.missing.is_empty() {
+            return None;
+        }
+        Some(
+            resolved
+                .chosen
+                .iter()
+                .flat_map(|(one, _)| [one.stored(AAR), one.stored(JAR)])
+                .collect(),
+        )
     }
 
     pub fn write_json(plan: &Plan, w: &mut crate::json::Writer) {
@@ -36246,6 +37546,11 @@ pub mod bundle {
     const SYMBOL_VALUE: u32 = 4;
     const SYMBOL_TYPE: u32 = 5;
 
+    const TYPE_NULL_VALUE: u8 = 0x00;
+    const TYPE_REFERENCE_VALUE: u8 = 0x01;
+    const PRIMITIVE_NULL: u32 = 1;
+    const PRIMITIVE_EMPTY: u32 = 2;
+
     const PRIMITIVE_FIELDS: &[(u8, u32, bool)] = &[
         (0x04, 3, true),
         (0x05, 13, false),
@@ -36363,6 +37668,23 @@ pub mod bundle {
                     held.number(REFERENCE_TYPE, REFERENCE_TYPE_ATTRIBUTE);
                     held.number(REFERENCE_ID, u64::from(*data));
                     item.message(ITEM_REFERENCE, &held);
+                    return Ok(item);
+                }
+                if *as_what == TYPE_REFERENCE_VALUE && *data == 0 {
+                    item.message(ITEM_REFERENCE, &Message::new());
+                    return Ok(item);
+                }
+                if *as_what == TYPE_NULL_VALUE {
+                    let mut held = Message::new();
+                    held.message(
+                        if *data == 1 {
+                            PRIMITIVE_EMPTY
+                        } else {
+                            PRIMITIVE_NULL
+                        },
+                        &Message::new(),
+                    );
+                    item.message(ITEM_PRIMITIVE, &held);
                     return Ok(item);
                 }
                 let Some((_, field, whole)) = PRIMITIVE_FIELDS
@@ -38077,7 +39399,12 @@ pub mod builder {
         pub resources: Vec<crate::scaffold::Supplied>,
 
         pub library_values: Vec<(String, String)>,
+
+        pub library_values_names: Vec<String>,
+
         pub library_resources: Vec<crate::scaffold::Supplied>,
+
+        pub application_id: String,
 
         pub library_packages: Vec<String>,
 
@@ -38221,6 +39548,18 @@ pub mod builder {
             crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
         let mut files = Vec::with_capacity(set.len() + project.resources.len());
 
+        let mut macros: Vec<(String, String)> = Vec::new();
+        for (_, text) in project.values.iter().chain(&project.library_values) {
+            if text.contains("<macro") {
+                for (name, held) in crate::resources::macros_in(text) {
+                    if !macros.iter().any(|(named, _)| *named == name) {
+                        macros.push((name, held));
+                    }
+                }
+            }
+        }
+        table.know_macros(&macros);
+
         let mut naming = Naming::new(project.seal_resources);
         let mut compiling: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
         for made in &set {
@@ -38348,21 +39687,43 @@ pub mod builder {
                 }
                 carried.push((entry, held.clone()));
             }
-            for (folder, text) in &project.library_values {
-                let origin = format!("{}/{}", folder, crate::scaffold::STRINGS_FILE);
+            let mut taken = table.take_what_is_missing(theirs, sink);
+            for (index, (folder, text)) in project.library_values.iter().enumerate() {
+                let origin = match project.library_values_names.get(index) {
+                    Some(named) => named.clone(),
+                    None => format!("{}/{}", folder, crate::scaffold::STRINGS_FILE),
+                };
                 let config =
                     crate::resources::Config::parse_values_directory(folder).map_err(|why| {
                         fail("EB043", "A resource folder is not one this build reads.")
                             .with_context(format!("Folder: {folder}"))
                             .with_context(format!("Reported: {why}"))
                     })?;
-                if !theirs.read_values_for(text, &origin, config, sink) {
-                    return Err(fail("EB044", "A library's values file could not be read.")
-                        .with_context(format!("File: {origin}")));
+                let mut one =
+                    crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
+                one.know_macros(&macros);
+                if !one.read_values_for(text, &origin, config, sink) {
+                    let mut refused = fail("EB044", "A library's values file could not be read.")
+                        .with_context(format!("File: {origin}"));
+                    if let Some(first) = sink
+                        .entries()
+                        .iter()
+                        .rev()
+                        .find(|one| one.severity == crate::diag::Severity::Error)
+                    {
+                        if let Some(location) = &first.location {
+                            refused = refused.with_context(format!(
+                                "Line {}, column {}",
+                                location.line, location.column
+                            ));
+                        }
+                        refused = refused.with_context(format!("Reported: {}", first.message));
+                    }
+                    return Err(refused);
                 }
+                taken.extend(table.take_what_is_missing(one, sink));
             }
 
-            let taken = table.take_what_is_missing(theirs, sink);
             for (entry, held) in carried {
                 if !taken.iter().any(|one| one.origin == entry) {
                     continue;
@@ -38409,6 +39770,7 @@ pub mod builder {
                 return Err(fail("EB048", "A resource file could not be read as XML.")
                     .with_context(format!("File: {entry}")));
             };
+            crate::resources::expand_macros(&mut parsed, &macros);
             resolve_references(&mut parsed, Some(&compiled))?;
             let bytes = crate::axml::encode_knowing(&parsed, &own).map_err(|why| {
                 why.with_context(format!("File: {entry}")).with_suggestion(
@@ -38432,15 +39794,19 @@ pub mod builder {
                 if rest.starts_with("0x") || rest.starts_with("0X") {
                     continue;
                 }
-                let (package, name) = match rest.split_once(':') {
-                    Some((package, held)) => (Some(package), held),
-                    None => (None, rest),
+                let rest = rest.strip_prefix('*').unwrap_or(rest);
+                let (typed, named) = match rest.split_once('/') {
+                    Some((typed, named)) => (typed, named),
+                    None => ("", rest),
                 };
-                let name = name.strip_prefix("attr/").unwrap_or(name);
+                let (package, name) = match (typed.split_once(':'), named.split_once(':')) {
+                    (Some((package, _)), _) => (Some(package), named),
+                    (None, Some((package, held))) => (Some(package), held),
+                    (None, None) => (None, named),
+                };
                 let found = match package {
                     Some("android") => crate::axml::attribute_id(name),
-                    Some(_) => None,
-                    None => compiled
+                    _ => compiled
                         .and_then(|table| table.id(crate::resources::Kind::Attr, name))
                         .map(|id| id.raw())
                         .or_else(|| crate::axml::attribute_id(name)),
@@ -38516,6 +39882,39 @@ pub mod builder {
 
     fn package_name(root: &crate::xml::Element) -> String {
         root.attribute("package").unwrap_or_default().to_string()
+    }
+
+    pub const CLASS_NAMED: &[(&str, &str)] = &[
+        ("application", "android:name"),
+        ("application", "android:backupAgent"),
+        ("application", "android:manageSpaceActivity"),
+        ("activity", "android:name"),
+        ("activity", "android:parentActivityName"),
+        ("activity-alias", "android:name"),
+        ("activity-alias", "android:targetActivity"),
+        ("service", "android:name"),
+        ("receiver", "android:name"),
+        ("provider", "android:name"),
+        ("instrumentation", "android:name"),
+    ];
+
+    pub fn named_in_full(element: &mut crate::xml::Element, namespace: &str) {
+        for attribute in &mut element.attributes {
+            let wanted = CLASS_NAMED
+                .iter()
+                .any(|(tag, named)| *tag == element.name && *named == attribute.name);
+            if !wanted || attribute.value.is_empty() || attribute.value.starts_with('@') {
+                continue;
+            }
+            if attribute.value.starts_with('.') {
+                attribute.value = format!("{namespace}{}", attribute.value);
+            } else if !attribute.value.contains('.') {
+                attribute.value = format!("{namespace}.{}", attribute.value);
+            }
+        }
+        for child in &mut element.children {
+            named_in_full(child, namespace);
+        }
     }
 
     fn export_what_answers_intents(root: &mut crate::xml::Element) {
@@ -38632,7 +40031,9 @@ pub mod builder {
             values_names: Vec::new(),
             resources: Vec::new(),
             library_values: Vec::new(),
+            library_values_names: Vec::new(),
             library_resources: Vec::new(),
+            application_id: String::new(),
             library_packages: Vec::new(),
             sealed: None,
             shrink: true,
@@ -38758,7 +40159,9 @@ pub mod builder {
             values_names: Vec::new(),
             resources: Vec::new(),
             library_values: Vec::new(),
+            library_values_names: Vec::new(),
             library_resources: Vec::new(),
+            application_id: String::new(),
             library_packages: Vec::new(),
             sealed: None,
             shrink: true,
@@ -38786,8 +40189,15 @@ pub mod builder {
         };
 
         let brought = brought_by_libraries(root)?;
-        let manifest = merged_manifest(&manifest, &brought.manifests)?;
+        let namespace = package_of(&manifest).unwrap_or_default();
+        let application_id = held
+            .as_ref()
+            .map(|one| one.application_id.clone())
+            .filter(|one| !one.is_empty() && *one != namespace)
+            .unwrap_or_default();
+        let manifest = merged_manifest_as(&manifest, &brought.manifests, &application_id)?;
         let mut project = from_manifest(&manifest)?;
+        project.application_id = application_id;
         project.shrink = held.as_ref().map(|one| one.shrink).unwrap_or(true);
         project.seal_resources = held.as_ref().map(|one| one.seal_resources).unwrap_or(false);
         project.icon = crate::scaffold::icon_bytes(root);
@@ -38814,6 +40224,7 @@ pub mod builder {
         }
         project.files.extend(carried);
         project.library_values = brought.values;
+        project.library_values_names = brought.values_names;
         project.library_resources = brought.resources;
         project.library_packages = brought.packages;
 
@@ -38836,6 +40247,21 @@ pub mod builder {
             }
         }
 
+        if let Some(settings) = &held {
+            let namespace = package_of(&project.manifest).unwrap_or_default();
+            if !namespace.is_empty() && !declares_build_config(root, &namespace) {
+                let identity = if project.application_id.is_empty() {
+                    namespace.clone()
+                } else {
+                    project.application_id.clone()
+                };
+                sources.push((
+                    format!("{BUILD_CONFIG}.java"),
+                    build_config_source(&namespace, &identity, settings),
+                ));
+            }
+        }
+
         if let Some(made_by) = fingerprint {
             let mut named = crate::diag::Sink::new();
             let parsed = crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut named);
@@ -38843,7 +40269,15 @@ pub mod builder {
             if !package.is_empty() {
                 sources.push((
                     format!("{}.java", crate::seal::CLASS),
-                    crate::seal::source(&package, made_by),
+                    crate::seal::source_as(
+                        &package,
+                        if project.application_id.is_empty() {
+                            &package
+                        } else {
+                            &project.application_id
+                        },
+                        made_by,
+                    ),
                 ));
                 project.sealed = Some(crate::seal::class_name(&package));
             }
@@ -38851,7 +40285,7 @@ pub mod builder {
 
         let written = compiled_java(root, sources)?;
         if !written.is_empty() {
-            project.code = written;
+            project.code = crate::dalvik::open_nests(written);
         }
         Ok(project)
     }
@@ -39071,6 +40505,46 @@ pub mod builder {
                 other => other,
             })
             .collect()
+    }
+
+    pub const BUILD_CONFIG: &str = "BuildConfig";
+
+    pub const BUILD_TYPE: &str = "release";
+
+    fn java_text(said: &str) -> String {
+        said.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    pub fn build_config_source(
+        namespace: &str,
+        identity: &str,
+        settings: &crate::settings::Settings,
+    ) -> String {
+        format!(
+            "package {namespace};\n\npublic final class {BUILD_CONFIG} {{\n    \
+             public static final boolean DEBUG = false;\n    \
+             public static final String APPLICATION_ID = \"{}\";\n    \
+             public static final String BUILD_TYPE = \"{BUILD_TYPE}\";\n    \
+             public static final int VERSION_CODE = {};\n    \
+             public static final String VERSION_NAME = \"{}\";\n}}\n",
+            java_text(identity),
+            settings.version_code,
+            java_text(&settings.version_name),
+        )
+    }
+
+    fn declares_build_config(root: &str, namespace: &str) -> bool {
+        let folder = std::path::Path::new(root)
+            .join(crate::scaffold::JAVA_FOLDER)
+            .join(namespace.replace('.', "/"));
+        let wanted = format!("package {namespace};");
+        let at_root = std::path::Path::new(root)
+            .join(crate::scaffold::JAVA_FOLDER)
+            .join(format!("{BUILD_CONFIG}.java"));
+        [folder.join(format!("{BUILD_CONFIG}.java")), at_root]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .any(|text| text.contains(&wanted))
     }
 
     pub fn r_source(package: &str, compiled: &crate::resources::Compiled) -> String {
@@ -39379,17 +40853,96 @@ public final class R {{
     }
 
     fn known_as(element: &crate::xml::Element) -> (String, String) {
-        (
-            element.name.clone(),
-            element
-                .attribute("android:name")
-                .unwrap_or_default()
-                .to_string(),
-        )
+        let key = match element.attribute("android:name") {
+            Some(named) => named.to_string(),
+            None if element.name == "intent-filter" => as_xml(element, 0),
+            None => String::new(),
+        };
+        (element.name.clone(), key)
+    }
+
+    fn told(element: &crate::xml::Element) -> &str {
+        element.attribute("tools:node").unwrap_or("merge")
+    }
+
+    fn merge_into(mine: &mut crate::xml::Element, theirs: &crate::xml::Element, package: &str) {
+        if told(mine) == "replace" || told(mine) == "remove" {
+            return;
+        }
+        for attribute in &theirs.attributes {
+            if attribute.name.starts_with("tools:") || attribute.name.starts_with("xmlns") {
+                continue;
+            }
+            if mine.attribute(&attribute.name).is_none() {
+                let mut held = attribute.clone();
+                held.value = held.value.replace("${applicationId}", package);
+                mine.attributes.push(held);
+            }
+        }
+        for child in &theirs.children {
+            if child.name == "uses-sdk" || matches!(told(child), "remove" | "removeAll") {
+                continue;
+            }
+            let key = known_as(child);
+            match mine.children.iter_mut().find(|one| known_as(one) == key) {
+                Some(existing) => merge_into(existing, child, package),
+                None => {
+                    mine.child_at.push(mine.text.len());
+                    mine.children.push(instead(child, package));
+                }
+            }
+        }
+    }
+
+    fn settle_tools(element: &mut crate::xml::Element) {
+        let mut kept = Vec::with_capacity(element.children.len());
+        let mut at = Vec::with_capacity(element.children.len());
+        for (index, mut child) in std::mem::take(&mut element.children)
+            .into_iter()
+            .enumerate()
+        {
+            if matches!(told(&child), "remove" | "removeAll") {
+                continue;
+            }
+            settle_tools(&mut child);
+            at.push(element.child_at.get(index).copied().unwrap_or(0));
+            kept.push(child);
+        }
+        element.children = kept;
+        element.child_at = at;
+        element.attributes.retain(|attribute| {
+            !attribute.name.starts_with("tools:") && attribute.name != "xmlns:tools"
+        });
+    }
+
+    pub const PLACEHOLDERS: &[&str] = &["${applicationId}", "${packageName}"];
+
+    fn filled_in(element: &mut crate::xml::Element, package: &str) {
+        for attribute in &mut element.attributes {
+            for held in PLACEHOLDERS {
+                if attribute.value.contains(held) {
+                    attribute.value = attribute.value.replace(held, package);
+                }
+            }
+        }
+        for child in &mut element.children {
+            filled_in(child, package);
+        }
     }
 
     pub fn merged_manifest(application: &str, libraries: &[String]) -> Result<String, Diagnostic> {
-        if libraries.is_empty() {
+        merged_manifest_as(application, libraries, "")
+    }
+
+    pub fn merged_manifest_as(
+        application: &str,
+        libraries: &[String],
+        identity: &str,
+    ) -> Result<String, Diagnostic> {
+        if libraries.is_empty()
+            && !application.contains("tools:")
+            && !PLACEHOLDERS.iter().any(|held| application.contains(held))
+        {
             return Ok(application.to_string());
         }
         let mut sink = Sink::new();
@@ -39398,7 +40951,11 @@ public final class R {{
             return Err(fail("EB051", "The manifest could not be read.")
                 .with_context("Merging what the libraries ask for needs it read first."));
         };
-        let package = root.attribute("package").unwrap_or_default().to_string();
+        let package = if identity.is_empty() {
+            root.attribute("package").unwrap_or_default().to_string()
+        } else {
+            identity.to_string()
+        };
 
         for (which, held) in libraries.iter().enumerate() {
             let named = format!("AndroidManifest.xml in library {}", which + 1);
@@ -39408,40 +40965,21 @@ public final class R {{
                     .with_context(format!("Library: {}", which + 1)));
             };
             for child in &brought.children {
-                if child.name == "application" {
-                    let Some(mine) = root
-                        .children
-                        .iter_mut()
-                        .find(|one| one.name == "application")
-                    else {
-                        continue;
-                    };
-                    for inside in &child.children {
-                        if mine
-                            .children
-                            .iter()
-                            .any(|one| known_as(one) == known_as(inside))
-                        {
-                            continue;
-                        }
-                        mine.children.push(instead(inside, &package));
+                if child.name == "uses-sdk" || matches!(told(child), "remove" | "removeAll") {
+                    continue;
+                }
+                let key = known_as(child);
+                match root.children.iter_mut().find(|one| known_as(one) == key) {
+                    Some(existing) => merge_into(existing, child, &package),
+                    None => {
+                        root.child_at.push(root.text.len());
+                        root.children.push(instead(child, &package));
                     }
-                    continue;
                 }
-
-                if child.name == "uses-sdk" {
-                    continue;
-                }
-                if root
-                    .children
-                    .iter()
-                    .any(|one| known_as(one) == known_as(child))
-                {
-                    continue;
-                }
-                root.children.push(instead(child, &package));
             }
         }
+        settle_tools(&mut root);
+        filled_in(&mut root, &package);
 
         let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         out.push_str(&as_xml(&root, 0));
@@ -39464,6 +41002,9 @@ public final class R {{
     #[derive(Default)]
     pub struct Brought {
         pub values: Vec<(String, String)>,
+
+        pub values_names: Vec<String>,
+
         pub resources: Vec<crate::scaffold::Supplied>,
         pub packages: Vec<String>,
         pub manifests: Vec<String>,
@@ -39538,6 +41079,11 @@ public final class R {{
                         folder.to_string(),
                         String::from_utf8_lossy(&held).to_string(),
                     ));
+                    let library = path
+                        .file_name()
+                        .map(|held| held.to_string_lossy().to_string())
+                        .unwrap_or_else(|| where_from.clone());
+                    out.values_names.push(format!("{library}: {}", entry.name));
                     continue;
                 }
                 out.resources.push(crate::scaffold::Supplied {
@@ -39547,7 +41093,87 @@ public final class R {{
                 });
             }
         }
+        out.carried.extend(java_resources(root)?);
         Ok(out)
+    }
+
+    pub fn java_resources(root: &str) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        for path in packaged_jars(root) {
+            let where_from = path.display().to_string();
+            let bytes = std::fs::read(&path).map_err(|why| {
+                fail("EB045", "A dependency could not be read.")
+                    .with_context(format!("Path: {where_from}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            for jar in jars_within(&path, &bytes)? {
+                let mut sink = Sink::new();
+                let Some(archive) = crate::archive::read(&jar, &mut sink) else {
+                    continue;
+                };
+                let mut entries: Vec<&crate::archive::Entry> = archive
+                    .entries()
+                    .iter()
+                    .filter(|entry| !entry.is_directory() && carried_along(&entry.name))
+                    .collect();
+                entries.sort_by(|left, right| left.name.cmp(&right.name));
+                for entry in entries {
+                    let held = entry_bytes(&jar, entry, &where_from)?;
+                    match out.iter_mut().find(|(named, _)| *named == entry.name) {
+                        Some((_, existing)) if entry.name.starts_with("META-INF/services/") => {
+                            let mut lines: Vec<String> = String::from_utf8_lossy(existing)
+                                .lines()
+                                .map(|line| line.trim().to_string())
+                                .filter(|line| !line.is_empty())
+                                .collect();
+                            for line in String::from_utf8_lossy(&held).lines() {
+                                let line = line.trim().to_string();
+                                if !line.is_empty() && !lines.contains(&line) {
+                                    lines.push(line);
+                                }
+                            }
+                            *existing = (lines.join("\n") + "\n").into_bytes();
+                        }
+                        Some(_) => {}
+                        None => out.push((entry.name.clone(), held)),
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn carried_along(named: &str) -> bool {
+        if named.ends_with(".class") || named.ends_with(".kotlin_metadata") {
+            return false;
+        }
+        let first = named.split('/').next().unwrap_or("");
+        if matches!(
+            first,
+            "res" | "assets" | "lib" | "AndroidManifest.xml" | "resources.arsc"
+        ) || (first.starts_with("classes") && first.ends_with(".dex"))
+        {
+            return false;
+        }
+        let upper = named.rsplit('/').next().unwrap_or("").to_ascii_uppercase();
+        if upper.starts_with("LICENSE") || upper.starts_with("NOTICE") {
+            return false;
+        }
+        if let Some(rest) = named.strip_prefix("META-INF/") {
+            if rest.starts_with("services/") {
+                return true;
+            }
+            if rest.contains('/') || rest.ends_with(".kotlin_module") {
+                return false;
+            }
+            return !(upper == "MANIFEST.MF"
+                || upper == "INDEX.LIST"
+                || upper.starts_with("DEPENDENCIES")
+                || [".SF", ".RSA", ".DSA", ".EC"]
+                    .iter()
+                    .any(|tail| upper.ends_with(tail)));
+        }
+        true
     }
 
     fn package_of(manifest: &str) -> Option<String> {
@@ -39571,6 +41197,23 @@ public final class R {{
             })
             .collect();
 
+        if let Some(chosen) = crate::maven::chosen_files(root) {
+            let cache = folder.join(crate::maven::CACHE);
+            found.retain(|path| {
+                let named = path
+                    .file_name()
+                    .map(|held| held.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let stem = path
+                    .file_stem()
+                    .map(|held| held.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let fetched = cache
+                    .join(format!("{stem}.{}", crate::maven::POM))
+                    .is_file();
+                !fetched || chosen.contains(&named)
+            });
+        }
         found.sort();
         found
     }
@@ -39867,11 +41510,27 @@ public final class R {{
         export_what_answers_intents(&mut root);
 
         if let Some(class) = &project.sealed {
-            let package = class
-                .rsplit_once('.')
-                .map(|(held, _)| held.to_string())
-                .unwrap_or_default();
+            let package = if project.application_id.is_empty() {
+                class
+                    .rsplit_once('.')
+                    .map(|(held, _)| held.to_string())
+                    .unwrap_or_default()
+            } else {
+                project.application_id.clone()
+            };
             declare_the_seal(&mut root, class, &crate::seal::authority(&package));
+        }
+
+        if !project.application_id.is_empty() {
+            let namespace = package_name(&root);
+            named_in_full(&mut root, &namespace);
+            if let Some(held) = root
+                .attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == "package")
+            {
+                held.value = project.application_id.clone();
+            }
         }
 
         let report = guard::inspect_manifest(&root);
@@ -39917,7 +41576,20 @@ public final class R {{
             crate::progress::enter_checked("dex")?;
             let package = package_of(&project.manifest).unwrap_or_default();
             let written = if project.shrink {
-                let roots = crate::shrink::roots_from_manifest(&project.manifest, &package);
+                let mut roots = crate::shrink::roots_from_manifest(&project.manifest, &package);
+                roots.extend(crate::shrink::beyond_the_package(&project.code, &package));
+                let texts: Vec<String> = project
+                    .resources
+                    .iter()
+                    .filter(|held| held.name.ends_with(".xml"))
+                    .map(|held| String::from_utf8_lossy(&held.bytes).to_string())
+                    .chain(project.values.iter().map(|(_, text)| text.clone()))
+                    .collect();
+                roots.extend(crate::shrink::named_in_resources(
+                    &texts,
+                    &project.code,
+                    &package,
+                ));
                 let (kept, trimmed) = crate::shrink::apply(project.code.clone(), &roots);
                 if trimmed.dropped > 0 {
                     sink.emit(

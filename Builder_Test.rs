@@ -1455,7 +1455,15 @@ mod core {
         let error = sink.entries().iter().find(|d| d.code == "E9042").unwrap();
         assert!(error.message.contains("three decimal places"));
 
-        for bad in ["16", "dp", "16em", "abc dp", "1.2.3dp"] {
+        let (plain, sink) = values("<resources><dimen name=\"a\">16</dimen></resources>");
+        assert!(
+            !sink.has_blocking(),
+            "aapt2 reads a size with no unit as a float, and so does this: {:?}",
+            sink.entries()
+        );
+        assert_eq!(plain.len(), 1);
+
+        for bad in ["dp", "16em", "abc dp", "1.2.3dp"] {
             let (_, sink) = values(&format!(
                 "<resources><dimen name=\"a\">{bad}</dimen></resources>"
             ));
@@ -1965,6 +1973,169 @@ mod core {
         );
         assert_eq!(exported(".Hidden").as_deref(), Some("false"));
         assert_eq!(exported(".Quiet"), None);
+    }
+
+    const A_LIBRARYS_VALUES: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <macro name="surface_tint">?attr/colorPrimary</macro>
+    <macro name="indirect">@macro/surface_tint</macro>
+    <attr name="colorPrimary" format="color" />
+    <style name="Base.Lib">
+        <item name="colorPrimary">#ff00ff00</item>
+    </style>
+    <style name="Lib.Tinted" parent="Base.Lib">
+        <item name="colorPrimary">@macro/indirect</item>
+    </style>
+    <string name="lib_share">Share with <ns1:g xmlns:ns1="urn:oasis:names:tc:xliff:document:1.2" example="Mail" id="application_name">%s</ns1:g></string>
+    <declare-styleable name="Motion">
+        <attr name="android:translationX" format="dimension" />
+        <attr name="colorPrimary" />
+    </declare-styleable>
+</resources>
+"####;
+
+    const A_LIBRARYS_ROW: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/lib_row"
+    android:layout="@layout/lib_row"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:tag="first
+        second	third"
+    class="android.widget.LinearLayout"
+    style="?attr/colorPrimary"
+    tools:ignore="NewApi"
+    tools:context=".Main">
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="?attr/android:textColorPrimary"
+        tools:text="only in the designer" />
+    <include layout="@layout/lib_row" />
+</LinearLayout>
+"####;
+
+    fn element_header(bytes: &[u8]) -> (u16, u16, u16, u16) {
+        let mut at = 8usize;
+        while at + 8 <= bytes.len() {
+            let kind = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+            let size =
+                u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]])
+                    as usize;
+            if kind == 0x0102 {
+                let field =
+                    |from: usize| u16::from_le_bytes([bytes[at + from], bytes[at + from + 1]]);
+                return (field(28), field(30), field(32), field(34));
+            }
+            at += size.max(8);
+        }
+        panic!("no element was written");
+    }
+
+    #[test]
+    fn a_librarys_macros_xliff_and_tools_come_out_the_way_aapt2_leaves_them() {
+        let _turn = crate::progress::one_at_a_time();
+        let mut project = crate::builder::from_manifest(A_MANIFEST).expect("the manifest reads");
+        project.values = vec![(
+            "values".to_string(),
+            "<resources><string name=\"app_name\">Shapes</string></resources>".to_string(),
+        )];
+        project.library_values = vec![(
+            "values".to_string(),
+            A_LIBRARYS_VALUES.trim_start().to_string(),
+        )];
+        project.library_values_names = vec!["lib-1.0.aar: res/values/values.xml".to_string()];
+        project.library_resources = vec![crate::scaffold::Supplied {
+            folder: "layout".to_string(),
+            name: "lib_row.xml".to_string(),
+            bytes: A_LIBRARYS_ROW.trim_start().as_bytes().to_vec(),
+        }];
+
+        let mut sink = crate::diag::Sink::new();
+        let icons = crate::builder::compile_resources_for_test(&project, &mut sink)
+            .unwrap_or_else(|why| panic!("the library compiles: {why:?}\n{:?}", sink.entries()))
+            .expect("and there is something");
+
+        let assigned = icons.compiled.assignments();
+        assert!(
+            !assigned
+                .iter()
+                .any(|(_, name, _)| name == "surface_tint" || name == "indirect"),
+            "a macro is spent where it is used and never reaches the table"
+        );
+        assert!(icons
+            .compiled
+            .id(crate::resources::Kind::Style, "Lib.Tinted")
+            .is_some());
+        assert!(icons
+            .compiled
+            .id(crate::resources::Kind::String, "lib_share")
+            .is_some());
+
+        let (_, row) = icons
+            .files
+            .iter()
+            .find(|(entry, _)| entry.ends_with("lib_row.xml"))
+            .expect("the library's layout is written");
+        let (attributes, id_index, class_index, style_index) = element_header(row);
+        assert_eq!(attributes, 7, "the two tools: attributes are gone");
+        assert_eq!(
+            id_index, 1,
+            "android:id is the first attribute, and the header says so"
+        );
+        assert_eq!(class_index, 6, "class is named in the header");
+        assert_eq!(
+            style_index, 7,
+            "style is named in the header, which is how it is ever read"
+        );
+
+        let read = crate::axml::decode(row).expect("the layout reads back");
+        assert!(
+            read.attributes
+                .iter()
+                .all(|one| one.name != "ignore" && one.name != "context"),
+            "{:?}",
+            read.attributes
+        );
+        assert_eq!(read.attribute("tag"), Some("first         second third"));
+        let text = &read.children[0];
+        assert!(text.attributes.iter().all(|one| one.name != "text"));
+        let colour = text
+            .attributes
+            .iter()
+            .find(|one| one.name == "textColor")
+            .expect("the colour is kept");
+        assert_eq!(
+            colour.data, 0x0101_0036,
+            "?attr/android:textColorPrimary is the framework's"
+        );
+        let include = &read.children[1];
+        assert_eq!(include.attributes[0].name, "layout");
+        assert_eq!(
+            include.attributes[0].id, None,
+            "include's layout is not android:layout, even beside one that is"
+        );
+
+        let mut broken = project.clone();
+        broken.library_values = vec![(
+            "values".to_string(),
+            "<resources><widget name=\"x\"/></resources>".to_string(),
+        )];
+        let mut sink = crate::diag::Sink::new();
+        let refused = crate::builder::compile_resources_for_test(&broken, &mut sink)
+            .err()
+            .expect("an element nothing models is refused");
+        assert!(
+            refused
+                .context
+                .iter()
+                .any(|line| line == "File: lib-1.0.aar: res/values/values.xml"),
+            "the refusal names the library it came from: {:?}",
+            refused.context
+        );
     }
 
     const STYLED_WORDS: &str = r####"
@@ -6454,6 +6625,290 @@ public final class Family {
             }
         }
         out
+    }
+
+    #[test]
+    fn nestmates_and_monitors_come_out_the_way_art_accepts_them() {
+        let directory = temp_directory("omni-nests");
+        let made = directory.join("classes");
+        std::fs::create_dir_all(made.join("nest")).unwrap();
+        std::fs::write(
+            directory.join("Outer.java"),
+            r#"
+package nest;
+
+public class Outer {
+    private int count;
+
+    private static int hidden() {
+        return 7;
+    }
+
+    private String secret(long wide, int n) {
+        return "s" + wide + n + count;
+    }
+
+    public synchronized int guarded() {
+        return count;
+    }
+
+    public int locked(Object on) {
+        synchronized (on) {
+            return count + 1;
+        }
+    }
+
+    public final class Inner {
+        public String peek() {
+            count++;
+            return secret(5L, 2) + hidden();
+        }
+    }
+}
+"#
+            .trim_start(),
+        )
+        .unwrap();
+        let done = std::process::Command::new("javac")
+            .args(["--release", "17", "-d"])
+            .arg(made.to_str().unwrap())
+            .arg(directory.join("Outer.java").to_str().unwrap())
+            .output();
+        let Ok(done) = done else {
+            std::fs::remove_dir_all(&directory).ok();
+            assert!(
+                std::env::var("OMNI_REQUIRE_JAVAC").is_err(),
+                "OMNI_REQUIRE_JAVAC is set but javac is not here"
+            );
+            eprintln!("nests: javac is not available here");
+            return;
+        };
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+
+        let mut files = Vec::new();
+        gather_class_files(&made, &mut files);
+        files.sort();
+        let mut classes = Vec::new();
+        for path in &files {
+            let class =
+                crate::jvm::read(&std::fs::read(path).unwrap()).expect("javac's class reads");
+            classes.extend(crate::dalvik::translate_class(&class).expect("and translates"));
+        }
+        let classes = crate::dalvik::open_nests(classes);
+
+        let outer = classes
+            .iter()
+            .find(|one| one.descriptor == "Lnest/Outer;")
+            .expect("the outer class");
+        let inner = classes
+            .iter()
+            .find(|one| one.descriptor == "Lnest/Outer$Inner;")
+            .expect("the inner class");
+
+        let bridge_name = format!("{}secret", crate::dalvik::NEST_BRIDGE);
+        let bridge = outer
+            .direct_methods
+            .iter()
+            .find(|one| one.reference.name == bridge_name)
+            .expect("the private method another class calls gets a bridge");
+        assert!(bridge.access_flags & 0x0008 != 0, "the bridge is static");
+        assert_eq!(bridge.reference.parameters, vec!["Lnest/Outer;", "J", "I"]);
+        assert_eq!(bridge.inputs, 4, "the receiver, a long in two, and an int");
+
+        let calls: Vec<(u16, String)> = inner
+            .direct_methods
+            .iter()
+            .chain(inner.virtual_methods.iter())
+            .flat_map(|one| one.instructions.iter())
+            .filter_map(|one| match &one.operand {
+                crate::dexwrite::Operand::Method(called) => {
+                    Some((one.units[0] & 0xff, called.name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            calls
+                .iter()
+                .any(|(opcode, name)| (*opcode == 0x71 || *opcode == 0x77) && *name == bridge_name),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|(_, name)| name == "secret"), "{calls:?}");
+
+        let private = |flags: u32| flags & 0x0002 != 0;
+        let count = outer
+            .instance_fields
+            .iter()
+            .find(|one| one.reference.name == "count")
+            .unwrap();
+        assert!(
+            !private(count.access_flags),
+            "a field another class touches is opened"
+        );
+        let hidden = outer
+            .direct_methods
+            .iter()
+            .find(|one| one.reference.name == "hidden")
+            .unwrap();
+        assert!(
+            !private(hidden.access_flags),
+            "a static method another class calls is opened"
+        );
+
+        let guarded = outer
+            .virtual_methods
+            .iter()
+            .find(|one| one.reference.name == "guarded")
+            .unwrap();
+        assert_eq!(
+            guarded.access_flags & 0x0020,
+            0,
+            "ACC_SYNCHRONIZED is not a dex flag"
+        );
+        assert!(guarded.access_flags & crate::dexwrite::ACC_DECLARED_SYNCHRONIZED != 0);
+        let opcodes: Vec<u16> = guarded
+            .instructions
+            .iter()
+            .filter_map(|one| one.units.first().map(|unit| unit & 0xff))
+            .collect();
+        assert!(
+            opcodes.contains(&0x1d) && opcodes.contains(&0x1e),
+            "{opcodes:02x?}"
+        );
+        assert!(
+            guarded
+                .tries
+                .iter()
+                .any(|one| one.catches.iter().any(|(caught, _)| caught.is_none())),
+            "the monitor is let go on the way out of an exception too"
+        );
+        for class in &classes {
+            for one in &class.direct_methods {
+                if one.reference.name == "<init>" || one.reference.name == "<clinit>" {
+                    assert!(one.access_flags & crate::dexwrite::ACC_CONSTRUCTOR != 0);
+                }
+            }
+        }
+
+        let dex = crate::dexwrite::write(&classes, &[]).expect("the dex is written");
+        if let Some(said) = dexdump_text(&dex) {
+            assert!(said.contains(&bridge_name), "dexdump reads the bridge back");
+        }
+        eprintln!("nests: a bridge, opened members and held monitors");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn library_manifests_merge_the_way_the_manifest_merger_merges_them() {
+        let application = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.tr.shapes">
+    <application android:label="Shapes" tools:replace="android:label">
+        <activity android:name=".Main" android:exported="true" />
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                tools:node="remove" />
+        </provider>
+    </application>
+</manifest>"#;
+        let emoji = r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools" package="androidx.emoji2">
+    <uses-sdk android:minSdkVersion="19" />
+    <application android:label="not this one">
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                android:value="androidx.startup" />
+        </provider>
+    </application>
+</manifest>"#;
+        let lifecycle = r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools" package="androidx.lifecycle.process">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application>
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+                android:value="androidx.startup" />
+        </provider>
+        <receiver android:name="x.Told" android:exported="true">
+            <intent-filter><action android:name="x.FIRST" /></intent-filter>
+            <intent-filter><action android:name="x.SECOND" /></intent-filter>
+        </receiver>
+    </application>
+</manifest>"#;
+        let merged = crate::builder::merged_manifest(
+            application,
+            &[emoji.to_string(), lifecycle.to_string()],
+        )
+        .expect("the manifests merge");
+        assert!(
+            !merged.contains("tools:"),
+            "nothing the merger reads is left: {merged}"
+        );
+        assert!(!merged.contains("${applicationId}"), "{merged}");
+
+        let mut sink = crate::diag::Sink::new();
+        let root = crate::xml::parse(&merged, "merged", &mut sink).expect("what is merged reads");
+        assert!(
+            root.children_named("uses-sdk").next().is_none(),
+            "a library's floor is not the application's"
+        );
+        assert!(root
+            .children_named("uses-permission")
+            .any(|one| one.attribute("android:name") == Some("android.permission.INTERNET")));
+        let application = root.children_named("application").next().unwrap();
+        assert_eq!(application.attribute("android:label"), Some("Shapes"));
+
+        let providers: Vec<&crate::xml::Element> = application.children_named("provider").collect();
+        assert_eq!(
+            providers.len(),
+            1,
+            "one provider, however many libraries name it"
+        );
+        let provider = providers[0];
+        assert_eq!(
+            provider.attribute("android:authorities"),
+            Some("com.tr.shapes.androidx-startup")
+        );
+        assert_eq!(provider.attribute("android:exported"), Some("false"));
+        let started: Vec<&str> = provider
+            .children_named("meta-data")
+            .filter_map(|one| one.attribute("android:name"))
+            .collect();
+        assert_eq!(
+            started,
+            vec!["androidx.lifecycle.ProcessLifecycleInitializer"],
+            "what the application removed stays removed, and the rest is kept"
+        );
+
+        let receiver = application
+            .children_named("receiver")
+            .next()
+            .expect("the receiver");
+        assert_eq!(
+            receiver.children_named("intent-filter").count(),
+            2,
+            "two filters stay two"
+        );
+        eprintln!("manifests: merged by name, tools:node honoured, ${{applicationId}} filled");
     }
 
     fn dexdump_text(bytes: &[u8]) -> Option<String> {
@@ -11198,7 +11653,9 @@ public class Walk {
             values_names: Vec::new(),
             resources: Vec::new(),
             library_values: Vec::new(),
+            library_values_names: Vec::new(),
             library_resources: Vec::new(),
+            application_id: String::new(),
             library_packages: Vec::new(),
             sealed: None,
             shrink: true,
@@ -11866,7 +12323,9 @@ public class Walk {
                 values_names: Vec::new(),
                 resources: Vec::new(),
                 library_values: Vec::new(),
+                library_values_names: Vec::new(),
                 library_resources: Vec::new(),
+                application_id: String::new(),
                 library_packages: Vec::new(),
                 sealed: None,
                 shrink: true,
@@ -14948,6 +15407,376 @@ public final class App extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    fn a_pom(group: &str, artifact: &str, version: &str, inside: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?>\n<project>\n  <modelVersion>4.0.0</modelVersion>\n  \
+             <groupId>{group}</groupId>\n  <artifactId>{artifact}</artifactId>\n  \
+             <version>{version}</version>\n{inside}\n</project>\n"
+        )
+    }
+
+    fn a_dependency(group: &str, artifact: &str, version: &str, extra: &str) -> String {
+        format!(
+            "    <dependency><groupId>{group}</groupId><artifactId>{artifact}</artifactId>\
+             <version>{version}</version><scope>compile</scope>{extra}</dependency>\n"
+        )
+    }
+
+    #[test]
+    fn libraries_resolve_the_way_gradle_resolves_them() {
+        let directory = temp_directory("omni-resolve");
+        let root = directory.to_str().unwrap().to_string();
+        let place = |coordinate: &str, kind: &str, text: &str| {
+            let one = crate::maven::Coordinate::parse(coordinate).unwrap();
+            let path = match kind {
+                "pom" => crate::maven::pom_path(&root, &one),
+                _ => crate::maven::module_path(&root, &one),
+            };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+
+        place(
+            "org.demo:alpha:1.0",
+            "pom",
+            &a_pom(
+                "org.demo",
+                "alpha",
+                "1.0",
+                &format!(
+                    "  <packaging>aar</packaging>\n  <dependencies>\n{}{}{}{}  </dependencies>",
+                    a_dependency("org.demo", "gamma", "1.0", ""),
+                    a_dependency(
+                        "org.demo",
+                        "zeta",
+                        "1.0",
+                        "<exclusions><exclusion><groupId>org.demo</groupId>\
+                         <artifactId>delta</artifactId></exclusion></exclusions>"
+                    ),
+                    a_dependency("org.jetbrains.kotlin", "kotlin-stdlib", "1.9.0", ""),
+                    a_dependency("org.old", "legacy", "1.0", ""),
+                ),
+            ),
+        );
+        place(
+            "org.demo:beta:1.0",
+            "pom",
+            &a_pom(
+                "org.demo",
+                "beta",
+                "1.0",
+                "  <!-- do_not_remove: published-with-gradle-metadata -->\n  <packaging>aar</packaging>",
+            ),
+        );
+        place(
+            "org.demo:beta:1.0",
+            "module",
+            r#"{
+  "formatVersion": "1.1",
+  "variants": [
+    {
+      "name": "releaseVariantReleaseApiPublication",
+      "attributes": { "org.gradle.usage": "java-api", "org.gradle.category": "library" },
+      "dependencies": [ { "group": "org.demo", "module": "never", "version": { "requires": "9.0" } } ]
+    },
+    {
+      "name": "releaseVariantReleaseRuntimePublication",
+      "attributes": {
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.category": "library",
+        "com.android.build.api.attributes.BuildTypeAttr": "release"
+      },
+      "dependencies": [ { "group": "org.demo", "module": "gamma", "version": { "requires": "2.0" } } ],
+      "files": [ { "name": "beta-1.0.aar", "url": "beta-1.0.aar" } ]
+    }
+  ]
+}"#,
+        );
+        for version in ["1.0", "2.0"] {
+            place(
+                &format!("org.demo:gamma:{version}"),
+                "pom",
+                &a_pom(
+                    "org.demo",
+                    "gamma",
+                    version,
+                    &format!(
+                        "  <parent><groupId>org.demo</groupId><artifactId>parent</artifactId>\
+                         <version>1</version></parent>\n  <dependencies>\n{}{}  </dependencies>",
+                        a_dependency("org.demo", "epsilon", "${lib.version}", ""),
+                        a_dependency("org.jetbrains.kotlin", "kotlin-stdlib-jdk8", "1.8.22", ""),
+                    ),
+                ),
+            );
+        }
+        place(
+            "org.demo:parent:1",
+            "pom",
+            &a_pom(
+                "org.demo",
+                "parent",
+                "1",
+                "  <packaging>pom</packaging>\n  <properties><lib.version>3.0</lib.version></properties>",
+            ),
+        );
+        place(
+            "org.demo:epsilon:3.0",
+            "pom",
+            &a_pom("org.demo", "epsilon", "3.0", ""),
+        );
+        place(
+            "org.demo:zeta:1.0",
+            "pom",
+            &a_pom(
+                "org.demo",
+                "zeta",
+                "1.0",
+                &format!(
+                    "  <dependencies>\n{}  </dependencies>",
+                    a_dependency("org.demo", "delta", "1.0", "")
+                ),
+            ),
+        );
+        place(
+            "org.old:legacy:1.0",
+            "pom",
+            &a_pom(
+                "org.old",
+                "legacy",
+                "1.0",
+                "  <distributionManagement><relocation><groupId>org.demo</groupId>\
+                 <artifactId>modern</artifactId></relocation></distributionManagement>",
+            ),
+        );
+        place(
+            "org.demo:modern:1.0",
+            "pom",
+            &a_pom("org.demo", "modern", "1.0", ""),
+        );
+        for artifact in ["kotlin-stdlib", "kotlin-stdlib-jdk8"] {
+            for version in ["1.9.0", "1.8.22"] {
+                place(
+                    &format!("org.jetbrains.kotlin:{artifact}:{version}"),
+                    "pom",
+                    &a_pom("org.jetbrains.kotlin", artifact, version, ""),
+                );
+            }
+        }
+
+        let need = |coordinate: &str| crate::maven::Need {
+            coordinate: crate::maven::Coordinate::parse(coordinate).unwrap(),
+            strictly: false,
+            excluded: Vec::new(),
+        };
+        let resolved = crate::maven::resolve(
+            &root,
+            &[need("org.demo:alpha:1.0"), need("org.demo:beta:1.0")],
+        );
+        assert!(resolved.missing.is_empty(), "{:?}", resolved.missing);
+        assert!(resolved.unresolved.is_empty(), "{:?}", resolved.unresolved);
+        let chosen: Vec<String> = resolved
+            .chosen
+            .iter()
+            .map(|(one, kind)| format!("{}:{kind}", one.text()))
+            .collect();
+        for wanted in [
+            "org.demo:alpha:1.0:aar",
+            "org.demo:beta:1.0:aar",
+            "org.demo:gamma:2.0:jar",
+            "org.demo:epsilon:3.0:jar",
+            "org.demo:zeta:1.0:jar",
+            "org.demo:modern:1.0:jar",
+            "org.jetbrains.kotlin:kotlin-stdlib:1.9.0:jar",
+            "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.0:jar",
+        ] {
+            assert!(
+                chosen.contains(&wanted.to_string()),
+                "{wanted} is not in {chosen:?}"
+            );
+        }
+        for unwanted in ["delta", "gamma:1.0", "never", "parent", "legacy", "1.8.22"] {
+            assert!(
+                !chosen.iter().any(|one| one.contains(unwanted)),
+                "{unwanted} should not be in {chosen:?}"
+            );
+        }
+        eprintln!("maven: newest wins, metadata, parents, exclusions, relocation and alignment");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_renamed_application_keeps_its_classes_where_the_namespace_put_them() {
+        let mut sink = crate::diag::Sink::new();
+        let mut root = crate::xml::parse(
+            r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.original">
+    <application android:name=".Shapes" android:backupAgent="Keeper">
+        <activity android:name=".Main" android:parentActivityName=".Home" />
+        <activity-alias android:name=".Door" android:targetActivity=".Main" />
+        <service android:name="com.other.Kept" />
+        <provider android:name="androidx.startup.InitializationProvider" android:authorities="x" />
+        <meta-data android:name="left.alone" android:value=".NotAClass" />
+    </application>
+</manifest>"#,
+            "AndroidManifest.xml",
+            &mut sink,
+        )
+        .unwrap();
+        crate::builder::named_in_full(&mut root, "com.example.original");
+        let application = root.children_named("application").next().unwrap();
+        assert_eq!(
+            application.attribute("android:name"),
+            Some("com.example.original.Shapes")
+        );
+        assert_eq!(
+            application.attribute("android:backupAgent"),
+            Some("com.example.original.Keeper")
+        );
+        let found = |tag: &str, name: &str| {
+            application
+                .children_named(tag)
+                .next()
+                .and_then(|one| one.attribute(name))
+                .map(str::to_string)
+        };
+        assert_eq!(
+            found("activity", "android:name").as_deref(),
+            Some("com.example.original.Main")
+        );
+        assert_eq!(
+            found("activity", "android:parentActivityName").as_deref(),
+            Some("com.example.original.Home")
+        );
+        assert_eq!(
+            found("activity-alias", "android:targetActivity").as_deref(),
+            Some("com.example.original.Main")
+        );
+        assert_eq!(
+            found("service", "android:name").as_deref(),
+            Some("com.other.Kept")
+        );
+        assert_eq!(
+            found("meta-data", "android:value").as_deref(),
+            Some(".NotAClass")
+        );
+
+        let sealed = crate::seal::source_as(
+            "com.example.original",
+            "com.example.renamed",
+            &"ab".repeat(32),
+        );
+        assert!(sealed.starts_with("package com.example.original;"));
+        assert!(sealed.contains("\"com.example.renamed\".equals(context.getPackageName())"));
+        assert_eq!(
+            crate::seal::authority("com.example.renamed"),
+            "com.example.renamed.omniseal"
+        );
+    }
+
+    #[test]
+    fn an_old_groovy_build_reads_the_way_gradle_reads_it() {
+        let directory = temp_directory("omni-old-gradle");
+        let root = directory.join("Old");
+        std::fs::create_dir_all(root.join("app/src/main")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "include ':app', ':lib'\n").unwrap();
+        std::fs::write(
+            root.join("build.gradle"),
+            "buildscript {\n    ext.kotlin_version = '1.2.30'\n}\n\
+             ext {\n    roomVersion = '1.1.1'\n    supportLibraryVersion = \"27.1.1\"\n    \
+             versions = [ glide: '4.9.0' ]\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("gradle.properties"), "lifecycleVersion=1.1.1\n").unwrap();
+        std::fs::write(
+            root.join("app/build.gradle"),
+            r#"apply plugin: 'com.android.application'
+
+android {
+    compileSdkVersion 27
+    defaultConfig {
+        applicationId "com.example.renamed"
+        minSdkVersion 15
+        targetSdkVersion 27
+        versionCode 3
+        versionName "1.2"
+    }
+}
+
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    compile "com.android.support:appcompat-v7:$supportLibraryVersion"
+    implementation "android.arch.persistence.room:runtime:$rootProject.roomVersion"
+    implementation "android.arch.lifecycle:extensions:${lifecycleVersion}"
+    implementation "com.github.bumptech.glide:glide:${rootProject.ext.versions.glide}"
+    implementation group: 'com.squareup.okio', name: 'okio', version: '1.14.0'
+    implementation project(':lib')
+    annotationProcessor "android.arch.persistence.room:compiler:$roomVersion"
+    testImplementation 'junit:junit:4.12'
+    androidTestImplementation 'com.android.support.test:runner:1.0.2'
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/src/main/AndroidManifest.xml"),
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.example.original\"><application /></manifest>",
+        )
+        .unwrap();
+
+        let text = root.to_str().unwrap();
+        assert_eq!(
+            crate::gradle::application_module(text).as_deref(),
+            Some("app")
+        );
+        let found = crate::gradle::read(text, "app").expect("the build reads");
+        assert!(found
+            .plugins
+            .contains(&"com.android.application".to_string()));
+        let named: Vec<String> = found
+            .settings
+            .dependencies
+            .iter()
+            .map(|one| format!("{}:{}", one.name, one.version))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                "com.android.support:appcompat-v7:27.1.1",
+                "android.arch.persistence.room:runtime:1.1.1",
+                "android.arch.lifecycle:extensions:1.1.1",
+                "com.github.bumptech.glide:glide:4.9.0",
+                "com.squareup.okio:okio:1.14.0",
+            ]
+        );
+        assert_eq!(
+            found
+                .processors
+                .iter()
+                .map(|one| format!("{}:{}", one.name, one.version))
+                .collect::<Vec<_>>(),
+            vec!["android.arch.persistence.room:compiler:1.1.1"]
+        );
+        assert!(
+            found.modules.contains(&"lib".to_string()),
+            "{:?}",
+            found.modules
+        );
+        assert!(
+            found.unread.is_empty(),
+            "nothing is left unread: {:?}",
+            found.unread
+        );
+        assert_eq!(
+            found.settings.namespace, "com.example.original",
+            "R lives where the manifest says"
+        );
+        assert_eq!(found.settings.application_id, "com.example.renamed");
+        assert_eq!(found.settings.min_sdk, 15);
+        assert_eq!(found.settings.version_code, 3);
+        eprintln!("gradle: an old Groovy build, its ext variables and its applicationId");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[test]
     fn what_a_project_names_comes_down_from_maven_with_all_it_leans_on() {
         let directory = temp_directory("omni-maven");
@@ -14991,6 +15820,10 @@ public final class App extends Activity {
                         break;
                     }
                 }
+                if want.kind == crate::maven::MODULE && !into.is_file() {
+                    std::fs::write(&into, b"").unwrap();
+                    carried += 1;
+                }
             }
             if carried == 0 {
                 eprintln!("maven: nothing came down, so there is nothing to check");
@@ -15007,15 +15840,17 @@ public final class App extends Activity {
             .map(|one| one.file_name().to_string_lossy().to_string())
             .collect();
         assert!(
-            held.contains(&"okhttp-4.12.0.jar".to_string()),
+            held.contains(&"com.squareup.okhttp3.okhttp-4.12.0.jar".to_string()),
             "what was named did not come down: {held:?}"
         );
         assert!(
-            held.iter().any(|one| one.starts_with("okio")),
+            held.iter()
+                .any(|one| one.starts_with("com.squareup.okio.okio")),
             "what okhttp leans on did not come with it: {held:?}"
         );
         assert!(
-            held.iter().any(|one| one.starts_with("kotlin-stdlib")),
+            held.iter()
+                .any(|one| one.starts_with("org.jetbrains.kotlin.kotlin-stdlib")),
             "the Kotlin runtime okhttp leans on did not come with it: {held:?}"
         );
         for one in &held {
@@ -33943,6 +34778,83 @@ public class Screen extends Activity implements View.OnClickListener {
         assert_eq!(refused.code, "EJ224");
 
         eprintln!("java: a static import, and what was not imported still refused");
+    }
+
+    #[test]
+    fn a_generic_override_with_a_primitive_beside_it_gets_its_bridge() {
+        let source = r#"
+            package com.my.app;
+
+            public class Holders {
+                public abstract static class Adapter<VH> {
+                    public abstract VH make(Object parent, int kind);
+                    public abstract void bind(VH holder, int position);
+                    public void use(VH one) {
+                        System.out.println("the adapter's own use");
+                    }
+                }
+
+                public static final class Holder {
+                }
+
+                public static final class Rows extends Adapter<Holder> {
+                    @Override
+                    public Holder make(Object parent, int kind) {
+                        return new Holder();
+                    }
+
+                    @Override
+                    public void bind(Holder holder, int position) {
+                        System.out.println("bound " + position);
+                    }
+
+                    public void use(String unrelated) {
+                        System.out.println("an overload, never an override");
+                    }
+                }
+
+                public static void main(String[] args) {
+                    Adapter<Holder> adapter = new Rows();
+                    Holder made = adapter.make(null, 3);
+                    adapter.bind(made, 7);
+                    adapter.use(made);
+                    System.out.println(made != null);
+                }
+            }
+        "#;
+        let produced = compile(source, &empty()).expect("must compile");
+        let (_, bytes) = produced
+            .iter()
+            .find(|(name, _)| name == "com/my/app/Holders$Rows.class")
+            .expect("the subclass is written");
+        let rows = crate::jvm::read(bytes).expect("and reads back");
+        let bridged = |name: &str, descriptor: &str| {
+            rows.methods.iter().any(|one| {
+                one.name == name && one.descriptor == descriptor && one.access_flags & 0x0040 != 0
+            })
+        };
+        assert!(
+            bridged("make", "(Ljava/lang/Object;I)Ljava/lang/Object;"),
+            "a type variable returned beside an int still needs its bridge"
+        );
+        assert!(
+            bridged("bind", "(Ljava/lang/Object;I)V"),
+            "a type variable taken beside an int still needs its bridge"
+        );
+        assert!(
+            !rows
+                .methods
+                .iter()
+                .any(|one| one.name == "use" && one.descriptor == "(Ljava/lang/Object;)V"),
+            "use(String) does not override use(Holder), so nothing may bridge to it"
+        );
+
+        match jvm_runs(&produced, "com.my.app.Holders") {
+            None => eprintln!("java: no JVM here to run the bridges"),
+            Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
+            Some(Ok(said)) => assert_eq!(said.trim(), "bound 7\nthe adapter's own use\ntrue"),
+        }
+        eprintln!("java: bridges beside primitives, and none for an overload");
     }
 
     #[test]

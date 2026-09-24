@@ -3742,7 +3742,9 @@ class BuilderActivity : Activity() {
 
         const val AGENT_DIFF_BYTES = 512L * 1024L
 
-        const val LIBRARY_ROUNDS = 12
+        const val LIBRARY_ROUNDS = 40
+
+        const val LIBRARY_METADATA = "module"
 
         const val LIBRARY_SHOWN = 12
 
@@ -3780,20 +3782,27 @@ class BuilderActivity : Activity() {
 
         val BUILDER_LIMITS = """
             This project is built on the phone by Apk Builder, with its own Java 25
-            compiler, resource compiler, dex writer and signer. There is no Gradle,
-            no Kotlin, no C or C++ and no Rust here, so write every source file in
-            Java 25 and nothing else. Records, sealed types, switch expressions and
-            patterns, record patterns, text blocks, var, lambdas and method
-            references all compile. Use the Android framework (android.*) and the
-            Java core library (java.*, javax.*). Do not reach for AndroidX,
-            Jetpack Compose, Kotlin libraries or annotation processors unless the
-            project's Builder.json already lists that library. So an activity
-            extends android.app.Activity, never AppCompatActivity; a theme is the
-            platform's own, such as @android:style/Theme.Material.Light.NoActionBar
-            or @android:style/Theme.DeviceDefault, never Theme.AppCompat or
-            Theme.MaterialComponents; and lists and screens are made of ListView,
-            LinearLayout, FrameLayout and ScrollView, not RecyclerView,
-            ConstraintLayout or CardView. The manifest is
+            compiler, resource compiler, dex writer and signer. There is no Gradle
+            process, no Kotlin compiler, no C or C++ and no Rust here, so write
+            every source file in Java 25 and nothing else. Records, sealed types,
+            switch expressions and patterns, record patterns, text blocks, var,
+            lambdas and method references all compile.
+            Libraries work the way Gradle's do. AndroidX, Material Components and
+            any other library on Google Maven or Maven Central can be used:
+            AppCompatActivity, Theme.AppCompat, Theme.MaterialComponents,
+            Theme.Material3, RecyclerView, ConstraintLayout, CardView,
+            CoordinatorLayout, ViewPager2, Fragment, Lifecycle, ViewModel and the
+            rest. A library is added by listing it in the "dependencies" array of
+            Builder.json, the way it would be in build.gradle, for example
+            { "name": "androidx.appcompat:appcompat", "version": "1.7.0" } or
+            { "name": "com.google.android.material:material", "version": "1.12.0" }.
+            Read Builder.json first and write it back whole with the entry added;
+            what a library needs in turn is downloaded with it, newest version
+            wins, and its resources, manifest and classes are merged in. A library
+            written in Kotlin is fine to call from Java. Jetpack Compose is not
+            available, because it needs the Kotlin compiler, and annotation
+            processors (Room's compiler, Hilt, Dagger, Glide's compiler) do not
+            run, so write by hand what they would have generated. The manifest is
             AndroidManifest.xml at the root, Java sources live under Java (a folder
             per package is fine), resources live under Res (Res/layout,
             Res/values, Res/drawable, Res/mipmap-...), and the settings live in
@@ -12319,6 +12328,7 @@ class BuilderActivity : Activity() {
         if (agentWrote.isNotEmpty() && agentRound < AGENT_ROUNDS) {
             talkLiveNote?.text = getString(R.string.omni_agent_checking)
             Thread {
+                runCatching { librariesFetchedNow(root) }
                 val problem = agentProblem(root)
                 runOnUiThread {
                     if (isFinishing || isDestroyed) {
@@ -17844,6 +17854,12 @@ class BuilderActivity : Activity() {
             link.instanceFollowRedirects = true
             link.setRequestProperty("User-Agent", "apk-builder")
             val code = runCatching { link.responseCode }.getOrElse { -1 }
+            if (code == HttpURLConnection.HTTP_NOT_FOUND && one.kind == LIBRARY_METADATA) {
+                link.disconnect()
+                if (runCatching { into.writeBytes(ByteArray(0)) }.isSuccess) {
+                    return ""
+                }
+            }
             if (code != 200) {
                 last = one.coordinate + "  " + code
                 link.disconnect()
@@ -17880,35 +17896,40 @@ class BuilderActivity : Activity() {
         return last.ifEmpty { one.coordinate }
     }
 
+    private fun librariesFetchedNow(root: String): Pair<Int, List<String>> {
+        val refused = mutableListOf<String>()
+        var carried = 0
+        var rounds = 0
+        while (rounds < LIBRARY_ROUNDS) {
+            rounds += 1
+            val wanted = wantedLibraries(
+                runCatching { Builder.nativeMavenPlan(root) }.getOrDefault("")
+            ).filter { !refused.contains(it.coordinate + it.kind) }
+            if (wanted.isEmpty()) {
+                break
+            }
+            for (one in wanted) {
+                val why = downloadOne(root, one)
+                if (why.isEmpty()) {
+                    carried += 1
+                } else {
+                    refused.add(one.coordinate + one.kind)
+                    if (!refused.contains(why)) {
+                        refused.add(why)
+                    }
+                }
+            }
+        }
+        return carried to refused.filter {
+            !it.endsWith("pom") && !it.endsWith("jar") && !it.endsWith("aar") && !it.endsWith(LIBRARY_METADATA)
+        }
+    }
+
     private fun fetchTheLibraries(root: String, onDone: () -> Unit) {
         results.removeAllViews()
         results.addView(notice(getString(R.string.omni_libraries_fetching), palette.accent))
         Thread {
-            val refused = mutableListOf<String>()
-            var carried = 0
-            var rounds = 0
-            while (rounds < LIBRARY_ROUNDS) {
-                rounds += 1
-                val wanted = wantedLibraries(
-                    runCatching { Builder.nativeMavenPlan(root) }.getOrDefault("")
-                ).filter { !refused.contains(it.coordinate + it.kind) }
-                if (wanted.isEmpty()) {
-                    break
-                }
-                for (one in wanted) {
-                    val why = downloadOne(root, one)
-                    if (why.isEmpty()) {
-                        carried += 1
-                    } else {
-                        refused.add(one.coordinate + one.kind)
-                        if (!refused.contains(why)) {
-                            refused.add(why)
-                        }
-                    }
-                }
-            }
-            val got = carried
-            val left = refused.filter { !it.endsWith("pom") && !it.endsWith("jar") && !it.endsWith("aar") }
+            val (got, left) = librariesFetchedNow(root)
             runOnUiThread {
                 if (isFinishing || isDestroyed) {
                     return@runOnUiThread
