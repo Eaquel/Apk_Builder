@@ -1647,8 +1647,14 @@ fn write_quota(w: &mut Writer, quota: Quota) {
     w.end_object();
 }
 
-fn write_probe(w: &mut Writer, format: Format) {
-    let (method, path) = format.probe();
+pub fn probe_of(held: &Provider) -> (&'static str, &'static str) {
+    match held.id {
+        "openrouter" => ("GET", "/key"),
+        _ => held.format.probe(),
+    }
+}
+
+fn write_probe(w: &mut Writer, (method, path): (&str, &str)) {
     w.begin_object(Some("probe"));
     w.field_str("method", method);
     w.field_str("path", path);
@@ -1669,7 +1675,7 @@ pub fn write_provider(w: &mut Writer, held: &Provider) {
     w.field_bool("lastResort", held.last_resort);
     w.field_u64("freeWindow", held.free_window);
     write_quota(w, held.quota);
-    write_probe(w, held.format);
+    write_probe(w, probe_of(held));
     w.begin_array(Some("models"));
     for model in held.models {
         w.begin_object(None);
@@ -1764,7 +1770,7 @@ pub fn custom_json(held: &Custom) -> String {
     w.field_str("sign", format.sign().name());
     w.field_str("base", &held.base);
     w.field_u64("window", held.window);
-    write_probe(&mut w, format);
+    write_probe(&mut w, format.probe());
     write_efforts(&mut w, &held.efforts, held.wire());
     if let Some(found) = barred(&held.base) {
         w.field_str("barred", found.name);

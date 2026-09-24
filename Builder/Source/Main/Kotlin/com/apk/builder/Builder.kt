@@ -1169,11 +1169,10 @@ object Preferences {
     private const val FEEDBACK_SENT = "feedback_sent"
     private const val ASSISTANT_KEY = "assistant_key"
     private const val ASSISTANT_VENDOR = "assistant_vendor"
-    private const val VENDOR_REST = "vendor_rest"
-    private const val VENDOR_FAULTS = "vendor_faults"
     private const val VENDOR_MODELS = "vendor_models"
     private const val ASSISTANT_MODEL = "assistant_model"
     private const val ASSISTANT_EFFORT = "assistant_effort"
+    private const val CUSTOM_VENDORS = "custom_vendors"
     private const val ASSISTANT_AGENT = "assistant_agent"
 
     val LANGUAGES: List<Triple<String, String, String>> = listOf(
@@ -1210,9 +1209,10 @@ object Preferences {
         store(context).edit().remove(ASSISTANT_KEY + "_" + vendor).apply()
     }
 
-    fun assistantVendor(context: Context): String =
-        store(context).getString(ASSISTANT_VENDOR, "").orEmpty()
-            .ifEmpty { Brain.VENDORS.first().id }
+    fun assistantVendor(context: Context): String {
+        val held = store(context).getString(ASSISTANT_VENDOR, "").orEmpty()
+        return if (Brain.vendorOf(context, held) != null) held else Brain.AUTO
+    }
 
     fun setAssistantVendor(context: Context, id: String) {
         store(context).edit().putString(ASSISTANT_VENDOR, id).apply()
@@ -1221,28 +1221,32 @@ object Preferences {
     fun assistantModel(context: Context): String = modelFor(context, assistantVendor(context))
 
     fun modelFor(context: Context, vendor: String): String {
-        val held = Brain.vendorOf(vendor)
+        val held = Brain.vendorOf(context, vendor) ?: return ""
         return store(context).getString(ASSISTANT_MODEL + "_" + held.id, "").orEmpty()
-            .ifEmpty { held.models.first().id }
+            .ifEmpty { held.models.firstOrNull()?.id.orEmpty() }
+    }
+
+    fun effortFor(context: Context, vendor: String, model: String): String =
+        store(context).getString(ASSISTANT_EFFORT + "_" + vendor + "_" + model, "").orEmpty()
+            .ifEmpty { assistantEffort(context) }
+
+    fun setEffortFor(context: Context, vendor: String, model: String, named: String) {
+        store(context).edit()
+            .putString(ASSISTANT_EFFORT + "_" + vendor + "_" + model, named)
+            .putString(ASSISTANT_EFFORT, named)
+            .apply()
+    }
+
+    fun customVendors(context: Context): String =
+        store(context).getString(CUSTOM_VENDORS, "").orEmpty().ifEmpty { "[]" }
+
+    fun setCustomVendors(context: Context, held: String) {
+        store(context).edit().putString(CUSTOM_VENDORS, held).apply()
     }
 
     fun setAssistantModel(context: Context, id: String) {
         val vendor = assistantVendor(context)
         store(context).edit().putString(ASSISTANT_MODEL + "_" + vendor, id).apply()
-    }
-
-    fun restingUntil(context: Context, vendor: String): Long =
-        store(context).getLong(VENDOR_REST + "_" + vendor, 0L)
-
-    fun setRestingUntil(context: Context, vendor: String, at: Long) {
-        store(context).edit().putLong(VENDOR_REST + "_" + vendor, at).apply()
-    }
-
-    fun faults(context: Context, vendor: String): Int =
-        store(context).getInt(VENDOR_FAULTS + "_" + vendor, 0)
-
-    fun setFaults(context: Context, vendor: String, many: Int) {
-        store(context).edit().putInt(VENDOR_FAULTS + "_" + vendor, many).apply()
     }
 
     fun fetchedModels(context: Context, vendor: String): List<String> =
@@ -3315,6 +3319,22 @@ class BuilderActivity : Activity() {
 
         const val NOTE_REQUEST = 5
 
+        const val TALK_FILE_REQUEST = 6
+
+        const val TALK_PICTURE_REQUEST = 7
+
+        const val TALK_MOST_FILES = 10
+
+        const val TALK_MOST_PICTURES = 10
+
+        const val TALK_FILE_BYTES = 25L * 1024L * 1024L
+
+        const val TALK_PICTURE_BYTES = 10L * 1024L * 1024L
+
+        const val TALK_THOUGHT_SHOWN = 1_200
+
+        const val TALK_PATIENCE_SECONDS = 60L
+
         const val PAIRING_SERVICE = "_adb-tls-pairing._tcp."
 
         const val TRASH_FOLDER = "Trash"
@@ -3663,6 +3683,15 @@ class BuilderActivity : Activity() {
 
         const val AGENT_ROUNDS = 12
 
+
+        const val AGENT_DIFF_CELLS = 400_000L
+
+
+        const val AGENT_DIFF_LINES = 400
+
+
+        const val AGENT_DIFF_BYTES = 512L * 1024L
+
         const val LIBRARY_ROUNDS = 12
 
         const val LIBRARY_SHOWN = 12
@@ -3751,6 +3780,8 @@ class BuilderActivity : Activity() {
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var results: LinearLayout
+    private lateinit var pin: LinearLayout
+    private lateinit var dock: LinearLayout
     private lateinit var banner: LinearLayout
 
     private var logPort = 0
@@ -3850,6 +3881,22 @@ class BuilderActivity : Activity() {
     private var talkResetsAt = ""
     private var talkPartial = ""
     private var talkLive: TextView? = null
+    private var talkThinkLive: TextView? = null
+    private var talkLiveNote: TextView? = null
+    private var talkThinking = ""
+    private var talkAnswering = ""
+    private var talkAnsweringWindow = 0L
+    private var talkFailure = false
+    private var talkAnyway = false
+    private var talkGeneration = 0
+    private val talkThought = mutableMapOf<Int, String>()
+    private val talkChanges = mutableMapOf<Int, List<Change>>()
+    private val talkPictures = mutableMapOf<Int, List<Brain.Picture>>()
+    private val talkOpen = mutableSetOf<Int>()
+    private val talkAttached = mutableListOf<Attached>()
+    private var agentChanges = mutableListOf<Change>()
+    private var keyboardHeight = 0
+    private var barsBelow = 0
     private val talkStopping = java.util.concurrent.atomic.AtomicBoolean(false)
     private var agentRound = 0
     private var agentWrote = mutableListOf<String>()
@@ -3940,6 +3987,15 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutTransition = LayoutTransition()
         }
+        pin = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        dock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setBackgroundColor(palette.background)
+        }
         scroller = ScrollView(this).apply {
             isFillViewport = true
             clipToPadding = false
@@ -3994,7 +4050,9 @@ class BuilderActivity : Activity() {
             addView(crown, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
             addView(banner, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(pin, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(dock, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(footer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
@@ -4094,7 +4152,14 @@ class BuilderActivity : Activity() {
             drawer.setPadding(0, top, 0, bottom)
             footer.setPadding(gap(2), gap(1), gap(2), gap(1) + bottom)
             footer.visibility = if (keyboard > 0) View.GONE else footer.visibility
-            scroller.setPadding(0, 0, 0, keyboard)
+            keyboardHeight = keyboard
+            barsBelow = bottom
+            if (dock.visibility == View.VISIBLE) {
+                fitTheDock()
+                scroller.setPadding(0, 0, 0, 0)
+            } else {
+                scroller.setPadding(0, 0, 0, keyboard)
+            }
             insets
         }
     }
@@ -4313,6 +4378,13 @@ class BuilderActivity : Activity() {
         }
         content.removeAllViews()
         results.removeAllViews()
+        pin.removeAllViews()
+        pin.visibility = View.GONE
+        dock.removeAllViews()
+        dock.visibility = View.GONE
+        if (screen !is Screen.Assistant) {
+            scroller.setPadding(0, 0, 0, keyboardHeight)
+        }
         fitTheColumn()
 
         when (val load = Builder.load()) {
@@ -4790,6 +4862,32 @@ class BuilderActivity : Activity() {
                 crown.addView(more, each)
             }
         } else {
+            if (here is Screen.Assistant) {
+                crown.addView(
+                    markControl(Mark.Shape.MENU, R.string.omni_menu_title) { openTheDrawer() },
+                    each,
+                )
+                effortChip()?.let { chip ->
+                    crown.addView(
+                        chip,
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                            marginStart = gap(1)
+                            marginEnd = gap(2)
+                        },
+                    )
+                }
+                crown.addView(
+                    crownTitle(
+                        getString(R.string.omni_menu_assistant),
+                        getString(R.string.omni_app_name),
+                    ),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+                val talkMore = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
+                talkMore.setOnClickListener { talkMenu(talkMore) }
+                crown.addView(talkMore, each)
+                return
+            }
             crown.addView(
                 markControl(Mark.Shape.CHEVRON_LEFT, R.string.omni_action_back) { stepBack() },
                 each,
@@ -4820,35 +4918,6 @@ class BuilderActivity : Activity() {
                     markControl(Mark.Shape.HELP, R.string.omni_help_title) { go(Screen.Help) },
                     each,
                 )
-                return
-            }
-            if (here is Screen.Assistant) {
-                crown.addView(
-                    crownTitle(
-                        getString(R.string.omni_menu_assistant),
-                        getString(R.string.omni_app_name),
-                    ),
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                )
-                crown.addView(
-                    markControl(Mark.Shape.CLOCK, R.string.omni_talk_export) {
-                        copyOut(
-                            talkHeld.joinToString("\n\n") { it.second },
-                            getString(R.string.omni_menu_assistant),
-                        )
-                    },
-                    each,
-                )
-                crown.addView(
-                    markControl(Mark.Shape.TRASH, R.string.omni_talk_clear) {
-                        talkHeld.clear()
-                        render(false)
-                    },
-                    each,
-                )
-                val talkMore = markControl(Mark.Shape.MORE, R.string.omni_action_more) { }
-                talkMore.setOnClickListener { talkMenu(talkMore) }
-                crown.addView(talkMore, each)
                 return
             }
             if (here is Screen.Editor) {
@@ -7692,36 +7761,54 @@ class BuilderActivity : Activity() {
             },
             listOf(
                 getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
-                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                getString(R.string.omni_vibe_custom_test) to { it: AlertDialog ->
                     val held = readSecret(editor)
+                    editor.text?.clear()
                     results.removeAllViews()
                     if (held.isEmpty()) {
                         results.addView(
                             notice(getString(R.string.omni_talk_no_key), palette.warning)
                         )
                     } else {
-                        val locked = Vault.seal(held)
-                        held.fill(' ')
-                        editor.text?.clear()
-                        if (locked == null) {
-                            results.addView(
-                                notice(getString(R.string.omni_device_refused), palette.error)
-                            )
-                        } else {
-                            Preferences.setVendorKey(this, vendor.id, locked)
-                            Preferences.setFaults(this, vendor.id, 0)
-                            Preferences.setRestingUntil(this, vendor.id, 0L)
-                            results.addView(
-                                notice(getString(R.string.omni_talk_key_set), palette.ok)
-                            )
-                        }
                         it.dismiss()
-                        render(false)
+                        testThenKeep(vendor, held)
                     }
                 },
             ),
         )
         editor.requestFocus()
+    }
+
+    private fun testThenKeep(vendor: Brain.Vendor, held: CharArray) {
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_working), palette.accent))
+        Thread {
+            val tested = runCatching { Brain.probe(vendor, held) }
+            val locked = if (tested.isSuccess) Vault.seal(held) else null
+            held.fill(' ')
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                results.removeAllViews()
+                val why = tested.exceptionOrNull()
+                when {
+                    why != null -> results.addView(
+                        notice(getString(R.string.omni_vibe_test_failed, sayWhy(why)), palette.error)
+                    )
+                    locked == null -> results.addView(
+                        notice(getString(R.string.omni_device_refused), palette.error)
+                    )
+                    else -> {
+                        Preferences.setVendorKey(this, vendor.id, locked)
+                        results.addView(
+                            notice(getString(R.string.omni_vibe_test_ok), palette.ok)
+                        )
+                        pickTheVendor(vendor)
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun sayWhy(why: Throwable): String {
@@ -7802,8 +7889,9 @@ class BuilderActivity : Activity() {
         Thread {
             var held = ""
             var why: Throwable? = null
+            var every = coming.every
             while (signingIn.get() && System.currentTimeMillis() < coming.until) {
-                runCatching { Thread.sleep(coming.every * 1000L) }
+                runCatching { Thread.sleep(every * 1000L) }
                 if (!signingIn.get()) {
                     break
                 }
@@ -7816,6 +7904,9 @@ class BuilderActivity : Activity() {
                 if (fault !is Copilot.Waiting) {
                     why = fault
                     break
+                }
+                if (fault.slower) {
+                    every += 5L
                 }
             }
             val given = held
@@ -7850,34 +7941,104 @@ class BuilderActivity : Activity() {
             return
         }
         Preferences.setVendorKey(this, vendor.id, locked)
-        Preferences.setFaults(this, vendor.id, 0)
-        Preferences.setRestingUntil(this, vendor.id, 0L)
-        Preferences.setAssistantVendor(this, vendor.id)
         Copilot.forget()
         results.addView(notice(getString(R.string.omni_copilot_done), palette.ok))
-        render(false)
+        pickTheVendor(vendor)
     }
 
-    private fun vendorRow(vendor: Brain.Vendor, onPicked: () -> Unit): View {
-        val here = Preferences.assistantVendor(this)
+    private fun noticeFor(vendor: Brain.Vendor): Pair<Int, Int>? = when (vendor.notice) {
+        "groq" -> R.string.omni_vibe_notice_groq_title to R.string.omni_vibe_notice_groq
+        "gemini" -> R.string.omni_vibe_notice_gemini_title to R.string.omni_vibe_notice_gemini
+        "untrained" ->
+            R.string.omni_vibe_notice_untrained_title to R.string.omni_vibe_notice_untrained
+        "unverified" ->
+            R.string.omni_vibe_notice_unverified_title to R.string.omni_vibe_notice_unverified
+        else -> null
+    }
+
+    private fun pickTheVendor(vendor: Brain.Vendor) {
+        Preferences.setAssistantVendor(this, vendor.id)
+        render(false)
+        val (titled, said) = noticeFor(vendor) ?: return
+        dialogShell(
+            getString(titled),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                getString(said).split("\n").filter { it.isNotBlank() }.forEach { line ->
+                    addView(body(line).apply { setPadding(0, 0, 0, gap(2)) })
+                }
+            },
+            listOf(getString(R.string.omni_vibe_understood) to { it: AlertDialog -> it.dismiss() }),
+        )
+    }
+
+    private fun vendorNote(vendor: Brain.Vendor): String {
         val keyed = vendor.keyed(this)
-        val resting = Preferences.restingUntil(this, vendor.id) - System.currentTimeMillis()
+        val parts = mutableListOf(
+            when {
+                vendor.keyless -> getString(R.string.omni_talk_keyless)
+                keyed -> getString(R.string.omni_talk_key_set)
+                else -> getString(R.string.omni_vibe_no_key_yet)
+            }
+        )
+        val quota = quotaOf(vendor.id)
+        if (quota.isNotEmpty()) {
+            parts.add(quota)
+        }
+        if (vendor.lastResort) {
+            parts.add(getString(R.string.omni_vibe_last_resort))
+        }
+        return parts.joinToString("  ·  ")
+    }
+
+    private fun quotaOf(id: String): String {
+        val quota = Brain.quotaOf(id) ?: return ""
+        val minute = quota.optLong("rpm")
+        val day = quota.optLong("rpd")
+        val tokens = quota.optLong("tpd")
+        return when {
+            minute <= 0L -> ""
+            day > 0L -> getString(R.string.omni_vibe_quota_requests, minute, countable(day))
+            tokens > 0L -> getString(R.string.omni_vibe_quota_tokens, minute, countable(tokens))
+            else -> getString(R.string.omni_vibe_quota_minute, minute)
+        }
+    }
+
+    private fun vendorRow(
+        vendor: Brain.Vendor?,
+        onPicked: () -> Unit,
+        onGone: () -> Unit,
+    ): View {
+        val here = Preferences.assistantVendor(this)
+        val id = vendor?.id ?: Brain.AUTO
+        val keyed = vendor?.keyed(this) ?: true
+        val removable = vendor != null && (vendor.custom || (!vendor.keyless && keyed))
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = gap(ROW_UNITS)
-            setPadding(gap(4), gap(2), gap(4), gap(2))
+            setPadding(gap(4), gap(2), gap(2), gap(2))
             isClickable = true
             isFocusable = true
-            contentDescription = vendor.shown
+            contentDescription = vendor?.shown ?: getString(R.string.omni_vibe_auto)
             readAs(Button::class.java.name)
-            pressable(onHeld = { askToSignIn(vendor) })
+            pressable(onHeld = { if (vendor != null) askToSignIn(vendor) })
             setOnClickListener {
-                if (keyed) {
-                    Preferences.setAssistantVendor(this@BuilderActivity, vendor.id)
-                    onPicked()
-                } else {
-                    askToSignIn(vendor)
+                when {
+                    vendor == null -> {
+                        Preferences.setAssistantVendor(this@BuilderActivity, Brain.AUTO)
+                        onPicked()
+                        render(false)
+                    }
+                    keyed -> {
+                        onPicked()
+                        pickTheVendor(vendor)
+                    }
+                    else -> {
+                        onPicked()
+                        askToSignIn(vendor)
+                    }
                 }
             }
             addView(
@@ -7885,7 +8046,7 @@ class BuilderActivity : Activity() {
                     orientation = LinearLayout.VERTICAL
                     addView(
                         TextView(context).apply {
-                            text = vendor.shown
+                            text = vendor?.shown ?: getString(R.string.omni_vibe_auto)
                             setTextColor(palette.foreground)
                             typeface = Type.strong
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
@@ -7893,62 +8054,122 @@ class BuilderActivity : Activity() {
                     )
                     addView(
                         TextView(context).apply {
-                            text = buildString {
-                                append(
-                                    when {
-                                        vendor.keyless ->
-                                            getString(R.string.omni_talk_keyless)
-                                        keyed -> getString(R.string.omni_talk_key_set)
-                                        else -> getString(R.string.omni_talk_no_key)
-                                    }
-                                )
-                                if (vendor.free) {
-                                    append("  \u00b7  ").append(getString(R.string.omni_talk_free))
-                                }
-                                if (resting > 0L) {
-                                    append("  \u00b7  ").append(
-                                        getString(
-                                            R.string.omni_talk_resting,
-                                            ((resting + 59_999L) / 60_000L).toInt(),
-                                        )
-                                    )
-                                }
+                            text = if (vendor == null) {
+                                getString(R.string.omni_vibe_auto_note)
+                            } else {
+                                vendorNote(vendor)
                             }
-                            setTextColor(
-                                when {
-                                    resting > 0L -> palette.warning
-                                    keyed -> palette.ok
-                                    else -> palette.muted
-                                }
-                            )
+                            setTextColor(if (keyed) palette.ok else palette.muted)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                            maxLines = 1
+                            maxLines = 2
                         }
                     )
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
+            if (removable) {
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.CLOSE, palette.error)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(
+                            if (vendor.custom) R.string.omni_vibe_remove else R.string.omni_vibe_disconnect
+                        )
+                        readAs(Button::class.java.name)
+                        setOnClickListener {
+                            forgetTheVendor(vendor)
+                            onGone()
+                        }
+                    },
+                    LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(2) },
+                )
+            }
             addView(
-                View(context).apply { background = radioMark(vendor.id == here && keyed) },
+                View(context).apply { background = radioMark(id == here && keyed) },
                 LinearLayout.LayoutParams(gap(5), gap(5)),
             )
         }
     }
 
+    private fun forgetTheVendor(vendor: Brain.Vendor) {
+        Preferences.forgetVendorKey(this, vendor.id)
+        if (vendor.copilot) {
+            Copilot.forget()
+        }
+        if (vendor.custom) {
+            val held = runCatching { JSONArray(Preferences.customVendors(this)) }
+                .getOrDefault(JSONArray())
+            val kept = JSONArray()
+            for (at in 0 until held.length()) {
+                val one = held.optJSONObject(at) ?: continue
+                if (one.optString("id") != vendor.id) {
+                    kept.put(one)
+                }
+            }
+            Preferences.setCustomVendors(this, kept.toString())
+        }
+        if (Preferences.assistantVendor(this) == vendor.id) {
+            Preferences.setAssistantVendor(this, Brain.AUTO)
+        }
+        results.removeAllViews()
+        results.addView(
+            notice(getString(R.string.omni_vibe_disconnected, vendor.shown), palette.warning)
+        )
+        render(false)
+    }
+
     private fun chooseTheVendor() {
         var shown: AlertDialog? = null
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        Brain.VENDORS.forEachIndexed { at, one ->
-            if (at > 0) {
-                list.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+        val gone: () -> Unit = {
+            shown?.dismiss()
+            chooseTheVendor()
+        }
+        val picked: () -> Unit = { shown?.dismiss() }
+        list.addView(vendorRow(null, picked, gone), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        val groups = listOf(
+            "keyless" to R.string.omni_vibe_tier_keyless,
+            "free" to R.string.omni_vibe_tier_free,
+            "byok" to R.string.omni_vibe_tier_byok,
+            "custom" to R.string.omni_vibe_tier_custom,
+        )
+        val all = Brain.vendors(this)
+        groups.forEach { (tier, named) ->
+            val members = all.filter { it.tier == tier }
+            if (members.isEmpty()) {
+                return@forEach
             }
             list.addView(
-                vendorRow(one) {
-                    shown?.dismiss()
-                    render(false)
-                },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                TextView(this).apply {
+                    text = getString(named)
+                    setTextColor(palette.accent)
+                    typeface = Type.strong
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(gap(4), gap(3), gap(4), gap(1))
+                }
             )
+            members.forEach { one ->
+                list.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
+                list.addView(
+                    vendorRow(one, picked, gone),
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                )
+            }
+        }
+        list.addView(
+            subtle(getString(R.string.omni_vibe_custom_add), palette.accent) {
+                shown?.dismiss()
+                showTheDisclaimer()
+            }
+        )
+        val closer = View(this).apply {
+            foreground = Mark(Mark.Shape.CLOSE, palette.foreground)
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.omni_vibe_close)
+            readAs(Button::class.java.name)
+            setOnClickListener { shown?.dismiss() }
         }
         shown = dialogShell(
             getString(R.string.omni_talk_providers),
@@ -7957,7 +8178,266 @@ class BuilderActivity : Activity() {
                 addView(quiet(getString(R.string.omni_talk_providers_note)))
                 addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             },
-            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+            listOf(getString(R.string.omni_vibe_close) to { it: AlertDialog -> it.dismiss() }),
+            closer,
+        )
+    }
+
+    private fun showTheDisclaimer() {
+        var accepted = false
+        val points = listOf(
+            R.string.omni_vibe_disclaimer_1,
+            R.string.omni_vibe_disclaimer_2,
+            R.string.omni_vibe_disclaimer_3,
+            R.string.omni_vibe_disclaimer_4,
+            R.string.omni_vibe_disclaimer_5,
+        )
+        val box = android.widget.CheckBox(this).apply {
+            text = getString(R.string.omni_vibe_disclaimer_accept)
+            setTextColor(palette.foreground)
+            buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
+            setOnCheckedChangeListener { _, on -> accepted = on }
+        }
+        dialogShell(
+            getString(R.string.omni_vibe_disclaimer_title),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(body(getString(R.string.omni_vibe_disclaimer_lead)))
+                points.forEach { one ->
+                    addView(quiet(getString(one)).apply { setPadding(0, gap(2), 0, 0) })
+                }
+                addView(box, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    topMargin = gap(3)
+                })
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    if (accepted) {
+                        it.dismiss()
+                        askForTheCustomVendor(JSONObject())
+                    } else {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(getString(R.string.omni_vibe_problem_accepted), palette.warning)
+                        )
+                    }
+                },
+            ),
+        )
+    }
+
+    private fun customProblem(named: String): Int = when (named) {
+        "name" -> R.string.omni_vibe_problem_name
+        "base" -> R.string.omni_vibe_problem_base
+        "barred" -> R.string.omni_vibe_problem_barred
+        "format" -> R.string.omni_vibe_problem_format
+        "model" -> R.string.omni_vibe_problem_model
+        "window" -> R.string.omni_vibe_problem_window
+        "template" -> R.string.omni_vibe_problem_template
+        else -> R.string.omni_vibe_problem_accepted
+    }
+
+    private fun askForTheCustomVendor(was: JSONObject) {
+        val formats = listOf(
+            "openai" to R.string.omni_vibe_format_openai,
+            "anthropic" to R.string.omni_vibe_format_anthropic,
+            "gemini" to R.string.omni_vibe_format_gemini,
+            "raw" to R.string.omni_vibe_format_raw,
+        )
+        var format = was.optString("format").ifEmpty { "openai" }
+        val chosen = mutableSetOf<String>()
+        val wasEfforts = was.optJSONArray("efforts")
+        for (at in 0 until (wasEfforts?.length() ?: 0)) {
+            chosen.add(wasEfforts?.optString(at).orEmpty())
+        }
+        val named = styledField(was.optString("name"), getString(R.string.omni_vibe_custom_name))
+        val base = styledField(
+            was.optString("base").ifEmpty { "https://" },
+            getString(R.string.omni_vibe_custom_base),
+        ).apply { typeface = Type.data }
+        val secret = styledField("", getString(R.string.omni_vibe_custom_key), true)
+            .apply { typeface = Type.data }
+        val model = styledField(was.optString("model"), getString(R.string.omni_vibe_custom_model))
+            .apply { typeface = Type.data }
+        val window = styledField(
+            was.optLong("window", 128_000L).toString(),
+            getString(R.string.omni_vibe_custom_window),
+        ).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            typeface = Type.data
+        }
+        val template = styledField(
+            was.optString("template").ifEmpty {
+                "{\"model\": {{model}}, \"messages\": {{messages}}, \"max_tokens\": {{max_tokens}}}"
+            },
+            getString(R.string.omni_vibe_custom_template),
+        ).apply {
+            typeface = Type.data
+            isSingleLine = false
+            maxLines = 6
+        }
+        val reply = styledField(
+            was.optString("reply").ifEmpty { "choices.0.message.content" },
+            getString(R.string.omni_vibe_custom_reply),
+        ).apply { typeface = Type.data }
+        val rawOnly = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(template, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(quiet(getString(R.string.omni_vibe_custom_template_note)))
+            addView(reply, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            visibility = if (format == "raw") View.VISIBLE else View.GONE
+        }
+        val formatShown = TextView(this).apply {
+            setTextColor(palette.accent)
+            typeface = Type.strong
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, gap(2), 0, gap(2))
+        }
+        fun showFormat() {
+            val label = formats.firstOrNull { it.first == format }?.second
+                ?: R.string.omni_vibe_format_openai
+            formatShown.text = getString(R.string.omni_vibe_custom_format) + ":  " + getString(label)
+            rawOnly.visibility = if (format == "raw") View.VISIBLE else View.GONE
+        }
+        showFormat()
+        formatShown.setOnClickListener {
+            pickOne(getString(R.string.omni_vibe_custom_format), formats.map { getString(it.second) }) { which ->
+                format = formats[which].first
+                showFormat()
+            }
+        }
+        val levels = listOf(
+            "low" to R.string.omni_vibe_level_low,
+            "medium" to R.string.omni_vibe_level_medium,
+            "high" to R.string.omni_vibe_level_high,
+        )
+        val efforts = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            levels.forEach { (level, label) ->
+                addView(
+                    android.widget.CheckBox(context).apply {
+                        text = getString(label)
+                        isChecked = chosen.contains(level)
+                        setTextColor(palette.foreground)
+                        buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
+                        setOnCheckedChangeListener { _, on ->
+                            if (on) chosen.add(level) else chosen.remove(level)
+                        }
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        }
+        val said = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, gap(2), 0, 0)
+            visibility = View.GONE
+        }
+        fun form(): JSONObject = JSONObject()
+            .put("id", was.optString("id").ifEmpty { Brain.CUSTOM + System.currentTimeMillis() })
+            .put("name", named.text.toString().trim())
+            .put("base", base.text.toString().trim())
+            .put("format", format)
+            .put("model", model.text.toString().trim())
+            .put("window", window.text.toString().trim().toLongOrNull() ?: 0L)
+            .put("efforts", JSONArray(levels.map { it.first }.filter { chosen.contains(it) }))
+            .put("template", if (format == "raw") template.text.toString() else "")
+            .put("reply", if (format == "raw") reply.text.toString().trim() else "")
+            .put("accepted", true)
+        fun problems(held: JSONObject): List<String> {
+            val checked = Brain.vibe(JSONObject(held.toString()).put("op", "custom"))
+            val listed = checked.optJSONArray("problems") ?: return listOf("format")
+            return (0 until listed.length()).map { listed.optString(it) }
+        }
+        fun tell(words: String, colour: Int) {
+            said.text = words
+            said.setTextColor(colour)
+            said.visibility = View.VISIBLE
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(2))
+            listOf(named, base).forEach {
+                addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            }
+            addView(formatShown)
+            listOf(secret, model, window).forEach {
+                addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            }
+            addView(quiet(getString(R.string.omni_vibe_custom_effort)))
+            addView(efforts, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(rawOnly, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(said)
+            addView(
+                subtle(getString(R.string.omni_vibe_custom_test), palette.accent) {
+                    val held = form()
+                    val wrong = problems(held)
+                    if (wrong.isNotEmpty()) {
+                        tell(wrong.joinToString("\n") { getString(customProblem(it)) }, palette.warning)
+                        return@subtle
+                    }
+                    val key = readSecret(secret)
+                    tell(getString(R.string.omni_working), palette.accent)
+                    val vendor = Brain.customFrom(held)
+                    Thread {
+                        val tested = runCatching { Brain.probe(vendor, key) }
+                        key.fill(' ')
+                        runOnUiThread {
+                            if (isFinishing || isDestroyed) {
+                                return@runOnUiThread
+                            }
+                            val why = tested.exceptionOrNull()
+                            if (why == null) {
+                                tell(getString(R.string.omni_vibe_test_passed), palette.ok)
+                            } else {
+                                tell(getString(R.string.omni_vibe_test_failed, sayWhy(why)), palette.error)
+                            }
+                        }
+                    }.start()
+                }
+            )
+        }
+        dialogShell(
+            getString(R.string.omni_vibe_custom_add),
+            body,
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_action_save) to { it: AlertDialog ->
+                    val held = form()
+                    val wrong = problems(held)
+                    if (wrong.isNotEmpty()) {
+                        tell(wrong.joinToString("\n") { getString(customProblem(it)) }, palette.warning)
+                    } else {
+                        val key = readSecret(secret)
+                        val locked = if (key.isEmpty()) "" else Vault.seal(key)
+                        key.fill(' ')
+                        if (locked == null) {
+                            tell(getString(R.string.omni_device_refused), palette.error)
+                        } else {
+                            val kept = runCatching { JSONArray(Preferences.customVendors(this)) }
+                                .getOrDefault(JSONArray())
+                            val fresh = JSONArray()
+                            for (at in 0 until kept.length()) {
+                                val one = kept.optJSONObject(at) ?: continue
+                                if (one.optString("id") != held.optString("id")) {
+                                    fresh.put(one)
+                                }
+                            }
+                            fresh.put(held)
+                            Preferences.setCustomVendors(this, fresh.toString())
+                            if (locked.isNotEmpty()) {
+                                Preferences.setVendorKey(this, held.optString("id"), locked)
+                            }
+                            it.dismiss()
+                            Brain.vendorOf(this, held.optString("id"))?.let { made ->
+                                pickTheVendor(made)
+                            }
+                        }
+                    }
+                },
+            ),
         )
     }
 
@@ -9694,6 +10174,98 @@ class BuilderActivity : Activity() {
 
     private class AgentStep(val path: String, val body: String?)
 
+    private class Attached(
+        val name: String,
+        val mime: String,
+        val bytes: ByteArray,
+        val picture: Boolean,
+    )
+
+    private class Change(
+        val path: String,
+        val kind: String,
+        val added: Int,
+        val removed: Int,
+        val lines: List<String>,
+    )
+
+    private fun changeOf(path: String, before: String?, after: String?): Change {
+        val was = before?.lines().orEmpty()
+        val now = after?.lines().orEmpty()
+        var head = 0
+        while (head < was.size && head < now.size && was[head] == now[head]) {
+            head += 1
+        }
+        var tail = 0
+        while (tail < was.size - head && tail < now.size - head &&
+            was[was.size - 1 - tail] == now[now.size - 1 - tail]
+        ) {
+            tail += 1
+        }
+        val gone = was.subList(head, was.size - tail)
+        val came = now.subList(head, now.size - tail)
+        val marked = mutableListOf<String>()
+        if (gone.size.toLong() * came.size.toLong() <= AGENT_DIFF_CELLS) {
+            val table = Array(gone.size + 1) { IntArray(came.size + 1) }
+            for (i in gone.indices.reversed()) {
+                for (j in came.indices.reversed()) {
+                    table[i][j] = if (gone[i] == came[j]) {
+                        table[i + 1][j + 1] + 1
+                    } else {
+                        max(table[i + 1][j], table[i][j + 1])
+                    }
+                }
+            }
+            var i = 0
+            var j = 0
+            while (i < gone.size || j < came.size) {
+                when {
+                    i < gone.size && j < came.size && gone[i] == came[j] -> {
+                        marked.add("  " + gone[i])
+                        i += 1
+                        j += 1
+                    }
+                    j < came.size && (i >= gone.size || table[i][j + 1] >= table[i + 1][j]) -> {
+                        marked.add("+ " + came[j])
+                        j += 1
+                    }
+                    else -> {
+                        marked.add("- " + gone[i])
+                        i += 1
+                    }
+                }
+            }
+        } else {
+            gone.forEach { marked.add("- $it") }
+            came.forEach { marked.add("+ $it") }
+        }
+        val added = marked.count { it.startsWith("+") }
+        val removed = marked.count { it.startsWith("-") }
+        val shown = mutableListOf<String>()
+        if (head > 0) {
+            shown.add("@@ " + (head + 1))
+        }
+        var calm = 0
+        marked.forEachIndexed { at, line ->
+            val near = (maxOf(0, at - 2)..minOf(marked.size - 1, at + 2)).any {
+                !marked[it].startsWith("  ")
+            }
+            if (near) {
+                shown.add(line)
+                calm = 0
+            } else if (calm == 0) {
+                shown.add("  \u2026")
+                calm = 1
+            }
+        }
+        val kind = when {
+            before == null -> "created"
+            after == null -> "removed"
+            else -> "changed"
+        }
+        return Change(path, kind, added, removed, shown.take(AGENT_DIFF_LINES))
+    }
+
     private fun agentPath(named: String): Boolean =
         named.isNotEmpty() &&
             !named.contains("..") &&
@@ -9746,6 +10318,13 @@ class BuilderActivity : Activity() {
     private fun agentApply(root: String, steps: List<AgentStep>): List<String> {
         val told = mutableListOf<String>()
         steps.forEach { one ->
+            val target = File(root, one.path)
+            val before = if (target.isFile && target.length() <= AGENT_DIFF_BYTES) {
+                runCatching { target.readText() }.getOrNull()
+            } else {
+                null
+            }
+            val after = one.body?.let { if (it.endsWith("\n")) it else it + "\n" }
             val answer = runCatching {
                 if (one.body == null) {
                     Builder.nativeRemovePath(root, one.path, projectTrash(root))
@@ -9764,7 +10343,10 @@ class BuilderActivity : Activity() {
                     agentWrote.add(one.path)
                 }
                 told.add(getString(R.string.omni_agent_wrote, one.path))
+                agentChanges.removeAll { it.path == one.path }
+                agentChanges.add(changeOf(one.path, before, after))
             } else {
+                agentChanges.add(Change(one.path, "refused", 0, 0, emptyList()))
                 val refusal = document?.let { Refusal.parse(it) }
                 told.add(
                     getString(
@@ -9781,52 +10363,83 @@ class BuilderActivity : Activity() {
     }
 
     private fun liveBubble(): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.START
+        setPadding(0, gap(2), 0, gap(1))
         addView(
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.START
-                setPadding(0, gap(2), 0, gap(1))
-                addView(
-                    ImageView(context).apply {
-                        setImageResource(R.drawable.omni_art_talk_head)
-                        scaleType = ImageView.ScaleType.FIT_CENTER
-                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                    },
-                    LinearLayout.LayoutParams(gap(21), gap(21)),
-                )
-                addView(
-                    LinearLayout(context).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(gap(3), gap(3), gap(3), gap(3))
-                        background = GradientDrawable().apply {
-                            shape = GradientDrawable.RECTANGLE
-                            cornerRadius = gap(5) / 2f
-                            setColor(palette.raised)
-                            setStroke(1, palette.divider)
-                        }
-                        addView(
-                            TextView(context).apply {
-                                text = talkPartial.ifEmpty {
-                                    getString(R.string.omni_talk_thinking)
-                                }
-                                setTextColor(Ink.hot(palette.muted, 0.34f))
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                                setLineSpacing(gap(1) / 2f, 1f)
-                                talkLive = this
-                            }
-                        )
-                    },
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                )
+            ImageView(context).apply {
+                setImageResource(R.drawable.omni_art_talk_head)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             },
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            LinearLayout.LayoutParams(gap(21), gap(21)),
         )
         addView(
-            subtle(getString(R.string.omni_stage_stop), palette.error) { stopTheAssistant() },
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                marginStart = gap(21)
+            LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(gap(3), gap(3), gap(3), gap(3))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = gap(5) / 2f
+                    setColor(palette.raised)
+                    setStroke(1, palette.divider)
+                }
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_talk_thinking) + " \u2026"
+                        setTextColor(palette.accent)
+                        typeface = Type.strong
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        val pulse = ValueAnimator.ofFloat(1f, 0.35f).apply {
+                            duration = 700L
+                            repeatMode = ValueAnimator.REVERSE
+                            repeatCount = ValueAnimator.INFINITE
+                            addUpdateListener { turn -> alpha = turn.animatedValue as Float }
+                        }
+                        addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                            override fun onViewAttachedToWindow(v: View) = pulse.start()
+                            override fun onViewDetachedFromWindow(v: View) = pulse.cancel()
+                        })
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = if (talkAnswering.isEmpty()) {
+                            ""
+                        } else {
+                            getString(R.string.omni_vibe_routed, talkAnswering)
+                        }
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        maxLines = 1
+                        talkLiveNote = this
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = talkThinking.takeLast(TALK_THOUGHT_SHOWN)
+                        visibility = if (talkThinking.isEmpty()) View.GONE else View.VISIBLE
+                        setTextColor(Ink.hot(palette.muted, 0.2f))
+                        setTypeface(typeface, android.graphics.Typeface.ITALIC)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setLineSpacing(gap(1) / 2f, 1f)
+                        setPadding(0, gap(1), 0, gap(1))
+                        maxLines = 8
+                        ellipsize = android.text.TextUtils.TruncateAt.START
+                        talkThinkLive = this
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = talkPartial
+                        setTextColor(palette.foreground)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        setLineSpacing(gap(1) / 2f, 1f)
+                        talkLive = this
+                    }
+                )
             },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
         )
     }
 
@@ -9925,21 +10538,14 @@ class BuilderActivity : Activity() {
         anchoredMenu(
             under,
             listOf(
-                MenuChoice(Mark.Shape.TRASH, getString(R.string.omni_talk_clear)) {
-                    talkHeld.clear()
-                    render(false)
+                MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_talk_switch)) {
+                    chooseTheModel()
                 },
-                MenuChoice(Mark.Shape.SHARE, getString(R.string.omni_talk_export)) {
-                    copyOut(
-                        talkHeld.joinToString("\n\n") { it.second },
-                        getString(R.string.omni_menu_assistant),
-                    )
+                MenuChoice(Mark.Shape.SHIELD, getString(R.string.omni_talk_providers)) {
+                    chooseTheVendor()
                 },
                 MenuChoice(Mark.Shape.FOLDER, getString(R.string.omni_talk_folder)) {
                     chooseTalkFolder()
-                },
-                MenuChoice(Mark.Shape.ROBOT, getString(R.string.omni_talk_switch)) {
-                    chooseTheModel()
                 },
                 MenuChoice(
                     Mark.Shape.SPARK,
@@ -9949,50 +10555,434 @@ class BuilderActivity : Activity() {
                     Preferences.setAssistantAgent(this, !Preferences.assistantAgent(this))
                     render(false)
                 },
-                MenuChoice(Mark.Shape.SHIELD, getString(R.string.omni_talk_providers)) {
-                    chooseTheVendor()
-                },
                 MenuChoice(
-                    Mark.Shape.HELP,
-                    getString(R.string.omni_help_title),
+                    Mark.Shape.TRASH,
+                    getString(R.string.omni_talk_delete),
+                    tint = palette.error,
                     parted = true,
-                ) { go(Screen.Help) },
+                ) { askToDeleteTheTalk() },
+                MenuChoice(Mark.Shape.HELP, getString(R.string.omni_help_title)) {
+                    go(Screen.Help)
+                },
+            ),
+        )
+    }
+
+    private fun askToDeleteTheTalk() {
+        dialogShell(
+            getString(R.string.omni_talk_delete),
+            body(getString(R.string.omni_talk_delete_confirm)),
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.omni_talk_delete) to { it: AlertDialog ->
+                    it.dismiss()
+                    talkStopping.set(true)
+                    talkGeneration += 1
+                    talkAsking = false
+                    talkHeld.clear()
+                    talkThought.clear()
+                    talkChanges.clear()
+                    talkPictures.clear()
+                    talkOpen.clear()
+                    talkAttached.clear()
+                    talkWindowUsed = 0L
+                    talkSpentIn = 0L
+                    talkSpentOut = 0L
+                    talkLeftRequests = -1L
+                    talkLeftTokens = -1L
+                    talkResetsAt = ""
+                    talkAnswering = ""
+                    render(false)
+                },
             ),
         )
     }
 
     private fun talkAttach(under: View) {
-        val named = listOf(
-            Mark.Shape.FILE to R.string.omni_talk_add_file,
-            Mark.Shape.IMAGE to R.string.omni_talk_add_picture,
-            Mark.Shape.LINK to R.string.omni_talk_add_link,
-        )
         anchoredMenu(
             under,
-            named.mapIndexed { at, one ->
-                MenuChoice(one.first, getString(one.second)) {
-                    if (at == 1) {
-                        chooseShot()
-                    } else {
-                        askForName(getString(one.second), "") { said ->
-                            if (said.isNotBlank()) {
-                                talkHeld.add(true to said)
-                                render(false)
-                            }
+            listOf(
+                MenuChoice(Mark.Shape.FILE, getString(R.string.omni_talk_add_file)) {
+                    val room = TALK_MOST_FILES - talkAttached.count { !it.picture }
+                    if (room <= 0) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(
+                                getString(R.string.omni_talk_files_most, TALK_MOST_FILES),
+                                palette.warning,
+                            )
+                        )
+                        return@MenuChoice
+                    }
+                    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+                    if (runCatching { startActivityForResult(intent, TALK_FILE_REQUEST) }.isFailure) {
+                        results.removeAllViews()
+                        results.addView(notice(getString(R.string.omni_form_image_none), palette.error))
+                    }
+                },
+                MenuChoice(Mark.Shape.IMAGE, getString(R.string.omni_talk_add_picture)) {
+                    val room = TALK_MOST_PICTURES - talkAttached.count { it.picture }
+                    if (room <= 0) {
+                        results.removeAllViews()
+                        results.addView(
+                            notice(
+                                getString(R.string.omni_talk_pictures_most, TALK_MOST_PICTURES),
+                                palette.warning,
+                            )
+                        )
+                        return@MenuChoice
+                    }
+                    openGallery(TALK_PICTURE_REQUEST, room)
+                },
+            ),
+        )
+    }
+
+    private fun takeTheAttachments(picked: List<Uri>, pictures: Boolean) {
+        val most = if (pictures) TALK_MOST_PICTURES else TALK_MOST_FILES
+        val heaviest = if (pictures) TALK_PICTURE_BYTES else TALK_FILE_BYTES
+        val told = mutableListOf<String>()
+        picked.forEach { uri ->
+            if (talkAttached.count { it.picture == pictures } >= most) {
+                told.add(
+                    getString(
+                        if (pictures) R.string.omni_talk_pictures_most else R.string.omni_talk_files_most,
+                        most,
+                    )
+                )
+                return@forEach
+            }
+            var named = uri.lastPathSegment.orEmpty().substringAfterLast('/')
+            var size = -1L
+            runCatching {
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameAt = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeAt = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (nameAt >= 0) {
+                            named = cursor.getString(nameAt) ?: named
+                        }
+                        if (sizeAt >= 0 && !cursor.isNull(sizeAt)) {
+                            size = cursor.getLong(sizeAt)
                         }
                     }
                 }
-            },
+            }
+            if (size > heaviest) {
+                told.add(getString(R.string.omni_talk_file_heavy, named, heaviest / (1024 * 1024)))
+                return@forEach
+            }
+            val bytes = runCatching {
+                contentResolver.openInputStream(uri)?.use { from ->
+                    val room = ByteArrayOutputStream()
+                    val slab = ByteArray(64 * 1024)
+                    while (room.size() <= heaviest) {
+                        val got = from.read(slab)
+                        if (got < 0) {
+                            break
+                        }
+                        room.write(slab, 0, got)
+                    }
+                    room.toByteArray()
+                }
+            }.getOrNull()
+            if (bytes == null) {
+                told.add(getString(R.string.omni_talk_file_unread, named))
+                return@forEach
+            }
+            if (bytes.size > heaviest) {
+                told.add(getString(R.string.omni_talk_file_heavy, named, heaviest / (1024 * 1024)))
+                return@forEach
+            }
+            val mime = contentResolver.getType(uri).orEmpty().ifEmpty {
+                if (pictures) "image/jpeg" else "application/octet-stream"
+            }
+            talkAttached.add(Attached(named.ifEmpty { "file" }, mime, bytes, pictures))
+        }
+        results.removeAllViews()
+        told.distinct().forEach { results.addView(notice(it, palette.warning)) }
+        render(false)
+    }
+
+    private fun attachedRow(): View = HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = false
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                talkAttached.toList().forEach { one ->
+                    addView(
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(gap(3), gap(1), gap(1), gap(1))
+                            background = pill(palette.raised, gap(4).toFloat())
+                            addView(
+                                View(context).apply {
+                                    foreground = Mark(
+                                        if (one.picture) Mark.Shape.IMAGE else Mark.Shape.FILE,
+                                        palette.accent,
+                                    )
+                                },
+                                LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(1) },
+                            )
+                            addView(
+                                TextView(context).apply {
+                                    text = one.name
+                                    setTextColor(palette.foreground)
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                    maxLines = 1
+                                    maxWidth = gap(40)
+                                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                                }
+                            )
+                            addView(
+                                View(context).apply {
+                                    foreground = Mark(Mark.Shape.CLOSE, palette.muted)
+                                    isClickable = true
+                                    isFocusable = true
+                                    contentDescription = getString(R.string.omni_vibe_remove_attached, one.name)
+                                    readAs(Button::class.java.name)
+                                    setOnClickListener {
+                                        talkAttached.remove(one)
+                                        render(false)
+                                    }
+                                },
+                                LinearLayout.LayoutParams(gap(7), gap(7)),
+                            )
+                        },
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                            marginEnd = gap(2)
+                        },
+                    )
+                }
+            }
         )
+    }
+
+    private fun thoughtRow(at: Int, thought: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(gap(21), gap(1), 0, 0)
+        val open = talkOpen.contains(at)
+        addView(
+            TextView(context).apply {
+                text = (if (open) "▾  " else "▸  ") + getString(R.string.omni_vibe_thought)
+                setTextColor(palette.muted)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                isClickable = true
+                isFocusable = true
+                readAs(Button::class.java.name)
+                setPadding(0, gap(1), 0, gap(1))
+                setOnClickListener {
+                    if (!talkOpen.add(at)) {
+                        talkOpen.remove(at)
+                    }
+                    render(false)
+                }
+            }
+        )
+        if (open) {
+            addView(
+                TextView(context).apply {
+                    text = thought.trim()
+                    setTextColor(Ink.hot(palette.muted, 0.2f))
+                    setTypeface(typeface, android.graphics.Typeface.ITALIC)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setLineSpacing(gap(1) / 2f, 1f)
+                    setTextIsSelectable(true)
+                    setPadding(gap(3), gap(1), gap(2), gap(2))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = gap(2).toFloat()
+                        setColor(Ink.fade(palette.raised, 0.6f))
+                    }
+                }
+            )
+        }
+    }
+
+    private fun changesCard(at: Int, changes: List<Change>): View = card().apply {
+        addView(
+            TextView(context).apply {
+                text = getString(R.string.omni_agent_changes, changes.size)
+                setTextColor(palette.foreground)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            }
+        )
+        changes.forEachIndexed { index, one ->
+            val key = at * 1_000 + index + 1
+            val open = talkOpen.contains(-key)
+            val (label, tint) = when (one.kind) {
+                "created" -> R.string.omni_agent_created to palette.ok
+                "removed" -> R.string.omni_agent_removed to palette.error
+                "refused" -> R.string.omni_refused to palette.error
+                else -> R.string.omni_agent_changed to palette.warning
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, gap(2), 0, gap(1))
+                    isClickable = one.lines.isNotEmpty()
+                    isFocusable = one.lines.isNotEmpty()
+                    setOnClickListener {
+                        if (!talkOpen.add(-key)) {
+                            talkOpen.remove(-key)
+                        }
+                        render(false)
+                    }
+                    addView(
+                        TextView(context).apply {
+                            text = getString(label)
+                            setTextColor(tint)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            setPadding(gap(2), gap(1) / 2, gap(2), gap(1) / 2)
+                            background = pill(Ink.fade(tint, 0.16f), gap(3).toFloat())
+                        },
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                            marginEnd = gap(2)
+                        },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = one.path
+                            setTextColor(palette.foreground)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.START
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = when {
+                                one.kind == "refused" -> ""
+                                else -> "+${one.added} −${one.removed}"
+                            }
+                            setTextColor(palette.muted)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        }
+                    )
+                }
+            )
+            if (open && one.lines.isNotEmpty()) {
+                addView(
+                    HorizontalScrollView(context).apply {
+                        addView(
+                            TextView(context).apply {
+                                text = android.text.SpannableStringBuilder().apply {
+                                    one.lines.forEach { line ->
+                                        val from = length
+                                        append(line).append('\n')
+                                        val colour = when {
+                                            line.startsWith("+") -> palette.ok
+                                            line.startsWith("-") -> palette.error
+                                            else -> palette.muted
+                                        }
+                                        setSpan(
+                                            android.text.style.ForegroundColorSpan(colour),
+                                            from,
+                                            length,
+                                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                                        )
+                                    }
+                                }
+                                typeface = Type.data
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                setTextIsSelectable(true)
+                                setPadding(gap(2), gap(1), gap(2), gap(1))
+                            }
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    private fun effortChip(): View? {
+        val vendorId = Preferences.assistantVendor(this)
+        val vendor = Brain.vendorOf(this, vendorId)
+        val levels = if (vendor == null) {
+            listOf("low", "medium", "high", "deep")
+        } else {
+            Brain.modelOf(vendor, Preferences.assistantModel(this)).levels.map { it.level }
+        }
+        if (levels.isEmpty()) {
+            return null
+        }
+        val here = currentLevel() ?: levels.last()
+        return TextView(this).apply {
+            text = levelLabel(here) + "  ▾"
+            setTextColor(palette.accent)
+            typeface = Type.strong
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            gravity = Gravity.CENTER
+            setPadding(gap(3), gap(1), gap(3), gap(1))
+            background = pill(Ink.fade(palette.accent, 0.16f), gap(4).toFloat())
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.omni_vibe_effort) + " " + levelLabel(here)
+            readAs(Button::class.java.name)
+            setOnClickListener { chip ->
+                anchoredMenu(
+                    chip,
+                    levels.map { level ->
+                        MenuChoice(Mark.Shape.SPARK, levelLabel(level), picked = level == here) {
+                            val model = Preferences.assistantModel(this@BuilderActivity)
+                            if (vendor == null) {
+                                Preferences.setAssistantEffort(this@BuilderActivity, level)
+                            } else {
+                                Preferences.setEffortFor(this@BuilderActivity, vendor.id, model, level)
+                            }
+                            render(false)
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    private fun levelLabel(level: String): String = getString(
+        when (level) {
+            "low" -> R.string.omni_vibe_level_low
+            "medium" -> R.string.omni_vibe_level_medium
+            "deep" -> R.string.omni_vibe_level_deep
+            else -> R.string.omni_vibe_level_high
+        }
+    )
+
+    private fun currentLevel(): String? {
+        val vendorId = Preferences.assistantVendor(this)
+        val vendor = Brain.vendorOf(this, vendorId) ?: return Preferences.assistantEffort(this)
+        val model = Brain.modelOf(vendor, Preferences.assistantModel(this))
+        return model.level(Preferences.effortFor(this, vendor.id, model.id))?.level
     }
 
     private fun renderAssistant() {
         if (talkHeld.isEmpty()) {
             talkHeld.add(false to getString(R.string.omni_talk_hello))
         }
-        content.addView(assistantMeter())
+        pin.visibility = View.VISIBLE
+        pin.addView(assistantMeter(), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         talkHeld.forEachIndexed { at, one ->
+            talkThought[at]?.takeIf { it.isNotBlank() }?.let { content.addView(thoughtRow(at, it)) }
             content.addView(talkBubble(one.first, one.second, at == 0 && !one.first))
+            talkChanges[at]?.takeIf { it.isNotEmpty() }?.let { changes ->
+                content.addView(
+                    changesCard(at, changes),
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                        marginStart = gap(21)
+                    },
+                )
+            }
             if (!one.first) {
                 blocksIn(one.second).forEach { (named, body) ->
                     content.addView(
@@ -10010,107 +11000,20 @@ class BuilderActivity : Activity() {
             }
         }
         talkLive = null
+        talkThinkLive = null
         if (talkAsking) {
             content.addView(liveBubble())
         }
         content.addView(
             TextView(this).apply {
-                text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+                text = getString(R.string.omni_talk_warning)
                 setTextColor(palette.muted)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setPadding(gap(21), 0, 0, gap(3))
+                gravity = Gravity.CENTER
+                setLineSpacing(gap(1).toFloat(), 1f)
+                setPadding(gap(4), gap(2), gap(4), gap(2))
             }
         )
-
-        val root = talkFolder()
-        val where = card()
-        where.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(
-                    filledMark(Mark.Shape.FOLDER, Ink.fade(palette.accent, 0.9f), gap(5) / 2),
-                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
-                )
-                addView(
-                    LinearLayout(context).apply {
-                        orientation = LinearLayout.VERTICAL
-                        addView(
-                            TextView(context).apply {
-                                text = getString(R.string.omni_talk_folder)
-                                setTextColor(palette.foreground)
-                                typeface = Type.strong
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            }
-                        )
-                        addView(
-                            TextView(context).apply {
-                                text = getString(R.string.omni_talk_folder_note)
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                            }
-                        )
-                    },
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                )
-            }
-        )
-        where.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(gap(3), gap(2), gap(3), gap(2))
-                isClickable = true
-                isFocusable = true
-                readAs(Button::class.java.name)
-                contentDescription = getString(R.string.omni_talk_folder)
-                background = touchable(
-                    GradientDrawable().apply {
-                        this.shape = GradientDrawable.RECTANGLE
-                        cornerRadius = gap(3).toFloat()
-                        setColor(palette.raised)
-                    },
-                    palette.accent,
-                )
-                setOnClickListener { chooseTalkFolder() }
-                addView(
-                    thumbnail(
-                        File(root.orEmpty(), "$PROJECT_RES/$PROJECT_ICON").absolutePath,
-                        gap(10),
-                    ),
-                    LinearLayout.LayoutParams(gap(10), gap(10)).apply { marginEnd = gap(3) },
-                )
-                addView(
-                    LinearLayout(context).apply {
-                        orientation = LinearLayout.VERTICAL
-                        addView(
-                            TextView(context).apply {
-                                text = root?.let { File(it).name }
-                                    ?: getString(R.string.omni_projects_none)
-                                setTextColor(palette.foreground)
-                                typeface = Type.strong
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                            }
-                        )
-                        addView(
-                            TextView(context).apply {
-                                text = root.orEmpty()
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                                maxLines = 1
-                                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                            }
-                        )
-                    },
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                )
-                addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.CHEVRON_DOWN, palette.muted) },
-                    LinearLayout.LayoutParams(gap(6), gap(6)),
-                )
-            }
-        )
-        content.addView(where)
 
         val writing = EditText(this).apply {
             setText(talkDraft)
@@ -10135,11 +11038,20 @@ class BuilderActivity : Activity() {
                 }
             })
         }
-        content.addView(
+        dock.visibility = View.VISIBLE
+        fitTheDock()
+        if (talkAttached.isNotEmpty()) {
+            dock.addView(
+                attachedRow(),
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    bottomMargin = gap(2)
+                },
+            )
+        }
+        dock.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.BOTTOM
-                setPadding(0, gap(3), 0, gap(1))
                 addView(
                     View(context).apply {
                         background = GradientDrawable().apply {
@@ -10160,44 +11072,51 @@ class BuilderActivity : Activity() {
                     View(context).apply {
                         background = GradientDrawable().apply {
                             shape = GradientDrawable.OVAL
-                            setColor(palette.accent)
+                            setColor(if (talkAsking) palette.error else palette.accent)
                         }
-                        foreground = Mark(Mark.Shape.SEND, palette.background)
+                        foreground = Mark(
+                            if (talkAsking) Mark.Shape.STOP else Mark.Shape.SEND,
+                            palette.background,
+                        )
                         isClickable = true
                         isFocusable = true
-                        contentDescription = getString(R.string.omni_talk_send)
+                        contentDescription = getString(
+                            if (talkAsking) R.string.omni_stage_stop else R.string.omni_talk_send
+                        )
                         readAs(Button::class.java.name)
-                        setOnClickListener { sendTyped() }
+                        setOnClickListener {
+                            if (talkAsking) stopTheAssistant() else sendTyped()
+                        }
                     },
                     LinearLayout.LayoutParams(gap(13), gap(13)).apply { marginStart = gap(2) },
                 )
-            }
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
         )
-        content.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_talk_warning)
-                setTextColor(palette.muted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                gravity = Gravity.CENTER
-                setLineSpacing(gap(1).toFloat(), 1f)
-                setPadding(gap(4), gap(2), gap(4), gap(2))
-            }
+        scroller.post { scroller.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun fitTheDock() {
+        dock.setPadding(
+            gap(4),
+            gap(2),
+            gap(4),
+            gap(2) + if (keyboardHeight > 0) keyboardHeight else barsBelow,
         )
     }
 
     private fun assistantMeter(): View {
-        val vendor = Brain.vendorOf(Preferences.assistantVendor(this))
-        val model = Brain.modelOf(vendor, Preferences.assistantModel(this))
+        val auto = Preferences.assistantVendor(this) == Brain.AUTO
+        val vendor = Brain.vendorOf(this, Preferences.assistantVendor(this))
+        val model = vendor?.let { Brain.modelOf(it, Preferences.assistantModel(this)) }
+        val window = if (auto) talkAnsweringWindow else model?.window ?: 0L
         val used = if (talkWindowUsed > 0L) {
             talkWindowUsed
         } else {
-            Brain.roughly(
-                talkHeld.drop(1).map { Brain.Turn(it.first, it.second) },
-                assistantSystem(talkFolder()),
-            )
+            Brain.roughly(talkTurns(), assistantSystem(talkFolder()))
         }
-        val filled = if (model.window > 0L) {
-            (used.toFloat() / model.window.toFloat()).coerceIn(0f, 1f)
+        val filled = if (window > 0L) {
+            (used.toFloat() / window.toFloat()).coerceIn(0f, 1f)
         } else {
             0f
         }
@@ -10206,27 +11125,37 @@ class BuilderActivity : Activity() {
             filled >= 0.7f -> palette.warning
             else -> palette.ok
         }
-        return card().apply {
+        val named = when {
+            auto && talkAnswering.isNotEmpty() ->
+                getString(R.string.omni_vibe_auto) + "  ·  " + talkAnswering
+            auto -> getString(R.string.omni_vibe_auto)
+            vendor != null && model != null -> vendor.shown + "  ·  " + model.shown
+            else -> getString(R.string.omni_vibe_auto)
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(4), gap(2), gap(4), gap(2))
+            setBackgroundColor(palette.surface)
             addView(
                 LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     addView(
                         TextView(context).apply {
-                            text = vendor.shown + "  \u00b7  " + model.shown
+                            text = named
                             setTextColor(palette.foreground)
                             typeface = Type.strong
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                             isClickable = true
                             isFocusable = true
                             contentDescription = getString(R.string.omni_talk_model)
                             readAs(Button::class.java.name)
-                            setPadding(gap(2), gap(1), gap(2), gap(1))
                             maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
                             pressable(onHeld = { chooseTheVendor() })
-                            setOnClickListener { chooseTheModel() }
+                            setOnClickListener { if (auto) chooseTheVendor() else chooseTheModel() }
                         },
-                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                     )
                     addView(
                         TextView(context).apply {
@@ -10234,17 +11163,21 @@ class BuilderActivity : Activity() {
                                 append(getString(R.string.omni_talk_window))
                                 append("  ")
                                 append(countable(used))
-                                append(" / ")
-                                append(countable(model.window))
-                                append("  ")
-                                append("%${(filled * 100f).toInt()}")
+                                if (window > 0L) {
+                                    append(" / ")
+                                    append(countable(window))
+                                    append("  ")
+                                    append("%${(filled * 100f).toInt()}")
+                                }
                             }
                             setTextColor(palette.muted)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                             gravity = Gravity.END
                             maxLines = 1
                         },
-                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                            marginStart = gap(2)
+                        },
                     )
                 },
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
@@ -10254,9 +11187,7 @@ class BuilderActivity : Activity() {
                     background = pill(Ink.fade(palette.divider, 0.6f), gap(1).toFloat())
                     addView(
                         View(context).apply { background = pill(tint, gap(1).toFloat()) },
-                        FrameLayout.LayoutParams(0, MATCH_PARENT).apply {
-                            width = 0
-                        },
+                        FrameLayout.LayoutParams(0, MATCH_PARENT),
                     )
                     post {
                         val bar = getChildAt(0) ?: return@post
@@ -10289,17 +11220,25 @@ class BuilderActivity : Activity() {
                 said.add("↑${countable(talkSpentIn)} ↓${countable(talkSpentOut)}")
             }
             if (said.isNotEmpty()) {
-                addView(quiet(said.joinToString("  ·  ")))
-            }
-            if (talkAsking) {
-                addView(quiet(getString(R.string.omni_talk_thinking)))
+                addView(
+                    TextView(context).apply {
+                        text = said.joinToString("  ·  ")
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        maxLines = 1
+                    }
+                )
             }
         }
     }
 
     private fun chooseTheModel() {
+        val vendor = Brain.vendorOf(this, Preferences.assistantVendor(this))
+        if (vendor == null) {
+            chooseTheVendor()
+            return
+        }
         var shown: AlertDialog? = null
-        val vendor = Brain.vendorOf(Preferences.assistantVendor(this))
         val here = Preferences.assistantModel(this)
         val fetched = Preferences.fetchedModels(this, vendor.id)
         val named = (vendor.models.map { it.id } + fetched).distinct()
@@ -10323,7 +11262,7 @@ class BuilderActivity : Activity() {
                     setOnClickListener {
                         Preferences.setAssistantModel(this@BuilderActivity, one.id)
                         shown?.dismiss()
-                        render(false)
+                        pickTheVendor(vendor)
                     }
                     addView(
                         LinearLayout(context).apply {
@@ -10338,10 +11277,18 @@ class BuilderActivity : Activity() {
                             )
                             addView(
                                 TextView(context).apply {
-                                    text = "${one.id}  ·  ${countable(one.window)}"
+                                    text = buildString {
+                                        append(one.id)
+                                        append("  ·  ")
+                                        append(countable(one.window))
+                                        if (one.levels.isNotEmpty()) {
+                                            append("  ·  ")
+                                            append(one.levels.joinToString(", ") { levelLabel(it.level) })
+                                        }
+                                    }
                                     setTextColor(palette.muted)
                                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                                    maxLines = 1
+                                    maxLines = 2
                                 }
                             )
                         },
@@ -10364,7 +11311,7 @@ class BuilderActivity : Activity() {
                 }
             )
             addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            if (!vendor.anthropic) {
+            if (vendor.format != "dvm" && vendor.format != "raw") {
                 addView(
                     subtle(getString(R.string.omni_talk_models_fetch), palette.accent) {
                         shown?.dismiss()
@@ -10376,14 +11323,14 @@ class BuilderActivity : Activity() {
         shown = dialogShell(
             getString(R.string.omni_talk_model),
             body,
-            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+            listOf(getString(R.string.omni_vibe_close) to { it: AlertDialog -> it.dismiss() }),
         )
     }
 
     private fun fetchTheModels(vendor: Brain.Vendor) {
         results.removeAllViews()
         val sealed = Preferences.vendorKey(this, vendor.id)
-        if (sealed.isEmpty() && !vendor.keyless) {
+        if (sealed.isEmpty() && !vendor.keyless && !vendor.custom) {
             askToSignIn(vendor)
             return
         }
@@ -10419,101 +11366,170 @@ class BuilderActivity : Activity() {
         else -> value.toString()
     }
 
-    private fun vendorsToTry(): List<Brain.Vendor> {
-        val now = System.currentTimeMillis()
-        val here = Brain.vendorOf(Preferences.assistantVendor(this))
-        val after = Brain.VENDORS.filter {
-            it.id != here.id &&
-                it.keyed(this) &&
-                Preferences.restingUntil(this, it.id) <= now
-        }
-        return listOf(here) + after
-    }
-
-    private fun vendorFaulted(vendor: Brain.Vendor) {
-        val many = Preferences.faults(this, vendor.id) + 1
-        if (many >= Brain.FAULTS_BEFORE_REST) {
-            Preferences.setFaults(this, vendor.id, 0)
-            Preferences.setRestingUntil(
-                this,
-                vendor.id,
-                System.currentTimeMillis() + Brain.REST_MILLIS,
-            )
-        } else {
-            Preferences.setFaults(this, vendor.id, many)
-        }
-    }
-
-    private fun vendorSteady(vendor: Brain.Vendor) {
-        Preferences.setFaults(this, vendor.id, 0)
-        Preferences.setRestingUntil(this, vendor.id, 0L)
-    }
-
-    private fun worthAnotherVendor(why: Throwable): Boolean {
-        val refused = why as? Brain.Refused ?: return false
-        return refused.said == R.string.omni_talk_spent ||
-            refused.said == R.string.omni_talk_busy ||
-            refused.said == R.string.omni_talk_server ||
-            refused.said == R.string.omni_talk_unreachable ||
-            refused.said == R.string.omni_talk_no_model
-    }
-
-    private fun sendTyped() {
-        agentRound = 0
-        agentWrote = mutableListOf()
-        sendToTheAssistant()
-    }
-
-    private fun sendToTheAssistant() {
-        val said = talkDraft.trim()
-        if (said.isEmpty() || talkAsking) {
-            return
-        }
-        val tries = vendorsToTry().filter { it.keyed(this) }
-        if (tries.isEmpty()) {
-            talkHeld.add(true to said)
-            talkHeld.add(false to getString(R.string.omni_talk_no_key))
-            talkDraft = ""
-            render(false)
-            chooseTheVendor()
-            return
-        }
-        talkHeld.add(true to said)
-        talkDraft = ""
-        talkAsking = true
-        talkPartial = ""
-        talkStopping.set(false)
-        render(false)
-
+    private fun talkTurns(pictures: Boolean = false): List<Brain.Turn> {
         val turns = mutableListOf<Brain.Turn>()
-        talkHeld.drop(1).forEach { one ->
+        talkHeld.forEachIndexed { at, one ->
+            if (at == 0) {
+                return@forEachIndexed
+            }
+            val shown = if (pictures) talkPictures[at].orEmpty() else emptyList()
             val last = turns.lastOrNull()
             if (last != null && last.mine == one.first) {
-                turns[turns.size - 1] = Brain.Turn(one.first, last.said + "\n\n" + one.second)
+                turns[turns.size - 1] = Brain.Turn(
+                    one.first,
+                    last.said + "\n\n" + one.second,
+                    last.pictures + shown,
+                )
             } else {
-                turns.add(Brain.Turn(one.first, one.second))
+                turns.add(Brain.Turn(one.first, one.second, shown))
             }
         }
         while (turns.isNotEmpty() && !turns.first().mine) {
             turns.removeAt(0)
         }
-        val effort = Preferences.assistantEffort(this)
+        return turns
+    }
+
+    private fun seesPictures(vendor: Brain.Vendor): Boolean =
+        vendor.anthropic || vendor.gemini || vendor.id == "openai" || vendor.id == "copilot"
+
+    private fun sendTyped() {
+        agentRound = 0
+        agentWrote = mutableListOf()
+        agentChanges = mutableListOf()
+        sendToTheAssistant()
+    }
+
+    private fun attachedText(): String = buildString {
+        talkAttached.filter { !it.picture }.forEach { one ->
+            val head = one.bytes.take(8_192)
+            val textual = head.none { it.toInt() == 0 }
+            append("\n\n📎 ").append(one.name)
+            if (textual) {
+                append("\n```\n").append(String(one.bytes, Charsets.UTF_8).trimEnd()).append("\n```")
+            } else {
+                append("  (").append(one.mime).append(", ").append(one.bytes.size).append(" B)")
+            }
+        }
+    }.trim('\n')
+
+    private class Attempt(
+        val vendor: Brain.Vendor,
+        val model: Brain.Model,
+        val level: Brain.Level?,
+        val wait: Long,
+    )
+
+    private fun ledgerPath(): String = File(filesDir, Brain.LEDGER).absolutePath
+
+    private fun sendToTheAssistant() {
+        val typed = talkDraft.trim()
+        if ((typed.isEmpty() && talkAttached.isEmpty()) || talkAsking) {
+            return
+        }
+        val pictures = talkAttached.filter { it.picture }.map { one ->
+            Brain.Picture(one.mime, Base64.encodeToString(one.bytes, Base64.NO_WRAP))
+        }
+        val files = talkAttached.size
+        val said = listOf(typed, attachedText()).filter { it.isNotEmpty() }.joinToString("\n\n")
+        val failure = talkFailure
+        talkFailure = false
+        talkAttached.clear()
+        talkHeld.add(true to said)
+        if (pictures.isNotEmpty()) {
+            talkPictures[talkHeld.size - 1] = pictures
+        }
+        talkDraft = ""
         val where = talkFolder()
-        val chosen = tries.first().id
-        val sealed = tries.associate { it.id to Preferences.vendorKey(this, it.id) }
-        val models = tries.associate { it.id to Preferences.modelFor(this, it.id) }
+        val system = assistantSystem(where)
+        val turns = talkTurns(true)
+        val need = Brain.roughly(turns, system)
+        val auto = Preferences.assistantVendor(this) == Brain.AUTO
+        val attempts = mutableListOf<Attempt>()
+        if (auto) {
+            val keyed = Brain.VENDORS.filter { it.keyed(this) }.map { it.id }
+            val routed = Brain.route(
+                ledgerPath(),
+                need,
+                files,
+                said.contains("```") || Preferences.assistantAgent(this) && where != null,
+                failure,
+                keyed,
+                Preferences.assistantEffort(this),
+            )
+            routed.choices.forEach { one ->
+                val vendor = Brain.vendorOf(this, one.vendor) ?: return@forEach
+                val model = Brain.modelOf(vendor, one.model)
+                attempts.add(Attempt(vendor, model, model.level(one.effort), one.wait))
+            }
+            val larger = routed.larger
+            if (attempts.isEmpty() && larger != null) {
+                val widest = Brain.VENDORS
+                    .filter { it.keyed(this) && it.id != larger.vendor }
+                    .flatMap { one -> one.models }
+                    .maxByOrNull { it.window }
+                offerTheLargerWindow(need, larger, widest, false)
+                render(false)
+                return
+            }
+            when (routed.warning) {
+                "own_key_task" -> talkHeld.add(false to getString(R.string.omni_vibe_own_key_task))
+                "own_key_spent" -> talkHeld.add(false to getString(R.string.omni_vibe_own_key_spent))
+            }
+            if (attempts.isEmpty()) {
+                render(false)
+                chooseTheVendor()
+                return
+            }
+        } else {
+            val vendor = Brain.vendorOf(this, Preferences.assistantVendor(this))
+            if (vendor == null || !vendor.keyed(this) && !vendor.custom) {
+                talkHeld.add(false to getString(R.string.omni_talk_no_key))
+                render(false)
+                chooseTheVendor()
+                return
+            }
+            val model = Brain.modelOf(vendor, Preferences.assistantModel(this))
+            val larger = Brain.fit(vendor.id, model.id, model.window, need)
+            if (larger != null && !talkAnyway) {
+                offerTheLargerWindow(need, larger, model, true)
+                render(false)
+                return
+            }
+            talkAnyway = false
+            attempts.add(
+                Attempt(vendor, model, model.level(Preferences.effortFor(this, vendor.id, model.id)), 0L)
+            )
+        }
+        talkAsking = true
+        talkPartial = ""
+        talkThinking = ""
+        talkStopping.set(false)
+        render(false)
+        val sealed = attempts.associate { it.vendor.id to Preferences.vendorKey(this, it.vendor.id) }
+        val ledger = ledgerPath()
+        val generation = talkGeneration
 
         Thread {
-            val system = assistantSystem(where)
             var held: Brain.Answer? = null
-            var answered: Brain.Vendor? = null
+            var answered: Attempt? = null
             var why: Throwable? = null
-            for (vendor in tries) {
+            var retried = false
+            var index = 0
+            while (index < attempts.size) {
+                val attempt = attempts[index]
+                val vendor = attempt.vendor
                 val locked = sealed[vendor.id].orEmpty()
-                if (locked.isEmpty() && !vendor.keyless) {
-                    continue
+                if (attempt.wait > 0L && !restFor(vendor, attempt.wait)) {
+                    break
                 }
                 talkPartial = ""
+                talkThinking = ""
+                runOnUiThread {
+                    talkAnswering = vendor.shown + " · " + attempt.model.shown
+                    talkAnsweringWindow = attempt.model.window
+                    talkLiveNote?.text = getString(R.string.omni_vibe_routed, talkAnswering)
+                }
                 val outcome = runCatching {
                     val opened = if (locked.isEmpty()) {
                         CharArray(0)
@@ -10521,15 +11537,28 @@ class BuilderActivity : Activity() {
                         Vault.open(locked)
                             ?: throw Brain.Refused(R.string.omni_talk_bad_key)
                     }
+                    val shown = if (seesPictures(vendor)) turns else turns.map {
+                        Brain.Turn(it.mine, it.said)
+                    }
                     try {
                         Brain.stream(
                             vendor,
                             opened,
-                            turns,
-                            models[vendor.id].orEmpty(),
-                            effort,
+                            shown,
+                            attempt.model,
+                            attempt.level,
                             system,
                             talkStopping,
+                            { part ->
+                                runOnUiThread {
+                                    if (isFinishing || isDestroyed) {
+                                        return@runOnUiThread
+                                    }
+                                    talkThinking += part
+                                    talkThinkLive?.text = talkThinking.takeLast(TALK_THOUGHT_SHOWN)
+                                    talkThinkLive?.visibility = View.VISIBLE
+                                }
+                            },
                         ) { part ->
                             runOnUiThread {
                                 if (isFinishing || isDestroyed) {
@@ -10543,74 +11572,178 @@ class BuilderActivity : Activity() {
                         opened.fill(' ')
                     }
                 }
+                val refused = outcome.exceptionOrNull() as? Brain.Refused
+                val status = when {
+                    outcome.isSuccess -> 200
+                    refused != null && refused.code > 0 -> refused.code
+                    refused?.said == R.string.omni_talk_unreachable -> 503
+                    else -> 0
+                }
+                val answer = outcome.getOrNull()
+                val rest = if (status > 0) {
+                    Brain.record(
+                        ledger,
+                        vendor.id,
+                        status,
+                        answer?.let { it.spend.window() + it.spend.output } ?: 0L,
+                        refused?.retryAfter ?: 0L,
+                        answer?.limits?.requestsAllowed ?: -1L,
+                    )
+                } else {
+                    0L
+                }
                 if (outcome.isSuccess) {
-                    held = outcome.getOrNull()
-                    answered = vendor
-                    runOnUiThread { vendorSteady(vendor) }
+                    held = answer
+                    answered = attempt
                     break
                 }
                 why = outcome.exceptionOrNull()
-                runOnUiThread { vendorFaulted(vendor) }
                 if (talkStopping.get() || talkPartial.isNotEmpty()) {
                     break
                 }
-                if (why == null || !worthAnotherVendor(why)) {
+                if (status == 429 && !auto && !retried && rest in 1L..TALK_PATIENCE_SECONDS) {
+                    retried = true
+                    if (!restFor(vendor, rest)) {
+                        break
+                    }
+                    continue
+                }
+                if (!worthAnotherVendor(why)) {
                     break
                 }
+                index += 1
             }
+            val chosen = attempts.first().vendor.id
             runOnUiThread {
+                if (generation != talkGeneration) {
+                    return@runOnUiThread
+                }
                 talkAsking = false
                 talkLive = null
+                talkThinkLive = null
+                talkLiveNote = null
                 if (isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
                 var replied = ""
-                if (held != null) {
-                    if (answered != null && answered.id != chosen) {
-                        talkHeld.add(
-                            false to getString(R.string.omni_talk_instead, answered.shown)
-                        )
+                val done = held
+                if (done != null) {
+                    val by = answered
+                    if (by != null && by.vendor.id != chosen && !auto) {
+                        talkHeld.add(false to getString(R.string.omni_vibe_routed, by.vendor.shown))
                     }
-                    val spoken = held.said.ifEmpty { talkPartial }
+                    val spoken = done.said.ifEmpty { talkPartial }
                     replied = spoken
                     talkHeld.add(
                         false to spoken.ifEmpty { getString(R.string.omni_refused) }
                     )
-                    if (held.stopped == "max_tokens") {
+                    val thought = done.thought.ifEmpty { talkThinking }
+                    if (thought.isNotBlank()) {
+                        talkThought[talkHeld.size - 1] = thought
+                    }
+                    if (done.stopped == "max_tokens") {
                         talkHeld.add(false to getString(R.string.omni_talk_cut))
                     }
-                    talkSpentIn += held.spend.input + held.spend.cacheWritten
-                    talkSpentOut += held.spend.output
-                    talkWindowUsed = held.spend.window() + held.spend.output
-                    if (held.limits.known()) {
-                        talkLeftRequests = held.limits.requestsLeft
-                        talkLeftTokens = held.limits.tokensLeft
-                        talkResetsAt = held.limits.resetsAt
+                    talkSpentIn += done.spend.input + done.spend.cacheWritten
+                    talkSpentOut += done.spend.output
+                    talkWindowUsed = done.spend.window() + done.spend.output
+                    if (done.limits.known()) {
+                        talkLeftRequests = done.limits.requestsLeft
+                        talkLeftTokens = done.limits.tokensLeft
+                        talkResetsAt = done.limits.resetsAt
                     }
                 } else {
                     if (talkPartial.isNotEmpty()) {
                         talkHeld.add(false to talkPartial)
-                    }
-                    val refused = why as? Brain.Refused
-                    val text = if (refused != null) {
-                        val head = getString(refused.said)
-                        if (refused.detail.isEmpty()) {
-                            head
-                        } else {
-                            head + "  (" + refused.detail + ")"
+                        if (talkThinking.isNotBlank()) {
+                            talkThought[talkHeld.size - 1] = talkThinking
                         }
-                    } else {
-                        why?.message ?: getString(R.string.omni_talk_refused)
                     }
-                    talkHeld.add(false to text)
+                    talkHeld.add(
+                        false to (why?.let { sayWhy(it) } ?: getString(R.string.omni_talk_refused))
+                    )
+                    if (auto && attempts.isNotEmpty()) {
+                        talkHeld.add(false to getString(R.string.omni_vibe_own_key_spent))
+                    }
                 }
                 talkPartial = ""
+                talkThinking = ""
                 render(false)
                 if (replied.isNotEmpty()) {
                     agentFollow(replied)
                 }
             }
         }.start()
+    }
+
+    private fun restFor(vendor: Brain.Vendor, seconds: Long): Boolean {
+        var left = seconds
+        while (left > 0L) {
+            if (talkStopping.get()) {
+                return false
+            }
+            val shown = left
+            runOnUiThread {
+                talkLiveNote?.text = getString(R.string.omni_vibe_resting, vendor.shown, shown.toInt())
+            }
+            runCatching { Thread.sleep(1_000L) }
+            left -= 1L
+        }
+        return !talkStopping.get()
+    }
+
+    private fun offerTheLargerWindow(
+        need: Long,
+        larger: Brain.Choice,
+        from: Brain.Model?,
+        anyway: Boolean,
+    ) {
+        val google = Brain.vendorOf(this, larger.vendor) ?: return
+        dialogShell(
+            getString(R.string.omni_talk_window),
+            body(
+                getString(
+                    R.string.omni_vibe_larger,
+                    countable(need),
+                    from?.shown ?: getString(R.string.omni_vibe_auto),
+                    countable(from?.window ?: 0L),
+                )
+            ),
+            listOfNotNull(
+                if (anyway) {
+                    getString(R.string.omni_vibe_anyway) to { it: AlertDialog ->
+                        it.dismiss()
+                        talkAnyway = true
+                        talkDraft = talkHeld.removeLastOrNull()?.second.orEmpty()
+                        sendToTheAssistant()
+                    }
+                } else {
+                    null
+                },
+                getString(R.string.omni_vibe_switch) to { it: AlertDialog ->
+                    it.dismiss()
+                    talkDraft = talkHeld.removeLastOrNull()?.second.orEmpty()
+                    Preferences.setAssistantVendor(this, google.id)
+                    Preferences.setAssistantModel(this, larger.model)
+                    if (google.keyed(this)) {
+                        pickTheVendor(google)
+                    } else {
+                        askToSignIn(google)
+                    }
+                },
+            ),
+        )
+    }
+
+    private fun worthAnotherVendor(why: Throwable?): Boolean {
+        val refused = why as? Brain.Refused ?: return false
+        return refused.said == R.string.omni_talk_spent ||
+            refused.said == R.string.omni_talk_busy ||
+            refused.said == R.string.omni_talk_server ||
+            refused.said == R.string.omni_talk_unreachable ||
+            refused.said == R.string.omni_talk_no_model ||
+            refused.said == R.string.omni_talk_bad_key ||
+            refused.said == R.string.omni_vibe_paid
     }
 
     private fun agentFollow(said: String) {
@@ -10628,9 +11761,14 @@ class BuilderActivity : Activity() {
             sendToTheAssistant()
             return
         }
-        if (told.isNotEmpty()) {
+        val changes = agentChanges.toList()
+        if (changes.isNotEmpty()) {
+            talkHeld.add(false to getString(R.string.omni_agent_changes, changes.size))
+            talkChanges[talkHeld.size - 1] = changes
+        } else if (told.isNotEmpty()) {
             talkHeld.add(false to told.joinToString("\n"))
         }
+        agentChanges = mutableListOf()
         if (!ended && steps.isNotEmpty()) {
             talkHeld.add(false to getString(R.string.omni_agent_stopped, agentRound))
         }
@@ -10719,6 +11857,15 @@ class BuilderActivity : Activity() {
             ),
         )
         editor.requestFocus()
+    }
+
+    private fun fixWithTheAssistant(root: String, whole: String) {
+        talkRoot = root
+        Preferences.setAssistantAgent(this, true)
+        talkFailure = true
+        talkDraft = getString(R.string.omni_talk_fix_request, File(root).name, whole)
+        go(Screen.Assistant)
+        sendTyped()
     }
 
     private fun stopTheAssistant() {
@@ -15455,11 +16602,6 @@ class BuilderActivity : Activity() {
                     palette.warning,
                     getString(R.string.omni_talk_add_picture),
                 ),
-                mockLine(
-                    Mark.Shape.LINK,
-                    palette.ok,
-                    getString(R.string.omni_talk_add_link),
-                ),
             )
         )
         3 -> mockPanel(
@@ -15479,14 +16621,14 @@ class BuilderActivity : Activity() {
         4 -> mockPanel(
             listOf(
                 mockLine(
-                    Mark.Shape.TRASH,
-                    palette.error,
-                    getString(R.string.omni_talk_clear),
+                    Mark.Shape.MORE,
+                    palette.accent,
+                    getString(R.string.omni_action_more),
                 ),
                 mockLine(
-                    Mark.Shape.SHARE,
-                    palette.accent,
-                    getString(R.string.omni_talk_export),
+                    Mark.Shape.TRASH,
+                    palette.error,
+                    getString(R.string.omni_talk_delete),
                 ),
             )
         )
@@ -16354,7 +17496,7 @@ class BuilderActivity : Activity() {
                     return@runOnUiThread
                 }
                 answer.fold({ document ->
-                    settle(stage) { buildEnded(document, apk, aab, started) }
+                    settle(stage) { buildEnded(root, document, apk, aab, started) }
                 }) { error ->
                     OmniLog.recordCrash(Thread.currentThread(), error)
                     settle(stage) {
@@ -16407,7 +17549,7 @@ class BuilderActivity : Activity() {
                     return@runOnUiThread
                 }
                 answer.fold({ document ->
-                    settle(stage) { buildEnded(document, apk, apk, started) }
+                    settle(stage) { buildEnded(root, document, apk, apk, started) }
                 }) { error ->
                     OmniLog.recordCrash(Thread.currentThread(), error)
                     settle(stage) {
@@ -16512,7 +17654,7 @@ class BuilderActivity : Activity() {
         }, Motion.of(Motion.SETTLE))
     }
 
-    private fun buildEnded(answer: String, apk: File, aab: File, started: Long) {
+    private fun buildEnded(root: String, answer: String, apk: File, aab: File, started: Long) {
         run finished@{
             val elapsed = (System.nanoTime() - started) / 1_000_000
             val outcome = runCatching { BuildOutcome.parse(answer) }.getOrElse {
@@ -16530,8 +17672,15 @@ class BuilderActivity : Activity() {
                         outcome.error.orEmpty(),
                     )
                 }
-                showRefusal(Refusal.parse(JSONObject(answer)), results)
+                val refusal = Refusal.parse(JSONObject(answer))
+                showRefusal(refusal, results)
                 outcome.findings.forEach { results.addView(quiet(it)) }
+                val whole = (
+                    listOfNotNull(refusal.code, refusal.message, outcome.error) + outcome.findings
+                    ).filter { it.isNotBlank() }.distinct().joinToString("\n")
+                results.addView(
+                    primary(getString(R.string.omni_build_fix_ai)) { fixWithTheAssistant(root, whole) }
+                )
                 runCatching {
                     val here = apk.parentFile
                     if (here != null && here.isDirectory && here.list()?.isEmpty() == true) {
@@ -16948,6 +18097,21 @@ class BuilderActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) {
+            return
+        }
+        if (requestCode == TALK_FILE_REQUEST || requestCode == TALK_PICTURE_REQUEST) {
+            val picked = mutableListOf<Uri>()
+            val many = data?.clipData
+            if (many != null) {
+                for (index in 0 until many.itemCount) {
+                    many.getItemAt(index)?.uri?.let { picked.add(it) }
+                }
+            } else {
+                data?.data?.let { picked.add(it) }
+            }
+            if (picked.isNotEmpty()) {
+                takeTheAttachments(picked, requestCode == TALK_PICTURE_REQUEST)
+            }
             return
         }
         if (requestCode == SHOT_REQUEST) {
@@ -20011,182 +21175,214 @@ internal object Brain {
 
     private const val REPLY_BYTES = 8 * 1024 * 1024
 
-    const val MOST_TOKENS = 16_000
+    const val MOST_TOKENS = 16_000L
 
-    const val MOST_STREAMED = 64_000
+    const val MOST_STREAMED = 64_000L
 
-    const val REST_MILLIS = 120_000L
+    const val LEAST_TOKENS = 256L
 
-    const val FAULTS_BEFORE_REST = 3
+    const val AUTO = "auto"
+
+    const val CUSTOM = "custom-"
+
+    const val LEDGER = "vibe_ledger.json"
+
+    class Level(
+        val level: String,
+        val param: String,
+        val value: String,
+        val mostTokens: Long,
+        val hint: String,
+    )
 
     class Model(
         val id: String,
         val shown: String,
         val window: Long,
-    )
+        val levels: List<Level> = emptyList(),
+    ) {
+        fun level(wanted: String): Level? {
+            if (levels.isEmpty()) {
+                return null
+            }
+            levels.firstOrNull { it.level == wanted }?.let { return it }
+            val order = listOf("low", "medium", "high", "deep")
+            val want = order.indexOf(wanted).coerceAtLeast(0)
+            return levels.minByOrNull { one ->
+                val at = order.indexOf(one.level)
+                Math.abs(at - want) * 10 - at
+            }
+        }
+    }
 
     class Vendor(
         val id: String,
         val shown: String,
         val home: String,
-        val anthropic: Boolean,
-        val free: Boolean,
         val where: String,
+        val format: String,
+        val sign: String,
+        val tier: String,
+        val notice: String,
         val models: List<Model>,
-        val keyless: Boolean = false,
-        val copilot: Boolean = false,
+        val lastResort: Boolean = false,
+        val probeMethod: String = "GET",
+        val probePath: String = "/models",
+        val template: String = "",
+        val reply: String = "",
     ) {
+        val anthropic: Boolean get() = format == "anthropic"
+
+        val gemini: Boolean get() = format == "gemini"
+
+        val keyless: Boolean get() = tier == "keyless"
+
+        val copilot: Boolean get() = sign == "github"
+
+        val custom: Boolean get() = tier == "custom"
+
+        val free: Boolean get() = tier == "free" || tier == "keyless"
+
         fun keyed(context: Context): Boolean =
-            keyless || Preferences.vendorKey(context, id).isNotEmpty()
+            keyless || custom || Preferences.vendorKey(context, id).isNotEmpty()
     }
 
-    private val CLAUDE = listOf(
-        Model("claude-opus-5", "Opus 5", 1_000_000L),
-        Model("claude-sonnet-5", "Sonnet 5", 1_000_000L),
-        Model("claude-fable-5-1", "Fable 5.1", 1_000_000L),
-        Model("claude-haiku-4-5", "Haiku 4.5", 200_000L),
-    )
+    private fun levelsOf(held: JSONArray?): List<Level> {
+        val out = mutableListOf<Level>()
+        for (at in 0 until (held?.length() ?: 0)) {
+            val one = held?.optJSONObject(at) ?: continue
+            out.add(
+                Level(
+                    one.optString("level"),
+                    one.optString("param"),
+                    one.optString("value"),
+                    one.optLong("mostTokens", MOST_TOKENS),
+                    one.optString("hint"),
+                )
+            )
+        }
+        return out
+    }
 
-    val VENDORS: List<Vendor> = listOf(
-        Vendor(
-            "pollinations", "Pollinations", "https://text.pollinations.ai/openai",
-            false, true, "pollinations.ai", listOf(
-                Model("openai", "GPT-OSS 20B", 128_000L),
-                Model("openai-fast", "GPT-OSS 20B fast", 128_000L),
-            ),
-            keyless = true,
-        ),
-        Vendor(
-            "anthropic", "Anthropic", "https://api.anthropic.com", true, false,
-            "console.anthropic.com", CLAUDE,
-        ),
-        Vendor(
-            "openai", "OpenAI", "https://api.openai.com/v1", false, false,
-            "platform.openai.com", listOf(
-                Model("gpt-5.2", "GPT-5.2", 400_000L),
-                Model("gpt-5.2-mini", "GPT-5.2 mini", 400_000L),
-                Model("gpt-5.1", "GPT-5.1", 400_000L),
-                Model("o4-mini", "o4 mini", 200_000L),
-            ),
-        ),
-        Vendor(
-            "google", "Google AI Studio",
-            "https://generativelanguage.googleapis.com/v1beta/openai", false, true,
-            "aistudio.google.com", listOf(
-                Model("gemini-3-pro", "Gemini 3 Pro", 1_000_000L),
-                Model("gemini-3-flash", "Gemini 3 Flash", 1_000_000L),
-                Model("gemini-2.5-flash", "Gemini 2.5 Flash", 1_000_000L),
-            ),
-        ),
-        Vendor(
-            "groq", "Groq", "https://api.groq.com/openai/v1", false, true,
-            "console.groq.com", listOf(
-                Model("llama-3.3-70b-versatile", "Llama 3.3 70B", 128_000L),
-                Model("qwen3-32b", "Qwen3 32B", 128_000L),
-                Model("openai/gpt-oss-120b", "GPT-OSS 120B", 128_000L),
-            ),
-        ),
-        Vendor(
-            "cerebras", "Cerebras", "https://api.cerebras.ai/v1", false, true,
-            "cloud.cerebras.ai", listOf(
-                Model("llama-3.3-70b", "Llama 3.3 70B", 128_000L),
-                Model("qwen-3-235b-a22b-instruct", "Qwen3 235B", 128_000L),
-            ),
-        ),
-        Vendor(
-            "openrouter", "OpenRouter", "https://openrouter.ai/api/v1", false, true,
-            "openrouter.ai", listOf(
-                Model("deepseek/deepseek-r1:free", "DeepSeek R1 free", 164_000L),
-                Model("qwen/qwen3-coder:free", "Qwen3 Coder free", 262_000L),
-                Model("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash free", 1_000_000L),
-            ),
-        ),
-        Vendor(
-            "opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", false, true,
-            "opencode.ai/zen", listOf(
-                Model("big-pickle", "Big Pickle", 256_000L),
-                Model("nemotron-3-ultra-free", "Nemotron 3 Ultra", 128_000L),
-                Model("muse-spark-1.3-contributor-free", "Muse Spark 1.3", 128_000L),
-                Model("mimo-v2.5-free", "MiMo v2.5", 128_000L),
-            ),
-        ),
-        Vendor(
-            "github", "GitHub Models", "https://models.github.ai/inference", false, true,
-            "github.com/marketplace/models", listOf(
-                Model("openai/gpt-4.1", "GPT-4.1", 1_000_000L),
-                Model("meta/Llama-4-Scout-17B-16E-Instruct", "Llama 4 Scout", 128_000L),
-            ),
-        ),
-        Vendor(
-            "copilot", "GitHub Copilot", "https://api.githubcopilot.com", false, false,
-            "github.com", listOf(
-                Model("gpt-4.1", "GPT-4.1", 128_000L),
-                Model("gpt-5-mini", "GPT-5 mini", 128_000L),
-                Model("claude-sonnet-4.5", "Claude Sonnet 4.5", 200_000L),
-                Model("gemini-2.5-pro", "Gemini 2.5 Pro", 1_000_000L),
-            ),
-            copilot = true,
-        ),
-        Vendor(
-            "nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", false, true,
-            "build.nvidia.com", listOf(
-                Model("nvidia/llama-3.3-nemotron-super-49b-v1", "Nemotron Super 49B", 128_000L),
-                Model("deepseek-ai/deepseek-r1", "DeepSeek R1", 164_000L),
-            ),
-        ),
-        Vendor(
-            "mistral", "Mistral", "https://api.mistral.ai/v1", false, true,
-            "console.mistral.ai", listOf(
-                Model("mistral-large-latest", "Mistral Large", 128_000L),
-                Model("codestral-latest", "Codestral", 256_000L),
-            ),
-        ),
-        Vendor(
-            "deepseek", "DeepSeek", "https://api.deepseek.com/v1", false, false,
-            "platform.deepseek.com", listOf(
-                Model("deepseek-chat", "DeepSeek Chat", 128_000L),
-                Model("deepseek-reasoner", "DeepSeek Reasoner", 128_000L),
-            ),
-        ),
-        Vendor(
-            "xai", "xAI", "https://api.x.ai/v1", false, false,
-            "console.x.ai", listOf(
-                Model("grok-4", "Grok 4", 256_000L),
-                Model("grok-code-fast-1", "Grok Code Fast", 256_000L),
-            ),
-        ),
-        Vendor(
-            "together", "Together", "https://api.together.xyz/v1", false, false,
-            "api.together.ai", listOf(
-                Model("Qwen/Qwen3-235B-A22B-Instruct-2507-tput", "Qwen3 235B", 256_000L),
-                Model("deepseek-ai/DeepSeek-V3", "DeepSeek V3", 128_000L),
-            ),
-        ),
-        Vendor(
-            "fireworks", "Fireworks", "https://api.fireworks.ai/inference/v1", false, false,
-            "fireworks.ai", listOf(
-                Model("accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
-                    "Qwen3 Coder 480B", 256_000L),
-                Model("accounts/fireworks/models/deepseek-v3", "DeepSeek V3", 128_000L),
-            ),
-        ),
-    )
+    private fun vendorFrom(one: JSONObject, tier: String = one.optString("tier")): Vendor {
+        val models = mutableListOf<Model>()
+        val listed = one.optJSONArray("models")
+        for (at in 0 until (listed?.length() ?: 0)) {
+            val model = listed?.optJSONObject(at) ?: continue
+            models.add(
+                Model(
+                    model.optString("id"),
+                    model.optString("shown").ifEmpty { model.optString("id") },
+                    model.optLong("window"),
+                    levelsOf(model.optJSONArray("efforts")),
+                )
+            )
+        }
+        val probe = one.optJSONObject("probe")
+        return Vendor(
+            one.optString("id"),
+            one.optString("shown"),
+            one.optString("base"),
+            one.optString("home"),
+            one.optString("format"),
+            one.optString("sign"),
+            tier,
+            one.optString("notice"),
+            models,
+            one.optBoolean("lastResort"),
+            probe?.optString("method").orEmpty().ifEmpty { "GET" },
+            probe?.optString("path") ?: "/models",
+            one.optString("template"),
+            one.optString("reply"),
+        )
+    }
 
-    fun vendorOf(id: String): Vendor = VENDORS.firstOrNull { it.id == id } ?: VENDORS.first()
+    fun vibe(asked: JSONObject): JSONObject =
+        runCatching { JSONObject(Builder.nativeVibe(asked.toString())) }.getOrDefault(JSONObject())
 
-    fun modelOf(vendor: Vendor, id: String): Model =
-        vendor.models.firstOrNull { it.id == id }
-            ?: Model(id.ifEmpty { vendor.models.first().id }, id.ifEmpty {
-                vendor.models.first().shown
-            }, vendor.models.first().window)
+    private val CATALOG: JSONObject by lazy { vibe(JSONObject().put("op", "catalog")) }
 
-    class Turn(val mine: Boolean, val said: String)
+    fun quotaOf(id: String): JSONObject? {
+        val held = CATALOG.optJSONArray("providers") ?: return null
+        for (at in 0 until held.length()) {
+            val one = held.optJSONObject(at) ?: continue
+            if (one.optString("id") == id) {
+                return one.optJSONObject("quota")
+            }
+        }
+        return null
+    }
+
+    val VENDORS: List<Vendor> by lazy {
+        val held = CATALOG.optJSONArray("providers")
+        val out = mutableListOf<Vendor>()
+        for (at in 0 until (held?.length() ?: 0)) {
+            held?.optJSONObject(at)?.let { out.add(vendorFrom(it)) }
+        }
+        out
+    }
+
+    fun customs(context: Context): List<Vendor> {
+        val held = runCatching { JSONArray(Preferences.customVendors(context)) }
+            .getOrDefault(JSONArray())
+        val out = mutableListOf<Vendor>()
+        for (at in 0 until held.length()) {
+            val one = held.optJSONObject(at) ?: continue
+            out.add(customFrom(one))
+        }
+        return out
+    }
+
+    fun customFrom(form: JSONObject): Vendor {
+        val checked = vibe(JSONObject(form.toString()).put("op", "custom"))
+        val model = form.optString("model")
+        return vendorFrom(
+            JSONObject()
+                .put("id", form.optString("id"))
+                .put("shown", form.optString("name"))
+                .put("base", checked.optString("base").ifEmpty { form.optString("base") })
+                .put("home", form.optString("base"))
+                .put("format", checked.optString("format"))
+                .put("sign", checked.optString("sign"))
+                .put("notice", "unverified")
+                .put("probe", checked.optJSONObject("probe") ?: JSONObject())
+                .put("template", form.optString("template"))
+                .put("reply", form.optString("reply"))
+                .put(
+                    "models",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("id", model)
+                            .put("shown", model)
+                            .put("window", form.optLong("window"))
+                            .put("efforts", checked.optJSONArray("efforts") ?: JSONArray())
+                    ),
+                ),
+            "custom",
+        )
+    }
+
+    fun vendors(context: Context): List<Vendor> = VENDORS + customs(context)
+
+    fun vendorOf(context: Context, id: String): Vendor? =
+        vendors(context).firstOrNull { it.id == id }
+
+    fun modelOf(vendor: Vendor, id: String): Model {
+        val first = vendor.models.firstOrNull() ?: Model(id, id, 0L)
+        return vendor.models.firstOrNull { it.id == id }
+            ?: Model(id.ifEmpty { first.id }, id.ifEmpty { first.shown }, first.window, first.levels)
+    }
+
+    class Picture(val mime: String, val data: String)
+
+    class Turn(val mine: Boolean, val said: String, val pictures: List<Picture> = emptyList())
 
     class Limits(
         val requestsLeft: Long,
         val tokensLeft: Long,
         val resetsAt: String,
         val retryAfter: Long,
+        val requestsAllowed: Long = -1L,
     ) {
         fun known(): Boolean = requestsLeft >= 0 || tokensLeft >= 0
     }
@@ -20205,17 +21401,156 @@ internal object Brain {
         val stopped: String,
         val spend: Spend,
         val limits: Limits,
+        val thought: String = "",
     )
 
-    class Refused(val said: Int, val detail: String = "") : Exception()
+    class Refused(
+        val said: Int,
+        val detail: String = "",
+        val code: Int = 0,
+        val retryAfter: Long = 0L,
+    ) : Exception()
 
-    private fun messagesOf(turns: List<Turn>): JSONArray {
+    class Choice(
+        val vendor: String,
+        val model: String,
+        val window: Long,
+        val wait: Long,
+        val effort: String,
+    )
+
+    class Routed(
+        val task: String,
+        val warning: String,
+        val choices: List<Choice>,
+        val larger: Choice?,
+    )
+
+    private fun choiceFrom(one: JSONObject?): Choice? {
+        if (one == null || one.optString("provider").isEmpty()) {
+            return null
+        }
+        return Choice(
+            one.optString("provider"),
+            one.optString("model"),
+            one.optLong("window"),
+            one.optLong("wait"),
+            one.optString("effort"),
+        )
+    }
+
+    fun route(
+        ledger: String,
+        tokens: Long,
+        files: Int,
+        code: Boolean,
+        failure: Boolean,
+        keyed: List<String>,
+        effort: String,
+    ): Routed {
+        val held = vibe(
+            JSONObject()
+                .put("op", "route")
+                .put("ledger", ledger)
+                .put("tokens", tokens)
+                .put("files", files)
+                .put("code", code)
+                .put("failure", failure)
+                .put("keyed", JSONArray(keyed))
+                .put("effort", effort)
+        )
+        val listed = held.optJSONArray("choices")
+        val choices = mutableListOf<Choice>()
+        for (at in 0 until (listed?.length() ?: 0)) {
+            choiceFrom(listed?.optJSONObject(at))?.let { choices.add(it) }
+        }
+        return Routed(
+            held.optString("task"),
+            held.optString("warning"),
+            choices,
+            choiceFrom(held.optJSONObject("larger")),
+        )
+    }
+
+    fun record(
+        ledger: String,
+        vendor: String,
+        status: Int,
+        tokens: Long,
+        retryAfter: Long,
+        allowed: Long,
+    ): Long =
+        vibe(
+            JSONObject()
+                .put("op", "record")
+                .put("ledger", ledger)
+                .put("provider", vendor)
+                .put("status", status)
+                .put("tokens", tokens)
+                .put("retryAfter", retryAfter)
+                .put("limitDay", if (vendor == "groq") allowed.coerceAtLeast(0L) else 0L)
+        ).optLong("rest")
+
+    fun fit(vendor: String, model: String, window: Long, tokens: Long): Choice? {
+        val held = vibe(
+            JSONObject()
+                .put("op", "fit")
+                .put("provider", vendor)
+                .put("model", model)
+                .put("window", window)
+                .put("tokens", tokens)
+        )
+        if (held.optBoolean("fits", true)) {
+            return null
+        }
+        val larger = held.optJSONObject("larger") ?: return null
+        return Choice(
+            larger.optString("provider"),
+            larger.optString("model"),
+            larger.optLong("window"),
+            0L,
+            "",
+        )
+    }
+
+    private fun pictureParts(one: Turn, anthropic: Boolean): JSONArray {
+        val parts = JSONArray()
+        one.pictures.forEach { picture ->
+            parts.put(
+                if (anthropic) {
+                    JSONObject()
+                        .put("type", "image")
+                        .put(
+                            "source",
+                            JSONObject()
+                                .put("type", "base64")
+                                .put("media_type", picture.mime)
+                                .put("data", picture.data),
+                        )
+                } else {
+                    JSONObject()
+                        .put("type", "image_url")
+                        .put(
+                            "image_url",
+                            JSONObject().put("url", "data:${picture.mime};base64,${picture.data}"),
+                        )
+                }
+            )
+        }
+        parts.put(JSONObject().put("type", "text").put("text", one.said))
+        return parts
+    }
+
+    private fun messagesOf(turns: List<Turn>, anthropic: Boolean): JSONArray {
         val messages = JSONArray()
         turns.forEach { one ->
             messages.put(
                 JSONObject()
                     .put("role", if (one.mine) "user" else "assistant")
-                    .put("content", one.said)
+                    .put(
+                        "content",
+                        if (one.pictures.isEmpty()) one.said else pictureParts(one, anthropic),
+                    )
             )
         }
         return messages
@@ -20224,16 +21559,31 @@ internal object Brain {
     private fun anthropicBody(
         turns: List<Turn>,
         model: String,
-        effort: String,
+        level: Level?,
         system: String,
+        most: Long,
     ): JSONObject {
         val asked = JSONObject()
             .put("model", model)
-            .put("max_tokens", MOST_TOKENS)
-            .put("messages", messagesOf(turns))
-            .put("thinking", JSONObject().put("type", "adaptive"))
-        if (effort.isNotEmpty()) {
-            asked.put("output_config", JSONObject().put("effort", effort))
+            .put("max_tokens", most)
+            .put("messages", messagesOf(turns, true))
+        when (level?.param) {
+            "effort" -> {
+                asked.put(
+                    "thinking",
+                    JSONObject().put("type", "adaptive").put("display", "summarized"),
+                )
+                asked.put("output_config", JSONObject().put("effort", level.value))
+            }
+            "budget" -> {
+                val budget = level.value.toLongOrNull() ?: 0L
+                if (budget > 0L && budget < most) {
+                    asked.put(
+                        "thinking",
+                        JSONObject().put("type", "enabled").put("budget_tokens", budget),
+                    )
+                }
+            }
         }
         if (system.isNotEmpty()) {
             asked.put(
@@ -20252,45 +21602,100 @@ internal object Brain {
         return asked
     }
 
+    private fun hinted(system: String, level: Level?): String {
+        val hint = if (level?.param == "hint") level.hint else ""
+        return when {
+            hint.isEmpty() -> system
+            system.isEmpty() -> hint
+            else -> system + "\n\n" + hint
+        }
+    }
+
     private fun openBody(
+        vendor: Vendor,
         turns: List<Turn>,
         model: String,
-        effort: String,
+        level: Level?,
         system: String,
+        most: Long,
     ): JSONObject {
         val messages = JSONArray()
-        if (system.isNotEmpty()) {
-            messages.put(JSONObject().put("role", "system").put("content", system))
+        val told = hinted(system, level)
+        if (told.isNotEmpty()) {
+            messages.put(JSONObject().put("role", "system").put("content", told))
         }
-        val held = messagesOf(turns)
+        val held = messagesOf(turns, false)
         for (at in 0 until held.length()) {
             messages.put(held.get(at))
         }
         val asked = JSONObject()
             .put("model", model)
-            .put("max_tokens", MOST_TOKENS)
             .put("messages", messages)
-        if (effort.isNotEmpty()) {
-            asked.put("reasoning_effort", effort)
+        val tokens = if (level?.param == "max_tokens") {
+            (level.value.toLongOrNull() ?: most).coerceAtMost(most)
+        } else {
+            most
+        }
+        asked.put(if (vendor.id == "openai") "max_completion_tokens" else "max_tokens", tokens)
+        if (level?.param == "reasoning_effort") {
+            asked.put("reasoning_effort", level.value)
         }
         return asked
     }
 
-    private fun bodyFor(
-        vendor: Vendor,
+    private fun geminiBody(
         turns: List<Turn>,
-        model: String,
-        effort: String,
+        level: Level?,
         system: String,
-    ): JSONObject =
-        if (vendor.anthropic) {
-            anthropicBody(turns, model, effort, system)
-        } else {
-            openBody(turns, model, effort, system)
+        most: Long,
+    ): JSONObject {
+        val contents = JSONArray()
+        turns.forEach { one ->
+            val parts = JSONArray()
+            one.pictures.forEach { picture ->
+                parts.put(
+                    JSONObject().put(
+                        "inline_data",
+                        JSONObject().put("mime_type", picture.mime).put("data", picture.data),
+                    )
+                )
+            }
+            parts.put(JSONObject().put("text", one.said))
+            contents.put(
+                JSONObject().put("role", if (one.mine) "user" else "model").put("parts", parts)
+            )
         }
+        val shaping = JSONObject().put("maxOutputTokens", most)
+        if (level?.param == "budget") {
+            shaping.put(
+                "thinkingConfig",
+                JSONObject()
+                    .put("thinkingBudget", level.value.toLongOrNull() ?: 0L)
+                    .put("includeThoughts", true),
+            )
+        }
+        val asked = JSONObject().put("contents", contents).put("generationConfig", shaping)
+        if (system.isNotEmpty()) {
+            asked.put(
+                "systemInstruction",
+                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))),
+            )
+        }
+        return asked
+    }
+
+    private fun flattened(turns: List<Turn>, system: String): String = buildString {
+        if (system.isNotEmpty()) {
+            append(system).append("\n\n")
+        }
+        turns.forEach { one ->
+            append(if (one.mine) "User: " else "Assistant: ").append(one.said).append("\n\n")
+        }
+    }.trim()
 
     private fun refusalFor(code: Int): Int = when (code) {
         401, 403 -> R.string.omni_talk_bad_key
+        402 -> R.string.omni_vibe_paid
         404 -> R.string.omni_talk_no_model
         429 -> R.string.omni_talk_spent
         529 -> R.string.omni_talk_busy
@@ -20308,6 +21713,7 @@ internal object Brain {
         var requests = -1L
         var tokens = -1L
         var resets = ""
+        var allowed = -1L
         link.headerFields?.forEach { (named, values) ->
             val key = named?.lowercase(Locale.US) ?: return@forEach
             if (!key.contains("ratelimit")) {
@@ -20317,11 +21723,12 @@ internal object Brain {
             when {
                 key.endsWith("requests-remaining") -> requests = held.toLongOrNull() ?: requests
                 key.endsWith("tokens-remaining") -> tokens = held.toLongOrNull() ?: tokens
+                key.endsWith("limit-requests") -> allowed = held.toLongOrNull() ?: allowed
                 key.endsWith("tokens-reset") && resets.isEmpty() -> resets = held
                 key.endsWith("requests-reset") && resets.isEmpty() -> resets = held
             }
         }
-        return Limits(requests, tokens, resets, numbered(link, "retry-after"))
+        return Limits(requests, tokens, resets, numbered(link, "retry-after"), allowed)
     }
 
     private fun read(from: java.io.InputStream?): String {
@@ -20344,64 +21751,11 @@ internal object Brain {
         }.getOrDefault("")
     }
 
-    private fun spokenFrom(reply: JSONObject): String {
-        val parts = reply.optJSONArray("content") ?: return ""
-        val out = StringBuilder()
-        for (at in 0 until parts.length()) {
-            val one = parts.optJSONObject(at) ?: continue
-            if (one.optString("type") != "text") {
-                continue
-            }
-            if (out.isNotEmpty()) {
-                out.append("\n\n")
-            }
-            out.append(one.optString("text"))
-        }
-        return out.toString()
-    }
-
-    private fun openSpokenFrom(reply: JSONObject): String {
-        val first = reply.optJSONArray("choices")?.optJSONObject(0) ?: return ""
-        val message = first.optJSONObject("message") ?: return ""
-        val held = message.opt("content")
-        if (held is JSONArray) {
-            val out = StringBuilder()
-            for (at in 0 until held.length()) {
-                val one = held.optJSONObject(at) ?: continue
-                val part = one.optString("text")
-                if (part.isNotEmpty()) {
-                    out.append(part)
-                }
-            }
-            return out.toString()
-        }
-        return held?.toString().orEmpty()
-    }
-
-    private fun spendFrom(reply: JSONObject): Spend {
-        val used = reply.optJSONObject("usage") ?: JSONObject()
-        return Spend(
-            used.optLong("input_tokens"),
-            used.optLong("output_tokens"),
-            used.optLong("cache_creation_input_tokens"),
-            used.optLong("cache_read_input_tokens"),
-        )
-    }
-
-    private fun openSpendFrom(reply: JSONObject): Spend {
-        val used = reply.optJSONObject("usage") ?: JSONObject()
-        val cached = used.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L
-        return Spend(
-            (used.optLong("prompt_tokens") - cached).coerceAtLeast(0L),
-            used.optLong("completion_tokens"),
-            0L,
-            cached,
-        )
-    }
-
     private fun opened(vendor: Vendor, key: CharArray, path: String, listening: Boolean):
         HttpURLConnection {
-        val link = runCatching { URL(vendor.home + path).openConnection() }
+        val ticket = if (vendor.copilot) Copilot.ticketFor(key) else ""
+        val base = if (vendor.copilot) Copilot.endpoint() else vendor.home
+        val link = runCatching { URL(base + path).openConnection() }
             .getOrNull() as? HttpURLConnection
             ?: throw Refused(R.string.omni_talk_unreachable)
         link.connectTimeout = OPEN_MILLIS
@@ -20413,22 +21767,26 @@ internal object Brain {
         )
         link.setRequestProperty("User-Agent", "apk-builder")
         when {
-            vendor.anthropic -> {
-                link.setRequestProperty("x-api-key", String(key))
-                link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
-            }
             vendor.copilot -> {
-                link.setRequestProperty(
-                    "authorization",
-                    "Bearer " + Copilot.ticketFor(key),
-                )
+                link.setRequestProperty("authorization", "Bearer $ticket")
                 link.setRequestProperty("editor-version", Copilot.EDITOR)
                 link.setRequestProperty("editor-plugin-version", Copilot.PLUGIN)
                 link.setRequestProperty("copilot-integration-id", Copilot.INTEGRATION)
+                link.setRequestProperty("openai-intent", "conversation-panel")
             }
-            key.isNotEmpty() -> {
-                link.setRequestProperty("authorization", "Bearer " + String(key))
+            key.isEmpty() -> Unit
+            vendor.sign == "x-api-key" -> {
+                link.setRequestProperty("x-api-key", String(key))
+                link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
             }
+            vendor.sign == "x-goog-api-key" ->
+                link.setRequestProperty("x-goog-api-key", String(key))
+            vendor.sign == "l402" ->
+                link.setRequestProperty("authorization", "L402 " + String(key))
+            else -> link.setRequestProperty("authorization", "Bearer " + String(key))
+        }
+        if (vendor.anthropic && key.isEmpty()) {
+            link.setRequestProperty("anthropic-version", ANTHROPIC_DATED)
         }
         return link
     }
@@ -20456,65 +21814,114 @@ internal object Brain {
                 held.optJSONObject("error")?.optString("message").orEmpty()
                     .ifEmpty { held.optString("message") }
             }.getOrDefault("")
-            throw Refused(refusalFor(code), detailFor(code, limits, detail))
+            throw Refused(
+                refusalFor(code),
+                detailFor(code, limits, detail),
+                code,
+                limits.retryAfter.coerceAtLeast(0L),
+            )
         }
         return limits
     }
 
-    fun ask(
+    fun probe(vendor: Vendor, key: CharArray): Int {
+        if (vendor.copilot) {
+            Copilot.forget()
+            Copilot.ticketFor(key)
+            return 200
+        }
+        val link = opened(vendor, key, vendor.probePath, false)
+        link.requestMethod = vendor.probeMethod
+        if (vendor.probeMethod == "POST") {
+            link.doOutput = true
+            val body = when (vendor.format) {
+                "dvm" -> JSONObject().put("prompt", "ping").toString()
+                else -> filled(
+                    vendor,
+                    listOf(Turn(true, "ping")),
+                    vendor.models.firstOrNull()?.id.orEmpty(),
+                    "",
+                    1L,
+                    "low",
+                )
+            }
+            sent(link, body)
+        }
+        val code = runCatching { link.responseCode }.getOrElse {
+            link.disconnect()
+            throw Refused(R.string.omni_talk_unreachable)
+        }
+        link.disconnect()
+        if (code == 200 || (vendor.format == "dvm" && code == 402)) {
+            return code
+        }
+        throw Refused(refusalFor(code), code.toString(), code)
+    }
+
+    private fun filled(
         vendor: Vendor,
-        key: CharArray,
         turns: List<Turn>,
         model: String,
-        effort: String,
         system: String,
-    ): Answer {
-        if (key.isEmpty() && !vendor.keyless) {
-            throw Refused(R.string.omni_talk_no_key)
+        most: Long,
+        level: String,
+    ): String {
+        val messages = JSONArray()
+        if (system.isNotEmpty()) {
+            messages.put(JSONObject().put("role", "system").put("content", system))
         }
-        val link = opened(vendor, key, if (vendor.anthropic) "/v1/messages" else "/chat/completions", false)
-        link.requestMethod = "POST"
-        link.doOutput = true
-        sent(link, bodyFor(vendor, turns, model, effort, system).toString())
-        val limits = answered(link)
-        val said = read(link.inputStream)
-        link.disconnect()
-        val reply = runCatching { JSONObject(said) }
-            .getOrElse { throw Refused(R.string.omni_talk_refused) }
-        if (vendor.anthropic) {
-            val stopped = reply.optString("stop_reason")
-            if (stopped == "refusal") {
-                throw Refused(R.string.omni_talk_declined)
-            }
-            return Answer(spokenFrom(reply), stopped, spendFrom(reply), limits)
+        turns.forEach { one ->
+            messages.put(
+                JSONObject()
+                    .put("role", if (one.mine) "user" else "assistant")
+                    .put("content", one.said)
+            )
         }
-        val stopped = reply.optJSONArray("choices")
-            ?.optJSONObject(0)
-            ?.optString("finish_reason")
-            .orEmpty()
-        return Answer(
-            openSpokenFrom(reply),
-            if (stopped == "length") "max_tokens" else stopped,
-            openSpendFrom(reply),
-            limits,
+        val held = vibe(
+            JSONObject()
+                .put("op", "fill")
+                .put("template", vendor.template)
+                .put("model", model)
+                .put("prompt", turns.lastOrNull { it.mine }?.said.orEmpty())
+                .put("system", system)
+                .put("messages", messages.toString())
+                .put("maxTokens", most)
+                .put("level", level)
         )
+        if (!held.optBoolean("ok")) {
+            throw Refused(R.string.omni_vibe_problem_template)
+        }
+        return held.optString("body")
     }
 
     fun listed(vendor: Vendor, key: CharArray): List<String> {
-        if ((key.isEmpty() && !vendor.keyless) || vendor.anthropic) {
+        if (key.isEmpty() && !vendor.keyless && !vendor.custom) {
             return emptyList()
         }
-        val link = runCatching { opened(vendor, key, "/models", false) }.getOrNull()
-            ?: return emptyList()
+        if (vendor.format == "dvm" || vendor.format == "raw") {
+            return emptyList()
+        }
+        val link = runCatching {
+            opened(vendor, key, if (vendor.anthropic) "/v1/models" else "/models", false)
+        }.getOrNull() ?: return emptyList()
         link.requestMethod = "GET"
         return runCatching {
             if (link.responseCode != 200) {
                 emptyList()
             } else {
-                val held = JSONObject(read(link.inputStream)).optJSONArray("data")
+                val said = read(link.inputStream).trim()
+                val held = if (said.startsWith("[")) {
+                    JSONArray(said)
+                } else {
+                    val whole = JSONObject(said)
+                    whole.optJSONArray("data") ?: whole.optJSONArray("models") ?: JSONArray()
+                }
                 val out = mutableListOf<String>()
-                for (at in 0 until (held?.length() ?: 0)) {
-                    val named = held?.optJSONObject(at)?.optString("id").orEmpty()
+                for (at in 0 until held.length()) {
+                    val one = held.optJSONObject(at)
+                    val named = one?.optString("id").orEmpty()
+                        .ifEmpty { one?.optString("name").orEmpty() }
+                        .removePrefix("models/")
                     if (named.isNotEmpty()) {
                         out.add(named)
                     }
@@ -20524,12 +21931,65 @@ internal object Brain {
         }.getOrDefault(emptyList()).also { link.disconnect() }
     }
 
-    private fun anthropicStream(
-        event: JSONObject,
-        whole: StringBuilder,
-        onText: (String) -> Unit,
-        held: LongArray,
-    ): String {
+    class Heard(
+        val onThink: (String) -> Unit,
+        val onText: (String) -> Unit,
+    ) {
+        val whole = StringBuilder()
+        val thought = StringBuilder()
+        val held = longArrayOf(0L, 0L, 0L, 0L)
+        private var thinking = false
+        private var owed = ""
+
+        fun think(part: String) {
+            if (part.isEmpty()) {
+                return
+            }
+            thought.append(part)
+            onThink(part)
+        }
+
+        fun say(part: String) {
+            if (part.isEmpty()) {
+                return
+            }
+            whole.append(part)
+            onText(part)
+        }
+
+        fun tagged(part: String) {
+            var rest = owed + part
+            owed = ""
+            while (rest.isNotEmpty()) {
+                val tag = if (thinking) "</think>" else "<think>"
+                val at = rest.indexOf(tag)
+                if (at >= 0) {
+                    val before = rest.substring(0, at)
+                    if (thinking) think(before) else say(before)
+                    thinking = !thinking
+                    rest = rest.substring(at + tag.length)
+                    continue
+                }
+                val keep = (1 until tag.length).lastOrNull { size ->
+                    rest.endsWith(tag.substring(0, size))
+                } ?: 0
+                val now = rest.substring(0, rest.length - keep)
+                if (thinking) think(now) else say(now)
+                owed = rest.substring(rest.length - keep)
+                rest = ""
+            }
+        }
+
+        fun flush() {
+            if (owed.isNotEmpty()) {
+                if (thinking) think(owed) else say(owed)
+                owed = ""
+            }
+        }
+    }
+
+    private fun anthropicStream(event: JSONObject, heard: Heard): String {
+        val held = heard.held
         when (event.optString("type")) {
             "message_start" -> {
                 val used = event.optJSONObject("message")?.optJSONObject("usage")
@@ -20539,13 +21999,9 @@ internal object Brain {
             }
             "content_block_delta" -> {
                 val delta = event.optJSONObject("delta") ?: return ""
-                if (delta.optString("type") != "text_delta") {
-                    return ""
-                }
-                val part = delta.optString("text")
-                if (part.isNotEmpty()) {
-                    whole.append(part)
-                    onText(part)
+                when (delta.optString("type")) {
+                    "text_delta" -> heard.say(delta.optString("text"))
+                    "thinking_delta" -> heard.think(delta.optString("thinking"))
                 }
             }
             "message_delta" -> {
@@ -20560,58 +22016,148 @@ internal object Brain {
         return ""
     }
 
-    private fun openStream(
-        event: JSONObject,
-        whole: StringBuilder,
-        onText: (String) -> Unit,
-        held: LongArray,
-    ): String {
+    private fun openStream(event: JSONObject, heard: Heard): String {
         event.optJSONObject("error")?.let { why ->
             throw Refused(R.string.omni_talk_server, why.optString("message"))
         }
         event.optJSONObject("usage")?.let { used ->
             val cached = used.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L
-            held[0] = (used.optLong("prompt_tokens") - cached).coerceAtLeast(0L)
-            held[1] = used.optLong("completion_tokens")
-            held[3] = cached
+            heard.held[0] = (used.optLong("prompt_tokens") - cached).coerceAtLeast(0L)
+            heard.held[1] = used.optLong("completion_tokens")
+            heard.held[3] = cached
         }
         val first = event.optJSONArray("choices")?.optJSONObject(0) ?: return ""
-        val part = first.optJSONObject("delta")?.optString("content").orEmpty()
-        if (part.isNotEmpty()) {
-            whole.append(part)
-            onText(part)
+        val delta = first.optJSONObject("delta")
+        if (delta != null) {
+            val reasoned = listOf("reasoning_content", "reasoning").firstNotNullOfOrNull { named ->
+                if (delta.has(named) && !delta.isNull(named)) delta.optString(named) else null
+            }
+            heard.think(reasoned.orEmpty())
+            if (delta.has("content") && !delta.isNull("content")) {
+                heard.tagged(delta.optString("content"))
+            }
         }
-        val stopped = first.optString("finish_reason")
+        val stopped = if (first.isNull("finish_reason")) "" else first.optString("finish_reason")
         return if (stopped == "length") "max_tokens" else stopped
+    }
+
+    private fun geminiStream(event: JSONObject, heard: Heard): String {
+        event.optJSONObject("error")?.let { why ->
+            throw Refused(R.string.omni_talk_server, why.optString("message"))
+        }
+        event.optJSONObject("usageMetadata")?.let { used ->
+            heard.held[0] = used.optLong("promptTokenCount")
+            heard.held[1] = used.optLong("candidatesTokenCount") + used.optLong("thoughtsTokenCount")
+            heard.held[3] = used.optLong("cachedContentTokenCount")
+        }
+        val first = event.optJSONArray("candidates")?.optJSONObject(0) ?: return ""
+        val parts = first.optJSONObject("content")?.optJSONArray("parts")
+        for (at in 0 until (parts?.length() ?: 0)) {
+            val part = parts?.optJSONObject(at) ?: continue
+            if (part.optBoolean("thought")) {
+                heard.think(part.optString("text"))
+            } else {
+                heard.say(part.optString("text"))
+            }
+        }
+        return when (first.optString("finishReason")) {
+            "" -> ""
+            "MAX_TOKENS" -> "max_tokens"
+            "SAFETY", "RECITATION", "PROHIBITED_CONTENT" -> "refusal"
+            else -> "end_turn"
+        }
+    }
+
+    private fun roomFor(model: Model, turns: List<Turn>, system: String, level: Level?): Long {
+        val asked = level?.mostTokens?.takeIf { it > 0L } ?: MOST_STREAMED
+        if (model.window <= 0L) {
+            return asked
+        }
+        val left = model.window - roughly(turns, system)
+        return asked.coerceAtMost(left).coerceAtLeast(LEAST_TOKENS)
+    }
+
+    private fun whole(
+        vendor: Vendor,
+        key: CharArray,
+        turns: List<Turn>,
+        model: Model,
+        level: Level?,
+        system: String,
+        heard: Heard,
+    ): Answer {
+        val most = roomFor(model, turns, system, level)
+        val link = opened(vendor, key, "", false)
+        link.requestMethod = "POST"
+        link.doOutput = true
+        val body = if (vendor.format == "dvm") {
+            JSONObject().put("prompt", flattened(turns, hinted(system, level))).toString()
+        } else {
+            filled(vendor, turns, model.id, hinted(system, level), most, level?.level ?: "")
+        }
+        sent(link, body)
+        val limits = answered(link)
+        val said = read(link.inputStream)
+        link.disconnect()
+        val plucked = vibe(
+            JSONObject()
+                .put("op", "pluck")
+                .put("reply", said)
+                .put("path", if (vendor.format == "dvm") "" else vendor.reply)
+        )
+        val text = if (plucked.optBoolean("found")) plucked.optString("text") else said.trim()
+        heard.tagged(text)
+        heard.flush()
+        return Answer(
+            heard.whole.toString(),
+            "end_turn",
+            Spend(roughly(turns, system), heard.whole.length / 4L, 0L, 0L),
+            limits,
+            heard.thought.toString(),
+        )
     }
 
     fun stream(
         vendor: Vendor,
         key: CharArray,
         turns: List<Turn>,
-        model: String,
-        effort: String,
+        model: Model,
+        level: Level?,
         system: String,
         stopping: java.util.concurrent.atomic.AtomicBoolean,
+        onThink: (String) -> Unit,
         onText: (String) -> Unit,
     ): Answer {
-        if (key.isEmpty() && !vendor.keyless) {
+        if (key.isEmpty() && !vendor.keyless && !vendor.custom) {
             throw Refused(R.string.omni_talk_no_key)
         }
-        val link = opened(vendor, key, if (vendor.anthropic) "/v1/messages" else "/chat/completions", true)
+        val heard = Heard(onThink, onText)
+        if (vendor.format == "dvm" || vendor.format == "raw") {
+            return whole(vendor, key, turns, model, level, system, heard)
+        }
+        val most = roomFor(model, turns, system, level)
+        val path = when {
+            vendor.anthropic -> "/v1/messages"
+            vendor.gemini -> "/models/" + model.id + ":streamGenerateContent?alt=sse"
+            else -> "/chat/completions"
+        }
+        val link = opened(vendor, key, path, true)
         link.requestMethod = "POST"
         link.doOutput = true
-        val asked = bodyFor(vendor, turns, model, effort, system)
-        asked.put("max_tokens", MOST_STREAMED)
-        asked.put("stream", true)
-        if (!vendor.anthropic) {
+        val asked = when {
+            vendor.anthropic -> anthropicBody(turns, model.id, level, system, most)
+            vendor.gemini -> geminiBody(turns, level, system, most)
+            else -> openBody(vendor, turns, model.id, level, system, most)
+        }
+        if (!vendor.gemini) {
+            asked.put("stream", true)
+        }
+        if (!vendor.anthropic && !vendor.gemini) {
             asked.put("stream_options", JSONObject().put("include_usage", true))
         }
         sent(link, asked.toString())
         val limits = answered(link)
 
-        val whole = StringBuilder()
-        val held = longArrayOf(0L, 0L, 0L, 0L)
         var stopped = ""
         runCatching {
             link.inputStream.bufferedReader(Charsets.UTF_8).use { from ->
@@ -20629,10 +22175,10 @@ internal object Brain {
                         continue
                     }
                     val event = runCatching { JSONObject(part) }.getOrNull() ?: continue
-                    val said = if (vendor.anthropic) {
-                        anthropicStream(event, whole, onText, held)
-                    } else {
-                        openStream(event, whole, onText, held)
+                    val said = when {
+                        vendor.anthropic -> anthropicStream(event, heard)
+                        vendor.gemini -> geminiStream(event, heard)
+                        else -> openStream(event, heard)
                     }
                     if (said.isNotEmpty()) {
                         stopped = said
@@ -20644,20 +22190,24 @@ internal object Brain {
             throw (why as? Refused ?: Refused(R.string.omni_talk_unreachable))
         }
         link.disconnect()
+        heard.flush()
         if (stopped == "refusal") {
             throw Refused(R.string.omni_talk_declined)
         }
+        val held = heard.held
         return Answer(
-            whole.toString(),
+            heard.whole.toString(),
             stopped,
             Spend(held[0], held[1], held[2], held[3]),
             limits,
+            heard.thought.toString(),
         )
     }
 
     fun roughly(turns: List<Turn>, system: String): Long {
         val letters = turns.sumOf { it.said.length.toLong() } + system.length
-        return letters / 4L
+        val pictures = turns.sumOf { it.pictures.size.toLong() } * 1_600L
+        return letters / 4L + pictures
     }
 }
 
@@ -21105,11 +22655,17 @@ internal object Copilot {
         val until: Long,
     )
 
-    class Waiting : Exception()
+    class Waiting(val slower: Boolean) : Exception()
+
+    private const val HOME = "https://api.githubcopilot.com"
 
     private var ticket = ""
 
     private var until = 0L
+
+    private var reached = HOME
+
+    fun endpoint(): String = synchronized(this) { reached }
 
     private fun read(link: HttpURLConnection): String {
         val code = runCatching { link.responseCode }.getOrElse {
@@ -21182,7 +22738,8 @@ internal object Copilot {
             return token
         }
         when (said.optString("error")) {
-            "authorization_pending", "slow_down" -> throw Waiting()
+            "authorization_pending" -> throw Waiting(false)
+            "slow_down" -> throw Waiting(true)
             "access_denied" -> throw Brain.Refused(R.string.omni_copilot_denied)
             else -> throw Brain.Refused(
                 R.string.omni_copilot_refused,
@@ -21195,6 +22752,7 @@ internal object Copilot {
         synchronized(this) {
             ticket = ""
             until = 0L
+            reached = HOME
         }
     }
 
@@ -21225,9 +22783,11 @@ internal object Copilot {
         if (given.isEmpty()) {
             throw Brain.Refused(R.string.omni_copilot_no_seat, said.optString("message"))
         }
+        val api = said.optJSONObject("endpoints")?.optString("api").orEmpty().trimEnd('/')
         synchronized(this) {
             ticket = given
             until = said.optLong("expires_at", now + 600L)
+            reached = if (api.startsWith("https://")) api else HOME
         }
         return given
     }

@@ -35094,6 +35094,17 @@ mod vibe_coding {
         let catalog = json::read(&answer(r#"{"op":"catalog"}"#)).unwrap();
         let providers = catalog.get("providers").and_then(Json::list).unwrap();
         assert_eq!(providers.len(), PROVIDERS.len());
+        let router = providers
+            .iter()
+            .find(|one| one.get("id").and_then(Json::text) == Some("openrouter"))
+            .unwrap();
+        assert_eq!(
+            router
+                .get("probe")
+                .and_then(|one| one.get("path"))
+                .and_then(Json::text),
+            Some("/key")
+        );
         let routed = json::read(&answer(
             r#"{"op":"route","tokens":50,"keyed":["groq"],"now":5}"#,
         ))
