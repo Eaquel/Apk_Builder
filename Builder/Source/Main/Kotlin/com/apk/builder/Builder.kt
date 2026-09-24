@@ -3787,7 +3787,13 @@ class BuilderActivity : Activity() {
             references all compile. Use the Android framework (android.*) and the
             Java core library (java.*, javax.*). Do not reach for AndroidX,
             Jetpack Compose, Kotlin libraries or annotation processors unless the
-            project's Builder.json already lists that library. The manifest is
+            project's Builder.json already lists that library. So an activity
+            extends android.app.Activity, never AppCompatActivity; a theme is the
+            platform's own, such as @android:style/Theme.Material.Light.NoActionBar
+            or @android:style/Theme.DeviceDefault, never Theme.AppCompat or
+            Theme.MaterialComponents; and lists and screens are made of ListView,
+            LinearLayout, FrameLayout and ScrollView, not RecyclerView,
+            ConstraintLayout or CardView. The manifest is
             AndroidManifest.xml at the root, Java sources live under Java (a folder
             per package is fine), resources live under Res (Res/layout,
             Res/values, Res/drawable, Res/mipmap-...), and the settings live in
@@ -3832,7 +3838,7 @@ class BuilderActivity : Activity() {
 
         const val FENCE_LINE = 200
 
-        val ROOT_FILES = setOf("AndroidManifest.xml", "Builder.json")
+        val ROOT_FILES = setOf("AndroidManifest.xml", PROJECT_FILE)
 
         val FOREIGN_SOURCES = listOf(
             ".kt", ".kts", ".gradle", ".c", ".cc", ".cpp", ".h", ".hpp", ".rs",
@@ -12488,6 +12494,14 @@ class BuilderActivity : Activity() {
         said.append("The reader is working in an Android project named ")
             .append(here.name)
             .append(". ")
+        val named = projectPackage(root)
+        if (named.isNotEmpty()) {
+            said.append("Its package is ").append(named)
+                .append(", set in Builder.json, which wins over the manifest; the generated R class is ")
+                .append(named).append(".R, so its sources belong under Java/")
+                .append(named.replace('.', '/')).append(" in that package, or import ")
+                .append(named).append(".R. ")
+        }
         said.append(BUILDER_LIMITS).append("\n\n")
         if (Preferences.assistantAgent(this)) {
             said.append(AGENT_RULES)
@@ -12903,6 +12917,26 @@ class BuilderActivity : Activity() {
         var folders = 0
         File(root).walkTopDown().forEach { if (it.isDirectory) folders += 1 else files += 1 }
         return files to (folders - 1).coerceAtLeast(0)
+    }
+
+    private fun projectPackage(root: String): String {
+        val settings = File(root, PROJECT_FILE)
+        val written = runCatching {
+            JSONObject(
+                settings.readLines()
+                    .filterNot { it.trim().startsWith("//") }
+                    .joinToString("\n")
+            ).optString("package")
+        }.getOrDefault("")
+        if (written.isNotEmpty()) {
+            return written
+        }
+        return runCatching {
+            JSONObject(Builder.nativeManifestFacts(root))
+                .optJSONObject("manifest")
+                ?.optString("package")
+                .orEmpty()
+        }.getOrDefault("")
     }
 
     private fun mainActivityOf(root: String): String = runCatching {
