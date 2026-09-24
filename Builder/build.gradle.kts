@@ -134,7 +134,7 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
 
     tasks.register<Exec>("cargoBuild${abi.replace("-", "").replaceFirstChar(Char::uppercase)}") {
         group = "build"
-        description = "Compiles the Omni Core for $abi ($triple)."
+        description = "Compiles the Apk Builder Core for $abi ($triple)."
 
         workingDir = coreDirectory
 
@@ -166,13 +166,13 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
 }
 
 android {
-    namespace = "com.omni.builder"
+    namespace = "com.apk.builder"
     compileSdk = omniCompileSdk
     buildToolsVersion = omniBuildToolsVersion
     ndkVersion = omniNdkVersion
 
     defaultConfig {
-        applicationId = "com.omni.builder"
+        applicationId = "com.apk.builder"
         minSdk = omniMinSdk
         targetSdk = omniTargetSdk
         versionCode = 1
@@ -511,7 +511,7 @@ tasks.register("verifyApkClasses") {
 
     val apkDirectory = layout.buildDirectory.dir("outputs/apk")
     val manifestFile = file("Source/Main/AndroidManifest.xml")
-    val namespace = "com.omni.builder"
+    val namespace = "com.apk.builder"
     val dexdump = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion/dexdump"
     val scratch = layout.buildDirectory.dir("tmp/verifyApkClasses")
 

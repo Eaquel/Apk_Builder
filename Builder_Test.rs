@@ -1135,7 +1135,7 @@ mod core {
             r#"<?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- a comment -->
-    <string name="app">Omni_Builder</string>
+    <string name="app">Apk_Builder</string>
     <color name="accent">#6cb6ff</color>
     <item android:id="x" empty="yes" />
 </resources>"#,
@@ -1153,7 +1153,7 @@ mod core {
         let string = &root.children[0];
         assert_eq!(string.name, "string");
         assert_eq!(string.attribute("name"), Some("app"));
-        assert_eq!(string.text, "Omni_Builder");
+        assert_eq!(string.text, "Apk_Builder");
 
         let item = &root.children[2];
         assert_eq!(item.attributes.len(), 2);
@@ -1298,7 +1298,7 @@ mod core {
     fn a_values_file_becomes_resources() {
         let (table, sink) = values(
             r#"<resources>
-    <string name="app_name">Omni_Builder</string>
+    <string name="app_name">Apk_Builder</string>
     <color name="accent">#6cb6ff</color>
     <dimen name="gap">16dp</dimen>
     <bool name="enabled">true</bool>
@@ -1321,7 +1321,7 @@ mod core {
 
         assert_eq!(
             by_name(ResourceKind::String, "app_name"),
-            Some(ResourceValue::Text("Omni_Builder".into()))
+            Some(ResourceValue::Text("Apk_Builder".into()))
         );
         assert_eq!(
             by_name(ResourceKind::Color, "accent"),
@@ -6264,7 +6264,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        String said = StringUtils.reverse("omni builder");
+        String said = StringUtils.reverse("apk builder");
         String padded = StringUtils.leftPad(said, 20, '.');
         boolean numeric = StringUtils.isNumeric(padded);
         TextView view = new TextView(this);
@@ -7429,7 +7429,7 @@ public final class MainActivity extends Activity {
             .add("AndroidManifest.xml", b"<manifest/>".to_vec())
             .unwrap();
         builder
-            .add("lib/arm64-v8a/libomni_builder.so", vec![0x7f; 5_000])
+            .add("lib/arm64-v8a/libapk_builder.so", vec![0x7f; 5_000])
             .unwrap();
         builder
             .add("lib/arm64-v8a/libomni_bridge.so", vec![0x7f; 3_000])
@@ -7690,7 +7690,7 @@ public final class MainActivity extends Activity {
             .unwrap();
         builder.add("classes.dex", vec![0x64; 1_234]).unwrap();
         builder
-            .add("lib/arm64-v8a/libomni_builder.so", vec![0x7f; 9_999])
+            .add("lib/arm64-v8a/libapk_builder.so", vec![0x7f; 9_999])
             .unwrap();
         builder
             .add("res/values/strings.arsc", b"table".to_vec())
@@ -7723,7 +7723,7 @@ public final class MainActivity extends Activity {
             for name in [
                 "AndroidManifest.xml",
                 "classes.dex",
-                "lib/arm64-v8a/libomni_builder.so",
+                "lib/arm64-v8a/libapk_builder.so",
                 "res/values/strings.arsc",
             ] {
                 assert!(text.contains(name), "unzip -l did not list {name}:\n{text}");
@@ -9176,7 +9176,7 @@ public final class MainActivity extends Activity {
     #[test]
     fn the_editor_colours_every_word_the_compiler_reserves() {
         let editor =
-            std::fs::read_to_string("Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt")
+            std::fs::read_to_string("Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt")
                 .expect("the interface's source must be here");
 
         let listed = |name: &str| -> Vec<String> {
@@ -9417,7 +9417,7 @@ public final class MainActivity extends Activity {
     fn type_descriptors_become_the_names_a_person_writes() {
         let cases = [
             ("Ljava/lang/String;", "java.lang.String"),
-            ("Lcom/omni/builder/Builder;", "com.omni.builder.Builder"),
+            ("Lcom/apk/builder/Builder;", "com.apk.builder.Builder"),
             ("V", "void"),
             ("I", "int"),
             ("J", "long"),
@@ -10328,7 +10328,7 @@ public class Walk {
             assert_eq!(wrapped.modulus(), key.modulus());
             assert_eq!(wrapped.public_exponent(), key.public_exponent());
 
-            let message = b"Omni_Builder signs this with arithmetic it wrote itself.";
+            let message = b"Apk_Builder signs this with arithmetic it wrote itself.";
             let signature = crate::rsa::sign(&key, algorithm, message).expect("signing must work");
             assert_eq!(signature.len(), key.modulus_bytes());
 
@@ -10845,7 +10845,7 @@ public class Walk {
             report.contains("Verified using v3 scheme (APK Signature Scheme v3): true"),
             "{report}"
         );
-        assert!(report.contains("CN=Omni_Builder"), "{report}");
+        assert!(report.contains("CN=Apk_Builder"), "{report}");
 
         let older = std::process::Command::new(&apksigner)
             .args([
@@ -11326,7 +11326,7 @@ public class Walk {
         let request = crate::keystore::Request {
             alias: "eaquel-release".to_string(),
             common_name: "Eaquel Release".to_string(),
-            organisation: "Omni Builder".to_string(),
+            organisation: "Apk Builder".to_string(),
             country: "TR".to_string(),
             validity_days: 10_950,
             bits: 2048,
@@ -11372,7 +11372,7 @@ public class Walk {
             "{report}"
         );
         assert!(report.contains("CN=Eaquel Release"), "{report}");
-        assert!(report.contains("O=Omni Builder"), "{report}");
+        assert!(report.contains("O=Apk Builder"), "{report}");
         assert!(
             report
                 .to_lowercase()
@@ -11387,7 +11387,7 @@ public class Walk {
     }
 
     #[test]
-    fn the_security_policy_reports_a_weak_package_without_stopping_it() {
+    fn a_weak_manifest_is_built_without_a_word_from_the_policy() {
         let _turn = crate::progress::one_at_a_time();
         let key = crate::rsa::generate(1024).unwrap();
         let cases: &[(&str, &str, &str)] = &[
@@ -11455,19 +11455,12 @@ public class Walk {
             assert!(built.signed, "{name}");
             let codes: Vec<&str> = sink.entries().iter().map(|d| d.code.as_str()).collect();
             assert!(
-                codes.contains(code),
-                "{name}: expected {code}, got {codes:?}"
-            );
-            assert!(
-                sink.entries()
-                    .iter()
-                    .filter(|one| one.code == *code)
-                    .all(|one| !one.severity.is_blocking()),
-                "{name}: a policy finding must not block a build"
+                !codes.contains(code),
+                "{name}: a manifest rule is not the build's to report, got {codes:?}"
             );
             assert!(
                 built.guard.findings.iter().any(|one| one.code == *code),
-                "{name}: the report must carry the finding"
+                "{name}: the report still carries the finding"
             );
         }
     }
@@ -19816,7 +19809,7 @@ class Screen
             ("0x20000", Value::Hex(0x20000)),
             ("@0x7f060000", Value::Reference(0x7f06_0000)),
             ("Omni", Value::Text),
-            ("com.omni.builder.Main", Value::Text),
+            ("com.apk.builder.Main", Value::Text),
             ("1.0.0", Value::Text),
         ];
         for (raw, expected) in cases {
@@ -19886,8 +19879,8 @@ class Screen
     #[test]
     fn internal_names_become_the_names_a_person_writes() {
         assert_eq!(
-            jvm::internal_name_to_source("com/omni/builder/Builder"),
-            "com.omni.builder.Builder"
+            jvm::internal_name_to_source("com/apk/builder/Builder"),
+            "com.apk.builder.Builder"
         );
         assert_eq!(
             jvm::internal_name_to_source("java/lang/Object"),

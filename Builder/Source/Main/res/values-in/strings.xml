@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">Pusat bantuan</string>
     <string name="omni_find_project">Cari di proyek</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">Cari pertanyaan...</string>
     <string name="omni_terminal_search">Cari perintah...</string>
     <string name="omni_help_popular">Populer:</string>
-    <string name="omni_help_note">Semua yang ingin kamu tahu tentang Omni Builder ada di sini. Belajar cepat, temukan lebih banyak.</string>
+    <string name="omni_help_note">Semua yang ingin kamu tahu tentang Apk Builder ada di sini. Belajar cepat, temukan lebih banyak.</string>
     <string name="omni_help_hello">Halo! 👋</string>
     <string name="omni_help_none">Tak ada yang cocok dengan itu.</string>
     <string name="omni_help_band_all">Semua</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">Langkah pertama</string>
     <string name="omni_help_first_note">Apa aplikasi ini, dan mulai dari mana</string>
-    <string name="omni_help_first_body">Omni Builder menerjemahkan paket Android di perangkat ini. Tak ada peladen dan tak ada perkakas meja: penerjemah, pembungkus dan penanda tangan semuanya berjalan di sini. Buat proyek dari Beranda, tulis kodemu di bawah Java, lalu bangun.</string>
+    <string name="omni_help_first_body">Apk Builder menerjemahkan paket Android di perangkat ini. Tak ada peladen dan tak ada perkakas meja: penerjemah, pembungkus dan penanda tangan semuanya berjalan di sini. Buat proyek dari Beranda, tulis kodemu di bawah Java, lalu bangun.</string>
     <string name="omni_help_project">Proyek baru</string>
     <string name="omni_help_project_note">Nama, paket, versi dan ikon</string>
     <string name="omni_help_project_body">Sebuah proyek perlu nama, nama paket seperti com.example.app, sebuah versi, dan versi Android tempat ia berjalan. Android mengenali aplikasi terpasang dari nama paketnya, jadi pilihlah sebelum menerbitkan, bukan sesudah. Ikon bisa ditambahkan kapan saja dari Berkas.</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">Bahasa yang didukung:</string>
     <string name="omni_kinds_holds_web">Teknologi web yang didukung:</string>
     <string name="omni_brand_note">Lingkungan pengembangan Android</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">Buka Proyek</string>
     <string name="omni_import_none">Tidak ada di sini yang dapat membuka berkas itu.</string>
     <string name="omni_import_done">%1$d berkas dibuka menjadi sebuah proyek</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">Membantu kami menjangkau lebih banyak pengembang.</string>
     <string name="omni_rate_one">Membuat kami semangat menyempurnakan aplikasi.</string>
     <string name="omni_rate_why">Menilai aplikasi di Play Store mendukung kami. Aplikasi pun menjangkau lebih banyak orang.</string>
-    <string name="omni_rate_ask">Suka dengan Omni Builder?</string>
-    <string name="omni_about_head">Semua tentang Omni Builder.</string>
-    <string name="omni_about_note">Omni Builder adalah lingkungan yang kuat dan ramah\nuntuk menulis, menyunting, dan menguji aplikasi Android.\nCara membangun yang lebih bebas,\nuntuk semua orang, di mana saja.</string>
+    <string name="omni_rate_ask">Suka dengan Apk Builder?</string>
+    <string name="omni_about_head">Semua tentang Apk Builder.</string>
+    <string name="omni_about_note">Apk Builder adalah lingkungan yang kuat dan ramah\nuntuk menulis, menyunting, dan menguji aplikasi Android.\nCara membangun yang lebih bebas,\nuntuk semua orang, di mana saja.</string>
     <string name="omni_about_contact_note">Hubungi kami.</string>
     <string name="omni_about_terms_note">Aturan penggunaan Apk Builder</string>
     <string name="omni_about_terms">Ketentuan Penggunaan</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">Kiat</string>
     <string name="omni_talk_step_tips_note">Satu pokok per pertanyaan. Sebut berkasnya. Kutip kesalahannya utuh. Minta penjelasan sebelum perubahan besar.</string>
     <string name="omni_adb_first">Sebelum kamu mulai</string>
-    <string name="omni_adb_desk_note">Hubungkan perangkat Android Anda ke komputer dan pakai seluruh Omni Builder. Ikuti langkah di bawah berurutan.</string>
+    <string name="omni_adb_desk_note">Hubungkan perangkat Android Anda ke komputer dan pakai seluruh Apk Builder. Ikuti langkah di bawah berurutan.</string>
     <string name="omni_adb_alone_note">Sambungkan tanpa komputer, lewat pengawakutuan nirkabel di perangkat itu sendiri. Ikuti langkah di bawah berurutan.</string>
     <string name="omni_adb_alone">Tanpa komputer</string>
     <string name="omni_adb_alone_first">Ini memakai Wireless debugging yang dibawa Android 11 dan sesudahnya. Bila pilihan itu tak ada di perangkatmu, periksa versi perangkat lunaknya.</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">Ikut serta</string>
     <string name="omni_about_join_note">Bersama, untuk yang lebih baik</string>
     <string name="omni_about_reserved">Semua hak dilindungi.</string>
-    <string name="omni_about_thanks">Terima kasih telah memakai Omni Builder!</string>
+    <string name="omni_about_thanks">Terima kasih telah memakai Apk Builder!</string>
     <string name="omni_about_thanks_note">Kami di sini untuk pengalaman pengembangan yang lebih baik.</string>
     <string name="omni_feedback_kind_fault_note">Ada yang salah</string>
     <string name="omni_feedback_kind_idea_note">Sebuah gagasan baru</string>

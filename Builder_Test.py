@@ -34,7 +34,7 @@ SPEECH = ROOT / "Diagnostic_Speech.rs"
 TERMINAL = ROOT / "Terminal.rs"
 TERMINAL_SPEECH = ROOT / "Terminal_Speech.rs"
 CORE_TESTS = ROOT / "Builder_Test.rs"
-KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt"
+KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
 COMPILERS = ROOT / "Compilers"
@@ -490,7 +490,7 @@ def check_bridge() -> str:
     nm = ndk_tool("llvm-nm")
 
     declared = sorted(
-        f"Java_com_omni_builder_Builder_{name}"
+        f"Java_com_apk_builder_Builder_{name}"
         for name in re.findall(r"external fun (native[A-Za-z]*)", interface())
     ) + ["JNI_OnLoad"]
     declared = sorted(declared)
@@ -503,7 +503,7 @@ def check_bridge() -> str:
 
     checked = 0
     for abi in ("arm64-v8a",):
-        library = work / f"lib/{abi}/libomni_builder.so"
+        library = work / f"lib/{abi}/libapk_builder.so"
         if not library.is_file():
             raise AssertionError(f"no native library for {abi}")
         listed = run([str(nm), "-D", "--defined-only", str(library)])

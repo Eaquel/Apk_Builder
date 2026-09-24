@@ -1,4 +1,4 @@
-package com.omni.builder
+package com.apk.builder
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
@@ -150,7 +150,7 @@ enum class LogLevel {
 
 object OmniLog {
 
-    const val DIRECTORY_NAME: String = "Omni_Builder"
+    const val DIRECTORY_NAME: String = "Apk_Builder"
 
     const val SESSION_FILE: String = "Session_Log.txt"
 
@@ -158,7 +158,7 @@ object OmniLog {
 
     const val MAX_BYTES: Int = 256 * 1024
 
-    private const val TAG = "OmniBuilder"
+    private const val TAG = "ApkBuilder"
 
     private val lock = Any()
     private val session = StringBuilder(8 * 1024)
@@ -233,7 +233,7 @@ object OmniLog {
     }
 
     private fun sessionDocument(): String = buildString {
-        append("Omni Builder session log\n")
+        append("Apk Builder session log\n")
         append("Started: ").append(installedAt).append('\n')
         append("Written: ").append(timestamp()).append('\n')
         append("-".repeat(72)).append('\n')
@@ -526,12 +526,12 @@ object Builder {
     fun load(): LoadState {
         loadState?.let { return it }
         val state = try {
-            System.loadLibrary("omni_builder")
-            OmniLog.event(LogLevel.INFO, "native", "libomni_builder.so loaded.")
+            System.loadLibrary("apk_builder")
+            OmniLog.event(LogLevel.INFO, "native", "libapk_builder.so loaded.")
             LoadState.Loaded
         } catch (error: UnsatisfiedLinkError) {
             val reason = "The native library could not be loaded: " +
-                "${error.message ?: "no detail"}. This usually means the Omni Core " +
+                "${error.message ?: "no detail"}. This usually means the Apk Builder Core " +
                 "was not linked into this build, or the bridge and the Core " +
                 "disagree on the ABI version."
             OmniLog.event(LogLevel.ERROR, "native", reason)
@@ -16024,7 +16024,7 @@ class BuilderActivity : Activity() {
             link.connectTimeout = LIBRARY_OPEN_MILLIS
             link.readTimeout = LIBRARY_READ_MILLIS
             link.instanceFollowRedirects = true
-            link.setRequestProperty("User-Agent", "omni-builder")
+            link.setRequestProperty("User-Agent", "apk-builder")
             val code = runCatching { link.responseCode }.getOrElse { -1 }
             if (code != 200) {
                 last = one.coordinate + "  " + code
@@ -19898,7 +19898,7 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
 
 internal object DeviceKey {
 
-    const val ALIAS = "omni_builder_signing"
+    const val ALIAS = "apk_builder_signing"
 
     const val STORE = "AndroidKeyStore"
 
@@ -19916,7 +19916,7 @@ internal object DeviceKey {
             .setDigests(KeyProperties.DIGEST_SHA256)
             .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
             .setKeySize(4096)
-            .setCertificateSubject(javax.security.auth.x500.X500Principal("CN=Omni Builder"))
+            .setCertificateSubject(javax.security.auth.x500.X500Principal("CN=Apk Builder"))
             .setCertificateNotBefore(from.time)
             .setCertificateNotAfter(until.time)
             .setUserAuthenticationRequired(false)
@@ -19937,7 +19937,7 @@ internal object DeviceKey {
                     .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
                     .setKeySize(2048)
                     .setCertificateSubject(
-                        javax.security.auth.x500.X500Principal("CN=Omni Builder")
+                        javax.security.auth.x500.X500Principal("CN=Apk Builder")
                     )
                     .setCertificateNotBefore(from.time)
                     .setCertificateNotAfter(until.time)
@@ -20409,7 +20409,7 @@ internal object Brain {
             "accept",
             if (listening) "text/event-stream" else "application/json",
         )
-        link.setRequestProperty("User-Agent", "omni-builder")
+        link.setRequestProperty("User-Agent", "apk-builder")
         when {
             vendor.anthropic -> {
                 link.setRequestProperty("x-api-key", String(key))
@@ -20661,7 +20661,7 @@ internal object Brain {
 
 internal object Bell {
 
-    const val CHANNEL = "omni_builder"
+    const val CHANNEL = "apk_builder"
 
     const val BUILD_NOTE = 1
 
@@ -20722,7 +20722,7 @@ internal object Bell {
 
 internal object Vault {
 
-    private const val ALIAS = "omni_builder_secrets"
+    private const val ALIAS = "apk_builder_secrets"
 
     private const val STORE = "AndroidKeyStore"
 
@@ -20803,7 +20803,7 @@ internal object Remote {
 
     private const val SERVICE = "git-upload-pack"
 
-    private const val AGENT = "omni-builder"
+    private const val AGENT = "apk-builder"
 
     private const val OPEN_MILLIS = 20_000
 
@@ -21135,7 +21135,7 @@ internal object Copilot {
         link.doOutput = true
         link.setRequestProperty("accept", "application/json")
         link.setRequestProperty("content-type", "application/x-www-form-urlencoded")
-        link.setRequestProperty("user-agent", "omni-builder")
+        link.setRequestProperty("user-agent", "apk-builder")
         runCatching {
             link.outputStream.use { out -> out.write(form.toByteArray(Charsets.UTF_8)) }
         }.getOrElse {
@@ -21215,7 +21215,7 @@ internal object Copilot {
         link.setRequestProperty("authorization", "token " + String(key))
         link.setRequestProperty("editor-version", EDITOR)
         link.setRequestProperty("editor-plugin-version", PLUGIN)
-        link.setRequestProperty("user-agent", "omni-builder")
+        link.setRequestProperty("user-agent", "apk-builder")
         val said = runCatching { JSONObject(read(link)) }.getOrElse {
             throw Brain.Refused(R.string.omni_copilot_no_seat)
         }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">مركز المساعدة</string>
     <string name="omni_find_project">البحث في المشروع</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">ابحث في الأسئلة...</string>
     <string name="omni_terminal_search">ابحث في الأوامر...</string>
     <string name="omni_help_popular">الأكثر شيوعًا:</string>
-    <string name="omni_help_note">كل ما تريد معرفته عن Omni Builder هنا. تعلّم بسرعة واكتشف المزيد.</string>
+    <string name="omni_help_note">كل ما تريد معرفته عن Apk Builder هنا. تعلّم بسرعة واكتشف المزيد.</string>
     <string name="omni_help_hello">مرحبًا! 👋</string>
     <string name="omni_help_none">لا شيء هنا يوافق ذلك.</string>
     <string name="omni_help_band_all">الكل</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">الخطوات الأولى</string>
     <string name="omni_help_first_note">ما هذا التطبيق، ومن أين تبدأ</string>
-    <string name="omni_help_first_body">يترجم Omni Builder حزم أندرويد على هذا الجهاز. لا خادم ولا سلسلة أدوات مكتبية: المترجِم والمُحزِّم والموقِّع كلها تعمل هنا. أنشئ مشروعًا من الرئيسية، واكتب شفرتك تحت Java، ثم ابنِه.</string>
+    <string name="omni_help_first_body">يترجم Apk Builder حزم أندرويد على هذا الجهاز. لا خادم ولا سلسلة أدوات مكتبية: المترجِم والمُحزِّم والموقِّع كلها تعمل هنا. أنشئ مشروعًا من الرئيسية، واكتب شفرتك تحت Java، ثم ابنِه.</string>
     <string name="omni_help_project">مشروع جديد</string>
     <string name="omni_help_project_note">الاسم والحزمة والإصدار والأيقونة</string>
     <string name="omni_help_project_body">يحتاج المشروع إلى اسم، واسم حزمة مثل com.example.app، وإصدار، وإصدارات أندرويد التي يعمل عليها. يعرف أندرويد التطبيق المثبَّت باسم حزمته، فاختره قبل النشر لا بعده. ويمكن إضافة الأيقونة في أي وقت من الملفات.</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">اللغات المدعومة:</string>
     <string name="omni_kinds_holds_web">تقنيات الويب المدعومة:</string>
     <string name="omni_brand_note">بيئة تطوير أندرويد</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">افتح مشروعًا</string>
     <string name="omni_import_none">لا شيء هنا استطاع فتح ذلك الملف.</string>
     <string name="omni_import_done">فُتح %1$d ملفًا في مشروع</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">يساعدنا على الوصول إلى مزيد من المطورين.</string>
     <string name="omni_rate_one">يمنحنا حافزًا لتحسين التطبيق.</string>
     <string name="omni_rate_why">تقييم التطبيق في متجر Play يدعمنا ويساعده على الوصول إلى مزيد من الناس.</string>
-    <string name="omni_rate_ask">هل أعجبك Omni Builder؟</string>
-    <string name="omni_about_head">كل شيء عن Omni Builder.</string>
-    <string name="omni_about_note">‏Omni Builder بيئة قوية وسهلة لكتابة\nتطبيقات أندرويد وتحريرها واختبارها.\nتجربة تطوير أكثر حرية،\nللجميع وفي كل مكان.</string>
+    <string name="omni_rate_ask">هل أعجبك Apk Builder؟</string>
+    <string name="omni_about_head">كل شيء عن Apk Builder.</string>
+    <string name="omni_about_note">‏Apk Builder بيئة قوية وسهلة لكتابة\nتطبيقات أندرويد وتحريرها واختبارها.\nتجربة تطوير أكثر حرية،\nللجميع وفي كل مكان.</string>
     <string name="omni_about_contact_note">تواصل معنا.</string>
     <string name="omni_about_terms_note">قواعد استخدام Apk Builder</string>
     <string name="omni_about_terms">شروط الاستخدام</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">إرشادات</string>
     <string name="omni_talk_step_tips_note">موضوع واحد لكل سؤال. سمِّ الملف. اذكر الخطأ كاملًا. اطلب شرحًا قبل تغيير كبير.</string>
     <string name="omni_adb_first">قبل أن تبدأ</string>
-    <string name="omni_adb_desk_note">اربط جهاز أندرويد بحاسوب واستخدم Omni Builder بالكامل. اتبع الخطوات أدناه بالترتيب.</string>
+    <string name="omni_adb_desk_note">اربط جهاز أندرويد بحاسوب واستخدم Apk Builder بالكامل. اتبع الخطوات أدناه بالترتيب.</string>
     <string name="omni_adb_alone_note">اتصل بدون حاسوب عبر التصحيح اللاسلكي في الجهاز نفسه. اتبع الخطوات أدناه بالترتيب.</string>
     <string name="omni_adb_alone">دون حاسوب</string>
     <string name="omni_adb_alone_first">يستعمل هذا تنقيح الأخطاء اللاسلكي الذي يحمله أندرويد 11 وما بعده. فإن لم يكن الخيار في جهازك فتحقق من إصدار برمجياته.</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">شارك</string>
     <string name="omni_about_join_note">معًا، نحو أفضل</string>
     <string name="omni_about_reserved">كل الحقوق محفوظة.</string>
-    <string name="omni_about_thanks">شكرًا لاستعمالك Omni Builder!</string>
+    <string name="omni_about_thanks">شكرًا لاستعمالك Apk Builder!</string>
     <string name="omni_about_thanks_note">نحن هنا من أجل تجربة تطوير أفضل.</string>
     <string name="omni_feedback_kind_fault_note">ثمة خلل</string>
     <string name="omni_feedback_kind_idea_note">فكرة جديدة</string>

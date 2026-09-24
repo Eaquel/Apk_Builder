@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">Hilfe-Center</string>
     <string name="omni_find_project">Im Projekt suchen</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">Fragen suchen …</string>
     <string name="omni_terminal_search">Befehle durchsuchen...</string>
     <string name="omni_help_popular">Beliebt:</string>
-    <string name="omni_help_note">Alles über Omni Builder findest du hier. Lerne schnell und entdecke mehr.</string>
+    <string name="omni_help_note">Alles über Apk Builder findest du hier. Lerne schnell und entdecke mehr.</string>
     <string name="omni_help_hello">Hallo! 👋</string>
     <string name="omni_help_none">Dazu passt hier nichts.</string>
     <string name="omni_help_band_all">Alle</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">Erste Schritte</string>
     <string name="omni_help_first_note">Was diese App ist und wo man anfängt</string>
-    <string name="omni_help_first_body">Omni Builder übersetzt Android-Pakete auf diesem Gerät. Es gibt keinen Server und keine Desktop-Werkzeugkette: Compiler, Packer und Signierer laufen hier. Lege von der Startseite aus ein Projekt an, schreib deinen Code unter Java und baue ihn dann.</string>
+    <string name="omni_help_first_body">Apk Builder übersetzt Android-Pakete auf diesem Gerät. Es gibt keinen Server und keine Desktop-Werkzeugkette: Compiler, Packer und Signierer laufen hier. Lege von der Startseite aus ein Projekt an, schreib deinen Code unter Java und baue ihn dann.</string>
     <string name="omni_help_project">Ein neues Projekt</string>
     <string name="omni_help_project_note">Name, Paket, Version und Symbol</string>
     <string name="omni_help_project_body">Ein Projekt braucht einen Namen, einen Paketnamen wie com.example.app, eine Version und die Android-Versionen, auf denen es läuft. Android erkennt eine installierte App am Paketnamen, also wähle ihn vor der Veröffentlichung und nicht danach. Ein Symbol lässt sich jederzeit über Dateien hinzufügen.</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">Unterstützte Sprachen:</string>
     <string name="omni_kinds_holds_web">Unterstützte Web-Technologien:</string>
     <string name="omni_brand_note">Android-Entwicklungsumgebung</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">Projekt öffnen</string>
     <string name="omni_import_none">Hier konnte nichts diese Datei öffnen.</string>
     <string name="omni_import_done">%1$d Dateien in ein Projekt geöffnet</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">Du hilfst uns, mehr Entwickler zu erreichen.</string>
     <string name="omni_rate_one">Es motiviert uns, die App besser zu machen.</string>
     <string name="omni_rate_why">Mit einer Bewertung im Play Store unterstützt du uns. So erreicht die App mehr Menschen.</string>
-    <string name="omni_rate_ask">Gefällt dir Omni Builder?</string>
-    <string name="omni_about_head">Alles über Omni Builder.</string>
-    <string name="omni_about_note">Omni Builder ist eine leistungsstarke, freundliche\nUmgebung zum Schreiben, Bearbeiten und Testen\nvon Android-Apps. Ein freieres Entwickeln,\nfür alle, überall.</string>
+    <string name="omni_rate_ask">Gefällt dir Apk Builder?</string>
+    <string name="omni_about_head">Alles über Apk Builder.</string>
+    <string name="omni_about_note">Apk Builder ist eine leistungsstarke, freundliche\nUmgebung zum Schreiben, Bearbeiten und Testen\nvon Android-Apps. Ein freieres Entwickeln,\nfür alle, überall.</string>
     <string name="omni_about_contact_note">Nehmen Sie Kontakt mit uns auf.</string>
     <string name="omni_about_terms_note">Die Regeln für die Nutzung von Apk Builder</string>
     <string name="omni_about_terms">Nutzungsbedingungen</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">Hinweise</string>
     <string name="omni_talk_step_tips_note">Ein Thema je Frage. Nenne die Datei. Zitiere den Fehler ganz. Bitte vor einer großen Änderung um eine Erklärung.</string>
     <string name="omni_adb_first">Bevor du anfängst</string>
-    <string name="omni_adb_desk_note">Verbinden Sie Ihr Android-Gerät mit einem Computer und nutzen Sie Omni Builder vollständig. Führen Sie die Schritte der Reihe nach aus.</string>
+    <string name="omni_adb_desk_note">Verbinden Sie Ihr Android-Gerät mit einem Computer und nutzen Sie Apk Builder vollständig. Führen Sie die Schritte der Reihe nach aus.</string>
     <string name="omni_adb_alone_note">Ohne Computer verbinden, über drahtloses Debugging auf dem Gerät selbst. Führen Sie die Schritte der Reihe nach aus.</string>
     <string name="omni_adb_alone">Ohne Computer</string>
     <string name="omni_adb_alone_first">Das nutzt das drahtlose Debugging, das Android 11 und später mitbringen. Fehlt die Option auf deinem Gerät, prüfe seine Softwareversion.</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">Mitmachen</string>
     <string name="omni_about_join_note">Gemeinsam für eine bessere</string>
     <string name="omni_about_reserved">Alle Rechte vorbehalten.</string>
-    <string name="omni_about_thanks">Danke, dass du Omni Builder benutzt!</string>
+    <string name="omni_about_thanks">Danke, dass du Apk Builder benutzt!</string>
     <string name="omni_about_thanks_note">Wir sind da für ein besseres Entwickeln.</string>
     <string name="omni_feedback_kind_fault_note">Etwas stimmt nicht</string>
     <string name="omni_feedback_kind_idea_note">Eine neue Idee</string>

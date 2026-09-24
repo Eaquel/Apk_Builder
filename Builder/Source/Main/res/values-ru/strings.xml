@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">Центр помощи</string>
     <string name="omni_find_project">Поиск по проекту</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">Поиск вопросов…</string>
     <string name="omni_terminal_search">Поиск по командам...</string>
     <string name="omni_help_popular">Популярное:</string>
-    <string name="omni_help_note">Здесь всё, что вы хотите знать об Omni Builder. Учитесь быстро, открывайте больше.</string>
+    <string name="omni_help_note">Здесь всё, что вы хотите знать об Apk Builder. Учитесь быстро, открывайте больше.</string>
     <string name="omni_help_hello">Привет! 👋</string>
     <string name="omni_help_none">Здесь этому ничто не отвечает.</string>
     <string name="omni_help_band_all">Всё</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">Первые шаги</string>
     <string name="omni_help_first_note">Что это за приложение и с чего начать</string>
-    <string name="omni_help_first_body">Omni Builder собирает пакеты Android на этом устройстве. Ни сервера, ни настольного набора средств: компилятор, упаковщик и подписывающий работают здесь. Создайте проект с главной, пишите свой код в Java, затем соберите его.</string>
+    <string name="omni_help_first_body">Apk Builder собирает пакеты Android на этом устройстве. Ни сервера, ни настольного набора средств: компилятор, упаковщик и подписывающий работают здесь. Создайте проект с главной, пишите свой код в Java, затем соберите его.</string>
     <string name="omni_help_project">Новый проект</string>
     <string name="omni_help_project_note">Имя, пакет, версия и значок</string>
     <string name="omni_help_project_body">Проекту нужны имя, имя пакета вроде com.example.app, версия и версии Android, на которых он работает. Android узнаёт установленное приложение по имени пакета, поэтому выбирайте его до выпуска, а не после. Значок можно добавить в любое время из Файлов.</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">Поддерживаемые языки:</string>
     <string name="omni_kinds_holds_web">Поддерживаемые веб-технологии:</string>
     <string name="omni_brand_note">Среда разработки Android</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">Открыть проект</string>
     <string name="omni_import_none">Здесь ничто не смогло открыть этот файл.</string>
     <string name="omni_import_done">%1$d файлов открыто в проект</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">Вы помогаете нам найти больше разработчиков.</string>
     <string name="omni_rate_one">Это мотивирует нас делать приложение лучше.</string>
     <string name="omni_rate_why">Оценка в Play Store поддерживает нас. Так приложение находит больше людей.</string>
-    <string name="omni_rate_ask">Вам понравился Omni Builder?</string>
-    <string name="omni_about_head">Всё об Omni Builder.</string>
-    <string name="omni_about_note">Omni Builder — мощная и дружелюбная среда\nдля написания, редактирования и тестирования\nприложений Android. Более свободная разработка\nдля всех и везде.</string>
+    <string name="omni_rate_ask">Вам понравился Apk Builder?</string>
+    <string name="omni_about_head">Всё об Apk Builder.</string>
+    <string name="omni_about_note">Apk Builder — мощная и дружелюбная среда\nдля написания, редактирования и тестирования\nприложений Android. Более свободная разработка\nдля всех и везде.</string>
     <string name="omni_about_contact_note">Свяжитесь с нами.</string>
     <string name="omni_about_terms_note">Правила использования Apk Builder</string>
     <string name="omni_about_terms">Условия использования</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">Советы</string>
     <string name="omni_talk_step_tips_note">Один предмет на вопрос. Назовите файл. Приведите ошибку целиком. Просите объяснение до крупной правки.</string>
     <string name="omni_adb_first">Прежде чем начать</string>
-    <string name="omni_adb_desk_note">Подключите устройство Android к компьютеру и пользуйтесь всеми возможностями Omni Builder. Выполните шаги по порядку.</string>
+    <string name="omni_adb_desk_note">Подключите устройство Android к компьютеру и пользуйтесь всеми возможностями Apk Builder. Выполните шаги по порядку.</string>
     <string name="omni_adb_alone_note">Подключайтесь без компьютера — по беспроводной отладке на самом устройстве. Выполните шаги по порядку.</string>
     <string name="omni_adb_alone">Без компьютера</string>
     <string name="omni_adb_alone_first">Здесь работает беспроводная отладка, которую несут Android 11 и новее. Если такой настройки на устройстве нет, проверьте версию его прошивки.</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">Участвовать</string>
     <string name="omni_about_join_note">Вместе — к лучшему</string>
     <string name="omni_about_reserved">Все права защищены.</string>
-    <string name="omni_about_thanks">Спасибо, что пользуетесь Omni Builder!</string>
+    <string name="omni_about_thanks">Спасибо, что пользуетесь Apk Builder!</string>
     <string name="omni_about_thanks_note">Мы здесь ради лучшей разработки.</string>
     <string name="omni_feedback_kind_fault_note">Что-то не так</string>
     <string name="omni_feedback_kind_idea_note">Новая мысль</string>

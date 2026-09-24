@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">帮助中心</string>
     <string name="omni_find_project">在项目中搜索</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">搜索问题…</string>
     <string name="omni_terminal_search">搜索命令...</string>
     <string name="omni_help_popular">热门：</string>
-    <string name="omni_help_note">关于 Omni Builder 想知道的一切都在这里。快速上手，发现更多。</string>
+    <string name="omni_help_note">关于 Apk Builder 想知道的一切都在这里。快速上手，发现更多。</string>
     <string name="omni_help_hello">你好！👋</string>
     <string name="omni_help_none">这里没有匹配的内容。</string>
     <string name="omni_help_band_all">全部</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">第一步</string>
     <string name="omni_help_first_note">这个应用是什么，从哪里开始</string>
-    <string name="omni_help_first_body">Omni Builder 在本机上编译 Android 包。没有服务器，也没有桌面工具链：编译器、打包器和签名器都在这里运行。从主页建一个项目，把代码写在 Java 下面，然后构建它。</string>
+    <string name="omni_help_first_body">Apk Builder 在本机上编译 Android 包。没有服务器，也没有桌面工具链：编译器、打包器和签名器都在这里运行。从主页建一个项目，把代码写在 Java 下面，然后构建它。</string>
     <string name="omni_help_project">新建项目</string>
     <string name="omni_help_project_note">名称、包名、版本和图标</string>
     <string name="omni_help_project_body">一个项目需要名称、像 com.example.app 这样的包名、一个版本，以及它运行的 Android 版本。Android 靠包名认识已安装的应用，所以要在发布之前选定，而不是之后。图标随时可以从文件里加上。</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">支持的语言：</string>
     <string name="omni_kinds_holds_web">支持的网页技术：</string>
     <string name="omni_brand_note">Android 开发环境</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">打开项目</string>
     <string name="omni_import_none">这里没有什么能打开那个文件。</string>
     <string name="omni_import_done">已把 %1$d 个文件打开为一个项目</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">帮助我们触达更多开发者。</string>
     <string name="omni_rate_one">让我们更有动力把应用做得更好。</string>
     <string name="omni_rate_why">在 Play 商店评分是对我们的支持，也能让更多人发现这款应用。</string>
-    <string name="omni_rate_ask">喜欢 Omni Builder 吗？</string>
-    <string name="omni_about_head">关于 Omni Builder 的一切。</string>
-    <string name="omni_about_note">Omni Builder 是一个强大而友好的环境，\n用于编写、编辑和测试 Android 应用。\n让每个人在任何地方\n都能更自由地开发。</string>
+    <string name="omni_rate_ask">喜欢 Apk Builder 吗？</string>
+    <string name="omni_about_head">关于 Apk Builder 的一切。</string>
+    <string name="omni_about_note">Apk Builder 是一个强大而友好的环境，\n用于编写、编辑和测试 Android 应用。\n让每个人在任何地方\n都能更自由地开发。</string>
     <string name="omni_about_contact_note">与我们联系。</string>
     <string name="omni_about_terms_note">使用 Apk Builder 的规则</string>
     <string name="omni_about_terms">使用条款</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">小提示</string>
     <string name="omni_talk_step_tips_note">一个问题只谈一件事。说出文件名。把报错完整贴出来。大改之前先要解释。</string>
     <string name="omni_adb_first">开始之前</string>
-    <string name="omni_adb_desk_note">把 Android 设备连到电脑，用上 Omni Builder 的全部能力。请按顺序完成下面的步骤。</string>
+    <string name="omni_adb_desk_note">把 Android 设备连到电脑，用上 Apk Builder 的全部能力。请按顺序完成下面的步骤。</string>
     <string name="omni_adb_alone_note">不用电脑，直接用设备自身的无线调试连接。请按顺序完成下面的步骤。</string>
     <string name="omni_adb_alone">不用电脑</string>
     <string name="omni_adb_alone_first">这用的是 Android 11 及以后自带的无线调试。设备上没有这个选项的话，检查一下系统版本。</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">参与</string>
     <string name="omni_about_join_note">一起把它变得更好</string>
     <string name="omni_about_reserved">保留所有权利。</string>
-    <string name="omni_about_thanks">谢谢你使用 Omni Builder！</string>
+    <string name="omni_about_thanks">谢谢你使用 Apk Builder！</string>
     <string name="omni_about_thanks_note">我们一直在，为了更好的开发体验。</string>
     <string name="omni_feedback_kind_fault_note">出问题了</string>
     <string name="omni_feedback_kind_idea_note">新的想法</string>

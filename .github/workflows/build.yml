@@ -223,7 +223,7 @@ jobs:
       - name: Publish the package and the bundle
         uses: actions/upload-artifact@v5
         with:
-          name: omni-builder-release
+          name: apk-builder-release
           path: |
             Builder/build/outputs/apk/release/*.apk
             Builder/build/outputs/bundle/release/*.aab

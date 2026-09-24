@@ -2194,7 +2194,7 @@ pub mod toolchain {
             checksum: None,
             observable_on_device: false,
             note: "Provides the Clang toolchain that links the Core into \
-                   libomni_builder.so.",
+                   libapk_builder.so.",
         },
         Pin {
             id: "androidApi",
@@ -2237,7 +2237,7 @@ pub mod toolchain {
             display_name: "minSdk",
             pinned: "30",
             requirement: Requirement::Exact,
-            source: "Omni_Builder build configuration",
+            source: "Apk_Builder build configuration",
             checksum: None,
             observable_on_device: true,
             note: "Lowest Android release the builder itself runs on.",
@@ -2247,7 +2247,7 @@ pub mod toolchain {
             display_name: "targetSdk",
             pinned: "37",
             requirement: Requirement::Exact,
-            source: "Omni_Builder build configuration",
+            source: "Apk_Builder build configuration",
             checksum: None,
             observable_on_device: true,
             note: "Behavioural contract the builder opts into.",
@@ -19883,7 +19883,7 @@ pub mod rsa {
         crate::cipher::hmac_sha256(wrapping, CONTAINER_TAG_DOMAIN)
     }
 
-    const CONTAINER_TAG_DOMAIN: &[u8] = b"Omni_Builder key container tag, version 2";
+    const CONTAINER_TAG_DOMAIN: &[u8] = b"Apk_Builder key container tag, version 2";
 
     pub fn seal_pkcs8(key: &PrivateKey, password: &str) -> Result<Vec<u8>, Diagnostic> {
         seal_pkcs8_tagging(key, password).map(|(sealed, _)| sealed)
@@ -36922,7 +36922,7 @@ pub mod keystore {
 
     static DEVICE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
-    const SHARED_BINDING_DOMAIN: &[u8] = b"Omni_Builder shared key, bound to this device";
+    const SHARED_BINDING_DOMAIN: &[u8] = b"Apk_Builder shared key, bound to this device";
 
     pub fn bind_device(secret: &str) {
         let held = secret.trim();
@@ -37271,7 +37271,7 @@ pub mod keystore {
 
     pub fn parts(data: &[u8]) -> Result<Container<'_>, Diagnostic> {
         if data.len() < 12 || &data[..8] != MAGIC {
-            return Err(fail("EY032", "The file is not an Omni signing key.")
+            return Err(fail("EY032", "The file is not an Apk Builder signing key.")
                 .with_suggestion("A key file made by this build starts with OMNIKEY1."));
         }
         let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
@@ -37606,8 +37606,8 @@ pub mod builder {
     impl Default for Identity {
         fn default() -> Identity {
             Identity {
-                common_name: "Omni_Builder".to_string(),
-                organisation: "Omni".to_string(),
+                common_name: "Apk_Builder".to_string(),
+                organisation: "Apk Builder".to_string(),
                 country: "TR".to_string(),
             }
         }
@@ -40628,14 +40628,14 @@ pub fn state_report(observed_environment: &str) -> String {
     w.begin_object(None);
 
     w.begin_object(Some("core"));
-    w.field_str("name", "Omni_Builder Core");
+    w.field_str("name", "Apk_Builder Core");
     w.field_str("version", CORE_VERSION);
     w.field_u64("abiVersion", ffi::OMNI_ABI_VERSION as u64);
     w.field_bool("selfHosted", false);
     w.field_str(
         "selfHostingNote",
-        "Omni_Builder is not self-hosted. Directive section 53 requires the whole \
-         chain from source to signed artifact to run on Omni infrastructure; none \
+        "Apk_Builder is not self-hosted. Directive section 53 requires the whole \
+         chain from source to signed artifact to run on Apk Builder infrastructure; none \
          of it does yet.",
     );
     w.begin_array(Some("bootstrapDependencies"));

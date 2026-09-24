@@ -4,7 +4,7 @@ version       = "1.0.0"
 edition       = "2021"
 rust-version  = "1.97.1"
 publish       = false
-description   = "Omni_Builder Core — build graph, capability security and toolchain infrastructure"
+description   = "Apk_Builder Core — build graph, capability security and toolchain infrastructure"
 license       = "MIT"
 
 [lib]

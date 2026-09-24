@@ -26,6 +26,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Omni_Builder"
+rootProject.name = "Apk_Builder"
 
 include(":Builder")

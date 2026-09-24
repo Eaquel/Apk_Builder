@@ -19,7 +19,7 @@
 
 namespace {
 
-constexpr const char *kLogTag = "OmniBuilder";
+constexpr const char *kLogTag = "ApkBuilder";
 constexpr const char *kIllegalState = "java/lang/IllegalStateException";
 constexpr const char *kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char *kOutOfMemory = "java/lang/OutOfMemoryError";
@@ -200,7 +200,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * ) {
   }
 
   __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                      "Omni Core %s loaded (ABI %u).", omni_core_version(),
+                      "Apk Builder Core %s loaded (ABI %u).", omni_core_version(),
                       core_abi);
   return JNI_VERSION_1_6;
 }
@@ -208,7 +208,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * ) {
 jstring HandBack(JNIEnv *env, char *report) {
   if (report == nullptr) {
     ThrowJava(env, kIllegalState,
-              "Omni Core could not report. This is a defect in the Core, not "
+              "Apk Builder Core could not report. This is a defect in the Core, not "
               "in the project being built.");
     return nullptr;
   }
@@ -221,7 +221,7 @@ jstring HandBack(JNIEnv *env, char *report) {
   return result;
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateProject(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCreateProject(
     JNIEnv *env, jobject , jstring root, jstring spec) {
   std::string root_text;
   std::string spec_text;
@@ -234,7 +234,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateProject(
   return HandBack(env, omni_create_project(root_text.c_str(), spec_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildAll(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildAll(
     JNIEnv *env, jobject , jstring root, jstring package_path,
     jstring bundle_path, jstring key_path, jcharArray key_password) {
   std::string root_text;
@@ -264,7 +264,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildAll(
                                           : password.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBindDevice(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBindDevice(
     JNIEnv *env, jobject , jstring secret) {
   std::string secret_text;
   if (secret == nullptr || !JavaStringToUtf8(env, secret, &secret_text)) {
@@ -277,7 +277,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBindDevice(
   return answer;
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDefaultKey(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDefaultKey(
     JNIEnv *env, jobject , jstring directory) {
   std::string directory_text;
   if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
@@ -287,7 +287,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDefaultKey(
   return HandBack(env, omni_default_key(directory_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateKey(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCreateKey(
     JNIEnv *env, jobject , jstring directory, jstring spec,
     jcharArray key_password) {
   std::string directory_text;
@@ -309,7 +309,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateKey(
                                        password.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListKeys(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeListKeys(
     JNIEnv *env, jobject , jstring directory) {
   std::string directory_text;
   if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
@@ -319,7 +319,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListKeys(
   return HandBack(env, omni_list_keys(directory_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDeleteKey(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDeleteKey(
     JNIEnv *env, jobject , jstring path) {
   std::string path_text;
   if (path == nullptr || !JavaStringToUtf8(env, path, &path_text)) {
@@ -329,7 +329,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDeleteKey(
   return HandBack(env, omni_delete_key(path_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCheckKey(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCheckKey(
     JNIEnv *env, jobject , jstring path, jcharArray key_password) {
   std::string path_text;
   if (path == nullptr || key_password == nullptr ||
@@ -346,7 +346,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCheckKey(
   return HandBack(env, omni_check_key(path_text.c_str(), password.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeVerifySelf(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVerifySelf(
     JNIEnv *env, jobject , jstring package_path, jstring expected) {
   std::string path_text;
   std::string expected_text;
@@ -373,7 +373,7 @@ bool TwoPaths(JNIEnv *env, jstring first, jstring second, std::string *first_tex
   return true;
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListProjects(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeListProjects(
     JNIEnv *env, jobject , jstring directory) {
   std::string directory_text;
   if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
@@ -383,7 +383,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListProjects(
   return HandBack(env, omni_list_projects(directory_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeProjectTree(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -393,7 +393,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeLayOut(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeLayOut(
     JNIEnv *env, jobject , jstring name, jstring text) {
   std::string name_text;
   std::string body_text;
@@ -405,7 +405,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeLayOut(
   return HandBack(env, omni_lay_out(name_text.c_str(), body_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencies(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDependencies(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -415,7 +415,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencies(
   return HandBack(env, omni_dependencies(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencyRemove(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDependencyRemove(
     JNIEnv *env, jobject , jstring root, jstring name) {
   std::string root_text;
   std::string name_text;
@@ -427,7 +427,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencyRemove(
   return HandBack(env, omni_dependency_remove(root_text.c_str(), name_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestFacts(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestFacts(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -437,7 +437,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestFacts(
   return HandBack(env, omni_manifest_facts(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestSet(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestSet(
     JNIEnv *env, jobject , jstring root, jstring field, jstring value) {
   std::string root_text;
   std::string field_text;
@@ -452,7 +452,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestSet(
                                          value_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestPermission(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestPermission(
     JNIEnv *env, jobject , jstring root, jstring name, jboolean wanted) {
   std::string root_text;
   std::string name_text;
@@ -465,7 +465,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestPermission
                                                 wanted == JNI_TRUE));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSymbols(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSymbols(
     JNIEnv *env, jobject , jstring root, jstring needle) {
   std::string root_text;
   std::string needle_text;
@@ -477,7 +477,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSymbols(
   return HandBack(env, omni_symbols(root_text.c_str(), needle_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWhereWritten(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeWhereWritten(
     JNIEnv *env, jobject , jstring root, jstring qualified) {
   std::string root_text;
   std::string qualified_text;
@@ -489,7 +489,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWhereWritten(
   return HandBack(env, omni_where_written(root_text.c_str(), qualified_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeInspectPackage(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeInspectPackage(
     JNIEnv *env, jobject , jstring path) {
   std::string path_text;
   if (path == nullptr || !JavaStringToUtf8(env, path, &path_text)) {
@@ -499,7 +499,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeInspectPackage(
   return HandBack(env, omni_inspect_package(path_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCheckProject(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCheckProject(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -509,7 +509,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCheckProject(
   return HandBack(env, omni_check_project(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSearchProject(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSearchProject(
     JNIEnv *env, jobject , jstring root, jstring needle, jboolean sensitive,
     jboolean whole_word) {
   std::string root_text;
@@ -524,7 +524,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSearchProject(
                                            whole_word == JNI_TRUE));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeReadFile(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeReadFile(
     JNIEnv *env, jobject , jstring root, jstring relative) {
   std::string root_text;
   std::string relative_text;
@@ -535,7 +535,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeReadFile(
   return HandBack(env, omni_read_file(root_text.c_str(), relative_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWriteFile(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeWriteFile(
     JNIEnv *env, jobject , jstring root, jstring relative, jstring contents) {
   std::string root_text;
   std::string relative_text;
@@ -551,7 +551,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWriteFile(
                                        contents_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeGitCheckout(
     JNIEnv *env, jobject , jstring pack_path, jstring head, jstring into) {
   std::string pack_text;
   std::string head_text;
@@ -568,7 +568,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeGitCheckout(
                                          into_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeMavenPlan(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeMavenPlan(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -578,7 +578,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeMavenPlan(
   return HandBack(env, omni_maven_plan(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectRepairs(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeProjectRepairs(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -588,7 +588,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectRepairs(
   return HandBack(env, omni_project_repairs(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeApplyRepairs(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeApplyRepairs(
     JNIEnv *env, jobject , jstring root, jstring repairs) {
   std::string root_text;
   std::string repairs_text;
@@ -603,7 +603,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeApplyRepairs(
                   omni_apply_repairs(root_text.c_str(), repairs_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDigestFile(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDigestFile(
     JNIEnv *env, jobject , jstring path) {
   std::string path_text;
   if (path == nullptr || !JavaStringToUtf8(env, path, &path_text)) {
@@ -613,7 +613,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDigestFile(
   return HandBack(env, omni_digest_file(path_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativePackArchive(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativePackArchive(
     JNIEnv *env, jobject , jstring root, jstring names, jstring into,
     jstring format, jstring password) {
   std::string root_text;
@@ -641,7 +641,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativePackArchive(
   return answer;
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeOpenArchive(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeOpenArchive(
     JNIEnv *env, jobject , jstring archive_path, jstring into, jstring password) {
   std::string archive_text;
   std::string into_text;
@@ -662,7 +662,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeOpenArchive(
   return answer;
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeAdoptProject(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeAdoptProject(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;
   if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
@@ -672,7 +672,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeAdoptProject(
   return HandBack(env, omni_adopt_project(root_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeNewFolder(
     JNIEnv *env, jobject , jstring root, jstring relative) {
   std::string root_text;
   std::string relative_text;
@@ -683,7 +683,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
   return HandBack(env, omni_new_folder(root_text.c_str(), relative_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRemovePath(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeRemovePath(
     JNIEnv *env, jobject , jstring root, jstring relative, jstring trash_root) {
   std::string root_text;
   std::string relative_text;
@@ -701,7 +701,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRemovePath(
                                         trash_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRenamePath(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeRenamePath(
     JNIEnv *env, jobject , jstring root, jstring from, jstring to) {
   std::string root_text;
   std::string from_text;
@@ -719,7 +719,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRenamePath(
                                         to_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCopyPath(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCopyPath(
     JNIEnv *env, jobject , jstring root, jstring from, jstring to) {
   std::string root_text;
   std::string from_text;
@@ -737,7 +737,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCopyPath(
                                         to_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildUnsigned(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildUnsigned(
     JNIEnv *env, jobject , jstring root, jstring packagePath,
     jstring certificate) {
   std::string rootHeld;
@@ -752,7 +752,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildUnsigned(
                                            certificateHeld.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSealPackage(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSealPackage(
     JNIEnv *env, jobject , jstring packagePath, jstring sealedPath,
     jstring certificate, jstring signatureV2, jstring signatureV3,
     jstring signatureV31, jint minSdk, jint maxSdk) {
@@ -778,7 +778,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSealPackage(
                            static_cast<uint32_t>(maxSdk)));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListBuilt(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeListBuilt(
     JNIEnv *env, jobject , jstring directory) {
   std::string directory_text;
   if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
@@ -788,7 +788,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListBuilt(
   return HandBack(env, omni_list_built(directory_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashSend(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashSend(
     JNIEnv *env, jobject , jstring trash_root, jstring path) {
   std::string trash_text;
   std::string path_text;
@@ -799,7 +799,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashSend(
   return HandBack(env, omni_trash_send(trash_text.c_str(), path_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashList(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashList(
     JNIEnv *env, jobject , jstring trash_root) {
   std::string trash_text;
   if (trash_root == nullptr || !JavaStringToUtf8(env, trash_root, &trash_text)) {
@@ -809,7 +809,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashList(
   return HandBack(env, omni_trash_list(trash_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashRestore(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashRestore(
     JNIEnv *env, jobject , jstring trash_root, jstring id) {
   std::string trash_text;
   std::string id_text;
@@ -820,7 +820,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashRestore(
   return HandBack(env, omni_trash_restore(trash_text.c_str(), id_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashPurge(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashPurge(
     JNIEnv *env, jobject , jstring trash_root, jstring id) {
   std::string trash_text;
   std::string id_text;
@@ -831,7 +831,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashPurge(
   return HandBack(env, omni_trash_purge(trash_text.c_str(), id_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashEmpty(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashEmpty(
     JNIEnv *env, jobject , jstring trash_root) {
   std::string trash_text;
   if (trash_root == nullptr || !JavaStringToUtf8(env, trash_root, &trash_text)) {
@@ -841,7 +841,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashEmpty(
   return HandBack(env, omni_trash_empty(trash_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSetIcon(
     JNIEnv *env, jobject , jstring root, jstring source) {
   std::string root_text;
   std::string source_text;
@@ -852,17 +852,17 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
   return HandBack(env, omni_set_icon(root_text.c_str(), source_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildProgress(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildProgress(
     JNIEnv *env, jobject ) {
   return HandBack(env, omni_build_progress());
 }
 
-JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildStop(
+JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeBuildStop(
     JNIEnv *, jobject ) {
   omni_build_stop();
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSpeak(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSpeak(
     JNIEnv *env, jobject , jstring tag) {
   std::string held;
   if (tag != nullptr && !JavaStringToUtf8(env, tag, &held)) {
@@ -872,7 +872,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSpeak(
   return HandBack(env, omni_speak(held.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTerminalDocs(
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTerminalDocs(
     JNIEnv *env, jobject , jstring tag) {
   std::string held;
   if (tag != nullptr && !JavaStringToUtf8(env, tag, &held)) {
@@ -882,7 +882,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTerminalDocs(
   return HandBack(env, omni_terminal_docs(held.c_str()));
 }
 
-JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
+JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeBuildExpect(
     JNIEnv *env, jobject , jstring timings) {
   if (timings == nullptr) {
     omni_build_expect(nullptr);
@@ -895,7 +895,7 @@ JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
   omni_build_expect(held.c_str());
 }
 
-JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellOpen(
+JNIEXPORT jint JNICALL Java_com_apk_builder_Builder_nativeShellOpen(
     JNIEnv *env, jobject , jstring folder, jstring home, jint rows, jint columns) {
   std::string folder_text;
   std::string home_text;
@@ -942,7 +942,7 @@ JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellOpen(
   return master;
 }
 
-JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellRead(
+JNIEXPORT jint JNICALL Java_com_apk_builder_Builder_nativeShellRead(
     JNIEnv *env, jobject , jint handle, jbyteArray into, jint wait) {
   if (handle < 0 || into == nullptr) {
     return -1;
@@ -970,7 +970,7 @@ JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellRead(
   return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
 }
 
-JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellWrite(
+JNIEXPORT jint JNICALL Java_com_apk_builder_Builder_nativeShellWrite(
     JNIEnv *env, jobject , jint handle, jbyteArray from) {
   if (handle < 0 || from == nullptr) {
     return -1;
@@ -996,7 +996,7 @@ JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellWrite(
   return written;
 }
 
-JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellResize(
+JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeShellResize(
     JNIEnv *, jobject , jint handle, jint rows, jint columns) {
   if (handle < 0) {
     return;
@@ -1007,7 +1007,7 @@ JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellResize(
   ioctl(handle, TIOCSWINSZ, &size);
 }
 
-JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellClose(
+JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeShellClose(
     JNIEnv *, jobject , jint handle) {
   if (handle < 0) {
     return;
@@ -1021,7 +1021,7 @@ JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellClose(
   }
 }
 
-JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellInterrupt(
+JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeShellInterrupt(
     JNIEnv *, jobject , jint handle) {
   if (handle < 0) {
     return;

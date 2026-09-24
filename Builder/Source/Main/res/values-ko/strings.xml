@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">도움말 센터</string>
     <string name="omni_find_project">프로젝트에서 검색</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">질문 검색…</string>
     <string name="omni_terminal_search">명령 검색...</string>
     <string name="omni_help_popular">인기:</string>
-    <string name="omni_help_note">Omni Builder에 대해 알고 싶은 모든 것이 여기에. 빠르게 배우고 더 발견하세요.</string>
+    <string name="omni_help_note">Apk Builder에 대해 알고 싶은 모든 것이 여기에. 빠르게 배우고 더 발견하세요.</string>
     <string name="omni_help_hello">안녕하세요! 👋</string>
     <string name="omni_help_none">여기에 맞는 것이 없습니다.</string>
     <string name="omni_help_band_all">전체</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">첫걸음</string>
     <string name="omni_help_first_note">이 앱이 무엇이고 어디서 시작하는가</string>
-    <string name="omni_help_first_body">Omni Builder는 Android 패키지를 이 기기에서 번역합니다. 서버도 책상 위 도구도 없습니다. 번역기도 포장기도 서명기도 여기서 돕니다. 홈에서 프로젝트를 만들고 Java 아래에 코드를 적은 뒤 빌드하세요.</string>
+    <string name="omni_help_first_body">Apk Builder는 Android 패키지를 이 기기에서 번역합니다. 서버도 책상 위 도구도 없습니다. 번역기도 포장기도 서명기도 여기서 돕니다. 홈에서 프로젝트를 만들고 Java 아래에 코드를 적은 뒤 빌드하세요.</string>
     <string name="omni_help_project">새 프로젝트</string>
     <string name="omni_help_project_note">이름, 패키지, 버전, 아이콘</string>
     <string name="omni_help_project_body">프로젝트에는 이름, com.example.app 같은 패키지 이름, 버전, 그리고 돌아갈 Android 버전이 필요합니다. Android는 설치된 앱을 패키지 이름으로 알아보니, 내놓기 전에 정하세요. 아이콘은 파일에서 언제든 더할 수 있습니다.</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">지원하는 말:</string>
     <string name="omni_kinds_holds_web">지원하는 웹 기술:</string>
     <string name="omni_brand_note">Android 개발 환경</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">프로젝트 열기</string>
     <string name="omni_import_none">여기 있는 무엇도 그 파일을 열지 못했습니다.</string>
     <string name="omni_import_done">파일 %1$d개를 프로젝트로 열었습니다</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">더 많은 개발자에게 닿도록 도와줍니다.</string>
     <string name="omni_rate_one">더 나은 앱을 만들 힘이 됩니다.</string>
     <string name="omni_rate_why">Play 스토어 평가는 큰 힘이 됩니다. 더 많은 사람에게 앱이 닿습니다.</string>
-    <string name="omni_rate_ask">Omni Builder가 마음에 드셨나요?</string>
-    <string name="omni_about_head">Omni Builder에 관한 모든 것.</string>
-    <string name="omni_about_note">Omni Builder는 Android 앱을 작성하고 편집하고\n시험하기 위한 강력하고 친숙한 개발 환경입니다.\n누구나, 어디서나,\n더 자유로운 개발 경험을.</string>
+    <string name="omni_rate_ask">Apk Builder가 마음에 드셨나요?</string>
+    <string name="omni_about_head">Apk Builder에 관한 모든 것.</string>
+    <string name="omni_about_note">Apk Builder는 Android 앱을 작성하고 편집하고\n시험하기 위한 강력하고 친숙한 개발 환경입니다.\n누구나, 어디서나,\n더 자유로운 개발 경험을.</string>
     <string name="omni_about_contact_note">저희에게 연락해 주세요.</string>
     <string name="omni_about_terms_note">Apk Builder 이용 규칙</string>
     <string name="omni_about_terms">이용 약관</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">요령</string>
     <string name="omni_talk_step_tips_note">물음 하나에 주제 하나. 파일을 지목하기. 오류를 그대로 옮기기. 크게 바꾸기 전에 풀이를 청하기.</string>
     <string name="omni_adb_first">시작하기 전에</string>
-    <string name="omni_adb_desk_note">Android 기기를 컴퓨터에 연결해 Omni Builder의 모든 기능을 사용하세요. 아래 단계를 순서대로 따르세요.</string>
+    <string name="omni_adb_desk_note">Android 기기를 컴퓨터에 연결해 Apk Builder의 모든 기능을 사용하세요. 아래 단계를 순서대로 따르세요.</string>
     <string name="omni_adb_alone_note">컴퓨터 없이 기기 자체의 무선 디버깅으로 연결합니다. 아래 단계를 순서대로 따르세요.</string>
     <string name="omni_adb_alone">컴퓨터 없이 잇기</string>
     <string name="omni_adb_alone_first">이것은 Android 11 이후가 지닌 무선 디버깅을 씁니다. 그 항목이 기기에 없다면 소프트웨어 버전을 살피세요.</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">함께하기</string>
     <string name="omni_about_join_note">함께, 더 나은 것으로</string>
     <string name="omni_about_reserved">모든 권리를 보유합니다.</string>
-    <string name="omni_about_thanks">Omni Builder를 써 주셔서 고맙습니다!</string>
+    <string name="omni_about_thanks">Apk Builder를 써 주셔서 고맙습니다!</string>
     <string name="omni_about_thanks_note">더 나은 개발을 위해 늘 곁에 있습니다.</string>
     <string name="omni_feedback_kind_fault_note">무언가 잘못됨</string>
     <string name="omni_feedback_kind_idea_note">새로운 생각</string>

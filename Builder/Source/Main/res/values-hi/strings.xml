@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni Builder</string>
+    <string name="omni_app_name">Apk Builder</string>
     <string name="omni_version_shown">1.0.0</string>
     <string name="omni_help_title">सहायता केंद्र</string>
     <string name="omni_find_project">प्रोजेक्ट में खोजें</string>
@@ -270,7 +270,7 @@
     <string name="omni_faq_search">प्रश्न खोजें...</string>
     <string name="omni_terminal_search">कमांड खोजें...</string>
     <string name="omni_help_popular">लोकप्रिय:</string>
-    <string name="omni_help_note">Omni Builder के बारे में जो जानना चाहें, सब यहीं है। जल्दी सीखें, और खोजें।</string>
+    <string name="omni_help_note">Apk Builder के बारे में जो जानना चाहें, सब यहीं है। जल्दी सीखें, और खोजें।</string>
     <string name="omni_help_hello">नमस्ते! 👋</string>
     <string name="omni_help_none">यहाँ उससे कुछ मेल नहीं खाता।</string>
     <string name="omni_help_band_all">सब</string>
@@ -283,7 +283,7 @@
     <string name="omni_help_band_adb">ADB</string>
     <string name="omni_help_first">पहले कदम</string>
     <string name="omni_help_first_note">यह ऐप क्या है, और शुरू कहाँ से करें</string>
-    <string name="omni_help_first_body">Omni Builder इसी उपकरण पर Android पैकेज संकलित करता है। न कोई सर्वर है, न डेस्कटॉप का औज़ार-समूह: संकलक, पैकेजर और हस्ताक्षरकर्ता सब यहीं चलते हैं। घर से एक परियोजना बनाइए, Java के नीचे अपना कोड लिखिए, फिर उसे बनाइए।</string>
+    <string name="omni_help_first_body">Apk Builder इसी उपकरण पर Android पैकेज संकलित करता है। न कोई सर्वर है, न डेस्कटॉप का औज़ार-समूह: संकलक, पैकेजर और हस्ताक्षरकर्ता सब यहीं चलते हैं। घर से एक परियोजना बनाइए, Java के नीचे अपना कोड लिखिए, फिर उसे बनाइए।</string>
     <string name="omni_help_project">नई परियोजना</string>
     <string name="omni_help_project_note">नाम, पैकेज, संस्करण और आइकन</string>
     <string name="omni_help_project_body">परियोजना को एक नाम चाहिए, com.example.app जैसा एक पैकेज नाम, एक संस्करण, और वे Android संस्करण जिन पर वह चलती है। Android किसी लगे हुए ऐप को उसके पैकेज नाम से ही जानता है, इसलिए इसे प्रकाशित करने के बाद नहीं, पहले चुनिए। आइकन कभी भी फ़ाइलों से जोड़ा जा सकता है।</string>
@@ -365,7 +365,7 @@
     <string name="omni_kinds_holds">समर्थित भाषाएँ:</string>
     <string name="omni_kinds_holds_web">समर्थित वेब तकनीकें:</string>
     <string name="omni_brand_note">Android विकास का परिवेश</string>
-    <string name="omni_app_shown">Omni Builder %1$s</string>
+    <string name="omni_app_shown">Apk Builder %1$s</string>
     <string name="omni_raise_open">परियोजना खोलें</string>
     <string name="omni_import_none">यहाँ कुछ भी उस फ़ाइल को नहीं खोल सका।</string>
     <string name="omni_import_done">%1$d फ़ाइलें एक परियोजना में खोली गईं</string>
@@ -378,9 +378,9 @@
     <string name="omni_rate_two">और डेवलपर तक पहुँचने में मदद मिलती है।</string>
     <string name="omni_rate_one">बेहतर ऐप बनाने की प्रेरणा मिलती है।</string>
     <string name="omni_rate_why">Play Store पर रेटिंग देना हमारा समर्थन है। इससे ऐप और लोगों तक पहुँचता है।</string>
-    <string name="omni_rate_ask">क्या आपको Omni Builder पसंद आया?</string>
-    <string name="omni_about_head">Omni Builder के बारे में सब कुछ।</string>
-    <string name="omni_about_note">Omni Builder एंड्रॉइड ऐप्लिकेशन लिखने, संपादित करने\nऔर परखने के लिए बना एक सशक्त और सहज परिवेश है।\nहर किसी के लिए, हर जगह,\nअधिक स्वतंत्र विकास अनुभव।</string>
+    <string name="omni_rate_ask">क्या आपको Apk Builder पसंद आया?</string>
+    <string name="omni_about_head">Apk Builder के बारे में सब कुछ।</string>
+    <string name="omni_about_note">Apk Builder एंड्रॉइड ऐप्लिकेशन लिखने, संपादित करने\nऔर परखने के लिए बना एक सशक्त और सहज परिवेश है।\nहर किसी के लिए, हर जगह,\nअधिक स्वतंत्र विकास अनुभव।</string>
     <string name="omni_about_contact_note">हमसे संपर्क करें।</string>
     <string name="omni_about_terms_note">Apk Builder के उपयोग के नियम</string>
     <string name="omni_about_terms">उपयोग की शर्तें</string>
@@ -582,7 +582,7 @@
     <string name="omni_talk_step_tips">सुझाव</string>
     <string name="omni_talk_step_tips_note">एक प्रश्न में एक ही विषय। फ़ाइल का नाम लीजिए। त्रुटि पूरी उद्धृत कीजिए। बड़े बदलाव से पहले व्याख्या माँगिए।</string>
     <string name="omni_adb_first">शुरू करने से पहले</string>
-    <string name="omni_adb_desk_note">अपने एंड्रॉइड डिवाइस को कंप्यूटर से जोड़ें और Omni Builder का पूरा उपयोग करें। नीचे दिए चरणों का क्रम से पालन करें।</string>
+    <string name="omni_adb_desk_note">अपने एंड्रॉइड डिवाइस को कंप्यूटर से जोड़ें और Apk Builder का पूरा उपयोग करें। नीचे दिए चरणों का क्रम से पालन करें।</string>
     <string name="omni_adb_alone_note">बिना कंप्यूटर के, डिवाइस की अपनी वायरलेस डिबगिंग से जुड़ें। नीचे दिए चरणों का क्रम से पालन करें।</string>
     <string name="omni_adb_alone">बिना तार का डिबगिंग</string>
     <string name="omni_adb_alone_first">यह उस बिना-तार डिबगिंग का उपयोग करता है जो Android 11 और उससे आगे रखते हैं। यदि यह विकल्प आपके उपकरण पर नहीं है, तो उसका सॉफ़्टवेयर संस्करण देखिए।</string>
@@ -627,7 +627,7 @@
     <string name="omni_about_join">साथ आइए</string>
     <string name="omni_about_join_note">मिलकर, एक बेहतर के लिए</string>
     <string name="omni_about_reserved">सर्वाधिकार सुरक्षित।</string>
-    <string name="omni_about_thanks">Omni Builder उपयोग करने के लिए धन्यवाद!</string>
+    <string name="omni_about_thanks">Apk Builder उपयोग करने के लिए धन्यवाद!</string>
     <string name="omni_about_thanks_note">हम बेहतर विकास अनुभव के लिए यहाँ हैं।</string>
     <string name="omni_feedback_kind_fault_note">कुछ गलत है</string>
     <string name="omni_feedback_kind_idea_note">एक नया विचार</string>

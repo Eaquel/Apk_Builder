@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(omni_builder LANGUAGES CXX)
+project(apk_builder LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,33 +34,33 @@ set(OMNI_CORE_ARCHIVE
 
 if(NOT EXISTS "${OMNI_CORE_ARCHIVE}")
     message(FATAL_ERROR
-        "Omni Core archive not found for ABI '${ANDROID_ABI}'.\n"
+        "Apk Builder Core archive not found for ABI '${ANDROID_ABI}'.\n"
         "  Expected: ${OMNI_CORE_ARCHIVE}\n"
         "  Build it first, for example:\n"
         "    cargo build --release --target ${OMNI_RUST_TARGET}\n"
         "This build refuses to produce a library without the Core linked in.")
 endif()
 
-message(STATUS "Omni Core archive for ${ANDROID_ABI}: ${OMNI_CORE_ARCHIVE}")
+message(STATUS "Apk Builder Core archive for ${ANDROID_ABI}: ${OMNI_CORE_ARCHIVE}")
 
-add_library(omni_builder SHARED Builder.cpp)
+add_library(apk_builder SHARED Builder.cpp)
 
-target_include_directories(omni_builder PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(apk_builder PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
-target_compile_options(omni_builder PRIVATE
+target_compile_options(apk_builder PRIVATE
     -Wall
     -Wextra
     -Werror
     -fvisibility=hidden
     -fstack-protector-strong)
 
-target_link_libraries(omni_builder PRIVATE
+target_link_libraries(apk_builder PRIVATE
     "${OMNI_CORE_ARCHIVE}"
     log
     dl
     m)
 
-target_link_options(omni_builder PRIVATE
+target_link_options(apk_builder PRIVATE
     "-Wl,--exclude-libs,ALL"
     "-Wl,-z,relro"
     "-Wl,-z,now"
