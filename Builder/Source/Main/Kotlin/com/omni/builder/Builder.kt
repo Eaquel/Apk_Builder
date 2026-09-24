@@ -60,6 +60,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
@@ -236,13 +237,6 @@ object OmniLog {
         append("Written: ").append(timestamp()).append('\n')
         append("-".repeat(72)).append('\n')
         append(synchronized(lock) { session.toString() })
-    }
-
-    fun transcript(): String = synchronized(lock) { session.toString() }
-
-    fun clearTranscript() {
-        synchronized(lock) { session.setLength(0) }
-        event(LogLevel.INFO, "log", "The log was cleared from the screen.")
     }
 
     private fun describeEnvironment(context: Context): String {
@@ -1280,19 +1274,11 @@ object Preferences {
     fun newPackage(context: Context, fallback: String): String =
         store(context).getString(NEW_PACKAGE, "").orEmpty().ifEmpty { fallback }
 
-    fun setNewPackage(context: Context, value: String) {
-        store(context).edit().putString(NEW_PACKAGE, value).apply()
-    }
-
     fun newMinSdk(context: Context, fallback: Int): Int =
         store(context).getInt(NEW_MIN_SDK, fallback)
 
     fun newTargetSdk(context: Context, fallback: Int): Int =
         store(context).getInt(NEW_TARGET_SDK, fallback)
-
-    fun setNewPlatforms(context: Context, minimum: Int, target: Int) {
-        store(context).edit().putInt(NEW_MIN_SDK, minimum).putInt(NEW_TARGET_SDK, target).apply()
-    }
 
     fun palette(context: Context): Palette {
         val held = store(context).getString(THEME, Palette.DARK.key).orEmpty()
@@ -3266,11 +3252,7 @@ private sealed interface Screen {
 
     data class Build(val root: String) : Screen
 
-    data object Repos : Screen
-
     data object Trash : Screen
-
-    data object Settings : Screen
 
     data object Keys : Screen
 
@@ -3860,13 +3842,12 @@ class BuilderActivity : Activity() {
 
     private var cloning = false
 
-    private var reposQuery = ""
 
-    private var reposFound: List<Forge.Repository> = emptyList()
 
     private var raised = false
     private val wentBefore = mutableListOf<String>()
     private var cameBefore: Screen? = null
+    private var keysCameFrom: Screen? = null
     private var talkRoot: String? = null
     private val wentAfter = mutableListOf<String>()
 
@@ -4203,6 +4184,9 @@ class BuilderActivity : Activity() {
         if (next is Screen.Help && !inHelp(screen)) {
             cameBefore = screen
         }
+        if (next is Screen.Keys && screen !is Screen.Keys && screen !is Screen.NewKey) {
+            keysCameFrom = screen
+        }
         rememberWalk(next)
         raised = false
         screen = next
@@ -4349,9 +4333,7 @@ class BuilderActivity : Activity() {
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
-            is Screen.Repos -> renderRepos()
             is Screen.Trash -> renderTrash()
-            is Screen.Settings -> renderSettings()
             is Screen.Keys -> renderKeys()
             is Screen.NewKey -> renderNewKey()
             is Screen.Logcat -> renderLogcat()
@@ -4449,7 +4431,7 @@ class BuilderActivity : Activity() {
                 }
             }
             is Screen.Build -> go(Screen.Files(here.root, ""))
-            is Screen.Keys -> go(Screen.Settings)
+            is Screen.Keys -> go(keysCameFrom ?: Screen.Projects)
             is Screen.NewKey -> go(Screen.Keys)
             is Screen.Legal -> go(Screen.About)
             else -> go(Screen.Projects)
@@ -4530,10 +4512,8 @@ class BuilderActivity : Activity() {
             is Screen.Help -> R.string.omni_help_title
             is Screen.HelpDocs -> R.string.omni_help_terminal
             is Screen.HelpFaq -> R.string.omni_help_faq
-            is Screen.Settings -> R.string.omni_tab_settings
             is Screen.Keys -> R.string.omni_keys_title
             is Screen.NewKey -> R.string.omni_keys_new
-            is Screen.Repos -> R.string.omni_repos_title
             is Screen.Trash -> R.string.omni_trash_title
             is Screen.Build -> R.string.omni_tab_build
             is Screen.Legal ->
@@ -5699,13 +5679,13 @@ class BuilderActivity : Activity() {
             }
         )
         list.addView(
-            drawerRow(Mark.Shape.BRANCH, R.string.omni_repos_title, here is Screen.Repos) {
-                leaveFor(Screen.Repos)
+            drawerRow(Mark.Shape.NOTE, R.string.omni_menu_logcat, here is Screen.Logcat) {
+                leaveFor(Screen.Logcat)
             }
         )
         list.addView(
-            drawerRow(Mark.Shape.NOTE, R.string.omni_menu_logcat, here is Screen.Logcat) {
-                leaveFor(Screen.Logcat)
+            drawerRow(Mark.Shape.SHIELD, R.string.omni_keys_manage, here is Screen.Keys) {
+                leaveFor(Screen.Keys)
             }
         )
         list.addView(drawerSection(getString(R.string.omni_menu_other)))
@@ -8499,112 +8479,6 @@ class BuilderActivity : Activity() {
         content.addView(quiet(getString(R.string.omni_trash_note)))
     }
 
-    private fun renderRepos() {
-        content.addView(
-            screenHead(
-                Mark.Shape.BRANCH,
-                getString(R.string.omni_repos_title),
-                getString(R.string.omni_repos_detail),
-            )
-        )
-        val asking = card()
-        val (queryHolder, queryField) = input(
-            getString(R.string.omni_repos_query),
-            reposQuery,
-        )
-        queryField.hint = getString(R.string.omni_repos_hint)
-        asking.addView(queryHolder)
-        val (tokenHolder, tokenField) = input(
-            getString(R.string.omni_clone_auth_token),
-            cloneToken,
-        )
-        asking.addView(tokenHolder)
-        asking.addView(
-            primary(getString(R.string.omni_repos_search)) {
-                reposQuery = queryField.text?.toString().orEmpty().trim()
-                cloneToken = tokenField.text?.toString().orEmpty().trim()
-                lookForRepos(false)
-            }
-        )
-        asking.addView(
-            subtle(getString(R.string.omni_repos_mine), palette.accent) {
-                cloneToken = tokenField.text?.toString().orEmpty().trim()
-                lookForRepos(true)
-            }
-        )
-        content.addView(asking)
-        content.addView(quiet(getString(R.string.omni_repos_how)))
-        if (reposFound.isNotEmpty()) {
-            showRepos()
-        }
-    }
-
-    private fun lookForRepos(mine: Boolean) {
-        results.removeAllViews()
-        results.addView(quiet(getString(R.string.omni_repos_looking)))
-        val token = cloneToken
-        val asked = reposQuery
-        val thread = Thread {
-            val answer = runCatching {
-                if (mine) Forge.mine(token) else Forge.search(asked, token)
-            }
-            runOnUiThread {
-                if (screen !is Screen.Repos) {
-                    return@runOnUiThread
-                }
-                results.removeAllViews()
-                val found = answer.getOrElse { why ->
-                    results.addView(notice(refusalOf(why), palette.error))
-                    return@runOnUiThread
-                }
-                reposFound = found
-                showRepos()
-            }
-        }
-        thread.isDaemon = true
-        thread.start()
-    }
-
-    private fun showRepos() {
-        if (reposFound.isEmpty()) {
-            results.addView(quiet(getString(R.string.omni_repos_none)))
-            return
-        }
-        val listed = card()
-        reposFound.forEachIndexed { index, one ->
-            if (index > 0) {
-                listed.addView(rule(), MATCH_PARENT, 1)
-            }
-            val about = StringBuilder()
-            if (one.about.isNotEmpty()) {
-                about.append(one.about)
-            }
-            val facts = ArrayList<String>()
-            if (one.language.isNotEmpty()) {
-                facts.add(one.language)
-            }
-            facts.add(getString(R.string.omni_repos_stars, one.stars))
-            if (one.shut) {
-                facts.add(getString(R.string.omni_repos_private))
-            }
-            if (about.isNotEmpty()) {
-                about.append('\n')
-            }
-            about.append(facts.joinToString(" · "))
-            listed.addView(
-                row(
-                    one.full,
-                    about.toString(),
-                    getString(R.string.omni_clone_go),
-                    palette.accent,
-                ) {
-                    cloneFrom(one.address, cloneToken, projectsFolder().absolutePath, true, "")
-                }
-            )
-        }
-        results.addView(listed)
-    }
-
     private fun renderTrash() {
 
         val held = runCatching {
@@ -8718,7 +8592,7 @@ class BuilderActivity : Activity() {
         content.addView(vault)
         content.addView(primary(getString(R.string.omni_keys_new)) { go(Screen.NewKey) })
         content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Settings)
+            go(keysCameFrom ?: Screen.Projects)
         })
     }
 
@@ -14105,18 +13979,7 @@ class BuilderActivity : Activity() {
     }
 
     private fun chooseShot() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "image/*"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        }
-        runCatching { startActivityForResult(intent, SHOT_REQUEST) }
-            .onFailure {
-                results.removeAllViews()
-                results.addView(
-                    notice(it.message ?: getString(R.string.omni_form_image_none), palette.error)
-                )
-            }
+        openGallery(SHOT_REQUEST, MOST_SHOTS)
     }
 
     private fun helpChip(named: String, onPress: () -> Unit): View = TextView(this).apply {
@@ -15673,210 +15536,6 @@ class BuilderActivity : Activity() {
         helpFooter()
     }
 
-    private fun renderSettings() {
-        val look = card()
-        look.addView(
-            row(
-                getString(R.string.omni_settings_theme),
-                palette.label,
-                "",
-                palette.accent,
-            ) { go(Screen.Theme) }
-        )
-        look.addView(rule(), MATCH_PARENT, 1)
-        val spoken = Preferences.language(this).ifEmpty { deviceLanguage() }
-        look.addView(
-            row(
-                getString(R.string.omni_settings_language),
-                Preferences.LANGUAGES.firstOrNull { it.first == spoken }?.second.orEmpty(),
-                "",
-                palette.accent,
-            ) { go(Screen.Languages) }
-        )
-        content.addView(look)
-
-        content.addView(heading(getString(R.string.omni_keys_title)))
-        val chosen = Preferences.signingKey(this)
-        val key = keysHere().firstOrNull { it.path == chosen }
-        val signing = card()
-        signing.addView(
-            keyValue(
-                key?.alias ?: getString(R.string.omni_keys_none),
-                key?.subject.orEmpty(),
-                when {
-                    key == null -> ""
-                    key.alias == DEFAULT_KEY_ALIAS -> getString(R.string.omni_keys_shared)
-                    else -> getString(R.string.omni_keys_yours)
-                },
-                if (key == null) palette.warning else palette.accent,
-            )
-        )
-        signing.addView(subtle(getString(R.string.omni_keys_manage), palette.accent) {
-            go(Screen.Keys)
-        })
-        content.addView(signing)
-
-        content.addView(heading(getString(R.string.omni_defaults_title)))
-        val defaults = card()
-        defaults.addView(
-            row(
-                getString(R.string.omni_form_package),
-                Preferences.newPackage(this, DEFAULT_PACKAGE),
-                getString(R.string.omni_action_change),
-                palette.accent,
-            ) {
-                askForName(
-                    getString(R.string.omni_form_package),
-                    Preferences.newPackage(this, DEFAULT_PACKAGE),
-                ) { named ->
-                    Preferences.setNewPackage(this, named.trim())
-                    render(false)
-                }
-            }
-        )
-        content.addView(defaults)
-
-        content.addView(label(getString(R.string.omni_form_min_sdk)))
-        val chosenMin = Preferences.newMinSdk(this, OLDEST_PLATFORM)
-        val chosenTarget = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
-        content.addView(
-            chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == chosenMin }) {
-                val picked = ANDROID_RELEASES[it].first
-                Preferences.setNewPlatforms(this, picked, maxOf(picked, chosenTarget))
-                render(false)
-            }
-        )
-        content.addView(label(getString(R.string.omni_form_target_sdk)))
-        content.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { ANDROID_RELEASES[it].first == chosenTarget },
-            ) {
-                val picked = ANDROID_RELEASES[it].first
-                Preferences.setNewPlatforms(this, minOf(picked, chosenMin), picked)
-                render(false)
-            }
-        )
-        content.addView(quiet(getString(R.string.omni_defaults_seal)))
-
-        content.addView(
-            row(
-                getString(R.string.omni_tab_trash),
-                getString(R.string.omni_trash_title),
-                "",
-                palette.muted,
-            ) { go(Screen.Trash) }
-        )
-
-        content.addView(heading(getString(R.string.omni_talk_key)))
-        val brain = card()
-        val thinking = Brain.vendorOf(Preferences.assistantVendor(this))
-        val keyed = Brain.VENDORS.count { it.keyed(this) }
-        brain.addView(
-            keyValue(
-                thinking.shown + "  \u00b7  " +
-                    Brain.modelOf(thinking, Preferences.assistantModel(this)).shown,
-                getString(R.string.omni_talk_keyed, keyed, Brain.VENDORS.size),
-                if (Vault.inHardware()) {
-                    getString(R.string.omni_device_hardware)
-                } else {
-                    getString(R.string.omni_device_software)
-                },
-                if (keyed == 0) palette.muted else palette.ok,
-            )
-        )
-        Brain.VENDORS.filter { it.keyed(this) }.forEach { one ->
-            brain.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
-            brain.addView(
-                keyValue(
-                    one.shown,
-                    one.where,
-                    getString(R.string.omni_action_delete),
-                    palette.error,
-                ).apply {
-                    isClickable = true
-                    isFocusable = true
-                    readAs(Button::class.java.name)
-                    pressable()
-                    setOnClickListener {
-                        Preferences.forgetVendorKey(this@BuilderActivity, one.id)
-                        Preferences.setFetchedModels(this@BuilderActivity, one.id, emptyList())
-                        results.removeAllViews()
-                        results.addView(
-                            notice(getString(R.string.omni_talk_key_gone), palette.ok)
-                        )
-                        render(false)
-                    }
-                }
-            )
-        }
-        brain.addView(subtle(getString(R.string.omni_talk_providers), palette.accent) {
-            chooseTheVendor()
-        })
-        brain.addView(subtle(getString(R.string.omni_talk_model), palette.accent) {
-            chooseTheModel()
-        })
-        content.addView(brain)
-        content.addView(quiet(getString(R.string.omni_talk_key_note)))
-
-        content.addView(heading(getString(R.string.omni_settings_logs)))
-        val transcript = OmniLog.transcript().trimEnd()
-        val logging = card()
-        logging.addView(
-            EditText(this).apply {
-                setText(
-                    transcript.ifEmpty { getString(R.string.omni_settings_logs_empty) }
-                )
-                setTextColor(palette.foreground)
-                setBackgroundColor(Color.TRANSPARENT)
-                typeface = Type.data
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                gravity = Gravity.TOP or Gravity.START
-                setHorizontallyScrolling(false)
-                isFocusable = true
-                setTextIsSelectable(true)
-                keyListener = null
-                minLines = 6
-                maxLines = 18
-                setPadding(gap(2))
-            }
-        )
-        content.addView(logging)
-
-        val logActions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        logActions.addView(
-            subtle(getString(R.string.omni_action_copy), palette.accent) {
-                val clipboard = getSystemService(ClipboardManager::class.java)
-                clipboard?.setPrimaryClip(
-                    ClipData.newPlainText(getString(R.string.omni_settings_logs), transcript)
-                )
-                results.removeAllViews()
-                results.addView(notice(getString(R.string.omni_settings_logs_copied), palette.ok))
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
-        )
-        logActions.addView(
-            subtle(getString(R.string.omni_action_clear), palette.muted) {
-                OmniLog.clearTranscript()
-                render(false)
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
-        )
-        content.addView(logActions)
-        content.addView(quiet(getString(R.string.omni_settings_logs_note)))
-
-        content.addView(
-            row(
-                getString(R.string.omni_settings_about),
-                getString(R.string.omni_about_note),
-                "",
-                palette.muted,
-            ) { go(Screen.About) }
-        )
-    }
-
     private fun speakTheDeviceLanguage() {
         if (Builder.load() !is Builder.LoadState.Loaded) return
         val tag = Preferences.language(this).ifEmpty { deviceLanguage() }
@@ -16755,26 +16414,46 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun chooseImage(forProject: String?) {
-        imageForProject = forProject
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+    private fun galleryIntents(most: Int): List<Intent> {
+        val found = mutableListOf(
+            Intent(Intent.ACTION_PICK).apply {
+                setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
+                if (most > 1) {
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+            }
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            found += Intent(MediaStore.ACTION_PICK_IMAGES).apply {
+                type = "image/*"
+                if (most > 1) {
+                    putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, most)
+                }
+            }
+        }
+        found += Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "image/*"
-            putExtra(
-                Intent.EXTRA_MIME_TYPES,
-                arrayOf("image/png", "image/jpeg", "image/webp", "image/heif", "image/*"),
-            )
-        }
-        runCatching { startActivityForResult(intent, IMAGE_REQUEST) }
-            .onFailure {
-                results.removeAllViews()
-                results.addView(
-                    notice(
-                        it.message ?: getString(R.string.omni_form_image_none),
-                        palette.error,
-                    )
-                )
+            if (most > 1) {
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             }
+        }
+        return found
+    }
+
+    private fun openGallery(request: Int, most: Int) {
+        for (intent in galleryIntents(most)) {
+            if (runCatching { startActivityForResult(intent, request) }.isSuccess) {
+                return
+            }
+        }
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_form_image_none), palette.error))
+    }
+
+    private fun chooseImage(forProject: String?) {
+        imageForProject = forProject
+        openGallery(IMAGE_REQUEST, 1)
     }
 
     private fun askForAProjectArchive() {
@@ -21113,120 +20792,6 @@ internal object Remote {
             throw Refused(R.string.omni_clone_empty)
         }
         return carried
-    }
-}
-
-internal object Forge {
-
-    private const val HOST = "https://api.github.com"
-
-    private const val KIND = "application/vnd.github+json"
-
-    private const val DATED = "2022-11-28"
-
-    private const val MOST = 40
-
-    private const val REPLY_BYTES = 4 * 1024 * 1024
-
-    class Repository(
-        val full: String,
-        val about: String,
-        val stars: Int,
-        val language: String,
-        val address: String,
-        val shut: Boolean,
-    )
-
-    private fun ask(where: String, token: String): String {
-        val link = runCatching { URL(where).openConnection() }.getOrNull() as? HttpURLConnection
-            ?: throw Remote.Refused(R.string.omni_repos_refused)
-        link.connectTimeout = 20_000
-        link.readTimeout = 30_000
-        link.setRequestProperty("Accept", KIND)
-        link.setRequestProperty("X-GitHub-Api-Version", DATED)
-        link.setRequestProperty("User-Agent", "omni-builder")
-        if (token.isNotEmpty()) {
-            link.setRequestProperty("Authorization", "Bearer $token")
-        }
-        val code = runCatching { link.responseCode }.getOrElse {
-            throw Remote.Refused(R.string.omni_clone_unreachable)
-        }
-        if (code == 401 || code == 403) {
-            link.disconnect()
-            throw Remote.Refused(R.string.omni_repos_needs_token)
-        }
-        if (code != 200) {
-            link.disconnect()
-            throw Remote.Refused(R.string.omni_repos_refused, code.toString())
-        }
-        val said = runCatching {
-            link.inputStream.use { from ->
-                val room = ByteArrayOutputStream()
-                val slab = ByteArray(32 * 1024)
-                while (room.size() < REPLY_BYTES) {
-                    val got = from.read(slab)
-                    if (got < 0) {
-                        break
-                    }
-                    room.write(slab, 0, got)
-                }
-                room.toString(Charsets.UTF_8.name())
-            }
-        }.getOrElse { throw Remote.Refused(R.string.omni_clone_unreachable) }
-        link.disconnect()
-        return said
-    }
-
-    private fun said(from: JSONObject, key: String): String =
-        if (from.isNull(key)) "" else from.optString(key)
-
-    private fun readOne(from: JSONObject): Repository? {
-        val full = said(from, "full_name")
-        val address = said(from, "clone_url")
-        if (full.isEmpty() || !address.startsWith("https://")) {
-            return null
-        }
-        return Repository(
-            full = full,
-            about = said(from, "description"),
-            stars = from.optInt("stargazers_count"),
-            language = said(from, "language"),
-            address = address,
-            shut = from.optBoolean("private"),
-        )
-    }
-
-    private fun readMany(said: JSONArray): List<Repository> {
-        val found = ArrayList<Repository>(said.length())
-        for (index in 0 until said.length()) {
-            val one = said.optJSONObject(index) ?: continue
-            readOne(one)?.let { found.add(it) }
-        }
-        return found
-    }
-
-    fun search(said: String, token: String): List<Repository> {
-        val asked = said.trim()
-        if (asked.isEmpty()) {
-            return emptyList()
-        }
-        val quoted = URLEncoder.encode(asked, Charsets.UTF_8.name())
-        val body = ask("$HOST/search/repositories?q=$quoted&per_page=$MOST", token)
-        val held = runCatching { JSONObject(body) }.getOrElse {
-            throw Remote.Refused(R.string.omni_repos_refused)
-        }
-        return readMany(held.optJSONArray("items") ?: JSONArray())
-    }
-
-    fun mine(token: String): List<Repository> {
-        if (token.isEmpty()) {
-            throw Remote.Refused(R.string.omni_repos_needs_token)
-        }
-        val body = ask("$HOST/user/repos?per_page=$MOST&sort=updated&affiliation=owner", token)
-        val held = runCatching { JSONArray(body) }.getOrElse {
-            throw Remote.Refused(R.string.omni_repos_refused)
-        }
-        return readMany(held)
     }
 }
 
