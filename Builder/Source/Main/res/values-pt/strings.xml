@@ -503,6 +503,12 @@
     <string name="omni_clone_title">Clonar um repositório</string>
     <string name="omni_clone_kind">Controlo de versões</string>
     <string name="omni_clone_address">Endereço do repositório</string>
+    <string name="omni_clone_branch">Ramo</string>
+    <string name="omni_clone_branch_default">Ramo predefinido</string>
+    <string name="omni_clone_branch_default_named">%1$s (predefinido)</string>
+    <string name="omni_clone_branch_reading">A ler os ramos...</string>
+    <string name="omni_clone_branch_gone">Esse ramo já não está no repositório.</string>
+    <string name="omni_clone_not_a_project">O repositório foi clonado, mas não tem nenhum projeto Android para abrir.</string>
     <string name="omni_clone_auth">Autenticação</string>
     <string name="omni_clone_auth_none">Nenhuma</string>
     <string name="omni_clone_auth_token">Token</string>

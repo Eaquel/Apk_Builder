@@ -503,6 +503,12 @@
     <string name="omni_clone_title">Cloner un dépôt</string>
     <string name="omni_clone_kind">Gestion de versions</string>
     <string name="omni_clone_address">Adresse du dépôt</string>
+    <string name="omni_clone_branch">Branche</string>
+    <string name="omni_clone_branch_default">Branche par défaut</string>
+    <string name="omni_clone_branch_default_named">%1$s (par défaut)</string>
+    <string name="omni_clone_branch_reading">Lecture des branches...</string>
+    <string name="omni_clone_branch_gone">Cette branche n\'est plus dans le dépôt.</string>
+    <string name="omni_clone_not_a_project">Le dépôt a été cloné, mais il ne contient aucun projet Android à ouvrir.</string>
     <string name="omni_clone_auth">Authentification</string>
     <string name="omni_clone_auth_none">Aucune</string>
     <string name="omni_clone_auth_token">Jeton</string>

@@ -503,6 +503,12 @@
     <string name="omni_clone_title">저장소 복제</string>
     <string name="omni_clone_kind">버전 관리</string>
     <string name="omni_clone_address">저장소 주소</string>
+    <string name="omni_clone_branch">브랜치</string>
+    <string name="omni_clone_branch_default">기본 브랜치</string>
+    <string name="omni_clone_branch_default_named">%1$s (기본)</string>
+    <string name="omni_clone_branch_reading">브랜치를 읽는 중...</string>
+    <string name="omni_clone_branch_gone">그 브랜치는 더 이상 저장소에 없습니다.</string>
+    <string name="omni_clone_not_a_project">저장소를 복제했지만 열 수 있는 Android 프로젝트가 없습니다.</string>
     <string name="omni_clone_auth">인증</string>
     <string name="omni_clone_auth_none">없음</string>
     <string name="omni_clone_auth_token">토큰</string>

@@ -652,6 +652,8 @@ object Builder {
         password: String,
     ): String
 
+    external fun nativeAdoptProject(root: String): String
+
     external fun nativeNewFolder(root: String, relative: String): String
 
     external fun nativeRemovePath(root: String, relative: String, trashRoot: String): String
@@ -6892,8 +6894,9 @@ class BuilderActivity : Activity() {
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         if (named.lowercase(Locale.US).endsWith(".apk")) {
             actions += getString(R.string.omni_install_title) to { installPackage(file) }
+        } else {
+            actions += getString(R.string.omni_action_open) to { openOutside(file) }
         }
-        actions += getString(R.string.omni_action_open) to { openOutside(file) }
         actions += getString(R.string.omni_action_share) to { shareOutside(file) }
         actions += getString(R.string.omni_open_title) to {
             results.removeAllViews()
@@ -8595,7 +8598,7 @@ class BuilderActivity : Activity() {
                     getString(R.string.omni_clone_go),
                     palette.accent,
                 ) {
-                    cloneFrom(one.address, cloneToken, projectsFolder().absolutePath, true)
+                    cloneFrom(one.address, cloneToken, projectsFolder().absolutePath, true, "")
                 }
             )
         }
@@ -10647,11 +10650,18 @@ class BuilderActivity : Activity() {
         }
 
     private fun dropRow(named: String, shown: String, choices: List<String>, onPick: (Int) -> Unit): View {
-        val value = TextView(this).apply {
-            text = shown
-            setTextColor(palette.foreground)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        val value = TextView(this).apply { text = shown }
+        return pickerRow(named, value) {
+            pickOne(named, choices) { which ->
+                value.text = choices[which]
+                onPick(which)
+            }
         }
+    }
+
+    private fun pickerRow(named: String, value: TextView, onPress: () -> Unit): View {
+        value.setTextColor(palette.foreground)
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, gap(2), 0, gap(1))
@@ -10680,12 +10690,7 @@ class BuilderActivity : Activity() {
                         },
                         palette.accent,
                     )
-                    setOnClickListener {
-                        pickOne(named, choices) { which ->
-                            value.text = choices[which]
-                            onPick(which)
-                        }
-                    }
+                    setOnClickListener { onPress() }
                     addView(value, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                     addView(
                         View(context).apply {
@@ -10720,6 +10725,56 @@ class BuilderActivity : Activity() {
         val (tokenHolder, tokenField) = input(
             getString(R.string.omni_clone_auth_token),
             cloneToken,
+        )
+        var branch = ""
+        var reading = false
+        val branchShown = TextView(this).apply {
+            text = getString(R.string.omni_clone_branch_default)
+        }
+        sheet.addView(
+            pickerRow(getString(R.string.omni_clone_branch), branchShown) {
+                if (reading) {
+                    return@pickerRow
+                }
+                val address = runCatching {
+                    Remote.address(whereField.text?.toString().orEmpty())
+                }.getOrElse { why ->
+                    branchShown.text = refusalOf(why)
+                    return@pickerRow
+                }
+                val token = tokenField.text?.toString().orEmpty().trim()
+                reading = true
+                branchShown.text = getString(R.string.omni_clone_branch_reading)
+                Thread {
+                    val found = runCatching { Remote.advertise(address, token) }
+                    runOnUiThread {
+                        reading = false
+                        found.fold({ held ->
+                            val names = held.branches.map { it.first }
+                            val first = held.branch.ifEmpty { names.firstOrNull().orEmpty() }
+                            branchShown.text = branch.ifEmpty {
+                                getString(R.string.omni_clone_branch_default_named, first)
+                            }
+                            if (names.isEmpty()) {
+                                return@fold
+                            }
+                            val shown = names.map { name ->
+                                if (name == held.branch) {
+                                    getString(R.string.omni_clone_branch_default_named, name)
+                                } else {
+                                    name
+                                }
+                            }
+                            pickOne(getString(R.string.omni_clone_branch), shown) { which ->
+                                branch = names[which]
+                                branchShown.text = shown[which]
+                            }
+                        }, { why ->
+                            branchShown.text = refusalOf(why)
+                        })
+                    }
+                }.apply { isDaemon = true }.start()
+            }
         )
         tokenHolder.visibility = View.GONE
         sheet.addView(
@@ -10762,7 +10817,7 @@ class BuilderActivity : Activity() {
                     cloneToken = tokenField.text?.toString().orEmpty().trim()
                     val into = intoField.text?.toString().orEmpty().trim()
                     it.dismiss()
-                    cloneFrom(cloneAddress, cloneToken, into, !whole)
+                    cloneFrom(cloneAddress, cloneToken, into, !whole, branch)
                 },
             ),
         )
@@ -10778,7 +10833,13 @@ class BuilderActivity : Activity() {
         else -> getString(R.string.omni_clone_unreachable)
     }
 
-    private fun cloneFrom(said: String, token: String, into: String, shallow: Boolean) {
+    private fun cloneFrom(
+        said: String,
+        token: String,
+        into: String,
+        shallow: Boolean,
+        branch: String,
+    ) {
         results.removeAllViews()
         val address = try {
             Remote.address(said)
@@ -10809,13 +10870,22 @@ class BuilderActivity : Activity() {
             var spoke = 0L
             val answer = runCatching {
                 val found = Remote.advertise(address, token)
+                val wanted = if (branch.isEmpty()) {
+                    found.head
+                } else {
+                    found.branches.firstOrNull { it.first == branch }?.second
+                        ?: throw Remote.Refused(R.string.omni_clone_branch_gone, branch)
+                }
                 runOnUiThread {
-                    telling.text = getString(R.string.omni_clone_fetching, found.branch)
+                    telling.text = getString(
+                        R.string.omni_clone_fetching,
+                        branch.ifEmpty { found.branch },
+                    )
                 }
                 val carried = Remote.fetch(
                     address,
                     token,
-                    found.head,
+                    wanted,
                     shallow && found.shallow,
                     pack,
                 ) { bytes ->
@@ -10831,7 +10901,7 @@ class BuilderActivity : Activity() {
                 runOnUiThread { telling.text = getString(R.string.omni_clone_writing) }
                 val report = Builder.nativeGitCheckout(
                     pack.absolutePath,
-                    found.head,
+                    wanted,
                     target.absolutePath,
                 )
                 carried to JSONObject(report)
@@ -10868,12 +10938,23 @@ class BuilderActivity : Activity() {
         val files = report.optLong("files")
         val folders = report.optLong("folders")
         OmniLog.event(LogLevel.INFO, "clone", "A repository was cloned.")
-        flash(
-            getString(R.string.omni_clone_done, name, files, folders),
-            palette.ok,
-            Mark.Shape.BRANCH,
-        )
-        go(Screen.Files(target.absolutePath, ""))
+        working({ Builder.nativeAdoptProject(target.absolutePath) }) { answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull()
+            if (document == null || !document.optBoolean("opened", false)) {
+                go(Screen.Files(target.absolutePath, ""))
+                results.addView(
+                    notice(getString(R.string.omni_clone_not_a_project), palette.warning)
+                )
+                document?.let { showRefusal(Refusal.parse(it), results) }
+                return@working
+            }
+            flash(
+                getString(R.string.omni_clone_done, name, files, folders),
+                palette.ok,
+                Mark.Shape.BRANCH,
+            )
+            openHere(target.absolutePath)
+        }
     }
 
     private fun factRow(
@@ -16662,9 +16743,6 @@ class BuilderActivity : Activity() {
                 installPackage(file)
             })
         }
-        into.addView(subtle(getString(R.string.omni_action_open), palette.ok) {
-            openOutside(file)
-        })
         into.addView(subtle(getString(R.string.omni_action_share), palette.accent) {
             shareOutside(file)
         })
@@ -20792,6 +20870,7 @@ internal object Remote {
         val head: String,
         val branch: String,
         val shallow: Boolean,
+        val branches: List<Pair<String, String>>,
     )
 
     fun address(said: String): String {
@@ -20945,7 +21024,16 @@ internal object Remote {
             names.firstOrNull { it.first == head && it.second.startsWith("refs/heads/") }
                 ?.second.orEmpty()
         }
-        return Found(head, branch.removePrefix("refs/heads/"), capable.contains("shallow"))
+        val branches = names
+            .filter { it.second.startsWith("refs/heads/") }
+            .map { it.second.removePrefix("refs/heads/") to it.first }
+            .distinctBy { it.first }
+        return Found(
+            head,
+            branch.removePrefix("refs/heads/"),
+            capable.contains("shallow"),
+            branches,
+        )
     }
 
     fun fetch(

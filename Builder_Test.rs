@@ -14156,6 +14156,62 @@ public final class App extends Activity {
     }
 
     #[test]
+    fn a_cloned_folder_opens_as_a_project_named_the_way_it_names_itself() {
+        let directory = temp_directory("omni-adopt-clone");
+        let root = directory.join("repository");
+        std::fs::create_dir_all(root.join("Res/values")).unwrap();
+        std::fs::write(
+            root.join("AndroidManifest.xml"),
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.cloned.app\" android:versionCode=\"7\" android:versionName=\"2.1\">\n\
+             <application android:label=\"@string/app_name\" />\n</manifest>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Res/values/strings.xml"),
+            "<resources>\n<string name=\"app_name\">Cloned App</string>\n</resources>\n",
+        )
+        .unwrap();
+        let text = root.to_str().unwrap().to_string();
+
+        let adopted = crate::workspace::adopt_folder(&text, false).unwrap();
+        assert!(adopted.settings_written);
+        assert_eq!(adopted.package, "com.cloned.app");
+        assert_eq!(adopted.label, "Cloned App");
+        let held = crate::settings::held(&text)
+            .unwrap()
+            .expect("a project file");
+        assert_eq!(held.package, "com.cloned.app");
+        assert_eq!(held.label, "Cloned App");
+        assert_eq!(held.version_code, 7);
+        assert_eq!(held.version_name, "2.1");
+        assert!(root.join(crate::settings::FILE_NAME).is_file());
+
+        let again = crate::workspace::adopt_folder(&text, true).unwrap();
+        assert!(
+            !again.settings_written,
+            "a project already written is left as it is"
+        );
+        assert_eq!(again.label, "Cloned App");
+
+        let plain = directory.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(
+            plain.join("AndroidManifest.xml"),
+            "<manifest package=\"com.plain.app\"><application android:label=\"Plain\" /></manifest>",
+        )
+        .unwrap();
+        let named = crate::workspace::adopt_folder(plain.to_str().unwrap(), false).unwrap();
+        assert_eq!(named.label, "Plain");
+
+        let empty = directory.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(crate::workspace::adopt_folder(empty.to_str().unwrap(), false).is_err());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn the_manifest_is_a_file_like_any_other() {
         let directory = temp_directory("omni-manifest-free");
         let root = directory.join("Held");

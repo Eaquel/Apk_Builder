@@ -503,6 +503,12 @@
     <string name="omni_clone_title">Клонировать репозиторий</string>
     <string name="omni_clone_kind">Контроль версий</string>
     <string name="omni_clone_address">Адрес репозитория</string>
+    <string name="omni_clone_branch">Ветка</string>
+    <string name="omni_clone_branch_default">Ветка по умолчанию</string>
+    <string name="omni_clone_branch_default_named">%1$s (по умолчанию)</string>
+    <string name="omni_clone_branch_reading">Чтение веток...</string>
+    <string name="omni_clone_branch_gone">Этой ветки больше нет в репозитории.</string>
+    <string name="omni_clone_not_a_project">Репозиторий склонирован, но в нём нет проекта Android, который можно открыть.</string>
     <string name="omni_clone_auth">Аутентификация</string>
     <string name="omni_clone_auth_none">Нет</string>
     <string name="omni_clone_auth_token">Токен</string>

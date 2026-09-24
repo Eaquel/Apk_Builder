@@ -503,6 +503,12 @@
     <string name="omni_clone_title">Depo Klonla</string>
     <string name="omni_clone_kind">Sürüm kontrolü</string>
     <string name="omni_clone_address">Depo adresi</string>
+    <string name="omni_clone_branch">Dal</string>
+    <string name="omni_clone_branch_default">Varsayılan dal</string>
+    <string name="omni_clone_branch_default_named">%1$s (varsayılan)</string>
+    <string name="omni_clone_branch_reading">Dallar okunuyor...</string>
+    <string name="omni_clone_branch_gone">Bu dal artık depoda yok.</string>
+    <string name="omni_clone_not_a_project">Depo klonlandı ama içinde açılacak bir Android projesi yok.</string>
     <string name="omni_clone_auth">Kimlik doğrulama</string>
     <string name="omni_clone_auth_none">Yok</string>
     <string name="omni_clone_auth_token">Belirteç</string>

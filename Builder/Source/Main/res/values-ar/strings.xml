@@ -503,6 +503,12 @@
     <string name="omni_clone_title">استنساخ مستودع</string>
     <string name="omni_clone_kind">إدارة الإصدارات</string>
     <string name="omni_clone_address">عنوان المستودع</string>
+    <string name="omni_clone_branch">الفرع</string>
+    <string name="omni_clone_branch_default">الفرع الافتراضي</string>
+    <string name="omni_clone_branch_default_named">%1$s (افتراضي)</string>
+    <string name="omni_clone_branch_reading">جارٍ قراءة الفروع...</string>
+    <string name="omni_clone_branch_gone">هذا الفرع لم يعد موجودًا في المستودع.</string>
+    <string name="omni_clone_not_a_project">تم استنساخ المستودع، لكن لا يوجد فيه مشروع Android لفتحه.</string>
     <string name="omni_clone_auth">الاستيثاق</string>
     <string name="omni_clone_auth_none">بلا</string>
     <string name="omni_clone_auth_token">رمز</string>

@@ -503,6 +503,12 @@
     <string name="omni_clone_title">भंडार की नकल उतारें</string>
     <string name="omni_clone_kind">संस्करण नियंत्रण</string>
     <string name="omni_clone_address">भंडार का पता</string>
+    <string name="omni_clone_branch">ब्रांच</string>
+    <string name="omni_clone_branch_default">डिफ़ॉल्ट ब्रांच</string>
+    <string name="omni_clone_branch_default_named">%1$s (डिफ़ॉल्ट)</string>
+    <string name="omni_clone_branch_reading">ब्रांच पढ़ी जा रही हैं...</string>
+    <string name="omni_clone_branch_gone">वह ब्रांच अब रिपॉज़िटरी में नहीं है।</string>
+    <string name="omni_clone_not_a_project">रिपॉज़िटरी क्लोन हो गई, लेकिन उसमें खोलने के लिए कोई Android प्रोजेक्ट नहीं है।</string>
     <string name="omni_clone_auth">प्रमाणीकरण</string>
     <string name="omni_clone_auth_none">कोई नहीं</string>
     <string name="omni_clone_auth_token">टोकन</string>

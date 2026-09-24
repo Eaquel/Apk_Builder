@@ -35249,6 +35249,61 @@ pub mod workspace {
             out.bytes += content.len() as u64;
         }
 
+        let adoption = adopt_folder(into, had_settings)?;
+        out.adopted = adoption.adopted;
+        out.settings_written = adoption.settings_written;
+        out.unread = adoption.unread;
+        out.icon_drawn = adoption.icon_drawn;
+        Ok(out)
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Adoption {
+        pub adopted: bool,
+        pub settings_written: bool,
+        pub icon_drawn: bool,
+        pub unread: Vec<String>,
+        pub package: String,
+        pub label: String,
+    }
+
+    fn label_in(into: &str, manifest: &crate::xml::Element) -> Option<String> {
+        let said = manifest
+            .children_named("application")
+            .next()?
+            .attribute("android:label")?
+            .trim()
+            .to_string();
+        let Some(key) = said.strip_prefix("@string/") else {
+            return (!said.is_empty() && !said.starts_with('@')).then_some(said);
+        };
+        for folder in [crate::scaffold::RES_FOLDER, "res"] {
+            let path = std::path::Path::new(into)
+                .join(folder)
+                .join("values")
+                .join("strings.xml");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut quiet = crate::diag::Sink::new();
+            let Some(table) = crate::xml::parse(&text, "strings.xml", &mut quiet) else {
+                continue;
+            };
+            let found = table
+                .children_named("string")
+                .find(|one| one.attribute("name") == Some(key))
+                .map(|one| one.text.trim().to_string())
+                .filter(|one| !one.is_empty());
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    pub fn adopt_folder(into: &str, had_settings: bool) -> Result<Adoption, Diagnostic> {
+        let mut out = Adoption::default();
+        let mut had_settings = had_settings;
         if !had_settings {
             if let Some(held) = crate::gradle::adopt(into)? {
                 had_settings = true;
@@ -35261,7 +35316,8 @@ pub mod workspace {
         if !had_settings {
             let mut settings = crate::settings::Settings::default();
             let mut quiet = crate::diag::Sink::new();
-            if let Some(parsed) = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut quiet) {
+            let parsed = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut quiet);
+            if let Some(parsed) = &parsed {
                 settings.package = parsed.attribute("package").unwrap_or_default().to_string();
                 settings.namespace = settings.package.clone();
                 settings.application_id = settings.package.clone();
@@ -35275,20 +35331,26 @@ pub mod workspace {
                     settings.version_code = found.max(1);
                 }
             }
-            settings.label = std::path::Path::new(into)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string();
+            settings.label = parsed
+                .as_ref()
+                .and_then(|held| label_in(into, held))
+                .unwrap_or_else(|| {
+                    std::path::Path::new(into)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string()
+                });
             crate::settings::write(into, &settings)?;
             out.settings_written = true;
         }
-        let named = crate::settings::held(into)
-            .ok()
-            .flatten()
-            .map(|held| held.package)
+        let held = crate::settings::held(into).ok().flatten();
+        out.package = held
+            .as_ref()
+            .map(|one| one.package.clone())
             .unwrap_or_default();
-        out.icon_drawn = crate::scaffold::plant_icon(into, &named)?;
+        out.label = held.map(|one| one.label).unwrap_or_default();
+        out.icon_drawn = crate::scaffold::plant_icon(into, &out.package)?;
         Ok(out)
     }
 
@@ -44345,6 +44407,40 @@ pub mod ffi {
                     w.end_array();
                 }
                 Err(error) => write_failure(&mut w, "unpacked", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_adopt_project(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let had_settings = std::path::Path::new(&root)
+                .join(crate::settings::FILE_NAME)
+                .is_file();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::adopt_folder(&root, had_settings) {
+                Ok(held) => {
+                    w.field_bool("opened", true);
+                    w.field_str("root", &root);
+                    w.field_str("package", &held.package);
+                    w.field_str("label", &held.label);
+                    w.field_bool("settingsWritten", held.settings_written);
+                    w.field_bool("iconDrawn", held.icon_drawn);
+                    w.field_bool("adopted", held.adopted);
+                    w.begin_array(Some("unread"));
+                    for one in &held.unread {
+                        w.element_str(one);
+                    }
+                    w.end_array();
+                }
+                Err(error) => write_failure(&mut w, "opened", &error),
             }
             w.end_object();
             hand_back(w)

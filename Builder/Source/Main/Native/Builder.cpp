@@ -662,6 +662,16 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeOpenArchive(
   return answer;
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeAdoptProject(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Opening a project needs its folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_adopt_project(root_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
     JNIEnv *env, jobject , jstring root, jstring relative) {
   std::string root_text;

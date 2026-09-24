@@ -503,6 +503,12 @@
     <string name="omni_clone_title">Klon lumbung</string>
     <string name="omni_clone_kind">Kendali versi</string>
     <string name="omni_clone_address">Alamat lumbung</string>
+    <string name="omni_clone_branch">Cabang</string>
+    <string name="omni_clone_branch_default">Cabang bawaan</string>
+    <string name="omni_clone_branch_default_named">%1$s (bawaan)</string>
+    <string name="omni_clone_branch_reading">Membaca cabang...</string>
+    <string name="omni_clone_branch_gone">Cabang itu sudah tidak ada di repositori.</string>
+    <string name="omni_clone_not_a_project">Repositori sudah dikloning, tetapi tidak ada proyek Android di dalamnya untuk dibuka.</string>
     <string name="omni_clone_auth">Otentikasi</string>
     <string name="omni_clone_auth_none">Tidak ada</string>
     <string name="omni_clone_auth_token">Token</string>

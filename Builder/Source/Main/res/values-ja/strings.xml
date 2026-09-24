@@ -503,6 +503,12 @@
     <string name="omni_clone_title">リポジトリーを複製</string>
     <string name="omni_clone_kind">版管理</string>
     <string name="omni_clone_address">リポジトリーの住所</string>
+    <string name="omni_clone_branch">ブランチ</string>
+    <string name="omni_clone_branch_default">デフォルトのブランチ</string>
+    <string name="omni_clone_branch_default_named">%1$s（デフォルト）</string>
+    <string name="omni_clone_branch_reading">ブランチを読み込んでいます...</string>
+    <string name="omni_clone_branch_gone">そのブランチはもうリポジトリにありません。</string>
+    <string name="omni_clone_not_a_project">リポジトリをクローンしましたが、開ける Android プロジェクトがありません。</string>
     <string name="omni_clone_auth">認証</string>
     <string name="omni_clone_auth_none">なし</string>
     <string name="omni_clone_auth_token">トークン</string>
