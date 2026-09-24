@@ -10677,7 +10677,7 @@ class BuilderActivity : Activity() {
         said.lines()
             .map { it.trim() }
             .filter { it.startsWith(AGENT_READ) }
-            .map { it.removePrefix(AGENT_READ).removeSuffix(AGENT_END).trim() }
+            .map { it.removePrefix(AGENT_READ).trimEnd().trimEnd('>').trim() }
             .filter { agentPath(it) }
             .distinct()
 
@@ -10733,14 +10733,14 @@ class BuilderActivity : Activity() {
             val line = lines[at].trim()
             when {
                 line.startsWith(AGENT_DELETE) -> {
-                    val named = line.removePrefix(AGENT_DELETE).removeSuffix(AGENT_END).trim()
+                    val named = line.removePrefix(AGENT_DELETE).trimEnd().trimEnd('>').trim()
                     if (agentPath(named)) {
                         out.add(AgentStep(named, null))
                     }
                     at += 1
                 }
                 line.startsWith(AGENT_WRITE) -> {
-                    val named = line.removePrefix(AGENT_WRITE).removeSuffix(AGENT_END).trim()
+                    val named = line.removePrefix(AGENT_WRITE).trimEnd().trimEnd('>').trim()
                     var stop = at + 1
                     while (stop < lines.size && lines[stop].trim() != AGENT_END) {
                         stop += 1
