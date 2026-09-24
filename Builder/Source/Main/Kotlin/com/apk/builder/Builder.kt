@@ -1222,8 +1222,10 @@ object Preferences {
 
     fun modelFor(context: Context, vendor: String): String {
         val held = Brain.vendorOf(context, vendor) ?: return ""
+        val fetched = fetchedModels(context, held.id)
+        val usual = held.models.firstOrNull()?.id.orEmpty()
         return store(context).getString(ASSISTANT_MODEL + "_" + held.id, "").orEmpty()
-            .ifEmpty { held.models.firstOrNull()?.id.orEmpty() }
+            .ifEmpty { if (fetched.isEmpty() || fetched.contains(usual)) usual else fetched.first() }
     }
 
     fun effortFor(context: Context, vendor: String, model: String): String =
@@ -4093,6 +4095,7 @@ class BuilderActivity : Activity() {
         answerBackTheWayThisScreenWants()
         fitTheColumn()
         render(false)
+        renewTheModels()
     }
 
     private fun hideTheNavigationBar() {
@@ -11238,11 +11241,26 @@ class BuilderActivity : Activity() {
             chooseTheVendor()
             return
         }
+        if (Brain.listable(vendor) && !Brain.fresh(vendor.id)) {
+            if (vendor.keyed(this)) {
+                fetchTheModels(vendor)
+            } else {
+                askToSignIn(vendor)
+            }
+            return
+        }
         var shown: AlertDialog? = null
         val here = Preferences.assistantModel(this)
         val fetched = Preferences.fetchedModels(this, vendor.id)
-        val named = (vendor.models.map { it.id } + fetched).distinct()
+        val named = when {
+            fetched.isNotEmpty() -> fetched
+            vendor.custom || !Brain.listable(vendor) -> vendor.models.map { it.id }
+            else -> emptyList()
+        }
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (named.isEmpty()) {
+            list.addView(quiet(getString(R.string.omni_talk_models_none)))
+        }
         named.forEachIndexed { at, id ->
             val one = Brain.modelOf(vendor, id)
             if (at > 0) {
@@ -11346,18 +11364,51 @@ class BuilderActivity : Activity() {
                 opened.fill(' ')
             }
             found.joinToString("\n")
-        }) finished@{ answer ->
+        }) { answer ->
             val found = answer.split('\n').filter { it.isNotBlank() }
+            Brain.markFresh(vendor.id)
             if (found.isEmpty()) {
                 results.addView(notice(getString(R.string.omni_talk_models_none), palette.warning))
-                return@finished
+            } else {
+                Preferences.setFetchedModels(this, vendor.id, found)
+                results.addView(
+                    notice(getString(R.string.omni_talk_models_got, found.size), palette.ok)
+                )
             }
-            Preferences.setFetchedModels(this, vendor.id, found)
-            results.addView(
-                notice(getString(R.string.omni_talk_models_got, found.size), palette.ok)
-            )
             chooseTheModel()
         }
+    }
+
+    private fun renewTheModels() {
+        if (!Brain.renewOnce()) {
+            return
+        }
+        val kept = applicationContext
+        val due = Brain.vendors(kept).filter { vendor ->
+            Brain.listable(vendor) &&
+                vendor.keyed(kept) &&
+                Preferences.fetchedModels(kept, vendor.id).isNotEmpty()
+        }
+        if (due.isEmpty()) {
+            return
+        }
+        Thread {
+            due.forEach { vendor ->
+                val sealed = Preferences.vendorKey(kept, vendor.id)
+                val opened = if (sealed.isEmpty()) CharArray(0) else Vault.open(sealed)
+                if (opened != null) {
+                    val found = try {
+                        runCatching { Brain.listed(vendor, opened) }.getOrDefault(emptyList())
+                    } finally {
+                        opened.fill(' ')
+                    }
+                    if (found.isNotEmpty()) {
+                        Preferences.setFetchedModels(kept, vendor.id, found)
+                        Brain.markFresh(vendor.id)
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun countable(value: Long): String = when {
@@ -21894,11 +21945,40 @@ internal object Brain {
         return held.optString("body")
     }
 
+    private val FRESH: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    private val RENEWING = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private val UNSPOKEN = listOf(
+        "embed", "whisper", "tts", "dall-e", "moderation", "image", "audio",
+        "transcribe", "realtime", "rerank", "guard", "imagen", "veo", "aqa",
+    )
+
+    fun listable(vendor: Vendor): Boolean = vendor.format != "dvm" && vendor.format != "raw"
+
+    fun fresh(id: String): Boolean = FRESH.contains(id)
+
+    fun markFresh(id: String) {
+        FRESH.add(id)
+    }
+
+    fun renewOnce(): Boolean = RENEWING.compareAndSet(false, true)
+
+    private fun spoken(one: JSONObject?, named: String): Boolean {
+        val lower = named.lowercase(Locale.US)
+        if (UNSPOKEN.any { lower.contains(it) }) {
+            return false
+        }
+        val methods = one?.optJSONArray("supportedGenerationMethods") ?: return true
+        return (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+    }
+
     fun listed(vendor: Vendor, key: CharArray): List<String> {
         if (key.isEmpty() && !vendor.keyless && !vendor.custom) {
             return emptyList()
         }
-        if (vendor.format == "dvm" || vendor.format == "raw") {
+        if (!listable(vendor)) {
             return emptyList()
         }
         val link = runCatching {
@@ -21922,11 +22002,11 @@ internal object Brain {
                     val named = one?.optString("id").orEmpty()
                         .ifEmpty { one?.optString("name").orEmpty() }
                         .removePrefix("models/")
-                    if (named.isNotEmpty()) {
+                    if (named.isNotEmpty() && spoken(one, named)) {
                         out.add(named)
                     }
                 }
-                out.sorted()
+                out.distinct().sorted()
             }
         }.getOrDefault(emptyList()).also { link.disconnect() }
     }
