@@ -38917,7 +38917,18 @@ pub mod builder {
         match from_project(root) {
             Ok(project) => {
                 let mut sink = crate::diag::Sink::new();
-                let table = compile_resources(&project, &mut sink);
+                let table = compile_resources(&project, &mut sink).and_then(|held| {
+                    let mut named = crate::diag::Sink::new();
+                    if let Some(mut manifest) =
+                        crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut named)
+                    {
+                        resolve_references(
+                            &mut manifest,
+                            held.as_ref().map(|made| &made.compiled),
+                        )?;
+                    }
+                    Ok(held)
+                });
                 let resources = table
                     .as_ref()
                     .ok()

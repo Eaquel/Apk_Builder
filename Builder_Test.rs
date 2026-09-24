@@ -18640,6 +18640,46 @@ public final class App extends Activity {
     }
 
     #[test]
+    fn a_check_refuses_a_manifest_that_names_a_missing_theme_as_the_build_would() {
+        let directory = temp_directory("omni-missing-theme");
+        let root = directory.to_str().unwrap().to_string();
+        crate::scaffold::create(
+            &root,
+            &crate::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Themed".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        assert!(crate::builder::check(&root).refusal.is_none());
+
+        let manifest = std::fs::read_to_string(directory.join("AndroidManifest.xml")).unwrap();
+        let themed = manifest.replacen(
+            "<application",
+            "<application android:theme=\"@style/Theme.AppCompat.Light.NoActionBar\"",
+            1,
+        );
+        assert_ne!(themed, manifest, "the manifest has an application to theme");
+        std::fs::write(directory.join("AndroidManifest.xml"), themed).unwrap();
+
+        let refusal = crate::builder::check(&root)
+            .refusal
+            .expect("a theme the project does not hold is refused before a build");
+        assert_eq!(refusal.code, "EB042");
+        assert!(
+            refusal
+                .context
+                .iter()
+                .any(|line| line.contains("Theme.AppCompat.Light.NoActionBar")),
+            "{:?}",
+            refusal.context
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn source_this_build_cannot_compile_stops_it_rather_than_being_dropped() {
         let directory = temp_directory("omni-uncompiled");
         let root = directory.to_str().unwrap().to_string();
