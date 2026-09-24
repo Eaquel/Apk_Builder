@@ -89,7 +89,7 @@
     <string name="omni_built_title">Собрано здесь</string>
     <string name="omni_built_none">Пока ничего не собрано.</string>
     <string name="omni_result_package">Пакет</string>
-    <string name="omni_result_bundle">Bundle</string>
+    <string name="omni_result_bundle">Пакет AAB</string>
     <string name="omni_result_contents">Содержимое</string>
     <string name="omni_result_languages">Языки</string>
     <string name="omni_result_signature">Подпись</string>
@@ -117,9 +117,6 @@
     <string name="omni_settings_about">О программе</string>
     <string name="omni_action_rename">Переименовать</string>
     <string name="omni_action_copy">Копировать</string>
-    <string name="omni_action_cut">Вырезать</string>
-    <string name="omni_action_paste">Вставить</string>
-    <string name="omni_files_held">%1$s готово к вставке</string>
     <string name="omni_action_clear">Убрать</string>
     <string name="omni_action_tools">Инструменты</string>
     <string name="omni_action_compress">Упаковать</string>
@@ -314,11 +311,11 @@
     <string name="omni_kinds_note">Выберите вариант, который подходит вашему проекту, и начинайте.</string>
     <string name="omni_kinds_spark">Больше идей — сильнее проекты.</string>
     <string name="omni_kinds_hail">Придумай. Создай. Опубликуй.</string>
-    <string name="omni_kinds_native">Native Project</string>
+    <string name="omni_kinds_native">Нативный проект</string>
     <string name="omni_kinds_native_note">Создайте с нуля полностью нативное приложение.</string>
-    <string name="omni_kinds_web">Web To Apk</string>
+    <string name="omni_kinds_web">Из веба в APK</string>
     <string name="omni_kinds_web_note">Легко превратите свой сайт в приложение Android.</string>
-    <string name="omni_web_title">Web To Apk</string>
+    <string name="omni_web_title">Из веба в APK</string>
     <string name="omni_web_note">Легко превратите сайт в приложение Android. Укажите ссылку, настройте и соберите своё приложение!</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">Скрипты на странице работают.</string>
@@ -336,7 +333,7 @@
     <string name="omni_web_needs">Нужен адрес, и в нём не может быть точки с запятой.</string>
     <string name="omni_web_note_privacy">Пакет просит сеть и ничего больше. Что делает страница — дело сайта, а не этого приложения.</string>
     <string name="omni_menu_making">Сборка</string>
-    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_menu_logcat">Системные журналы</string>
     <string name="omni_log_note">Смотрите журналы устройства и читайте, что в них.</string>
     <string name="omni_log_running">Читает</string>
     <string name="omni_log_stopped">Остановлено</string>
@@ -545,7 +542,7 @@
     <string name="omni_ask_tree_note">Каждый проект создаётся в своей папке. Структура остаётся простой и понятной.</string>
     <string name="omni_ask_tree">Как устроена файловая система?</string>
     <string name="omni_help_band_files">Файлы</string>
-    <string name="omni_help_band_web">Web To Apk</string>
+    <string name="omni_help_band_web">Из веба в APK</string>
     <string name="omni_ask_gradle">Где Gradle?</string>
     <string name="omni_ask_gradle_note">Это приложение сделано под сам Android. Gradle и настольные средства писались не для телефона и там поддержаны не полностью. Поэтому здесь свой сборочный движок и ни одной внешней зависимости — сборка выходит быстрее, ровнее и на телефоне как дома.</string>
     <string name="omni_ask_small">Почему приложение такое маленькое?</string>
@@ -738,10 +735,10 @@
     <string name="omni_vibe_format_raw">Свой (raw JSON)</string>
     <string name="omni_vibe_larger">Этот запрос занимает около %1$s токенов, а %2$s принимает только %3$s. Переключиться на Gemini с контекстом 1M?</string>
     <string name="omni_vibe_last_resort">крайний случай</string>
-    <string name="omni_vibe_level_deep">Deep</string>
-    <string name="omni_vibe_level_high">High</string>
-    <string name="omni_vibe_level_low">Low</string>
-    <string name="omni_vibe_level_medium">Medium</string>
+    <string name="omni_vibe_level_deep">Глубокий</string>
+    <string name="omni_vibe_level_high">Высокий</string>
+    <string name="omni_vibe_level_low">Низкий</string>
+    <string name="omni_vibe_level_medium">Средний</string>
     <string name="omni_vibe_no_key_yet">Ключа пока нет</string>
     <string name="omni_vibe_notice_gemini">Google может использовать запросы и ответы, отправленные на бесплатном тарифе, для улучшения своих продуктов. Эти данные могут просматривать люди.\nСовет по конфиденциальности: считайте бесплатный тариф «публичной тестовой площадкой». Не отправляйте этой модели код с личными или коммерческими секретами. Для таких данных используйте платного провайдера со своим ключом API (BYOK).</string>
     <string name="omni_vibe_notice_gemini_title">⚠️ Предупреждение о бесплатном тарифе Google Gemini</string>
@@ -779,4 +776,18 @@
     <string name="omni_vibe_tier_free">Бесплатный тариф</string>
     <string name="omni_vibe_tier_keyless">Без ключа</string>
     <string name="omni_vibe_understood">Понятно</string>
+    <string name="omni_action_move">Переместить</string>
+    <string name="omni_files_name_taken">Такое имя уже существует</string>
+    <string name="omni_files_same_name">%1$s там уже есть. Выберите имя для этого.</string>
+    <string name="omni_files_into_itself">Папку нельзя поместить внутрь неё самой.</string>
+    <string name="omni_help_command_copied">Скопировано: %1$s</string>
+    <string name="omni_vibe_paid_key">Этот ключ от платного аккаунта, показывать все модели</string>
+    <string name="omni_vibe_key_optional">Этот провайдер работает без ключа. Добавьте свой ключ, только если нужны собственные лимиты.</string>
+    <string name="omni_vibe_key_free">Бесплатного ключа этого провайдера достаточно. Отметьте флажок, если ключ от платного тарифа.</string>
+    <string name="omni_vibe_key_add">Добавить ключ для %1$s</string>
+    <string name="omni_copilot_free_note">Copilot Free доступен любому аккаунту GitHub. Если вход удался, а ответов нет, включите Copilot Free на github.com/settings/copilot.</string>
+    <string name="omni_copilot_by_code">Войти через GitHub (код)</string>
+    <string name="omni_copilot_by_token">Вставить токен GitHub</string>
+    <string name="omni_agent_java_only">%1$s не записан: здесь компилируется только Java 25.</string>
+    <string name="omni_agent_checking">Компиляция и проверка написанного…</string>
 </resources>

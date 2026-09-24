@@ -89,7 +89,7 @@
     <string name="omni_built_title">Construido aquí</string>
     <string name="omni_built_none">Aún no se ha construido nada.</string>
     <string name="omni_result_package">Paquete</string>
-    <string name="omni_result_bundle">Bundle</string>
+    <string name="omni_result_bundle">Paquete AAB</string>
     <string name="omni_result_contents">Contenido</string>
     <string name="omni_result_languages">Idiomas</string>
     <string name="omni_result_signature">Firma</string>
@@ -117,9 +117,6 @@
     <string name="omni_settings_about">Acerca de</string>
     <string name="omni_action_rename">Renombrar</string>
     <string name="omni_action_copy">Copiar</string>
-    <string name="omni_action_cut">Cortar</string>
-    <string name="omni_action_paste">Pegar</string>
-    <string name="omni_files_held">%1$s está listo para pegar</string>
     <string name="omni_action_clear">Quitar</string>
     <string name="omni_action_tools">Herramientas</string>
     <string name="omni_action_compress">Comprimir</string>
@@ -314,11 +311,11 @@
     <string name="omni_kinds_note">Elige la opción que mejor se ajuste a tu proyecto y empieza a desarrollar.</string>
     <string name="omni_kinds_spark">Más ideas, proyectos más fuertes.</string>
     <string name="omni_kinds_hail">Imagina. Crea. Publica.</string>
-    <string name="omni_kinds_native">Native Project</string>
+    <string name="omni_kinds_native">Proyecto nativo</string>
     <string name="omni_kinds_native_note">Desarrolla desde cero una aplicación totalmente nativa.</string>
-    <string name="omni_kinds_web">Web To Apk</string>
+    <string name="omni_kinds_web">De web a APK</string>
     <string name="omni_kinds_web_note">Convierte tu sitio web en una aplicación Android, fácilmente.</string>
-    <string name="omni_web_title">Web To Apk</string>
+    <string name="omni_web_title">De web a APK</string>
     <string name="omni_web_note">Convierte tu sitio web en una app de Android con facilidad. Pon el enlace, ajústalo y crea tu propia app.</string>
     <string name="omni_web_script">JavaScript</string>
     <string name="omni_web_script_note">Los scripts de la página se ejecutan.</string>
@@ -336,7 +333,7 @@
     <string name="omni_web_needs">Hace falta una dirección, y no puede llevar punto y coma.</string>
     <string name="omni_web_note_privacy">El paquete pide la red y nada más. Lo que haga la página es cosa del sitio, no de esta aplicación.</string>
     <string name="omni_menu_making">Construir</string>
-    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_menu_logcat">Registros del sistema</string>
     <string name="omni_log_note">Observa los registros del dispositivo y lee lo que dicen.</string>
     <string name="omni_log_running">Leyendo</string>
     <string name="omni_log_stopped">Detenido</string>
@@ -545,7 +542,7 @@
     <string name="omni_ask_tree_note">Cada proyecto se crea en su propia carpeta. La forma se mantiene sencilla y legible.</string>
     <string name="omni_ask_tree">¿Cómo funciona el sistema de archivos?</string>
     <string name="omni_help_band_files">Archivos</string>
-    <string name="omni_help_band_web">Web To Apk</string>
+    <string name="omni_help_band_web">De web a APK</string>
     <string name="omni_ask_gradle">¿Dónde está Gradle?</string>
     <string name="omni_ask_gradle_note">Esta aplicación se hizo para Android mismo. Gradle y las herramientas de escritorio no se escribieron para un teléfono y allí no están del todo soportadas. Por eso lleva su propio motor de construcción y ninguna dependencia externa, lo que hace construir más rápido, más estable y a gusto en un teléfono.</string>
     <string name="omni_ask_small">¿Por qué la aplicación es tan pequeña?</string>
@@ -738,10 +735,10 @@
     <string name="omni_vibe_format_raw">Personalizado (raw JSON)</string>
     <string name="omni_vibe_larger">Esta solicitud ocupa unos %1$s tokens y %2$s solo admite %3$s. ¿Cambiar a Gemini, que admite un contexto de 1M?</string>
     <string name="omni_vibe_last_resort">último recurso</string>
-    <string name="omni_vibe_level_deep">Deep</string>
-    <string name="omni_vibe_level_high">High</string>
-    <string name="omni_vibe_level_low">Low</string>
-    <string name="omni_vibe_level_medium">Medium</string>
+    <string name="omni_vibe_level_deep">Profundo</string>
+    <string name="omni_vibe_level_high">Alto</string>
+    <string name="omni_vibe_level_low">Bajo</string>
+    <string name="omni_vibe_level_medium">Medio</string>
     <string name="omni_vibe_no_key_yet">Aún sin clave</string>
     <string name="omni_vibe_notice_gemini">Google puede usar las solicitudes y respuestas enviadas en el nivel gratuito para mejorar sus productos. Estos datos pueden ser revisados por personas.\nConsejo de privacidad: considere el nivel gratuito como un \"espacio de pruebas público\". No envíe a este modelo código con secretos privados o comerciales. Para esos datos, use un proveedor de pago con su propia clave de API (BYOK).</string>
     <string name="omni_vibe_notice_gemini_title">⚠️ Aviso sobre el nivel gratuito de Google Gemini</string>
@@ -779,4 +776,18 @@
     <string name="omni_vibe_tier_free">Nivel gratuito</string>
     <string name="omni_vibe_tier_keyless">Sin clave</string>
     <string name="omni_vibe_understood">Entendido</string>
+    <string name="omni_action_move">Mover</string>
+    <string name="omni_files_name_taken">Este nombre ya existe</string>
+    <string name="omni_files_same_name">%1$s ya está allí. Elige el nombre para este.</string>
+    <string name="omni_files_into_itself">Una carpeta no puede ir dentro de sí misma.</string>
+    <string name="omni_help_command_copied">Copiado: %1$s</string>
+    <string name="omni_vibe_paid_key">Esta clave es de una cuenta de pago, mostrar todos los modelos</string>
+    <string name="omni_vibe_key_optional">Este proveedor funciona sin clave. Añade la tuya solo si quieres tus propios límites.</string>
+    <string name="omni_vibe_key_free">La clave gratuita de este proveedor es suficiente. Marca la casilla si tu clave es de un plan de pago.</string>
+    <string name="omni_vibe_key_add">Añadir una clave para %1$s</string>
+    <string name="omni_copilot_free_note">Copilot Free está abierto a toda cuenta de GitHub. Si el inicio de sesión funciona pero no llegan respuestas, activa Copilot Free en github.com/settings/copilot.</string>
+    <string name="omni_copilot_by_code">Iniciar sesión con GitHub (código)</string>
+    <string name="omni_copilot_by_token">Pegar un token de GitHub</string>
+    <string name="omni_agent_java_only">%1$s no se escribió: aquí solo se compila Java 25.</string>
+    <string name="omni_agent_checking">Compilando y comprobando lo escrito…</string>
 </resources>

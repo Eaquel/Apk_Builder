@@ -1170,6 +1170,7 @@ object Preferences {
     private const val ASSISTANT_KEY = "assistant_key"
     private const val ASSISTANT_VENDOR = "assistant_vendor"
     private const val VENDOR_MODELS = "vendor_models"
+    private const val PAID_KEY = "paid_key"
     private const val ASSISTANT_MODEL = "assistant_model"
     private const val ASSISTANT_EFFORT = "assistant_effort"
     private const val CUSTOM_VENDORS = "custom_vendors"
@@ -1206,7 +1207,23 @@ object Preferences {
     }
 
     fun forgetVendorKey(context: Context, vendor: String) {
-        store(context).edit().remove(ASSISTANT_KEY + "_" + vendor).apply()
+        store(context).edit()
+            .remove(ASSISTANT_KEY + "_" + vendor)
+            .remove(PAID_KEY + "_" + vendor)
+            .apply()
+    }
+
+    fun paidKey(context: Context, vendor: String): Boolean =
+        store(context).getBoolean(PAID_KEY + "_" + vendor, false)
+
+    fun setPaidKey(context: Context, vendor: String, paid: Boolean) {
+        store(context).edit().putBoolean(PAID_KEY + "_" + vendor, paid).apply()
+    }
+
+    internal fun listingTier(context: Context, vendor: Brain.Vendor): String = when {
+        vendor.custom -> "byok"
+        paidKey(context, vendor.id) && vendorKey(context, vendor.id).isNotEmpty() -> "byok"
+        else -> vendor.tier
     }
 
     fun assistantVendor(context: Context): String {
@@ -2415,6 +2432,7 @@ internal class TerminalView(
     private var onResize: ((Int, Int) -> Unit)? = null
 
     init {
+        layoutDirection = LAYOUT_DIRECTION_LTR
         isFocusableInTouchMode = true
         lettering = inPixels(13f)
         measureCell()
@@ -2812,6 +2830,14 @@ internal class Mark(
     }
 
     private companion object {
+        val TURNING = setOf(
+            Shape.CHEVRON_LEFT,
+            Shape.CHEVRON_RIGHT,
+            Shape.SEND,
+            Shape.UNDO,
+            Shape.REDO,
+        )
+
         const val GRID = 24f
         const val STROKE = 1.7f
         const val GLOW_STEPS = 3
@@ -2834,6 +2860,18 @@ internal class Mark(
     private var given: ColorFilter? = null
 
     override fun draw(canvas: Canvas) {
+        val flipped = layoutDirection == View.LAYOUT_DIRECTION_RTL && shape in TURNING
+        if (flipped) {
+            canvas.save()
+            canvas.scale(-1f, 1f, bounds.exactCenterX(), bounds.exactCenterY())
+        }
+        drawFacing(canvas)
+        if (flipped) {
+            canvas.restore()
+        }
+    }
+
+    private fun drawFacing(canvas: Canvas) {
         val edge = min(bounds.width(), bounds.height()).toFloat()
         if (edge <= 0f) return
         val drawn = Glyphs.of(shape)
@@ -3303,6 +3341,16 @@ class BuilderActivity : Activity() {
     private companion object {
         const val IMAGE_REQUEST = 2
 
+        const val KEPT_STATE = "kept_state.json"
+
+        const val SPARE_MODELS = 4
+
+        val COMMAND_WORDS = setOf(
+            "adb", "fastboot", "alias", "echo", "watch", "timeout", "set", "mkdir", "sleep",
+            "kill", "export", "cat", "grep", "cd", "ls", "logcat", "pm", "am", "dumpsys",
+            "settings", "getprop", "setprop", "sh", "bash", "clear", "exit", "help",
+        )
+
         const val LOOK_MILLIS = 60L
 
         const val WATCH_MILLIS = 110L
@@ -3715,6 +3763,24 @@ class BuilderActivity : Activity() {
         const val AGENT_CARRY = "Those are written. Carry on with whatever is still " +
             "missing, or end with the done line if the project now stands on its own."
 
+        val BUILDER_LIMITS = """
+            This project is built on the phone by Apk Builder, with its own Java 25
+            compiler, resource compiler, dex writer and signer. There is no Gradle,
+            no Kotlin, no C or C++ and no Rust here, so write every source file in
+            Java 25 and nothing else. Records, sealed types, switch expressions and
+            patterns, record patterns, text blocks, var, lambdas and method
+            references all compile. Use the Android framework (android.*) and the
+            Java core library (java.*, javax.*). Do not reach for AndroidX,
+            Jetpack Compose, Kotlin libraries or annotation processors unless the
+            project's Builder.json already lists that library. The manifest is
+            AndroidManifest.xml at the root, Java sources live under Java (a folder
+            per package is fine), resources live under Res (Res/layout,
+            Res/values, Res/drawable, Res/mipmap-...), and the settings live in
+            Builder.json. Keep the package the manifest declares. The oldest
+            Android it runs on is API 30 and the newest it targets is API 37.
+            Never write .kt, .kts, .gradle, .c, .cpp, .h, .hpp or .rs files.
+        """.trimIndent()
+
         val AGENT_RULES = """
             You are the hand as well as the voice: you write the files yourself, and
             nothing you say outside a block is written. Answer with blocks and only
@@ -3729,14 +3795,28 @@ class BuilderActivity : Activity() {
             To remove one:
             <<<OMNI DELETE Java/com/tr/yt/Old.java>>>
 
-            Paths are relative to the project root and never climb out of it. The
-            manifest is AndroidManifest.xml, Java classes live under Java, Kotlin
-            under Kotlin, C and C++ under Native, Rust under Rust, pictures and
-            layouts under Res, and the settings live in Builder.json. When the
-            project stands on its own and builds, say what you made in a sentence or
-            two and end your answer with this line and nothing after it:
+            Paths are relative to the project root and never climb out of it.
+            After your blocks are written the project is compiled; if it refuses,
+            you are sent the refusal and you fix the files it names. When the
+            project stands on its own and builds, say what you made in a sentence
+            or two and end your answer with this line and nothing after it:
             <<<OMNI DONE>>>
         """.trimIndent()
+
+        const val AGENT_MEND = "The project was compiled and it refused. Fix the files this " +
+            "names, write each one whole, and end with the done line once it builds:"
+
+        val FENCE_PATH = Regex(
+            "(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_-]+\\.(?:java|xml|json|txt|pro|properties|png|webp)"
+        )
+
+        const val FENCE_LINE = 200
+
+        val ROOT_FILES = setOf("AndroidManifest.xml", "Builder.json")
+
+        val FOREIGN_SOURCES = listOf(
+            ".kt", ".kts", ".gradle", ".c", ".cc", ".cpp", ".h", ".hpp", ".rs",
+        )
 
         val LOCKED_THEMES = setOf("hacker", "anime")
 
@@ -3812,7 +3892,6 @@ class BuilderActivity : Activity() {
     private var formImage: String? = null
     private var imageForProject: String? = null
     private var secondFolder: String? = null
-    private var fileClip: FileClip? = null
     private var paneRight = false
     private val besideBefore = mutableListOf<String>()
     private val besideAfter = mutableListOf<String>()
@@ -3916,6 +3995,7 @@ class BuilderActivity : Activity() {
     private val wentBefore = mutableListOf<String>()
     private var cameBefore: Screen? = null
     private var keysCameFrom: Screen? = null
+    private var sideCameFrom: Screen? = null
     private var talkRoot: String? = null
     private val wentAfter = mutableListOf<String>()
 
@@ -4089,7 +4169,10 @@ class BuilderActivity : Activity() {
         fitAroundTheSystemBars(stack, roof)
         hideTheNavigationBar()
 
-        drawer.translationX = -gap(DRAWER_DP / 4).toFloat()
+        drawer.translationX = drawerAway(gap(DRAWER_DP / 4).toFloat())
+        if (savedInstanceState != null) {
+            takeBackTheKeptState()
+        }
         standing = examine()
         provisionSharedKey()
         answerBackTheWayThisScreenWants()
@@ -4273,6 +4356,9 @@ class BuilderActivity : Activity() {
         }
         if (next is Screen.Keys && screen !is Screen.Keys && screen !is Screen.NewKey) {
             keysCameFrom = screen
+        }
+        if (asideScreen(next) && !asideScreen(screen)) {
+            sideCameFrom = screen
         }
         rememberWalk(next)
         raised = false
@@ -4530,8 +4616,134 @@ class BuilderActivity : Activity() {
             is Screen.NewKey -> go(Screen.Keys)
             is Screen.Legal -> go(Screen.About)
             is Screen.Developer -> go(Screen.About)
-            else -> go(Screen.Projects)
+            else -> go(sideCameFrom ?: Screen.Projects)
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        keepTheState()
+    }
+
+    private fun screenWord(one: Screen): JSONObject = JSONObject().apply {
+        when (one) {
+            is Screen.Files -> put("kind", "files").put("root", one.root).put("at", one.folder)
+            is Screen.Editor -> put("kind", "editor").put("root", one.root).put("at", one.path)
+            is Screen.Picture -> put("kind", "picture").put("root", one.root).put("at", one.path)
+            is Screen.Build -> put("kind", "files").put("root", one.root).put("at", "")
+            is Screen.Legal -> put("kind", "legal").put("at", one.kind.toString())
+            is Screen.NewProject -> put("kind", "new")
+            is Screen.WebToApk -> put("kind", "web")
+            is Screen.Trash -> put("kind", "trash")
+            is Screen.Keys -> put("kind", "keys")
+            is Screen.NewKey -> put("kind", "keys")
+            is Screen.Logcat -> put("kind", "logcat")
+            is Screen.Terminal -> put("kind", "terminal")
+            is Screen.Assistant -> put("kind", "assistant")
+            is Screen.Theme -> put("kind", "theme")
+            is Screen.Languages -> put("kind", "languages")
+            is Screen.Feedback -> put("kind", "feedback")
+            is Screen.Rate -> put("kind", "rate")
+            is Screen.About -> put("kind", "about")
+            is Screen.Help -> put("kind", "help")
+            is Screen.HelpAdb -> put("kind", "help_adb")
+            is Screen.HelpTalk -> put("kind", "help_talk")
+            is Screen.HelpDocs -> put("kind", "help_docs")
+            is Screen.HelpFaq -> put("kind", "help_faq")
+            is Screen.Developer -> put("kind", "developer")
+            is Screen.Projects -> put("kind", "projects")
+        }
+    }
+
+    private fun screenFrom(word: JSONObject?): Screen? {
+        word ?: return null
+        val root = word.optString("root")
+        val at = word.optString("at")
+        val there = root.isNotEmpty() && File(root).isDirectory
+        return when (word.optString("kind")) {
+            "files" -> if (there) Screen.Files(root, at) else null
+            "editor" -> if (there && File(root, at).isFile) Screen.Editor(root, at) else null
+            "picture" -> if (there && File(root, at).isFile) Screen.Picture(root, at) else null
+            "legal" -> at.toIntOrNull()?.let { Screen.Legal(it) }
+            "new" -> Screen.NewProject
+            "web" -> Screen.WebToApk
+            "trash" -> Screen.Trash
+            "keys" -> Screen.Keys
+            "logcat" -> Screen.Logcat
+            "terminal" -> Screen.Terminal
+            "assistant" -> Screen.Assistant
+            "theme" -> Screen.Theme
+            "languages" -> Screen.Languages
+            "feedback" -> Screen.Feedback
+            "rate" -> Screen.Rate
+            "about" -> Screen.About
+            "help" -> Screen.Help
+            "help_adb" -> Screen.HelpAdb
+            "help_talk" -> Screen.HelpTalk
+            "help_docs" -> Screen.HelpDocs
+            "help_faq" -> Screen.HelpFaq
+            "developer" -> Screen.Developer
+            "projects" -> Screen.Projects
+            else -> null
+        }
+    }
+
+    private fun keepTheState() {
+        val kept = JSONObject()
+        kept.put("screen", screenWord(screen))
+        sideCameFrom?.let { kept.put("side", screenWord(it)) }
+        openProject?.let { kept.put("project", it) }
+        talkRoot?.let { kept.put("talk_root", it) }
+        kept.put("draft", talkDraft)
+        kept.put(
+            "talk",
+            JSONArray().apply {
+                talkHeld.forEach { (mine, said) ->
+                    put(JSONObject().put("mine", mine).put("said", said))
+                }
+            },
+        )
+        runCatching { File(filesDir, KEPT_STATE).writeText(kept.toString()) }
+    }
+
+    private fun takeBackTheKeptState() {
+        val file = File(filesDir, KEPT_STATE)
+        val kept = runCatching { JSONObject(file.readText()) }.getOrNull() ?: return
+        runCatching { file.delete() }
+        kept.optString("project").takeIf { it.isNotEmpty() && File(it).isDirectory }?.let {
+            openProject = it
+        }
+        kept.optString("talk_root").takeIf { it.isNotEmpty() }?.let { talkRoot = it }
+        talkDraft = kept.optString("draft")
+        val talk = kept.optJSONArray("talk")
+        if (talk != null && talk.length() > 0) {
+            talkHeld.clear()
+            for (at in 0 until talk.length()) {
+                val one = talk.optJSONObject(at) ?: continue
+                talkHeld.add(one.optBoolean("mine") to one.optString("said"))
+            }
+        }
+        sideCameFrom = screenFrom(kept.optJSONObject("side"))
+        screenFrom(kept.optJSONObject("screen"))?.let { screen = it }
+    }
+
+    private fun asideScreen(one: Screen): Boolean =
+        one is Screen.Terminal || one is Screen.Logcat || one is Screen.Assistant ||
+            one is Screen.Trash || one is Screen.Theme || one is Screen.Languages ||
+            one is Screen.Feedback || one is Screen.Rate || one is Screen.About ||
+            one is Screen.Legal || one is Screen.Developer || one is Screen.Keys ||
+            one is Screen.NewKey || inHelp(one)
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (isFinishing || isDestroyed) {
+            return
+        }
+        hideMenus()
+        hideOffers()
+        fitTheColumn()
+        drawTheDrawer()
+        render(false)
     }
 
     private val bannerAway = Runnable { hideBanner() }
@@ -4805,7 +5017,7 @@ class BuilderActivity : Activity() {
                         typeface = Type.strong
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         maxLines = 1
-                        setPadding(gap(2), 0, 0, 0)
+                        setPaddingRelative(gap(2), 0, 0, 0)
                     }
                 )
             }
@@ -5180,12 +5392,6 @@ class BuilderActivity : Activity() {
             LinearLayout.LayoutParams(0, gap(10), 1f),
         )
         footer.addView(
-            footControl(Mark.Shape.CLIP, R.string.omni_action_paste, canPaste(here.root, paneFolder())) {
-                pasteInto(here.root, paneFolder())
-            },
-            LinearLayout.LayoutParams(0, gap(10), 1f),
-        )
-        footer.addView(
             footControl(Mark.Shape.SWAP, R.string.omni_files_mirror, true) {
                 val mine = paneFolder()
                 if (paneRight) {
@@ -5372,7 +5578,6 @@ class BuilderActivity : Activity() {
         val onPress: () -> Unit,
     )
 
-    private data class FileClip(val root: String, val path: String, val cut: Boolean)
 
     private fun sheetCell(row: MenuChoice, shown: () -> AlertDialog?): View =
         LinearLayout(this).apply {
@@ -5486,7 +5691,7 @@ class BuilderActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     minimumHeight = gap(10)
                     minimumWidth = gap(44)
-                    setPadding(gap(3), gap(1), gap(4), gap(1))
+                    setPaddingRelative(gap(3), gap(1), gap(4), gap(1))
                     isClickable = row.enabled
                     isFocusable = row.enabled
                     isEnabled = row.enabled
@@ -5553,7 +5758,16 @@ class BuilderActivity : Activity() {
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
             )
         }
-        runCatching { window.showAsDropDown(under, under.width - wide, 0) }
+        list.measure(
+            View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+        val tall = list.measuredHeight
+        val spot = IntArray(2)
+        under.getLocationOnScreen(spot)
+        val room = resources.displayMetrics.heightPixels - (spot[1] + under.height) - keyboardHeight
+        val lift = if (room < tall + gap(2) && spot[1] > tall) -(under.height + tall) else 0
+        runCatching { window.showAsDropDown(under, under.width - wide, lift) }
             .onFailure { menu = null }
     }
 
@@ -5604,6 +5818,11 @@ class BuilderActivity : Activity() {
 
     private fun drawerIsOpen(): Boolean = shade.visibility == View.VISIBLE
 
+    private fun rightToLeft(): Boolean =
+        resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
+
+    private fun drawerAway(wide: Float): Float = if (rightToLeft()) wide else -wide
+
     private fun openTheDrawer() {
         if (drawerIsOpen()) {
             return
@@ -5629,7 +5848,7 @@ class BuilderActivity : Activity() {
             .withEndAction { shade.visibility = View.GONE }
             .start()
         drawer.animate()
-            .translationX(-drawer.width.toFloat())
+            .translationX(drawerAway(drawer.width.toFloat()))
             .setDuration(Motion.of(Motion.LEAVE))
             .setInterpolator(AccelerateInterpolator())
             .start()
@@ -5696,7 +5915,7 @@ class BuilderActivity : Activity() {
                 setTextColor(palette.muted)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 letterSpacing = 0.06f
-                setPadding(gap(5), gap(3), gap(4), gap(2))
+                setPaddingRelative(gap(5), gap(3), gap(4), gap(2))
             }
         )
     }
@@ -5712,7 +5931,7 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = gap(10)
-            setPadding(gap(5), gap(2), gap(4), gap(2))
+            setPaddingRelative(gap(5), gap(2), gap(4), gap(2))
             isClickable = true
             isFocusable = true
             contentDescription = said(getString(named), under)
@@ -6101,7 +6320,7 @@ class BuilderActivity : Activity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(2), gap(2), gap(1), gap(2))
+            setPaddingRelative(gap(2), gap(2), gap(1), gap(2))
             addView(
                 View(context).apply {
                     foreground = Mark(
@@ -6883,10 +7102,15 @@ class BuilderActivity : Activity() {
         }
         var done = 0
         var refused: Refusal? = null
+        val clashing = mutableListOf<String>()
         for (path in chosen) {
             val name = path.substringAfterLast('/')
             val target = joined(into, name)
-            if (target == path) {
+            if (into == path || into.startsWith("$path/")) {
+                continue
+            }
+            if (File(root, target).exists()) {
+                clashing.add(path)
                 continue
             }
             val answer = runCatching {
@@ -6907,19 +7131,23 @@ class BuilderActivity : Activity() {
         render(false)
         if (refused != null) {
             showRefusal(refused, results)
-        } else {
+        } else if (done > 0) {
             results.addView(
                 notice(getString(R.string.omni_files_carried, done), palette.ok)
             )
+        }
+        askForEachClash(root, clashing, into, moving)
+    }
+
+    private fun askForEachClash(root: String, left: List<String>, into: String, moving: Boolean) {
+        val first = left.firstOrNull() ?: return
+        askForFreeName(root, first, File(root, first).isDirectory, into, moving) {
+            askForEachClash(root, left.drop(1), into, moving)
         }
     }
 
     private fun transferRow(root: String, from: String, into: String): View {
         val many = picks(from).size
-        val clash = picks(from).any { path ->
-            val target = joined(into, path.substringAfterLast('/'))
-            target != path && File(root, target).exists()
-        }
         val row = FlowLayout(this, gap(2), gap(2)).apply {
             setPadding(0, gap(1), 0, gap(1))
         }
@@ -6935,12 +7163,12 @@ class BuilderActivity : Activity() {
         row.addView(
             tool(getString(R.string.omni_files_copy_over), palette.accent) {
                 carryOver(root, from, into, false)
-            }.apply { isEnabled = !clash }
+            }
         )
         row.addView(
             tool(getString(R.string.omni_files_move_over), palette.warning) {
                 carryOver(root, from, into, true)
-            }.apply { isEnabled = !clash }
+            }
         )
         row.addView(
             tool(getString(R.string.omni_files_clear_picks), palette.muted) {
@@ -6997,11 +7225,11 @@ class BuilderActivity : Activity() {
         val here = arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder })
         if (here.isEmpty()) {
             holder.addView(quiet(getString(R.string.omni_files_empty)).apply {
-                setPadding(gap(6), gap(4), gap(4), gap(4))
+                setPaddingRelative(gap(6), gap(4), gap(4), gap(4))
             })
         }
         here.forEach { entry ->
-            holder.addView(fileRow(root, folder, entry, entries, side))
+            holder.addView(fileRow(root, folder, entry, entries, side, other ?: folder))
         }
         if (other != null && picks(folder).isNotEmpty()) {
             holder.addView(transferRow(root, folder, other))
@@ -7129,6 +7357,7 @@ class BuilderActivity : Activity() {
         entry: FileEntry,
         all: List<FileEntry>,
         side: Boolean = false,
+        other: String = folder,
     ): View {
         val name = entry.path.substringAfterLast('/')
         val absolute = File(root, entry.path).absolutePath
@@ -7143,7 +7372,7 @@ class BuilderActivity : Activity() {
             isFocusable = true
             contentDescription = name
             readAs(Button::class.java.name)
-            pressable(onHeld = { showActions(root, folder, entry) })
+            pressable(onHeld = { showActions(root, folder, entry, other) })
             setOnClickListener {
                 if (entry.folder) {
                     stepPane(root, side, folder, entry.path)
@@ -7263,58 +7492,117 @@ class BuilderActivity : Activity() {
         )
     }
 
-    private fun holdForPaste(root: String, entry: FileEntry, cut: Boolean) {
-        fileClip = FileClip(root, entry.path, cut)
-        flash(
-            getString(R.string.omni_files_held, entry.path.substringAfterLast('/')),
-            palette.ok,
-            if (cut) Mark.Shape.EXPORT else Mark.Shape.COPY,
-        )
-        drawFooter()
+    private fun freeNameBeside(root: String, into: String, name: String): String {
+        val dot = name.lastIndexOf('.')
+        val stem = if (dot > 0) name.substring(0, dot) else name
+        val tail = if (dot > 0) name.substring(dot) else ""
+        var turn = 1
+        while (true) {
+            val offered = "$stem ( $turn )$tail"
+            if (!File(File(root, into), offered).exists()) {
+                return offered
+            }
+            turn += 1
+        }
     }
 
-    private fun canPaste(root: String, into: String): Boolean {
-        val clip = fileClip ?: return false
-        if (clip.root != root || !File(root, clip.path).exists()) {
-            return false
-        }
-        if (into == clip.path || into.startsWith(clip.path + "/")) {
-            return false
-        }
-        return !File(File(root, into), clip.path.substringAfterLast('/')).exists()
-    }
-
-    private fun pasteInto(root: String, into: String) {
-        val clip = fileClip ?: return
-        if (!canPaste(root, into)) {
+    private fun sendAcross(root: String, entry: FileEntry, into: String, moving: Boolean) {
+        val name = entry.path.substringAfterLast('/')
+        if (entry.folder && (into == entry.path || into.startsWith(entry.path + "/"))) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_files_into_itself), palette.warning))
             return
         }
-        val target = joined(into, clip.path.substringAfterLast('/'))
-        if (clip.cut) {
-            fileClip = null
-            act(Builder.nativeRenamePath(root, clip.path, target), "moved")
+        val landing = File(File(root, into), name)
+        if (!landing.exists()) {
+            carryOne(root, entry.path, joined(into, name), moving)
+            return
+        }
+        askForFreeName(root, entry.path, entry.folder, into, moving)
+    }
+
+    private fun askForFreeName(
+        root: String,
+        path: String,
+        folderish: Boolean,
+        into: String,
+        moving: Boolean,
+        then: () -> Unit = {},
+    ) {
+        val name = path.substringAfterLast('/')
+        val titled = getString(if (moving) R.string.omni_action_move else R.string.omni_action_copy)
+        val offered = freeNameBeside(root, into, name)
+        val editor = styledField(offered, titled)
+        val dot = offered.lastIndexOf('.')
+        editor.setSelection(0, if (dot > 0 && !folderish) dot else offered.length)
+        val warning = TextView(this).apply {
+            setTextColor(palette.error)
+            typeface = Type.label
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(gap(1), gap(2), gap(1), 0)
+            visibility = View.GONE
+        }
+        dialogShell(
+            titled,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_files_same_name, name)
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setPadding(gap(1), 0, gap(1), gap(2))
+                    }
+                )
+                addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                addView(warning, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            },
+            listOf(
+                getString(R.string.omni_action_cancel) to { it: AlertDialog ->
+                    it.dismiss()
+                    then()
+                },
+                getString(R.string.omni_action_confirm) to { it: AlertDialog ->
+                    val chosen = editor.text.toString().trim()
+                    when {
+                        chosen.isEmpty() || chosen.contains('/') -> {
+                            warning.text = getString(R.string.omni_files_needs_name)
+                            warning.visibility = View.VISIBLE
+                        }
+                        File(File(root, into), chosen).exists() -> {
+                            warning.text = getString(R.string.omni_files_name_taken)
+                            warning.visibility = View.VISIBLE
+                        }
+                        else -> {
+                            it.dismiss()
+                            carryOne(root, path, joined(into, chosen), moving)
+                            then()
+                        }
+                    }
+                },
+            ),
+        )
+        editor.requestFocus()
+    }
+
+    private fun carryOne(root: String, from: String, target: String, moving: Boolean) {
+        if (moving) {
+            act(Builder.nativeRenamePath(root, from, target), "moved")
         } else {
-            act(Builder.nativeCopyPath(root, clip.path, target), "copied")
+            act(Builder.nativeCopyPath(root, from, target), "copied")
         }
     }
 
-    private fun showActions(root: String, folder: String, entry: FileEntry) {
+    private fun showActions(root: String, folder: String, entry: FileEntry, other: String) {
         val name = entry.path.substringAfterLast('/')
         val here = File(root, entry.path)
-        val pasteTo = if (entry.folder) entry.path else folder
         val rows = listOf(
             MenuChoice(Mark.Shape.COPY, getString(R.string.omni_action_copy)) {
-                holdForPaste(root, entry, false)
+                sendAcross(root, entry, other, false)
             },
-            MenuChoice(Mark.Shape.EXPORT, getString(R.string.omni_action_cut)) {
-                holdForPaste(root, entry, true)
-            },
-            MenuChoice(
-                Mark.Shape.CLIP,
-                getString(R.string.omni_action_paste),
-                enabled = canPaste(root, pasteTo),
-            ) {
-                pasteInto(root, pasteTo)
+            MenuChoice(Mark.Shape.EXPORT, getString(R.string.omni_action_move)) {
+                sendAcross(root, entry, other, true)
             },
             MenuChoice(
                 Mark.Shape.TRASH,
@@ -7753,12 +8041,34 @@ class BuilderActivity : Activity() {
                 android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             typeface = Type.data
         }
+        var paid = Preferences.paidKey(this, vendor.id)
+        val paidBox = android.widget.CheckBox(this).apply {
+            text = getString(R.string.omni_vibe_paid_key)
+            isChecked = paid
+            setTextColor(palette.foreground)
+            buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
+            setOnCheckedChangeListener { _, on -> paid = on }
+        }
         dialogShell(
             vendor.shown,
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, gap(1), 0, gap(2))
                 addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                if (vendor.free) {
+                    addView(
+                        quiet(
+                            getString(
+                                if (vendor.keyless) {
+                                    R.string.omni_vibe_key_optional
+                                } else {
+                                    R.string.omni_vibe_key_free
+                                }
+                            )
+                        )
+                    )
+                    addView(paidBox, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                }
                 addView(quiet(getString(R.string.omni_talk_key_where, vendor.where)))
                 addView(quiet(getString(R.string.omni_talk_key_note)))
             },
@@ -7774,7 +8084,7 @@ class BuilderActivity : Activity() {
                         )
                     } else {
                         it.dismiss()
-                        testThenKeep(vendor, held)
+                        testThenKeep(vendor, held, vendor.free && paid)
                     }
                 },
             ),
@@ -7782,7 +8092,7 @@ class BuilderActivity : Activity() {
         editor.requestFocus()
     }
 
-    private fun testThenKeep(vendor: Brain.Vendor, held: CharArray) {
+    private fun testThenKeep(vendor: Brain.Vendor, held: CharArray, paid: Boolean = false) {
         results.removeAllViews()
         results.addView(notice(getString(R.string.omni_working), palette.accent))
         Thread {
@@ -7804,10 +8114,17 @@ class BuilderActivity : Activity() {
                     )
                     else -> {
                         Preferences.setVendorKey(this, vendor.id, locked)
+                        Preferences.setPaidKey(this, vendor.id, paid)
+                        if (vendor.copilot) {
+                            Copilot.forget()
+                        }
                         results.addView(
                             notice(getString(R.string.omni_vibe_test_ok), palette.ok)
                         )
                         pickTheVendor(vendor)
+                        if (Brain.listable(vendor)) {
+                            fetchTheModels(vendor)
+                        }
                     }
                 }
             }
@@ -7825,10 +8142,35 @@ class BuilderActivity : Activity() {
 
     private fun askToSignIn(vendor: Brain.Vendor) {
         if (vendor.copilot) {
-            signIntoGitHub(vendor)
+            askHowToReachCopilot(vendor)
         } else {
             askForTheAssistantKey(vendor)
         }
+    }
+
+    private fun askHowToReachCopilot(vendor: Brain.Vendor) {
+        var shown: AlertDialog? = null
+        shown = dialogShell(
+            vendor.shown,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, gap(1), 0, gap(2))
+                addView(quiet(getString(R.string.omni_copilot_free_note)))
+                addView(
+                    subtle(getString(R.string.omni_copilot_by_code), palette.accent) {
+                        shown?.dismiss()
+                        signIntoGitHub(vendor)
+                    }
+                )
+                addView(
+                    subtle(getString(R.string.omni_copilot_by_token), palette.ok) {
+                        shown?.dismiss()
+                        askForTheAssistantKey(vendor)
+                    }
+                )
+            },
+            listOf(getString(R.string.omni_action_cancel) to { it: AlertDialog -> it.dismiss() }),
+        )
     }
 
     private fun signIntoGitHub(vendor: Brain.Vendor) {
@@ -7944,9 +8286,34 @@ class BuilderActivity : Activity() {
             return
         }
         Preferences.setVendorKey(this, vendor.id, locked)
+        Preferences.setPaidKey(this, vendor.id, false)
         Copilot.forget()
-        results.addView(notice(getString(R.string.omni_copilot_done), palette.ok))
-        pickTheVendor(vendor)
+        results.addView(notice(getString(R.string.omni_working), palette.accent))
+        Thread {
+            val opened = Vault.open(locked)
+            val checked = runCatching {
+                if (opened == null) {
+                    throw Brain.Refused(R.string.omni_talk_bad_key)
+                }
+                Copilot.ticketFor(opened)
+            }
+            opened?.fill(' ')
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                results.removeAllViews()
+                val why = checked.exceptionOrNull()
+                if (why != null) {
+                    results.addView(notice(sayWhy(why), palette.error))
+                    results.addView(quiet(getString(R.string.omni_copilot_free_note)))
+                    return@runOnUiThread
+                }
+                results.addView(notice(getString(R.string.omni_copilot_done), palette.ok))
+                pickTheVendor(vendor)
+                fetchTheModels(vendor)
+            }
+        }.start()
     }
 
     private fun noticeFor(vendor: Brain.Vendor): Pair<Int, Int>? = when (vendor.notice) {
@@ -8021,7 +8388,7 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = gap(ROW_UNITS)
-            setPadding(gap(4), gap(2), gap(2), gap(2))
+            setPaddingRelative(gap(4), gap(2), gap(2), gap(2))
             isClickable = true
             isFocusable = true
             contentDescription = vendor?.shown ?: getString(R.string.omni_vibe_auto)
@@ -8070,6 +8437,23 @@ class BuilderActivity : Activity() {
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
+            if (vendor != null && !vendor.custom) {
+                addView(
+                    View(context).apply {
+                        foreground = Mark(Mark.Shape.SHIELD, palette.accent)
+                        isClickable = true
+                        isFocusable = true
+                        contentDescription = getString(R.string.omni_vibe_key_add, vendor.shown)
+                        readAs(Button::class.java.name)
+                        background = reacting(Color.TRANSPARENT, gap(4).toFloat(), palette.accent)
+                        setOnClickListener {
+                            onPicked()
+                            askToSignIn(vendor)
+                        }
+                    },
+                    LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(1) },
+                )
+            }
             if (removable) {
                 addView(
                     View(context).apply {
@@ -8532,7 +8916,7 @@ class BuilderActivity : Activity() {
         editorText = draft ?: onDisk
 
         val editor = CodeEditor(this, palette).apply {
-            setPadding(gap(9), gap(2), gap(3), gap(2))
+            setPaddingRelative(gap(9), gap(2), gap(3), gap(2))
             readAt(Preferences.reading(this@BuilderActivity))
             wrapAt(Preferences.wrapping(this@BuilderActivity))
             open(path.substringAfterLast('/'), editorText)
@@ -9894,7 +10278,7 @@ class BuilderActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 minimumHeight = gap(11)
-                setPadding(gap(1), 0, gap(2), 0)
+                setPaddingRelative(gap(1), 0, gap(2), 0)
                 setBackgroundColor(SHELL_BAR)
                 addView(
                     View(context).apply {
@@ -10275,6 +10659,11 @@ class BuilderActivity : Activity() {
             !named.startsWith("/") &&
             !named.contains('\\')
 
+    private fun foreignSource(named: String): Boolean {
+        val lower = named.lowercase(Locale.ROOT)
+        return FOREIGN_SOURCES.any { lower.endsWith(it) }
+    }
+
     private fun agentBody(lines: List<String>): String {
         var held = lines
         if (held.firstOrNull()?.trim()?.startsWith("```") == true &&
@@ -10315,12 +10704,48 @@ class BuilderActivity : Activity() {
                 else -> at += 1
             }
         }
+        if (out.isEmpty()) {
+            out.addAll(fencedSteps(lines))
+        }
+        return out
+    }
+
+    private fun fencedSteps(lines: List<String>): List<AgentStep> {
+        val out = mutableListOf<AgentStep>()
+        var at = 0
+        while (at < lines.size) {
+            val line = lines[at].trim()
+            if (!line.startsWith("```")) {
+                at += 1
+                continue
+            }
+            val head = line.removePrefix("```").trim().split(Regex("\\s+"))
+            var stop = at + 1
+            while (stop < lines.size && !lines[stop].trim().startsWith("```")) {
+                stop += 1
+            }
+            val above = (at - 1 downTo 0).firstOrNull { lines[it].isNotBlank() }
+                ?.let { lines[it].trim() }
+                ?.takeIf { it.length <= FENCE_LINE }
+            val named = head.lastOrNull()?.takeIf { head.size >= 2 && it.contains('/') }
+                ?: above?.let { FENCE_PATH.findAll(it).lastOrNull()?.value }
+                    ?.takeIf { it.contains('/') || it in ROOT_FILES }
+            if (named != null && agentPath(named)) {
+                out.add(AgentStep(named, lines.subList(at + 1, min(stop, lines.size)).joinToString("\n")))
+            }
+            at = stop + 1
+        }
         return out
     }
 
     private fun agentApply(root: String, steps: List<AgentStep>): List<String> {
         val told = mutableListOf<String>()
         steps.forEach { one ->
+            if (one.body != null && foreignSource(one.path)) {
+                agentChanges.add(Change(one.path, "refused", 0, 0, emptyList()))
+                told.add(getString(R.string.omni_agent_java_only, one.path))
+                return@forEach
+            }
             val target = File(root, one.path)
             val before = if (target.isFile && target.length() <= AGENT_DIFF_BYTES) {
                 runCatching { target.readText() }.getOrNull()
@@ -10721,7 +11146,7 @@ class BuilderActivity : Activity() {
                         LinearLayout(context).apply {
                             orientation = LinearLayout.HORIZONTAL
                             gravity = Gravity.CENTER_VERTICAL
-                            setPadding(gap(3), gap(1), gap(1), gap(1))
+                            setPaddingRelative(gap(3), gap(1), gap(1), gap(1))
                             background = pill(palette.raised, gap(4).toFloat())
                             addView(
                                 View(context).apply {
@@ -10768,7 +11193,7 @@ class BuilderActivity : Activity() {
 
     private fun thoughtRow(at: Int, thought: String): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(gap(21), gap(1), 0, 0)
+        setPaddingRelative(gap(21), gap(1), 0, 0)
         val open = talkOpen.contains(at)
         addView(
             TextView(context).apply {
@@ -10797,7 +11222,7 @@ class BuilderActivity : Activity() {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setLineSpacing(gap(1) / 2f, 1f)
                     setTextIsSelectable(true)
-                    setPadding(gap(3), gap(1), gap(2), gap(2))
+                    setPaddingRelative(gap(3), gap(1), gap(2), gap(2))
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.RECTANGLE
                         cornerRadius = gap(2).toFloat()
@@ -11359,7 +11784,7 @@ class BuilderActivity : Activity() {
                 Vault.open(sealed) ?: return@working ""
             }
             val found = try {
-                Brain.listed(vendor, opened)
+                Brain.listed(vendor, opened, Preferences.listingTier(this, vendor))
             } finally {
                 opened.fill(' ')
             }
@@ -11398,7 +11823,9 @@ class BuilderActivity : Activity() {
                 val opened = if (sealed.isEmpty()) CharArray(0) else Vault.open(sealed)
                 if (opened != null) {
                     val found = try {
-                        runCatching { Brain.listed(vendor, opened) }.getOrDefault(emptyList())
+                        runCatching {
+                            Brain.listed(vendor, opened, Preferences.listingTier(kept, vendor))
+                        }.getOrDefault(emptyList())
                     } finally {
                         opened.fill(' ')
                     }
@@ -11548,9 +11975,17 @@ class BuilderActivity : Activity() {
                 return
             }
             talkAnyway = false
-            attempts.add(
-                Attempt(vendor, model, model.level(Preferences.effortFor(this, vendor.id, model.id)), 0L)
-            )
+            val effort = Preferences.effortFor(this, vendor.id, model.id)
+            attempts.add(Attempt(vendor, model, model.level(effort), 0L))
+            if (vendor.free && Brain.listable(vendor)) {
+                Preferences.fetchedModels(this, vendor.id)
+                    .filter { it != model.id }
+                    .take(SPARE_MODELS)
+                    .forEach { spare ->
+                        val other = Brain.Model(spare, spare, model.window, model.levels)
+                        attempts.add(Attempt(vendor, other, other.level(effort), 0L))
+                    }
+            }
         }
         talkAsking = true
         talkPartial = ""
@@ -11652,7 +12087,10 @@ class BuilderActivity : Activity() {
                 if (talkStopping.get() || talkPartial.isNotEmpty()) {
                     break
                 }
-                if (status == 429 && !auto && !retried && rest in 1L..TALK_PATIENCE_SECONDS) {
+                val lastChance = index == attempts.size - 1
+                if (status == 429 && !auto && lastChance && !retried &&
+                    rest in 1L..TALK_PATIENCE_SECONDS
+                ) {
                     retried = true
                     if (!restFor(vendor, rest)) {
                         break
@@ -11812,6 +12250,52 @@ class BuilderActivity : Activity() {
             sendToTheAssistant()
             return
         }
+        if (agentWrote.isNotEmpty() && agentRound < AGENT_ROUNDS) {
+            talkLiveNote?.text = getString(R.string.omni_agent_checking)
+            Thread {
+                val problem = agentProblem(root)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    if (problem != null) {
+                        talkDraft = (told + listOf("", AGENT_MEND, problem)).joinToString("\n")
+                        render(false)
+                        sendToTheAssistant()
+                    } else {
+                        agentWrapUp(root, steps, told, ended)
+                    }
+                }
+            }.start()
+            return
+        }
+        agentWrapUp(root, steps, told, ended)
+    }
+
+    private fun agentProblem(root: String): String? {
+        val answer = runCatching { Builder.nativeCheckProject(root) }.getOrNull() ?: return null
+        val checked = runCatching { CodeCheck.parse(answer) }.getOrNull() ?: return null
+        if (checked.clear) {
+            return null
+        }
+        val code = runCatching { JSONObject(answer).optJSONObject("code") }.getOrNull()
+        val english = code?.optString("english").orEmpty()
+            .ifEmpty { checked.refusal?.message.orEmpty() }
+        val place = if (checked.file.isNotEmpty()) {
+            " (" + checked.file + ":" + checked.line + ":" + checked.column + ")"
+        } else {
+            ""
+        }
+        val context = code?.optJSONArray("context")?.let { lines ->
+            (0 until lines.length()).joinToString("\n") { lines.optString(it) }
+        }.orEmpty()
+        return listOf(
+            (checked.refusal?.code.orEmpty() + " " + english + place).trim(),
+            context,
+        ).filter { it.isNotBlank() }.joinToString("\n")
+    }
+
+    private fun agentWrapUp(root: String, steps: List<AgentStep>, told: List<String>, ended: Boolean) {
         val changes = agentChanges.toList()
         if (changes.isNotEmpty()) {
             talkHeld.add(false to getString(R.string.omni_agent_changes, changes.size))
@@ -11944,6 +12428,7 @@ class BuilderActivity : Activity() {
         said.append("The reader is working in an Android project named ")
             .append(here.name)
             .append(". ")
+        said.append(BUILDER_LIMITS).append("\n\n")
         if (Preferences.assistantAgent(this)) {
             said.append(AGENT_RULES)
         } else {
@@ -12783,7 +13268,7 @@ class BuilderActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     background = sheet(palette.raised, palette.divider)
-                    setPadding(gap(3), gap(2), gap(2), gap(2))
+                    setPaddingRelative(gap(3), gap(2), gap(2), gap(2))
                     addView(
                         HorizontalScrollView(context).apply {
                             isHorizontalScrollBarEnabled = false
@@ -13674,7 +14159,7 @@ class BuilderActivity : Activity() {
                 addView(
                     EditText(context).apply {
                         setText(webAddress)
-                        hint = "https://ornek.com"
+                        hint = "https://example.com"
                         setHintTextColor(palette.muted)
                         setTextColor(palette.foreground)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
@@ -14077,7 +14562,11 @@ class BuilderActivity : Activity() {
                 if (held) palette.background else palette.muted,
                 gap(2).toFloat(),
             )
-            val slid = if (held) gap(5).toFloat() else 0f
+            val slid = when {
+                !held -> 0f
+                rightToLeft() -> -gap(5).toFloat()
+                else -> gap(5).toFloat()
+            }
             if (moving && !Motion.still()) {
                 knob.animate().translationX(slid).setDuration(Motion.of(Motion.TAP)).start()
             } else {
@@ -15951,58 +16440,98 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private fun commandOf(line: String): String? {
+        val said = line.substringBefore(" \u2192 ").trim()
+        if (said.isEmpty() || said.startsWith("#")) {
+            return null
+        }
+        val first = said.substringBefore(' ')
+        val assigned = Regex("^[A-Za-z_][A-Za-z0-9_]*=").containsMatchIn(said)
+        return if (first in COMMAND_WORDS || assigned) said else null
+    }
+
     private fun commandPanel(body: String): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.TOP
-        setPadding(gap(3), gap(2), gap(2), gap(2))
+        orientation = LinearLayout.VERTICAL
+        setPaddingRelative(gap(3), gap(2), gap(2), gap(2))
         background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = gap(2).toFloat()
             setColor(palette.background)
             setStroke(1, palette.divider)
         }
-        addView(
-            HorizontalScrollView(context).apply {
-                isHorizontalScrollBarEnabled = false
-                addView(
-                    TextView(context).apply {
-                        text = body
-                        setTextColor(Ink.hot(palette.foreground, 0.1f))
-                        typeface = Type.data
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        setLineSpacing(gap(1) / 2f, 1f)
-                        setTextIsSelectable(true)
-                    },
-                    WRAP_CONTENT,
-                    WRAP_CONTENT,
-                )
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
-        addView(
-            View(context).apply {
-                foreground = Mark(Mark.Shape.COPY, palette.muted)
-                isClickable = true
-                isFocusable = true
-                contentDescription = getString(R.string.omni_action_copy)
-                readAs(Button::class.java.name)
-                background = reacting(Color.TRANSPARENT, gap(5).toFloat(), palette.accent)
-                setOnClickListener {
-                    val clipboard = getSystemService(ClipboardManager::class.java)
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(
-                            ClipData.newPlainText(getString(R.string.omni_help_terminal), body)
-                        )
-                        flash(
-                            getString(R.string.omni_settings_logs_copied),
-                            palette.ok,
-                            Mark.Shape.COPY,
+        layoutDirection = View.LAYOUT_DIRECTION_LTR
+        body.split('\n').forEach { line ->
+            val command = commandOf(line)
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = if (command != null) gap(7) else 0
+                    addView(
+                        HorizontalScrollView(context).apply {
+                            isHorizontalScrollBarEnabled = false
+                            addView(
+                                TextView(context).apply {
+                                    text = line
+                                    textDirection = View.TEXT_DIRECTION_LTR
+                                    setTextColor(
+                                        if (command != null) {
+                                            Ink.hot(palette.foreground, 0.1f)
+                                        } else {
+                                            palette.muted
+                                        }
+                                    )
+                                    typeface = Type.data
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                    setLineSpacing(gap(1) / 2f, 1f)
+                                    setTextIsSelectable(true)
+                                },
+                                WRAP_CONTENT,
+                                WRAP_CONTENT,
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    if (command != null) {
+                        addView(
+                            View(context).apply {
+                                foreground = Mark(Mark.Shape.COPY, palette.muted)
+                                isClickable = true
+                                isFocusable = true
+                                contentDescription =
+                                    getString(R.string.omni_action_copy) + " " + command
+                                readAs(Button::class.java.name)
+                                background = reacting(
+                                    Color.TRANSPARENT,
+                                    gap(5).toFloat(),
+                                    palette.accent,
+                                )
+                                setOnClickListener {
+                                    val clipboard = getSystemService(ClipboardManager::class.java)
+                                    if (clipboard != null) {
+                                        clipboard.setPrimaryClip(
+                                            ClipData.newPlainText(
+                                                getString(R.string.omni_help_terminal),
+                                                command,
+                                            )
+                                        )
+                                        flash(
+                                            getString(R.string.omni_help_command_copied, command),
+                                            palette.ok,
+                                            Mark.Shape.COPY,
+                                        )
+                                    }
+                                }
+                            },
+                            LinearLayout.LayoutParams(gap(6), gap(6)).apply {
+                                marginStart = gap(2)
+                            },
                         )
                     }
-                }
-            },
-            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginStart = gap(2) },
-        )
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
     }
 
     private fun foldRow(at: Int, question: String, answer: String): View {
@@ -16839,7 +17368,7 @@ class BuilderActivity : Activity() {
                     LinearLayout(context).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        setPadding(gap(3), gap(1) / 2, 0, gap(1) / 2)
+                        setPaddingRelative(gap(3), gap(1) / 2, 0, gap(1) / 2)
                         addView(
                             View(context).apply {
                                 foreground = Mark(
@@ -17768,14 +18297,16 @@ class BuilderActivity : Activity() {
                     palette.ok,
                 )
             )
-            facts.addView(
-                keyValue(
-                    getString(R.string.omni_result_bundle),
-                    aab.name,
-                    size(outcome.bundleBytes),
-                    palette.ok,
+            if (outcome.bundleBytes > 0L && aab != apk) {
+                facts.addView(
+                    keyValue(
+                        getString(R.string.omni_result_bundle),
+                        aab.name,
+                        size(outcome.bundleBytes),
+                        palette.ok,
+                    )
                 )
-            )
+            }
             facts.addView(
                 keyValue(
                     getString(R.string.omni_result_contents),
@@ -20496,6 +21027,9 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     private val readAgain = Runnable { read() }
 
     init {
+        layoutDirection = LAYOUT_DIRECTION_LTR
+        textDirection = TEXT_DIRECTION_LTR
+        textAlignment = TEXT_ALIGNMENT_VIEW_START
         setTextColor(palette.foreground)
         setBackgroundColor(Color.TRANSPARENT)
         typeface = Typeface.MONOSPACE
@@ -21824,6 +22358,9 @@ internal object Brain {
                 link.setRequestProperty("editor-plugin-version", Copilot.PLUGIN)
                 link.setRequestProperty("copilot-integration-id", Copilot.INTEGRATION)
                 link.setRequestProperty("openai-intent", "conversation-panel")
+                link.setRequestProperty("user-agent", Copilot.AGENT)
+                link.setRequestProperty("x-github-api-version", Copilot.API_VERSION)
+                link.setRequestProperty("x-request-id", java.util.UUID.randomUUID().toString())
             }
             key.isEmpty() -> Unit
             vendor.sign == "x-api-key" -> {
@@ -21974,7 +22511,7 @@ internal object Brain {
         return (0 until methods.length()).any { methods.optString(it) == "generateContent" }
     }
 
-    fun listed(vendor: Vendor, key: CharArray): List<String> {
+    fun listed(vendor: Vendor, key: CharArray, tier: String = vendor.tier): List<String> {
         if (key.isEmpty() && !vendor.keyless && !vendor.custom) {
             return emptyList()
         }
@@ -21996,17 +22533,29 @@ internal object Brain {
                     val whole = JSONObject(said)
                     whole.optJSONArray("data") ?: whole.optJSONArray("models") ?: JSONArray()
                 }
-                val out = mutableListOf<String>()
-                for (at in 0 until held.length()) {
-                    val one = held.optJSONObject(at)
-                    val named = one?.optString("id").orEmpty()
-                        .ifEmpty { one?.optString("name").orEmpty() }
-                        .removePrefix("models/")
-                    if (named.isNotEmpty() && spoken(one, named)) {
-                        out.add(named)
+                val sorted = vibe(
+                    JSONObject()
+                        .put("op", "models")
+                        .put("tier", tier)
+                        .put("reply", said)
+                ).optJSONArray("models")
+                if (sorted != null) {
+                    (0 until sorted.length())
+                        .mapNotNull { sorted.optJSONObject(it)?.optString("id") }
+                        .filter { it.isNotEmpty() }
+                } else {
+                    val out = mutableListOf<String>()
+                    for (at in 0 until held.length()) {
+                        val one = held.optJSONObject(at)
+                        val named = one?.optString("id").orEmpty()
+                            .ifEmpty { one?.optString("name").orEmpty() }
+                            .removePrefix("models/")
+                        if (named.isNotEmpty() && spoken(one, named)) {
+                            out.add(named)
+                        }
                     }
+                    out.distinct().sorted()
                 }
-                out.distinct().sorted()
             }
         }.getOrDefault(emptyList()).also { link.disconnect() }
     }
@@ -22713,11 +23262,15 @@ internal object Copilot {
 
     private const val GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
-    const val EDITOR = "vscode/1.99.0"
+    const val EDITOR = "vscode/1.104.1"
 
-    const val PLUGIN = "copilot-chat/0.26.0"
+    const val PLUGIN = "copilot-chat/0.31.3"
 
     const val INTEGRATION = "vscode-chat"
+
+    const val AGENT = "GitHubCopilotChat/0.31.3"
+
+    const val API_VERSION = "2025-05-01"
 
     private const val OPEN_MILLIS = 20_000
 
@@ -22855,9 +23408,11 @@ internal object Copilot {
         link.setRequestProperty("authorization", "token " + String(key))
         link.setRequestProperty("editor-version", EDITOR)
         link.setRequestProperty("editor-plugin-version", PLUGIN)
-        link.setRequestProperty("user-agent", "apk-builder")
-        val said = runCatching { JSONObject(read(link)) }.getOrElse {
-            throw Brain.Refused(R.string.omni_copilot_no_seat)
+        link.setRequestProperty("user-agent", AGENT)
+        link.setRequestProperty("x-github-api-version", API_VERSION)
+        val said = runCatching { JSONObject(read(link)) }.getOrElse { why ->
+            throw (why as? Brain.Refused)?.takeIf { it.said == R.string.omni_talk_unreachable }
+                ?: Brain.Refused(R.string.omni_copilot_no_seat)
         }
         val given = said.optString("token")
         if (given.isEmpty()) {

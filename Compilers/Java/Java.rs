@@ -2401,6 +2401,8 @@ pub struct Unit {
     pub source: Option<String>,
 
     pub own_variables: Vec<(String, Written)>,
+
+    pub enclosed_by: Option<(String, Option<(String, String)>)>,
 }
 
 impl Unit {
@@ -3151,6 +3153,7 @@ impl Parser {
             static_imports: Vec::new(),
             source: None,
             own_variables,
+            enclosed_by: None,
         };
         if shape == Shape::Enum {
             return Ok(as_the_class_it_is(unit, &constants));
@@ -3991,36 +3994,37 @@ impl Parser {
 
     fn case_label(&mut self) -> Result<Expression, Diagnostic> {
         let (line, column) = (self.line(), self.column());
-        let negated = self.eat_mark("-");
-        let found = match self.take() {
-            Token::Int(value) => Expression::Int(value),
-            Token::Long(value) => Expression::Long(value),
-            Token::Char(value) => Expression::Char(value),
-            Token::Str(text) => Expression::Str(text),
-            Token::True => Expression::Boolean(true),
-            Token::False => Expression::Boolean(false),
-            Token::Identifier(name) => Expression::Name(name),
-
-            Token::Null => Expression::Null,
-            other => {
-                return Err(at(
-                    "EJ239",
-                    line,
-                    column,
-                    format!(
-                        "A `case` answers to a constant, and {} was found.",
-                        other.describe()
-                    ),
-                ))
-            }
-        };
-        if negated {
-            return Ok(Expression::Unary {
-                operator: Unary::Negate,
-                of: Box::new(found),
-            });
+        let begins = matches!(
+            self.here().token,
+            Token::Int(_)
+                | Token::Long(_)
+                | Token::Char(_)
+                | Token::Str(_)
+                | Token::True
+                | Token::False
+                | Token::Identifier(_)
+                | Token::Null
+                | Token::Punctuation("-" | "+" | "~" | "!" | "(")
+        );
+        if !begins {
+            return Err(at(
+                "EJ239",
+                line,
+                column,
+                format!(
+                    "A `case` answers to a constant, and {} was found.",
+                    self.here().token.describe()
+                ),
+            ));
         }
-        Ok(found)
+        if matches!(self.here().token, Token::Null) {
+            self.take();
+            return Ok(Expression::Null);
+        }
+        let outside = std::mem::replace(&mut self.bare_lambda, false);
+        let found = self.binary(0);
+        self.bare_lambda = outside;
+        found
     }
 
     fn try_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
@@ -5155,6 +5159,8 @@ pub struct KnownClass {
     pub interfaces: Vec<String>,
     pub methods: Vec<Signature>,
     pub fields: Vec<(String, Type, bool)>,
+
+    pub constants: Vec<(String, Expression)>,
     pub interface: bool,
 
     pub outer: Option<String>,
@@ -5345,6 +5351,19 @@ impl Classpath {
                     .collect(),
             });
         }
+        for field in &unit.fields {
+            if !field.modifiers.static_ || !field.modifiers.final_ {
+                continue;
+            }
+            let Some(value) = &field.value else {
+                continue;
+            };
+            if let Some(found) = constant_within(self, unit, value, 0) {
+                if let Some(held) = held_as(&field.what, found) {
+                    known.constants.push((field.name.clone(), held));
+                }
+            }
+        }
         self.known.insert(internal, known);
     }
 
@@ -5454,6 +5473,19 @@ impl Classpath {
             let Some(what) = read_type(&field.descriptor, &mut 0) else {
                 continue;
             };
+            let held = match &field.constant {
+                Some(crate::jvm::Element::Int(value)) => Some(Expression::Int(i64::from(*value))),
+                Some(crate::jvm::Element::Short(value)) => Some(Expression::Int(i64::from(*value))),
+                Some(crate::jvm::Element::Byte(value)) => Some(Expression::Int(i64::from(*value))),
+                Some(crate::jvm::Element::Char(value)) => Some(Expression::Char(*value)),
+                Some(crate::jvm::Element::Boolean(value)) => Some(Expression::Boolean(*value)),
+                Some(crate::jvm::Element::Long(value)) => Some(Expression::Long(*value)),
+                Some(crate::jvm::Element::Text(value)) => Some(Expression::Str(value.clone())),
+                _ => None,
+            };
+            if let Some(held) = held {
+                known.constants.push((field.name.clone(), held));
+            }
             known
                 .fields
                 .push((field.name.clone(), what, field.access_flags & 0x0008 != 0));
@@ -5591,20 +5623,32 @@ impl Classpath {
         owner: &str,
         name: &str,
     ) -> Option<(&KnownClass, &(String, Type, bool))> {
-        let mut at = Some(owner.to_string());
-        let mut seen = 0;
-        while let Some(current) = at {
-            let known = self.known.get(&current)?;
+        let mut waiting = vec![owner.to_string()];
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(current) = waiting.pop() {
+            if seen.contains(&current) || seen.len() > 64 {
+                continue;
+            }
+            seen.push(current.clone());
+            let Some(known) = self.known.get(&current) else {
+                continue;
+            };
             if let Some(found) = known.fields.iter().find(|(held, _, _)| held == name) {
                 return Some((known, found));
             }
-            seen += 1;
-            if seen > 64 {
-                return None;
-            }
-            at = known.superclass.clone();
+            waiting.extend(known.superclass.clone());
+            waiting.extend(known.interfaces.iter().rev().cloned());
         }
         None
+    }
+
+    pub fn constant(&self, owner: &str, name: &str) -> Option<&Expression> {
+        let (holder, _) = self.find_field(owner, name)?;
+        holder
+            .constants
+            .iter()
+            .find(|(held, _)| held == name)
+            .map(|(_, value)| value)
     }
 }
 
@@ -5969,6 +6013,8 @@ struct Emitter<'a> {
     writing_a_bridge: bool,
     static_: bool,
 
+    within: Option<(String, String)>,
+
     returns: Type,
 
     slots: Vec<Verified>,
@@ -6012,6 +6058,7 @@ impl<'a> Emitter<'a> {
             locally: Vec::new(),
             writing_a_bridge: false,
             static_,
+            within: None,
             returns: Type::Void,
             slots: Vec::new(),
             frames: Vec::new(),
@@ -7816,18 +7863,27 @@ fn resolve_named_within(
     } else if exists(name) {
         return Some(name.to_string());
     }
+    let nested_or_not = |dotted: &str| -> Option<String> {
+        let mut internal = dotted.replace('.', "/");
+        for _ in 0..8 {
+            if exists(&internal) {
+                return Some(internal);
+            }
+            let cut = internal.rfind('/')?;
+            internal.replace_range(cut..=cut, "$");
+        }
+        None
+    };
     for import in &unit.imports {
         if import.rsplit('.').next() == Some(name) {
-            let internal = import.replace('.', "/");
-            if exists(&internal) {
+            if let Some(internal) = nested_or_not(import) {
                 return Some(internal);
             }
         }
     }
     for import in &unit.imports {
         if let Some(prefix) = import.strip_suffix(".*") {
-            let candidate = format!("{}/{name}", prefix.replace('.', "/"));
-            if exists(&candidate) {
+            if let Some(candidate) = nested_or_not(&format!("{prefix}.{name}")) {
                 return Some(candidate);
             }
         }
@@ -8015,10 +8071,10 @@ public class Number {
 }
 
 public class Integer extends Number implements Comparable<Integer> {
-    public static final int MAX_VALUE;
-    public static final int MIN_VALUE;
-    public static final int SIZE;
-    public static final int BYTES;
+    public static final int MAX_VALUE = 2147483647;
+    public static final int MIN_VALUE = -2147483648;
+    public static final int SIZE = 32;
+    public static final int BYTES = 4;
     public native Integer(int value) throws java.lang.NumberFormatException ;
     public native int intValue();
     public native int compareTo(Integer other);
@@ -8086,8 +8142,8 @@ public class Long extends Number implements Comparable<Long> {
 }
 
 public class Short extends Number implements Comparable<Short> {
-    public static final short MAX_VALUE;
-    public static final short MIN_VALUE;
+    public static final short MAX_VALUE = 32767;
+    public static final short MIN_VALUE = -32768;
     public native Short(short value) throws java.lang.NumberFormatException ;
     public native short shortValue();
     public native int compareTo(Short other);
@@ -8099,8 +8155,8 @@ public class Short extends Number implements Comparable<Short> {
 }
 
 public class Byte extends Number implements Comparable<Byte> {
-    public static final byte MAX_VALUE;
-    public static final byte MIN_VALUE;
+    public static final byte MAX_VALUE = 127;
+    public static final byte MIN_VALUE = -128;
     public native Byte(byte value) throws java.lang.NumberFormatException ;
     public native byte byteValue();
     public native int compareTo(Byte other);
@@ -8167,8 +8223,8 @@ public class Boolean implements Comparable<Boolean> {
 }
 
 public class Character implements Comparable<Character> {
-    public static final char MAX_VALUE;
-    public static final char MIN_VALUE;
+    public static final char MAX_VALUE = '\uffff';
+    public static final char MIN_VALUE = '\u0000';
     public native Character(char value);
     public native char charValue();
     public native int compareTo(Character other);
@@ -8625,14 +8681,14 @@ public class RecordComponent {
 }
 
 public class Modifier {
-    public static final int PUBLIC;
-    public static final int PRIVATE;
-    public static final int PROTECTED;
-    public static final int STATIC;
-    public static final int FINAL;
-    public static final int ABSTRACT;
-    public static final int NATIVE;
-    public static final int SYNCHRONIZED;
+    public static final int PUBLIC = 1;
+    public static final int PRIVATE = 2;
+    public static final int PROTECTED = 4;
+    public static final int STATIC = 8;
+    public static final int FINAL = 16;
+    public static final int ABSTRACT = 1024;
+    public static final int NATIVE = 256;
+    public static final int SYNCHRONIZED = 32;
     public static native boolean isPublic(int flags);
     public static native boolean isPrivate(int flags);
     public static native boolean isProtected(int flags);
@@ -9505,12 +9561,12 @@ public class Date implements Comparable<Date> {
 }
 
 public class Calendar {
-    public static final int YEAR;
-    public static final int MONTH;
-    public static final int DAY_OF_MONTH;
-    public static final int HOUR_OF_DAY;
-    public static final int MINUTE;
-    public static final int SECOND;
+    public static final int YEAR = 1;
+    public static final int MONTH = 2;
+    public static final int DAY_OF_MONTH = 5;
+    public static final int HOUR_OF_DAY = 11;
+    public static final int MINUTE = 12;
+    public static final int SECOND = 13;
     public static native Calendar getInstance();
     public native int get(int field);
     public native void set(int field, int value);
@@ -9994,9 +10050,9 @@ public class AtomicReference<V> {
 package java.util.regex;
 
 public class Pattern {
-    public static final int CASE_INSENSITIVE;
-    public static final int MULTILINE;
-    public static final int DOTALL;
+    public static final int CASE_INSENSITIVE = 2;
+    public static final int MULTILINE = 8;
+    public static final int DOTALL = 32;
     public static native Pattern compile(String held);
     public static native Pattern compile(String held, int flags);
     public static native boolean matches(String pattern, CharSequence held);
@@ -10385,10 +10441,10 @@ public class Format {
 }
 
 public class DateFormat extends Format {
-    public static final int SHORT;
-    public static final int MEDIUM;
-    public static final int LONG;
-    public static final int FULL;
+    public static final int SHORT = 3;
+    public static final int MEDIUM = 2;
+    public static final int LONG = 1;
+    public static final int FULL = 0;
     public native String format(java.util.Date held);
     public native java.util.Date parse(String held) throws java.text.ParseException ;
     public native void setTimeZone(java.util.TimeZone held);
@@ -10601,8 +10657,8 @@ public class URLConnection {
 }
 
 public class HttpURLConnection extends URLConnection {
-    public static final int HTTP_OK;
-    public static final int HTTP_NOT_FOUND;
+    public static final int HTTP_OK = 200;
+    public static final int HTTP_NOT_FOUND = 404;
     public native void setRequestMethod(String name) throws java.net.ProtocolException ;
     public native int getResponseCode() throws java.io.IOException ;
     public native String getResponseMessage() throws java.io.IOException ;
@@ -15592,7 +15648,7 @@ impl Emitter<'_> {
                 wanted.iter().all(|name| {
                     arms.iter()
                         .flat_map(|arm| arm.labels.iter())
-                        .any(|label| matches!(label, Expression::Name(held) if held == name))
+                        .any(|label| enum_label(label) == Some(name.as_str()))
                 })
             }
             Chooser::Shape => {
@@ -15679,7 +15735,7 @@ impl Emitter<'_> {
 
         if let Type::Object(class, _) = found {
             let every = arms.iter().flat_map(|arm| arm.labels.iter()).all(|label| {
-                let Expression::Name(named) = label else {
+                let Some(named) = enum_label(label) else {
                     return false;
                 };
                 self.classpath
@@ -15890,13 +15946,23 @@ impl Emitter<'_> {
         let mut waiting: Vec<(Pending, usize)> = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             for label in &arm.labels {
-                let Expression::Name(named) = label else {
-                    return Err(at(
-                        "EJ239",
-                        arm.line,
-                        arm.column,
-                        "A `case` in a `switch` over an enum names one of its constants.",
-                    ));
+                let named = match label {
+                    Expression::Name(named) => named,
+                    Expression::Field { of, name }
+                        if dotted_name(of)
+                            .and_then(|written| resolve_named(self.classpath, self.unit, &written))
+                            .is_some_and(|owner| owner == class) =>
+                    {
+                        name
+                    }
+                    _ => {
+                        return Err(at(
+                            "EJ239",
+                            arm.line,
+                            arm.column,
+                            "A `case` in a `switch` over an enum names one of its constants.",
+                        ))
+                    }
                 };
                 if seen.contains(named) {
                     return Err(at(
@@ -15923,19 +15989,44 @@ impl Emitter<'_> {
         })
     }
 
+    fn case_constant(&self, label: &Expression) -> Option<Expression> {
+        if let Expression::Name(name) = label {
+            if self.local(name).is_some() {
+                return None;
+            }
+        }
+        if let Some(found) = constant_within(self.classpath, self.unit, label, 0) {
+            return Some(found);
+        }
+        let Expression::Name(name) = label else {
+            return None;
+        };
+        let mut owners = vec![self.this_class.clone()];
+        owners.extend(self.the_classes_around());
+        owners.extend(self.holders());
+        owners.extend(self.imported_statically(name));
+        owners
+            .iter()
+            .find_map(|owner| self.classpath.constant(owner, name).cloned())
+    }
+
     fn integer_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
         let mut keys: Vec<(i32, usize)> = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             for label in &arm.labels {
-                let value = constant_int(label).ok_or_else(|| {
-                    at(
-                        "EJ239",
-                        arm.line,
-                        arm.column,
-                        "A `case` over an integer wants a constant this compiler can read.",
-                    )
-                    .with_suggestion("A number, a character, or a `-` in front of one.")
-                })?;
+                let value = self
+                    .case_constant(label)
+                    .as_ref()
+                    .and_then(constant_int)
+                    .ok_or_else(|| {
+                        at(
+                            "EJ239",
+                            arm.line,
+                            arm.column,
+                            "A `case` over an integer wants a constant this compiler can read.",
+                        )
+                        .with_suggestion("A number, a character, or a `-` in front of one.")
+                    })?;
                 if keys.iter().any(|(held, _)| *held == value) {
                     return Err(at(
                         "EJ240",
@@ -16008,7 +16099,7 @@ impl Emitter<'_> {
         let mut waiting: Vec<(Pending, usize)> = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             for label in &arm.labels {
-                let Expression::Str(value) = label else {
+                let Some(Expression::Str(value)) = self.case_constant(label) else {
                     return Err(at(
                         "EJ239",
                         arm.line,
@@ -16016,6 +16107,7 @@ impl Emitter<'_> {
                         "A `case` in a `switch` over a String wants a String constant.",
                     ));
                 };
+                let value = &value;
                 if seen.contains(value) {
                     return Err(at(
                         "EJ240",
@@ -16869,6 +16961,8 @@ impl Emitter<'_> {
             source: self.unit.source.clone(),
 
             own_variables: Vec::new(),
+
+            enclosed_by: Some((self.this_class.clone(), self.within.clone())),
         });
 
         let made = match &self.unit.package {
@@ -17303,7 +17397,14 @@ impl Emitter<'_> {
         arguments: &[Expression],
         line: u32,
     ) -> Result<(), Diagnostic> {
-        let signature = if owner == self.this_class {
+        let chosen = if arguments.is_empty() {
+            None
+        } else {
+            self.signature_for(owner, "<init>", arguments, line)?
+        };
+        let signature = if let Some(chosen) = chosen {
+            chosen
+        } else if owner == self.this_class {
             let own = self
                 .unit
                 .methods
@@ -17837,6 +17938,316 @@ impl Dispatch {
             }
         }
     }
+}
+
+fn held_as(what: &Written, value: Expression) -> Option<Expression> {
+    let whole = match &value {
+        Expression::Int(held) => Some(*held),
+        Expression::Char(held) => Some(i64::from(*held)),
+        _ => None,
+    };
+    Some(match (what, whole) {
+        (Written::Char, Some(held)) => Expression::Char(held as u16),
+        (Written::Byte, Some(held)) => Expression::Int(i64::from(held as i8)),
+        (Written::Short, Some(held)) => Expression::Int(i64::from(held as i16)),
+        (Written::Int, Some(held)) => Expression::Int(held),
+        (Written::Long, Some(held)) => Expression::Long(held),
+        (Written::Long, None) if matches!(value, Expression::Long(_)) => value,
+        (Written::Boolean, None) if matches!(value, Expression::Boolean(_)) => value,
+        (Written::Named(named, _), None)
+            if matches!(value, Expression::Str(_))
+                && (named == "String" || named == "java.lang.String") =>
+        {
+            value
+        }
+        (Written::Inferred, _) => value,
+        _ => return None,
+    })
+}
+
+fn enum_label(label: &Expression) -> Option<&str> {
+    match label {
+        Expression::Name(name) | Expression::Field { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+fn dotted_name(expression: &Expression) -> Option<String> {
+    Some(match expression {
+        Expression::Name(name) => name.clone(),
+        Expression::Field { of, name } => format!("{}.{name}", dotted_name(of)?),
+        _ => return None,
+    })
+}
+
+fn constant_within(
+    classpath: &Classpath,
+    unit: &Unit,
+    expression: &Expression,
+    depth: u8,
+) -> Option<Expression> {
+    if depth > 24 {
+        return None;
+    }
+    let own = |name: &str| -> Option<Option<Expression>> {
+        let field = unit.fields.iter().find(|field| field.name == name)?;
+        if !field.modifiers.static_ || !field.modifiers.final_ {
+            return Some(None);
+        }
+        Some(
+            field
+                .value
+                .as_ref()
+                .and_then(|value| constant_within(classpath, unit, value, depth + 1))
+                .and_then(|found| held_as(&field.what, found)),
+        )
+    };
+    fold_constant(expression, &mut |named| match named {
+        Expression::Name(name) => {
+            if let Some(found) = own(name) {
+                return found;
+            }
+            let mut owners: Vec<String> = Vec::new();
+            owners.extend(
+                unit.extends
+                    .iter()
+                    .filter_map(|one| resolve_named(classpath, unit, one)),
+            );
+            owners.extend(
+                unit.implements
+                    .iter()
+                    .filter_map(|one| resolve_named(classpath, unit, one)),
+            );
+            let mut outer = unit.outer.clone();
+            while let Some(around) = outer {
+                if owners.len() > 64 || owners.contains(&around) {
+                    break;
+                }
+                outer = classpath.get(&around).and_then(|known| known.outer.clone());
+                owners.push(around);
+            }
+            for held in &unit.static_imports {
+                let Some((owner, last)) = held.rsplit_once('.') else {
+                    continue;
+                };
+                if last == "*" || last == name {
+                    owners.extend(resolve_named(classpath, unit, owner));
+                }
+            }
+            owners
+                .iter()
+                .find_map(|owner| classpath.constant(owner, name).cloned())
+        }
+        Expression::Field { of, name } => {
+            let owner = resolve_named(classpath, unit, &dotted_name(of)?)?;
+            if owner == unit.internal_name() {
+                if let Some(found) = own(name) {
+                    return found;
+                }
+            }
+            classpath.constant(&owner, name).cloned()
+        }
+        _ => None,
+    })
+}
+
+fn fold_constant(
+    expression: &Expression,
+    look: &mut dyn FnMut(&Expression) -> Option<Expression>,
+) -> Option<Expression> {
+    fn whole(expression: &Expression) -> Option<i64> {
+        match expression {
+            Expression::Int(value) => Some(*value),
+            Expression::Char(value) => Some(i64::from(*value)),
+            _ => None,
+        }
+    }
+    fn wide(expression: &Expression) -> Option<i64> {
+        match expression {
+            Expression::Long(value) => Some(*value),
+            other => whole(other),
+        }
+    }
+    fn spoken(expression: &Expression) -> Option<String> {
+        Some(match expression {
+            Expression::Str(text) => text.clone(),
+            Expression::Int(value) | Expression::Long(value) => value.to_string(),
+            Expression::Char(value) => char::from_u32(u32::from(*value))?.to_string(),
+            Expression::Boolean(value) => value.to_string(),
+            _ => return None,
+        })
+    }
+    fn narrow(value: i64) -> Expression {
+        Expression::Int(i64::from(value as i32))
+    }
+    Some(match expression {
+        Expression::Int(_)
+        | Expression::Long(_)
+        | Expression::Char(_)
+        | Expression::Str(_)
+        | Expression::Boolean(_) => expression.clone(),
+        Expression::Name(_) | Expression::Field { .. } => look(expression)?,
+        Expression::Cast { to, of } => {
+            let inner = fold_constant(of, look)?;
+            match to {
+                Written::Named(named, _) if named == "String" || named == "java.lang.String" => {
+                    let Expression::Str(_) = inner else {
+                        return None;
+                    };
+                    inner
+                }
+                Written::Boolean => {
+                    let Expression::Boolean(_) = inner else {
+                        return None;
+                    };
+                    inner
+                }
+                Written::Long => Expression::Long(wide(&inner)?),
+                Written::Int => narrow(wide(&inner)?),
+                Written::Char => Expression::Char(wide(&inner)? as u16),
+                Written::Short => Expression::Int(i64::from(wide(&inner)? as i16)),
+                Written::Byte => Expression::Int(i64::from(wide(&inner)? as i8)),
+                _ => return None,
+            }
+        }
+        Expression::Unary { operator, of } => {
+            let inner = fold_constant(of, look)?;
+            match (operator, inner) {
+                (Unary::Not, Expression::Boolean(value)) => Expression::Boolean(!value),
+                (Unary::Not, _) => return None,
+                (Unary::Negate, Expression::Long(value)) => Expression::Long(value.wrapping_neg()),
+                (Unary::Complement, Expression::Long(value)) => Expression::Long(!value),
+                (Unary::Plus, Expression::Long(value)) => Expression::Long(value),
+                (Unary::Negate, other) => narrow(whole(&other)?.wrapping_neg()),
+                (Unary::Complement, other) => narrow(!whole(&other)?),
+                (Unary::Plus, other) => narrow(whole(&other)?),
+            }
+        }
+        Expression::Conditional {
+            condition,
+            then,
+            otherwise,
+        } => {
+            let Expression::Boolean(chosen) = fold_constant(condition, look)? else {
+                return None;
+            };
+            let then = fold_constant(then, look)?;
+            let otherwise = fold_constant(otherwise, look)?;
+            if chosen {
+                then
+            } else {
+                otherwise
+            }
+        }
+        Expression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let left = fold_constant(left, look)?;
+            let right = fold_constant(right, look)?;
+            if let (Expression::Boolean(one), Expression::Boolean(two)) = (&left, &right) {
+                let (one, two) = (*one, *two);
+                return Some(Expression::Boolean(match operator {
+                    Binary::AndAlso | Binary::And => one && two,
+                    Binary::OrElse | Binary::Or => one || two,
+                    Binary::Xor | Binary::NotEqual => one != two,
+                    Binary::Equal => one == two,
+                    _ => return None,
+                }));
+            }
+            let text = matches!(left, Expression::Str(_)) || matches!(right, Expression::Str(_));
+            if text {
+                if *operator != Binary::Add {
+                    return None;
+                }
+                return Some(Expression::Str(spoken(&left)? + &spoken(&right)?));
+            }
+            let long = matches!(left, Expression::Long(_)) || matches!(right, Expression::Long(_));
+            let (one, two) = (wide(&left)?, wide(&right)?);
+            let shifting = matches!(
+                operator,
+                Binary::ShiftLeft | Binary::ShiftRight | Binary::UnsignedShiftRight
+            );
+            if shifting {
+                let long = matches!(left, Expression::Long(_));
+                let by = if long { two & 63 } else { two & 31 } as u32;
+                return Some(if long {
+                    Expression::Long(match operator {
+                        Binary::ShiftLeft => one.wrapping_shl(by),
+                        Binary::ShiftRight => one.wrapping_shr(by),
+                        _ => ((one as u64) >> by) as i64,
+                    })
+                } else {
+                    let one = one as i32;
+                    narrow(i64::from(match operator {
+                        Binary::ShiftLeft => one.wrapping_shl(by),
+                        Binary::ShiftRight => one.wrapping_shr(by),
+                        _ => ((one as u32) >> by) as i32,
+                    }))
+                });
+            }
+            let compared = match operator {
+                Binary::Less => Some(one < two),
+                Binary::LessOrEqual => Some(one <= two),
+                Binary::Greater => Some(one > two),
+                Binary::GreaterOrEqual => Some(one >= two),
+                Binary::Equal => Some(one == two),
+                Binary::NotEqual => Some(one != two),
+                _ => None,
+            };
+            if let Some(answer) = compared {
+                return Some(Expression::Boolean(answer));
+            }
+            if long {
+                Expression::Long(match operator {
+                    Binary::Add => one.wrapping_add(two),
+                    Binary::Subtract => one.wrapping_sub(two),
+                    Binary::Multiply => one.wrapping_mul(two),
+                    Binary::Divide => {
+                        if two == 0 {
+                            return None;
+                        }
+                        one.wrapping_div(two)
+                    }
+                    Binary::Remainder => {
+                        if two == 0 {
+                            return None;
+                        }
+                        one.wrapping_rem(two)
+                    }
+                    Binary::And => one & two,
+                    Binary::Or => one | two,
+                    Binary::Xor => one ^ two,
+                    _ => return None,
+                })
+            } else {
+                let (one, two) = (one as i32, two as i32);
+                narrow(i64::from(match operator {
+                    Binary::Add => one.wrapping_add(two),
+                    Binary::Subtract => one.wrapping_sub(two),
+                    Binary::Multiply => one.wrapping_mul(two),
+                    Binary::Divide => {
+                        if two == 0 {
+                            return None;
+                        }
+                        one.wrapping_div(two)
+                    }
+                    Binary::Remainder => {
+                        if two == 0 {
+                            return None;
+                        }
+                        one.wrapping_rem(two)
+                    }
+                    Binary::And => one & two,
+                    Binary::Or => one | two,
+                    Binary::Xor => one ^ two,
+                    _ => return None,
+                }))
+            }
+        }
+        _ => return None,
+    })
 }
 
 fn constant_int(expression: &Expression) -> Option<i32> {
@@ -19126,6 +19537,15 @@ pub fn compile_unit_in_nest(
         }
         let returns = emitter.resolve(&method.returns, method.line)?;
         emitter.returns = returns.clone();
+        if method.name != "<clinit>" {
+            let mut descriptor = String::from("(");
+            for one in &parameters {
+                descriptor.push_str(&one.descriptor());
+            }
+            descriptor.push(')');
+            descriptor.push_str(&returns.descriptor());
+            emitter.within = Some((method.name.clone(), descriptor));
+        }
 
         let mut body: &[Positioned<Statement>] = body;
         if method.constructor {
@@ -19429,6 +19849,17 @@ pub fn compile_unit_in_nest(
             }
             class_attributes.push((pool.utf8("InnerClasses"), body));
         }
+    }
+
+    if let Some((holder, method)) = &unit.enclosed_by {
+        let mut body = Vec::new();
+        body.extend_from_slice(&pool.class(holder).to_be_bytes());
+        let method = match method {
+            Some((name, descriptor)) => pool.name_and_type(name, descriptor),
+            None => 0,
+        };
+        body.extend_from_slice(&method.to_be_bytes());
+        class_attributes.push((pool.utf8("EnclosingMethod"), body));
     }
 
     let this_index = pool.class(&this_class);

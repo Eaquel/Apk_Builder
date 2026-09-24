@@ -558,7 +558,7 @@ pub const PROVIDERS: &[Provider] = &[
     Provider {
         id: "copilot",
         shown: "GitHub Copilot",
-        tier: Tier::Own,
+        tier: Tier::Free,
         format: Format::Open,
         sign: Sign::GitHub,
         base: "https://api.githubcopilot.com",
@@ -570,11 +570,18 @@ pub const PROVIDERS: &[Provider] = &[
         last_resort: false,
         models: &[
             Model {
-                id: "claude-opus-5.5",
-                shown: "Claude Opus 5.5",
-                window: 200_000,
-                efforts: HIGH_DEEP,
+                id: "gpt-4.1",
+                shown: "GPT-4.1",
+                window: 128_000,
+                efforts: LOW_HIGH,
                 wire: Wire::Prompted,
+            },
+            Model {
+                id: "gpt-5-mini",
+                shown: "GPT-5 mini",
+                window: 128_000,
+                efforts: LOW_TO_HIGH,
+                wire: Wire::Reasoning("medium"),
             },
             Model {
                 id: "claude-sonnet-5",
@@ -595,13 +602,6 @@ pub const PROVIDERS: &[Provider] = &[
                 shown: "Gemini 2.5 Pro",
                 window: 128_000,
                 efforts: LOW_TO_DEEP,
-                wire: Wire::Prompted,
-            },
-            Model {
-                id: "gpt-4.1",
-                shown: "GPT-4.1",
-                window: 128_000,
-                efforts: LOW_HIGH,
                 wire: Wire::Prompted,
             },
         ],
@@ -1720,6 +1720,213 @@ pub fn catalog_json() -> String {
     w.finish()
 }
 
+pub const LISTED_WINDOW: u64 = 16_000;
+
+pub const UNSPOKEN: &[&str] = &[
+    "embed",
+    "whisper",
+    "tts",
+    "dall-e",
+    "moderation",
+    "image",
+    "audio",
+    "transcribe",
+    "realtime",
+    "rerank",
+    "guard",
+    "imagen",
+    "veo",
+    "aqa",
+    "safety",
+    "lyria",
+    "sora",
+    "speech",
+    "music",
+    "video",
+    "ocr",
+    "search-preview",
+    "deep-research",
+    "computer-use",
+    "davinci",
+    "babbage",
+    "diffusion",
+    "flux",
+    "kling",
+    "seedream",
+    "seedance",
+    "upscale",
+];
+
+pub const PAID_TIERS: &[&str] = &["seed", "flower", "nectar", "paid"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub id: String,
+    pub window: u64,
+}
+
+fn amount(held: Option<&Json>) -> Option<f64> {
+    match held? {
+        Json::Number(said) => Some(*said),
+        Json::Text(said) => said.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn free_priced(one: &Json) -> Option<bool> {
+    if let Some(said) = one.get("isFree").and_then(Json::boolean) {
+        return Some(said);
+    }
+    if let Some(billed) = one.get("usage_based_only").and_then(Json::boolean) {
+        return Some(!billed);
+    }
+    let pricing = one.get("pricing")?;
+    let costs: Vec<f64> = ["prompt", "completion", "input", "output"]
+        .iter()
+        .filter_map(|named| amount(pricing.get(named)))
+        .collect();
+    if costs.is_empty() {
+        return None;
+    }
+    Some(costs.iter().all(|cost| *cost == 0.0))
+}
+
+fn spoken_only(one: &Json) -> bool {
+    let outputs = one
+        .get("architecture")
+        .and_then(|held| held.get("output_modalities"))
+        .or_else(|| one.get("modalities").and_then(|held| held.get("output")))
+        .or_else(|| one.get("output_modalities"));
+    if let Some(outputs) = outputs.and_then(Json::list) {
+        let said: Vec<&str> = outputs.iter().filter_map(Json::text).collect();
+        if !said.contains(&"text") || said.iter().any(|kind| *kind != "text") {
+            return false;
+        }
+    }
+    if let Some(kind) = one.get("model_type").and_then(Json::text) {
+        if kind != "chat" {
+            return false;
+        }
+    }
+    if let Some(kind) = one
+        .get("capabilities")
+        .and_then(|held| held.get("type"))
+        .and_then(Json::text)
+    {
+        if kind != "chat" {
+            return false;
+        }
+    }
+    if let Some(methods) = one.get("supportedGenerationMethods").and_then(Json::list) {
+        if !methods
+            .iter()
+            .any(|method| method.text() == Some("generateContent"))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn window_of(one: &Json) -> u64 {
+    let found = one
+        .get("context_length")
+        .and_then(Json::integer)
+        .or_else(|| {
+            one.get("context_window").and_then(|held| {
+                held.integer()
+                    .or_else(|| held.get("tokens").and_then(Json::integer))
+            })
+        })
+        .or_else(|| one.get("inputTokenLimit").and_then(Json::integer))
+        .or_else(|| one.get("max_context_length").and_then(Json::integer))
+        .or_else(|| {
+            one.get("top_provider")
+                .and_then(|held| held.get("context_length"))
+                .and_then(Json::integer)
+        })
+        .or_else(|| {
+            one.get("capabilities")
+                .and_then(|held| held.get("limits"))
+                .and_then(|held| held.get("max_context_window_tokens"))
+                .and_then(Json::integer)
+        });
+    found.map_or(0, |said| said.max(0) as u64)
+}
+
+pub fn usable_models(tier: Tier, reply: &Json) -> Vec<Listed> {
+    let items: &[Json] = match reply {
+        Json::List(items) => items,
+        _ => reply
+            .get("data")
+            .or_else(|| reply.get("models"))
+            .and_then(Json::list)
+            .unwrap_or(&[]),
+    };
+    let mut out: Vec<Listed> = Vec::new();
+    for one in items {
+        let named = one
+            .get("id")
+            .and_then(Json::text)
+            .filter(|said| !said.is_empty())
+            .or_else(|| one.get("name").and_then(Json::text))
+            .unwrap_or("");
+        let id = named.strip_prefix("models/").unwrap_or(named).trim();
+        if id.is_empty() {
+            continue;
+        }
+        let lower = id.to_ascii_lowercase();
+        if UNSPOKEN.iter().any(|word| lower.contains(word)) || !spoken_only(one) {
+            continue;
+        }
+        let window = window_of(one);
+        if window > 0 && window < LISTED_WINDOW {
+            continue;
+        }
+        if tier != Tier::Own {
+            if free_priced(one) == Some(false) {
+                continue;
+            }
+            if let Some(level) = one.get("tier").and_then(Json::text) {
+                if PAID_TIERS.contains(&level) {
+                    continue;
+                }
+            }
+            if one
+                .get("billing")
+                .and_then(|held| held.get("is_premium"))
+                .and_then(Json::boolean)
+                == Some(true)
+            {
+                continue;
+            }
+        }
+        if out.iter().all(|held| held.id != id) {
+            out.push(Listed {
+                id: id.to_string(),
+                window,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+pub fn listed_json(held: &[Listed]) -> String {
+    let mut w = Writer::new();
+    w.begin_object(None);
+    w.begin_array(Some("models"));
+    for one in held {
+        w.begin_object(None);
+        w.field_str("id", &one.id);
+        w.field_u64("window", one.window);
+        w.end_object();
+    }
+    w.end_array();
+    w.end_object();
+    w.finish()
+}
+
 fn write_choice(w: &mut Writer, key: Option<&str>, held: &Choice) {
     w.begin_object(key);
     w.field_str("provider", held.provider.id);
@@ -1862,6 +2069,16 @@ pub fn answer(request: &str) -> String {
             w.finish()
         }
         "custom" => custom_json(&Custom::read(&held)),
+        "models" => {
+            let tier = match text_of(&held, "tier") {
+                "byok" | "own" => Tier::Own,
+                "keyless" => Tier::Keyless,
+                "custom" => Tier::Own,
+                _ => Tier::Free,
+            };
+            let reply = json::read(text_of(&held, "reply")).unwrap_or(Json::Null);
+            listed_json(&usable_models(tier, &reply))
+        }
         "fit" => {
             let verdict = fit(
                 text_of(&held, "provider"),

@@ -8977,6 +8977,8 @@ pub mod xml {
         pub children: Vec<Element>,
         pub text: String,
         pub position: Position,
+
+        pub child_at: Vec<usize>,
     }
 
     impl Element {
@@ -9012,6 +9014,7 @@ pub mod xml {
         children: Vec<Element>,
         text: String,
         position: Position,
+        child_at: Vec<usize>,
     }
 
     impl<'a> Parser<'a> {
@@ -9175,7 +9178,10 @@ pub mod xml {
                         }
                         let finished = finish(open);
                         match stack.last_mut() {
-                            Some(parent) => parent.children.push(finished),
+                            Some(parent) => {
+                                parent.child_at.push(parent.text.len());
+                                parent.children.push(finished);
+                            }
                             None => {
                                 if root.is_some() {
                                     sink.emit(
@@ -9216,12 +9222,16 @@ pub mod xml {
                         children: Vec::new(),
                         text: String::new(),
                         position: at,
+                        child_at: Vec::new(),
                     };
 
                     if self_closing {
                         let finished = finish(element);
                         match stack.last_mut() {
-                            Some(parent) => parent.children.push(finished),
+                            Some(parent) => {
+                                parent.child_at.push(parent.text.len());
+                                parent.children.push(finished);
+                            }
                             None => {
                                 if root.is_some() {
                                     sink.emit(self.error(
@@ -9616,6 +9626,7 @@ pub mod xml {
             children: open.children,
             text: open.text,
             position: open.position,
+            child_at: open.child_at,
         }
     }
 
@@ -10534,8 +10545,20 @@ pub mod resources {
     }
 
     #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Span {
+        pub tag: String,
+        pub first: u32,
+        pub last: u32,
+    }
+
+    #[derive(Clone, PartialEq, Eq, Debug)]
     pub enum Value {
         Text(String),
+
+        Styled {
+            text: String,
+            spans: Vec<Span>,
+        },
         Color(u32),
         Dimension {
             milli: i64,
@@ -10595,6 +10618,7 @@ pub mod resources {
         pub const fn type_name(&self) -> &'static str {
             match self {
                 Value::Text(_) => "text",
+                Value::Styled { .. } => "styled text",
                 Value::Color(_) => "color",
                 Value::Dimension { .. } => "dimension",
                 Value::Fraction { .. } => "fraction",
@@ -10612,6 +10636,7 @@ pub mod resources {
         pub fn to_source(&self) -> String {
             match self {
                 Value::Text(text) => text.clone(),
+                Value::Styled { text, .. } => text.clone(),
                 Value::Color(argb) => format!("#{argb:08x}"),
                 Value::Dimension { milli, unit } => {
                     let whole = milli / 1000;
@@ -10879,6 +10904,9 @@ pub mod resources {
 
             let mut ok = true;
             for child in &root.children {
+                if child.name == "skip" || child.name == "eat-comment" {
+                    continue;
+                }
                 ok &= self.read_entry(child, origin, config, sink);
             }
             ok
@@ -10985,6 +11013,20 @@ pub mod resources {
                         name: name.to_string(),
                         config,
                         value,
+                        origin: origin.to_string(),
+                        position: element.position,
+                    },
+                    sink,
+                );
+            }
+
+            if !element.children.is_empty() && kind == Kind::String {
+                return self.push(
+                    Entry {
+                        kind,
+                        name: name.to_string(),
+                        config,
+                        value: styled_string(element),
                         origin: origin.to_string(),
                         position: element.position,
                     },
@@ -12342,6 +12384,10 @@ pub mod resources {
 
             let held = match kind {
                 Kind::Style => style_item(child, origin, sink)?,
+                Kind::Plurals if !child.children.is_empty() => (
+                    BagKey::Number(plural_quantity(child, origin, sink)?),
+                    styled_string(child),
+                ),
                 Kind::Plurals => (
                     BagKey::Number(plural_quantity(child, origin, sink)?),
                     parse_value(Kind::String, &child.text, origin, child.position, sink)?,
@@ -12628,6 +12674,7 @@ pub mod resources {
         sink: &mut Sink,
     ) -> Option<Value> {
         match written_as {
+            "string-array" if !child.children.is_empty() => Some(styled_string(child)),
             "string-array" => parse_value(Kind::String, &child.text, origin, child.position, sink),
             "integer-array" => {
                 parse_value(Kind::Integer, &child.text, origin, child.position, sink)
@@ -12701,6 +12748,117 @@ pub mod resources {
             message,
         )
         .with_location(Location::at(origin, position.line, position.column))
+    }
+
+    fn styled_string(element: &Element) -> Value {
+        enum Piece<'a> {
+            Text(&'a str),
+            Open(String),
+            Close,
+        }
+        fn gather<'a>(element: &'a Element, out: &mut Vec<Piece<'a>>) {
+            let mut from = 0usize;
+            for (index, child) in element.children.iter().enumerate() {
+                let at = element
+                    .child_at
+                    .get(index)
+                    .copied()
+                    .unwrap_or(element.text.len())
+                    .max(from);
+                out.push(Piece::Text(element.text.get(from..at).unwrap_or("")));
+                from = at;
+                let kept = !child.name.starts_with("xliff:");
+                if kept {
+                    let mut tag = child.name.clone();
+                    for attribute in &child.attributes {
+                        if attribute.name == "xmlns" || attribute.name.starts_with("xmlns:") {
+                            continue;
+                        }
+                        tag.push(';');
+                        tag.push_str(&attribute.name);
+                        tag.push('=');
+                        tag.push_str(&attribute.value);
+                    }
+                    out.push(Piece::Open(tag));
+                }
+                gather(child, out);
+                if kept {
+                    out.push(Piece::Close);
+                }
+            }
+            out.push(Piece::Text(element.text.get(from..).unwrap_or("")));
+        }
+
+        let mut pieces = Vec::new();
+        gather(element, &mut pieces);
+        let mut text = String::new();
+        let mut units = 0u32;
+        let mut spans: Vec<Span> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        let mut space = false;
+        let mut quoted = false;
+        for piece in pieces {
+            match piece {
+                Piece::Open(tag) => {
+                    if space {
+                        text.push(' ');
+                        units += 1;
+                        space = false;
+                    }
+                    open.push(spans.len());
+                    spans.push(Span {
+                        tag,
+                        first: units,
+                        last: u32::MAX,
+                    });
+                }
+                Piece::Close => {
+                    if let Some(at) = open.pop() {
+                        spans[at].last = units.wrapping_sub(1);
+                        if units == spans[at].first {
+                            spans[at].last = u32::MAX;
+                        }
+                    }
+                }
+                Piece::Text(raw) => {
+                    let mut characters = raw.chars();
+                    while let Some(character) = characters.next() {
+                        if character == '"' {
+                            quoted = !quoted;
+                            continue;
+                        }
+                        if character.is_whitespace() && !quoted {
+                            space = units > 0;
+                            continue;
+                        }
+                        let decoded = if character == '\\' {
+                            let mut sequence = String::from('\\');
+                            if let Some(next) = characters.next() {
+                                sequence.push(next);
+                                if next == 'u' {
+                                    sequence.extend(characters.by_ref().take(4));
+                                }
+                            }
+                            unescape(&sequence)
+                        } else {
+                            character.to_string()
+                        };
+                        if space {
+                            text.push(' ');
+                            units += 1;
+                            space = false;
+                        }
+                        units += decoded.encode_utf16().count() as u32;
+                        text.push_str(&decoded);
+                    }
+                }
+            }
+        }
+        spans.retain(|span| span.last != u32::MAX && span.last < units);
+        if spans.is_empty() {
+            return Value::Text(text);
+        }
+        Value::Styled { text, spans }
     }
 
     fn decode_string(text: &str) -> String {
@@ -12816,6 +12974,14 @@ pub mod resources {
     }
 
     fn parse_dimension(text: &str) -> Result<(i64, Unit), String> {
+        let spelled;
+        let text = match text.strip_suffix("dip") {
+            Some(number) => {
+                spelled = format!("{number}dp");
+                spelled.as_str()
+            }
+            None => text,
+        };
         let Some(unit) = Unit::ALL
             .iter()
             .copied()
@@ -22457,6 +22623,8 @@ pub mod dexwrite {
         protos: Vec<(String, String, Vec<String>)>,
         methods: Vec<(String, String, usize)>,
         fields: Vec<FieldRef>,
+
+        named_methods: Vec<MethodRef>,
     }
 
     impl Pools {
@@ -22535,6 +22703,7 @@ pub mod dexwrite {
         pub(super) const DOUBLE: u8 = 0x11;
         pub(super) const STRING: u8 = 0x17;
         pub(super) const TYPE: u8 = 0x18;
+        pub(super) const METHOD: u8 = 0x1a;
         pub(super) const ENUM: u8 = 0x1b;
         pub(super) const ARRAY: u8 = 0x1c;
         pub(super) const ANNOTATION: u8 = 0x1d;
@@ -22577,8 +22746,29 @@ pub mod dexwrite {
                     learn_element(pools, one);
                 }
             }
+            Element::Method {
+                class,
+                name,
+                descriptor,
+            } => {
+                if let Some(reference) = method_named(class, name, descriptor) {
+                    if !pools.named_methods.contains(&reference) {
+                        pools.named_methods.push(reference);
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    fn method_named(class: &str, name: &str, descriptor: &str) -> Option<MethodRef> {
+        let (parameters, return_type) = crate::dalvik::split_descriptor(descriptor)?;
+        Some(MethodRef {
+            class: class.to_string(),
+            name: name.to_string(),
+            return_type,
+            parameters,
+        })
     }
 
     fn write_element(
@@ -22620,6 +22810,19 @@ pub mod dexwrite {
                     out,
                     value::ENUM,
                     &pools.index_of_field(&reference)?.to_le_bytes(),
+                )
+            }
+            Element::Method {
+                class,
+                name,
+                descriptor,
+            } => {
+                let reference = method_named(class, name, descriptor)
+                    .ok_or_else(|| fail("EW004", "A method was never interned."))?;
+                sized(
+                    out,
+                    value::METHOD,
+                    &pools.index_of_method(&reference)?.to_le_bytes(),
                 )
             }
             Element::Nested(inside) => {
@@ -23055,6 +23258,7 @@ pub mod dexwrite {
                 }
             }
         }
+        references.append(&mut pools.named_methods);
         for reference in &references {
             pools.kind(&reference.class);
             pools.kind(&reference.return_type);
@@ -26501,11 +26705,22 @@ pub mod dalvik {
                         visibility: jvm::Visibility::System,
                         values: vec![(
                             "value".to_string(),
-                            jvm::Element::Text(format!("{inside}.{name}{descriptor}")),
+                            jvm::Element::Method {
+                                class: internal(inside),
+                                name: name.clone(),
+                                descriptor: descriptor.clone(),
+                            },
                         )],
                     });
                 }
-                _ => {
+                Some((inside, None)) => {
+                    out.push(jvm::Annotation {
+                        descriptor: "Ldalvik/annotation/EnclosingClass;".to_string(),
+                        visibility: jvm::Visibility::System,
+                        values: vec![("value".to_string(), jvm::Element::Class(internal(inside)))],
+                    });
+                }
+                None => {
                     if let Some(outer) = outer {
                         out.push(jvm::Annotation {
                             descriptor: "Ldalvik/annotation/EnclosingClass;".to_string(),
@@ -28404,6 +28619,14 @@ pub mod settings {
             "android:versionCode",
             &settings.version_code.to_string(),
         );
+        if !out.contains("<uses-sdk") {
+            if let Some(opened) = out.find("<manifest") {
+                if let Some(closed) = out[opened..].find('>') {
+                    let at = opened + closed + 1;
+                    out.insert_str(at, "\n    <uses-sdk />");
+                }
+            }
+        }
         out = set_attribute(
             &out,
             "uses-sdk",
@@ -29367,6 +29590,49 @@ pub mod gradle {
         ("src/main/jniLibs", crate::scaffold::LIBRARY_FOLDER),
         ("libs", crate::scaffold::LIBRARY_FOLDER),
     ];
+
+    pub const CLASSIC_MAP: &[(&str, &str)] = &[
+        ("src", crate::scaffold::JAVA_FOLDER),
+        ("res", crate::scaffold::RES_FOLDER),
+        ("assets", crate::scaffold::ASSETS_FOLDER),
+        ("libs", crate::scaffold::LIBRARY_FOLDER),
+    ];
+
+    pub fn looks_classic(root: &str) -> bool {
+        let here = std::path::Path::new(root);
+        here.join("AndroidManifest.xml").is_file()
+            && (here.join("src").is_dir() || here.join("res").is_dir())
+            && !here.join(crate::scaffold::JAVA_FOLDER).is_dir()
+            && !here.join(crate::scaffold::RES_FOLDER).is_dir()
+    }
+
+    pub fn adopt_classic(root: &str) -> Result<usize, Diagnostic> {
+        if !looks_classic(root) {
+            return Ok(0);
+        }
+        let here = std::path::Path::new(root);
+        let mut moved = 0;
+        for (classic_folder, omni_folder) in CLASSIC_MAP {
+            let from = here.join(classic_folder);
+            if !from.is_dir() {
+                continue;
+            }
+            let mut held = Vec::new();
+            walk(&from, "", &mut held);
+            for (named, path) in held {
+                let folder = if *omni_folder == crate::scaffold::JAVA_FOLDER {
+                    language_folder(&named)
+                } else {
+                    omni_folder
+                };
+                if carry(&path, &here.join(folder).join(&named))? {
+                    moved += 1;
+                }
+            }
+            std::fs::remove_dir_all(&from).ok();
+        }
+        Ok(moved)
+    }
 
     fn language_folder(named: &str) -> &'static str {
         if named.ends_with(".kt") || named.ends_with(".kts") {
@@ -30607,6 +30873,56 @@ pub mod scaffold {
         false
     }
 
+    pub fn drop_idle_starters(root: &str) -> usize {
+        let base = std::path::Path::new(root);
+        let Ok(Some(settings)) = crate::settings::held(root) else {
+            return 0;
+        };
+        let spec = Spec {
+            package: settings.package.clone(),
+            label: settings.label.clone(),
+            version_name: settings.version_name.clone(),
+            version_code: settings.version_code,
+            min_sdk: settings.min_sdk,
+            target_sdk: settings.target_sdk,
+            languages: settings.languages.clone(),
+            locales: settings.locales.clone(),
+            abis: settings.abis.clone(),
+            ..Spec::default()
+        };
+        let mut dropped = 0;
+        for (language, folder, _, compiled) in LANGUAGES {
+            if *compiled {
+                continue;
+            }
+            let directory = base.join(folder);
+            if !directory.is_dir() {
+                continue;
+            }
+            let mut names = vec![starter_source(language, &spec).0];
+            names.extend(
+                beside_the_starter(language, &spec)
+                    .into_iter()
+                    .map(|(name, _)| name),
+            );
+            for name in names {
+                let relative = format!("{folder}/{name}");
+                if is_untouched_starter(root, &relative)
+                    && std::fs::remove_file(base.join(&relative)).is_ok()
+                {
+                    dropped += 1;
+                }
+            }
+            let empty = std::fs::read_dir(&directory)
+                .map(|mut inside| inside.next().is_none())
+                .unwrap_or(false);
+            if empty {
+                std::fs::remove_dir(&directory).ok();
+            }
+        }
+        dropped
+    }
+
     fn beside_the_starter(language: &str, spec: &Spec) -> Vec<(String, String)> {
         match language {
             "cpp" => vec![
@@ -30683,6 +30999,10 @@ pub mod scaffold {
              -keepattributes SourceFile,LineNumberTable\n\n\
              -dontwarn android.**\n"
         )
+    }
+
+    pub fn starter_text(language: &str, spec: &Spec) -> String {
+        starter_source(language, spec).1
     }
 
     fn starter_source(language: &str, spec: &Spec) -> (String, String) {
@@ -30779,7 +31099,7 @@ pub mod scaffold {
             crate::settings::FILE_NAME.to_string(),
         ];
 
-        for (language, folder, _, _) in LANGUAGES {
+        for (language, folder, _, _) in LANGUAGES.iter().filter(|(_, _, _, compiled)| *compiled) {
             let directory = base.join(folder);
             std::fs::create_dir_all(&directory).map_err(|why| {
                 fail("EP022", "A language folder could not be made.")
@@ -30993,6 +31313,13 @@ pub mod scaffold {
     }
 
     pub fn values_files(root: &str) -> Vec<(String, String)> {
+        named_values_files(root)
+            .into_iter()
+            .map(|(folder, _, text)| (folder, text))
+            .collect()
+    }
+
+    pub fn named_values_files(root: &str) -> Vec<(String, String, String)> {
         let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
         let mut found = Vec::new();
         let Ok(entries) = std::fs::read_dir(&base) else {
@@ -31017,8 +31344,12 @@ pub mod scaffold {
 
             files.sort();
             for path in files {
+                let named = path
+                    .file_name()
+                    .map(|held| held.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    found.push((folder.clone(), text));
+                    found.push((folder.clone(), named, text));
                 }
             }
         }
@@ -35321,6 +35652,8 @@ pub mod workspace {
                 out.adopted = true;
                 out.settings_written = true;
                 out.unread = held.unread.clone();
+            } else if crate::gradle::adopt_classic(into)? > 0 {
+                out.adopted = true;
             }
         }
         let manifest = crate::scaffold::read_manifest(into)?;
@@ -35871,7 +36204,14 @@ pub mod bundle {
     const VALUE_ITEM: u32 = 4;
     const ITEM_REFERENCE: u32 = 1;
     const ITEM_STRING: u32 = 2;
+    const ITEM_STYLED_STRING: u32 = 4;
     const ITEM_FILE: u32 = 5;
+
+    const STYLED_VALUE: u32 = 1;
+    const STYLED_SPAN: u32 = 2;
+    const SPAN_TAG: u32 = 1;
+    const SPAN_FIRST: u32 = 2;
+    const SPAN_LAST: u32 = 3;
     const REFERENCE_ID: u32 = 2;
     const STRING_VALUE: u32 = 1;
     const FILE_PATH: u32 = 1;
@@ -35948,6 +36288,18 @@ pub mod bundle {
                 let mut held = Message::new();
                 held.text(STRING_VALUE, text);
                 item.message(ITEM_STRING, &held);
+            }
+            Value::Styled { text, spans } => {
+                let mut held = Message::new();
+                held.text(STYLED_VALUE, text);
+                for span in spans {
+                    let mut one = Message::new();
+                    one.text(SPAN_TAG, &span.tag);
+                    one.number(SPAN_FIRST, u64::from(span.first));
+                    one.number(SPAN_LAST, u64::from(span.last));
+                    held.message(STYLED_SPAN, &one);
+                }
+                item.message(ITEM_STYLED_STRING, &held);
             }
             Value::File(path) => {
                 let mut held = Message::new();
@@ -36359,6 +36711,7 @@ pub mod arsc {
     pub const TYPE_HEADER_BYTES: usize = 84;
     pub const TYPE_SPEC_HEADER_BYTES: usize = 16;
     pub const POOL_HEADER_BYTES: usize = 28;
+    pub const SPAN_END: u32 = 0xffff_ffff;
     pub const CONFIG_BYTES: usize = 64;
     pub const ENTRY_BYTES: usize = 16;
     pub const PACKAGE_NAME_UNITS: usize = 128;
@@ -36478,15 +36831,64 @@ pub mod arsc {
     #[derive(Default)]
     struct Pool {
         strings: Vec<String>,
+
+        styled: Vec<Vec<crate::resources::Span>>,
+
+        named: Vec<Vec<(u32, u32, u32)>>,
     }
 
     impl Pool {
         fn intern(&mut self, text: &str) -> u32 {
-            if let Some(index) = self.strings.iter().position(|held| held == text) {
-                return index as u32;
+            let skipped = self.styled.len();
+            if let Some(index) = self
+                .strings
+                .iter()
+                .skip(skipped)
+                .position(|held| held == text)
+            {
+                return (index + skipped) as u32;
             }
             self.strings.push(text.to_string());
             (self.strings.len() - 1) as u32
+        }
+
+        fn styled(&self, text: &str, spans: &[crate::resources::Span]) -> Option<u32> {
+            self.styled
+                .iter()
+                .zip(&self.strings)
+                .position(|(held, said)| said == text && held == spans)
+                .map(|index| index as u32)
+        }
+
+        fn reserve_styles(&mut self, compiled: &Compiled) {
+            let mut found: Vec<(&str, &[crate::resources::Span])> = Vec::new();
+            for entry in compiled.entries() {
+                let mut every = vec![&entry.value];
+                if let Value::Bag { items, .. } = &entry.value {
+                    every.extend(items.iter().map(|(_, value)| value));
+                }
+                for value in every {
+                    if let Value::Styled { text, spans } = value {
+                        if !found
+                            .iter()
+                            .any(|(said, held)| said == text && held == spans)
+                        {
+                            found.push((text, spans));
+                        }
+                    }
+                }
+            }
+            for (text, spans) in &found {
+                self.strings.push(text.to_string());
+                self.styled.push(spans.to_vec());
+            }
+            for (_, spans) in &found {
+                let named = spans
+                    .iter()
+                    .map(|span| (self.intern(&span.tag), span.first, span.last))
+                    .collect();
+                self.named.push(named);
+            }
         }
 
         fn encode(&self) -> Result<Vec<u8>, Diagnostic> {
@@ -36519,22 +36921,47 @@ pub mod arsc {
                 data.push(0);
             }
 
-            let strings_start = POOL_HEADER_BYTES + count * 4;
-            let total = strings_start + data.len();
+            let mut style_offsets: Vec<u32> = Vec::with_capacity(self.named.len());
+            let mut styles: Vec<u8> = Vec::new();
+            for spans in &self.named {
+                style_offsets.push(styles.len() as u32);
+                for (name, first, last) in spans {
+                    styles.extend_from_slice(&name.to_le_bytes());
+                    styles.extend_from_slice(&first.to_le_bytes());
+                    styles.extend_from_slice(&last.to_le_bytes());
+                }
+                styles.extend_from_slice(&SPAN_END.to_le_bytes());
+            }
+            if !self.named.is_empty() {
+                styles.extend_from_slice(&SPAN_END.to_le_bytes());
+                styles.extend_from_slice(&SPAN_END.to_le_bytes());
+            }
+
+            let strings_start = POOL_HEADER_BYTES + count * 4 + style_offsets.len() * 4;
+            let styles_start = if styles.is_empty() {
+                0
+            } else {
+                strings_start + data.len()
+            };
+            let total = strings_start + data.len() + styles.len();
 
             let mut out = Vec::with_capacity(total);
             out.extend_from_slice(&RES_STRING_POOL.to_le_bytes());
             out.extend_from_slice(&(POOL_HEADER_BYTES as u16).to_le_bytes());
             out.extend_from_slice(&(total as u32).to_le_bytes());
             out.extend_from_slice(&(count as u32).to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(style_offsets.len() as u32).to_le_bytes());
             out.extend_from_slice(&0u32.to_le_bytes());
             out.extend_from_slice(&(strings_start as u32).to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(styles_start as u32).to_le_bytes());
             for offset in offsets {
                 out.extend_from_slice(&offset.to_le_bytes());
             }
+            for offset in style_offsets {
+                out.extend_from_slice(&offset.to_le_bytes());
+            }
             out.extend_from_slice(&data);
+            out.extend_from_slice(&styles);
             Ok(out)
         }
     }
@@ -36585,6 +37012,11 @@ pub mod arsc {
             )
             .with_context(format!("Where: {where_from}"))),
             Value::Text(text) => Ok((TYPE_STRING, pool.intern(text))),
+            Value::Styled { text, spans } => Ok((
+                TYPE_STRING,
+                pool.styled(text, spans)
+                    .unwrap_or_else(|| pool.intern(text)),
+            )),
             Value::File(path) => Ok((TYPE_STRING, pool.intern(path))),
             Value::Color(argb) => Ok((TYPE_INT_COLOR_ARGB8, *argb)),
             Value::Integer(number) => Ok((TYPE_INT_DEC, *number as u32)),
@@ -36653,6 +37085,7 @@ pub mod arsc {
         }
 
         let mut values = Pool::default();
+        values.reserve_styles(compiled);
         let mut types = Pool::default();
         let mut keys = Pool::default();
 
@@ -37639,6 +38072,8 @@ pub mod builder {
         pub launcher: Vec<crate::scaffold::Supplied>,
         pub values: Vec<(String, String)>,
 
+        pub values_names: Vec<String>,
+
         pub resources: Vec<crate::scaffold::Supplied>,
 
         pub library_values: Vec<(String, String)>,
@@ -37858,8 +38293,13 @@ pub mod builder {
             }
         }
 
-        for (folder, text) in &project.values {
-            let origin = format!("{}/{}", folder, crate::scaffold::STRINGS_FILE);
+        for (index, (folder, text)) in project.values.iter().enumerate() {
+            let named = project
+                .values_names
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or(crate::scaffold::STRINGS_FILE);
+            let origin = format!("{folder}/{named}");
             let config =
                 crate::resources::Config::parse_values_directory(folder).map_err(|why| {
                     fail("EB043", "A resource folder is not one this build reads.")
@@ -37867,13 +38307,27 @@ pub mod builder {
                         .with_context(format!("Reported: {why}"))
                 })?;
             if !table.read_values_for(text, &origin, config, sink) {
-                return Err(fail("EB044", "A language file could not be read.")
-                    .with_context(format!("File: {origin}"))
-                    .with_suggestion(
-                        "The diagnostics above name the line. Every language folder is \
+                let mut refused = fail("EB044", "A language file could not be read.")
+                    .with_context(format!("File: {origin}"));
+                if let Some(first) = sink
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|one| one.severity == crate::diag::Severity::Error)
+                {
+                    if let Some(location) = &first.location {
+                        refused = refused.with_context(format!(
+                            "Line {}, column {}",
+                            location.line, location.column
+                        ));
+                    }
+                    refused = refused.with_context(format!("Reported: {}", first.message));
+                }
+                return Err(refused.with_suggestion(
+                    "The diagnostics above name the line. Every language folder is \
                          read, so a mistake in one stops the build rather than shipping \
                          an application that is missing its words on those devices.",
-                    ));
+                ));
             }
         }
 
@@ -38064,6 +38518,39 @@ pub mod builder {
         root.attribute("package").unwrap_or_default().to_string()
     }
 
+    fn export_what_answers_intents(root: &mut crate::xml::Element) {
+        let Some(application) = root
+            .children
+            .iter_mut()
+            .find(|child| child.name == "application")
+        else {
+            return;
+        };
+        for component in &mut application.children {
+            if !matches!(
+                component.name.as_str(),
+                "activity" | "activity-alias" | "service" | "receiver"
+            ) {
+                continue;
+            }
+            let answers = component
+                .children
+                .iter()
+                .any(|child| child.name == "intent-filter");
+            let said = component
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name == "android:exported");
+            if answers && !said {
+                component.attributes.push(crate::xml::Attribute {
+                    name: "android:exported".to_string(),
+                    value: "true".to_string(),
+                    position: component.position,
+                });
+            }
+        }
+    }
+
     fn set_attribute(root: &mut crate::xml::Element, name: &str, value: &str) {
         let Some(application) = root
             .children
@@ -38142,6 +38629,7 @@ pub mod builder {
             icon: None,
             launcher: Vec::new(),
             values: Vec::new(),
+            values_names: Vec::new(),
             resources: Vec::new(),
             library_values: Vec::new(),
             library_resources: Vec::new(),
@@ -38267,6 +38755,7 @@ pub mod builder {
             icon: None,
             launcher: Vec::new(),
             values: Vec::new(),
+            values_names: Vec::new(),
             resources: Vec::new(),
             library_values: Vec::new(),
             library_resources: Vec::new(),
@@ -38303,7 +38792,12 @@ pub mod builder {
         project.seal_resources = held.as_ref().map(|one| one.seal_resources).unwrap_or(false);
         project.icon = crate::scaffold::icon_bytes(root);
         project.launcher = crate::scaffold::launcher_files(root);
-        project.values = crate::scaffold::values_files(root);
+        let found = crate::scaffold::named_values_files(root);
+        project.values_names = found.iter().map(|(_, name, _)| name.clone()).collect();
+        project.values = found
+            .into_iter()
+            .map(|(folder, _, text)| (folder, text))
+            .collect();
         project.resources = crate::scaffold::resource_files(root);
 
         let mut carried: Vec<(String, Vec<u8>)> = Vec::new();
@@ -38446,7 +38940,12 @@ pub mod builder {
                 Checked {
                     classes: project.code.len(),
                     resources,
-                    locales: project.values.len(),
+                    locales: project
+                        .values
+                        .iter()
+                        .map(|(folder, _)| folder)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len(),
                     package,
                     refusal: table.err(),
                     policy,
@@ -39334,6 +39833,7 @@ public final class R {{
             children: Vec::new(),
             text: String::new(),
             position: where_at,
+            child_at: Vec::new(),
         });
     }
 
@@ -39353,6 +39853,7 @@ public final class R {{
             }
         }
         resolve_references(&mut root, icons.as_ref().map(|made| &made.compiled))?;
+        export_what_answers_intents(&mut root);
 
         if let Some(class) = &project.sealed {
             let package = class
@@ -40121,7 +40622,16 @@ pub mod jvm {
         Boolean(bool),
         Text(String),
 
-        Enum { descriptor: String, name: String },
+        Enum {
+            descriptor: String,
+            name: String,
+        },
+
+        Method {
+            class: String,
+            name: String,
+            descriptor: String,
+        },
 
         Class(String),
         Nested(Annotation),
@@ -43661,7 +44171,15 @@ pub mod ffi {
                 let project = crate::builder::sealed_project(&root, Some(&made_by))?;
                 w.field_bool("carriesImage", project.icon.is_some());
                 w.field_bool("sealed", project.sealed.is_some());
-                w.field_u64("locales", project.values.len() as u64);
+                w.field_u64(
+                    "locales",
+                    project
+                        .values
+                        .iter()
+                        .map(|(folder, _)| folder)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len() as u64,
+                );
                 let package = crate::builder::assemble(&project, &key, &certificate, &mut sink)?;
                 let bundle = crate::bundle::write(&project)?;
                 Ok((package, bundle))
@@ -43801,6 +44319,7 @@ pub mod ffi {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
             };
+            crate::scaffold::drop_idle_starters(&root);
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
             match crate::workspace::tree(&root) {
@@ -44683,18 +45202,33 @@ pub mod ffi {
                         Ok(()) => {
                             sealed_ok = true;
                             w.field_bool("sealed", true);
+                            w.field_bool("built", true);
                             w.field_str("path", &sealed_path);
                             w.field_u64("bytes", package.len() as u64);
                             w.field_str("fingerprint", &fingerprint);
                             report.write_json(&mut w, "signature");
+                            w.begin_object(Some("package"));
+                            w.field_u64("bytes", package.len() as u64);
+                            w.field_u64(
+                                "entries",
+                                crate::archive::read(&package, &mut crate::diag::Sink::new())
+                                    .map_or(0, |held| held.entries().len() as u64),
+                            );
+                            w.field_bool("signed", true);
+                            report.write_json(&mut w, "verified");
+                            w.end_object();
                         }
                         Err(why) => {
                             w.field_bool("sealed", false);
+                            w.field_bool("built", false);
                             w.field_str("error", &format!("it could not be written: {why}"));
                         }
                     }
                 }
-                Err(error) => write_failure(&mut w, "sealed", &error),
+                Err(error) => {
+                    w.field_bool("built", false);
+                    write_failure(&mut w, "sealed", &error);
+                }
             }
             let _ = sealed_ok;
             sink.write_json(&mut w, "diagnostics");

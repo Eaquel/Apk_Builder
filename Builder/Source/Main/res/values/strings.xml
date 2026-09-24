@@ -117,9 +117,6 @@
     <string name="omni_settings_about">About</string>
     <string name="omni_action_rename">Rename</string>
     <string name="omni_action_copy">Copy</string>
-    <string name="omni_action_cut">Cut</string>
-    <string name="omni_action_paste">Paste</string>
-    <string name="omni_files_held">%1$s is ready to paste</string>
     <string name="omni_action_clear">Remove</string>
     <string name="omni_action_tools">Tools</string>
     <string name="omni_action_compress">Compress</string>
@@ -336,7 +333,7 @@
     <string name="omni_web_needs">An address is needed, and it may not carry a semicolon.</string>
     <string name="omni_web_note_privacy">The package asks for the network, and nothing else. What the page does is the site’s business, not this app’s.</string>
     <string name="omni_menu_making">Making</string>
-    <string name="omni_menu_logcat">Logcat</string>
+    <string name="omni_menu_logcat">System logs</string>
     <string name="omni_log_note">Watch the device logs and read what they say.</string>
     <string name="omni_log_running">Reading</string>
     <string name="omni_log_stopped">Stopped</string>
@@ -779,4 +776,18 @@
     <string name="omni_vibe_tier_free">Free tier</string>
     <string name="omni_vibe_tier_keyless">No key needed</string>
     <string name="omni_vibe_understood">Got It</string>
+    <string name="omni_action_move">Move</string>
+    <string name="omni_files_name_taken">This name already exists</string>
+    <string name="omni_files_same_name">%1$s is already there. Choose the name for this one.</string>
+    <string name="omni_files_into_itself">A folder cannot go inside itself.</string>
+    <string name="omni_help_command_copied">Copied: %1$s</string>
+    <string name="omni_vibe_paid_key">This key belongs to a paid account, show every model</string>
+    <string name="omni_vibe_key_optional">This provider works without a key. Add your own key only if you want your own limits.</string>
+    <string name="omni_vibe_key_free">The free key from this provider is enough. Tick the box below if your key is from a paid plan.</string>
+    <string name="omni_vibe_key_add">Add a key for %1$s</string>
+    <string name="omni_copilot_free_note">Copilot Free is open to every GitHub account. If sign in works but answers do not come, turn Copilot Free on at github.com/settings/copilot.</string>
+    <string name="omni_copilot_by_code">Sign in with GitHub (code)</string>
+    <string name="omni_copilot_by_token">Paste a GitHub token</string>
+    <string name="omni_agent_java_only">%1$s was not written: only Java 25 is compiled here.</string>
+    <string name="omni_agent_checking">Compiling and checking what was written…</string>
 </resources>

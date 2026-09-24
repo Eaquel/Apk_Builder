@@ -1901,6 +1901,265 @@ mod core {
         );
     }
 
+    #[test]
+    fn a_manifest_that_says_no_floor_and_no_export_is_given_both() {
+        let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.my.app">
+    <application android:label="Hello" android:allowBackup="false">
+        <activity android:name=".Hello">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".Hidden" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+            </intent-filter>
+        </activity>
+        <service android:name=".Quiet" />
+    </application>
+</manifest>
+"#;
+        let settings = crate::settings::Settings::default();
+        let written = crate::settings::over_manifest(manifest, &settings);
+        let floor = written
+            .lines()
+            .find(|line| line.trim_start().starts_with("<uses-sdk"))
+            .unwrap_or_else(|| panic!("no floor was written:\n{written}"));
+        for said in [
+            format!("android:minSdkVersion=\"{}\"", settings.min_sdk),
+            format!("android:targetSdkVersion=\"{}\"", settings.target_sdk),
+        ] {
+            assert!(floor.contains(&said), "{floor} lacks {said}");
+        }
+        assert_eq!(written.matches("<uses-sdk").count(), 1);
+        assert_eq!(
+            crate::settings::over_manifest(&written, &settings),
+            written,
+            "writing the floor twice changes nothing"
+        );
+
+        let project = crate::builder::from_manifest(&written).expect("the manifest reads");
+        let mut sink = crate::diag::Sink::new();
+        let prepared = crate::builder::prepare(&project, &mut sink).expect("and prepares");
+        let application = prepared
+            .root
+            .children
+            .iter()
+            .find(|one| one.name == "application")
+            .expect("there is an application");
+        let exported = |name: &str| {
+            application
+                .children
+                .iter()
+                .find(|one| one.attribute("android:name") == Some(name))
+                .and_then(|one| one.attribute("android:exported"))
+                .map(str::to_string)
+        };
+        assert_eq!(
+            exported(".Hello").as_deref(),
+            Some("true"),
+            "what answers an intent was exported before API 31 said it must be written"
+        );
+        assert_eq!(exported(".Hidden").as_deref(), Some("false"));
+        assert_eq!(exported(".Quiet"), None);
+    }
+
+    const STYLED_WORDS: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <skip />
+    <eat-comment />
+    <string name="app_name">Omni</string>
+    <string name="main_label">Hello <u>th<ignore>e</ignore>re</u>, <i>you</i> <b>Activity</b>!</string>
+    <string name="connected">connected to <xliff:g id="device_name">%1$s</xliff:g></string>
+    <string name="coloured">Plain <font color="#ff0000">red</font> end</string>
+    <string-array name="choices">
+        <item>first</item>
+        <item><b>second</b> one</item>
+    </string-array>
+</resources>
+"####;
+
+    const OLD_UNITS: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="key_height">50dip</dimen>
+    <dimen name="gap">6sp</dimen>
+</resources>
+"####;
+
+    #[test]
+    fn styled_words_and_old_units_become_what_aapt2_makes_of_them() {
+        let _turn = crate::progress::one_at_a_time();
+        let directory = temp_directory("omni-styled");
+        let res = directory.join("Res");
+        std::fs::create_dir_all(res.join("values")).unwrap();
+        std::fs::write(res.join("values/strings.xml"), STYLED_WORDS.trim_start()).unwrap();
+        std::fs::write(res.join("values/dimens.xml"), OLD_UNITS.trim_start()).unwrap();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            A_MANIFEST.trim_start(),
+        )
+        .unwrap();
+        let root = directory.to_str().unwrap().to_string();
+
+        let mut project = crate::builder::from_manifest(A_MANIFEST).expect("the manifest reads");
+        project.values = crate::scaffold::values_files(&root);
+        let mut sink = crate::diag::Sink::new();
+        let icons = crate::builder::compile_resources_for_test(&project, &mut sink)
+            .expect("markup inside a string is read, not refused")
+            .expect("and there are resources");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let value_of = |name: &str| {
+            icons
+                .compiled
+                .entries()
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.value.clone())
+                .unwrap_or_else(|| panic!("{name} is missing"))
+        };
+        let span = |tag: &str, first: u32, last: u32| crate::resources::Span {
+            tag: tag.to_string(),
+            first,
+            last,
+        };
+        assert_eq!(
+            value_of("main_label"),
+            crate::resources::Value::Styled {
+                text: "Hello there, you Activity!".to_string(),
+                spans: vec![
+                    span("u", 6, 10),
+                    span("ignore", 8, 8),
+                    span("i", 13, 15),
+                    span("b", 17, 24),
+                ],
+            }
+        );
+        assert_eq!(
+            value_of("connected"),
+            crate::resources::Value::Text("connected to %1$s".to_string()),
+            "xliff:g marks what not to translate and leaves no style behind"
+        );
+        assert_eq!(
+            value_of("coloured"),
+            crate::resources::Value::Styled {
+                text: "Plain red end".to_string(),
+                spans: vec![span("font;color=#ff0000", 6, 8)],
+            }
+        );
+        assert_eq!(
+            value_of("key_height"),
+            crate::resources::Value::Dimension {
+                milli: 50_000,
+                unit: crate::resources::Unit::Dp,
+            },
+            "dip is the older spelling of dp"
+        );
+
+        let key = crate::rsa::generate(2048).expect("a key");
+        let mut made = crate::diag::Sink::new();
+        let outcome = crate::builder::build(&project, &key, 1_700_000_000, &mut made)
+            .expect("the package is written");
+        assert!(!made.has_blocking(), "{:?}", made.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("styled words: aapt2 is not available here");
+            return;
+        };
+        let Some(platform) = crate::builder::platform_jar() else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("styled words: no android.jar to link against");
+            return;
+        };
+        let ours = directory.join("ours.apk");
+        std::fs::write(&ours, &outcome.package).unwrap();
+        let compiled = directory.join("compiled.zip");
+        let done = std::process::Command::new(&aapt2)
+            .args(["compile", "--dir"])
+            .arg(res.to_str().unwrap())
+            .arg("-o")
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "aapt2 could not compile the folder: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        let theirs = directory.join("theirs.apk");
+        let linked = std::process::Command::new(&aapt2)
+            .arg("link")
+            .arg("-o")
+            .arg(theirs.to_str().unwrap())
+            .arg("-I")
+            .arg(&platform)
+            .arg("--manifest")
+            .arg(directory.join("AndroidManifest.xml").to_str().unwrap())
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 could not link the folder: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        let values = |apk: &std::path::Path| -> std::collections::BTreeMap<String, String> {
+            let out = std::process::Command::new(&aapt2)
+                .args(["dump", "resources"])
+                .arg(apk.to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "aapt2 refused {}: {}",
+                apk.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let said = String::from_utf8_lossy(&out.stdout).into_owned();
+            let mut found = std::collections::BTreeMap::new();
+            let mut named: Option<String> = None;
+            for line in said.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("resource ") {
+                    named = rest.split_whitespace().nth(1).map(str::to_string);
+                    continue;
+                }
+                if let Some(name) = &named {
+                    if name.starts_with("string/")
+                        || name.starts_with("dimen/")
+                        || name.starts_with("array/")
+                    {
+                        found
+                            .entry(name.clone())
+                            .and_modify(|held: &mut String| {
+                                held.push('\n');
+                                held.push_str(line);
+                            })
+                            .or_insert_with(|| line.to_string());
+                    }
+                }
+            }
+            found
+        };
+        let (mine, aapt) = (values(&ours), values(&theirs));
+        assert_eq!(mine.len(), aapt.len(), "{mine:#?}\n{aapt:#?}");
+        for (name, said) in &aapt {
+            assert_eq!(mine.get(name), Some(said), "{name} differs from aapt2");
+        }
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "styled words: {} strings, arrays and sizes agree with aapt2, spans included",
+            mine.len()
+        );
+    }
+
     const THE_BAGS: &str = r####"
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -8197,6 +8456,168 @@ public final class MainActivity extends Activity {
     }
 
     #[test]
+    fn a_package_sealed_by_the_device_reads_back_as_built() {
+        let Some(openssl) = openssl() else {
+            eprintln!("device sealing: openssl is not available here");
+            return;
+        };
+        let directory = temp_directory("omni-device-sealed");
+        let project = directory.join("Sealed");
+        let root = project.to_str().unwrap().to_string();
+        crate::scaffold::create(
+            &root,
+            &crate::scaffold::Spec {
+                package: "com.tr.sealed".to_string(),
+                label: "Sealed".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        let key = directory.join("key.pem");
+        let certificate = directory.join("cert.pem");
+        let der = directory.join("cert.der");
+        let made = std::process::Command::new(&openssl)
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "3650",
+                "-subj",
+                "/CN=Apk Builder",
+                "-keyout",
+                key.to_str().unwrap(),
+                "-out",
+                certificate.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        if !made.status.success() {
+            eprintln!("device sealing: openssl would not make a key");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        }
+        assert!(std::process::Command::new(&openssl)
+            .args([
+                "x509",
+                "-in",
+                certificate.to_str().unwrap(),
+                "-outform",
+                "DER",
+                "-out",
+                der.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let certificate_hex = crate::der::to_hex(&std::fs::read(&der).unwrap());
+        let raw = directory.join("Sealed-unsigned.apk");
+        let apk = directory.join("Sealed.apk");
+        let text = |ptr: *mut std::os::raw::c_char| {
+            assert!(!ptr.is_null());
+            let held = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { crate::ffi::omni_string_free(ptr) };
+            held
+        };
+        let c = |said: &str| std::ffi::CString::new(said).unwrap();
+        let prepared = text(unsafe {
+            crate::ffi::omni_build_unsigned(
+                c(&root).as_ptr(),
+                c(raw.to_str().unwrap()).as_ptr(),
+                c(&certificate_hex).as_ptr(),
+            )
+        });
+        let asked = crate::json::read(&prepared).expect("the answer is JSON");
+        assert_eq!(
+            asked.get("prepared").and_then(crate::json::Json::boolean),
+            Some(true),
+            "{prepared}"
+        );
+        let signed = |named: &str| -> String {
+            let wanted = asked
+                .get(named)
+                .and_then(crate::json::Json::text)
+                .unwrap_or("");
+            if wanted.is_empty() {
+                return String::new();
+            }
+            let payload = directory.join(format!("{named}.bin"));
+            let signature = directory.join(format!("{named}.sig"));
+            std::fs::write(&payload, crate::der::from_hex(wanted).unwrap()).unwrap();
+            assert!(std::process::Command::new(&openssl)
+                .args([
+                    "dgst",
+                    "-sha256",
+                    "-sign",
+                    key.to_str().unwrap(),
+                    "-out",
+                    signature.to_str().unwrap(),
+                    payload.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success());
+            crate::der::to_hex(&std::fs::read(&signature).unwrap())
+        };
+        let (v2, v3, v31) = (signed("toSignV2"), signed("toSignV3"), signed("toSignV31"));
+        let low = asked
+            .get("minSdk")
+            .and_then(crate::json::Json::integer)
+            .unwrap() as u32;
+        let high = asked
+            .get("maxSdk")
+            .and_then(crate::json::Json::integer)
+            .unwrap() as u32;
+        let sealed = text(unsafe {
+            crate::ffi::omni_seal_package(
+                c(raw.to_str().unwrap()).as_ptr(),
+                c(apk.to_str().unwrap()).as_ptr(),
+                c(&certificate_hex).as_ptr(),
+                c(&v2).as_ptr(),
+                c(&v3).as_ptr(),
+                c(&v31).as_ptr(),
+                low,
+                high,
+            )
+        });
+        assert!(is_structurally_valid(&sealed), "{sealed}");
+        let answer = crate::json::read(&sealed).unwrap();
+        assert_eq!(
+            answer.get("built").and_then(crate::json::Json::boolean),
+            Some(true),
+            "{sealed}"
+        );
+        let package = answer.get("package").expect("the package is described");
+        assert_eq!(
+            package.get("signed").and_then(crate::json::Json::boolean),
+            Some(true)
+        );
+        let verified = package.get("verified").expect("the signature is reported");
+        assert!(
+            verified
+                .get("signaturesVerified")
+                .and_then(crate::json::Json::integer)
+                .unwrap()
+                >= 1
+        );
+        assert_eq!(
+            verified
+                .get("keyMatchesCertificate")
+                .and_then(crate::json::Json::boolean),
+            Some(true)
+        );
+        assert!(apk.is_file());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_key_this_build_never_sees_can_still_sign_what_it_makes() {
         let Some(openssl) = openssl() else {
             eprintln!("device signing: openssl is not available here");
@@ -10774,6 +11195,7 @@ public class Walk {
             icon: None,
             launcher: Vec::new(),
             values: Vec::new(),
+            values_names: Vec::new(),
             resources: Vec::new(),
             library_values: Vec::new(),
             library_resources: Vec::new(),
@@ -11441,6 +11863,7 @@ public class Walk {
                 icon: None,
                 launcher: Vec::new(),
                 values: Vec::new(),
+                values_names: Vec::new(),
                 resources: Vec::new(),
                 library_values: Vec::new(),
                 library_resources: Vec::new(),
@@ -12663,33 +13086,24 @@ public final class App extends Activity {
                 "AndroidManifest.xml",
                 "Builder.json",
                 "Java",
-                "Kotlin",
-                "Native",
                 "Res",
-                "Rust",
                 "proguard-rules.pro"
             ],
-            "the root holds the manifest, the language folders, the resource folder and \
-             the shrinking rules, and nothing else"
+            "the root holds the manifest, the Java folder, the resource folder and the \
+             shrinking rules, and nothing else"
         );
 
-        for (folder, wanted) in [
-            ("Kotlin", vec!["App.kt"]),
-            ("Java", vec!["App.java"]),
-            ("Native", vec!["App.cpp", "App.hpp", "CMakeLists.txt"]),
-            ("Rust", vec!["App.rs", "Cargo.toml"]),
-        ] {
-            let mut inside: Vec<String> = std::fs::read_dir(root.join(folder))
-                .unwrap()
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .collect();
-            inside.sort();
-            assert_eq!(
-                inside, wanted,
-                "{folder} holds its starter and its build file and no subfolder"
-            );
-        }
+        let mut inside: Vec<String> = std::fs::read_dir(root.join("Java"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        inside.sort();
+        assert_eq!(
+            inside,
+            vec!["App.java"],
+            "Java holds its starter and no subfolder"
+        );
 
         let manifest = std::fs::read_to_string(root.join("AndroidManifest.xml")).unwrap();
         assert!(manifest.contains("package=\"com.tr.yt\""), "{manifest}");
@@ -13866,7 +14280,8 @@ public final class App extends Activity {
             .any(|entry| entry.path == "AndroidManifest.xml"));
         assert!(entries
             .iter()
-            .any(|entry| entry.path == "Kotlin" && entry.folder));
+            .any(|entry| entry.path == "Java" && entry.folder));
+        assert!(!entries.iter().any(|entry| entry.path == "Kotlin"));
 
         let manifest = crate::workspace::read_text(&text, "AndroidManifest.xml").unwrap();
         assert!(
@@ -13899,9 +14314,9 @@ public final class App extends Activity {
             .map(|data| data.len() == 2)
             .unwrap_or(false));
 
-        std::fs::write(root.join("Kotlin/Binary.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        std::fs::write(root.join("Java/Binary.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
         assert_eq!(
-            crate::workspace::read_text(&text, "Kotlin/Binary.bin")
+            crate::workspace::read_text(&text, "Java/Binary.bin")
                 .unwrap_err()
                 .code,
             "EW113"
@@ -13909,16 +14324,16 @@ public final class App extends Activity {
 
         let bin = directory.join("Trash").to_str().unwrap().to_string();
         let now = 1_787_000_000;
-        let thrown = crate::workspace::remove(&text, "Kotlin/Binary.bin", &bin, now).unwrap();
-        assert!(!root.join("Kotlin/Binary.bin").exists());
+        let thrown = crate::workspace::remove(&text, "Java/Binary.bin", &bin, now).unwrap();
+        assert!(!root.join("Java/Binary.bin").exists());
         assert_eq!(thrown.name, "Binary.bin");
         assert_eq!(thrown.bytes, 4);
 
-        crate::workspace::rename(&text, "Kotlin/App.kt", "Kotlin/Screen.kt").unwrap();
-        assert!(!root.join("Kotlin/App.kt").exists());
-        assert!(root.join("Kotlin/Screen.kt").is_file());
+        crate::workspace::rename(&text, "Java/App.java", "Java/Screen.java").unwrap();
+        assert!(!root.join("Java/App.java").exists());
+        assert!(root.join("Java/Screen.java").is_file());
         assert_eq!(
-            crate::workspace::rename(&text, "Kotlin", "Kotlin/Inside")
+            crate::workspace::rename(&text, "Java", "Java/Inside")
                 .unwrap_err()
                 .code,
             "EW153"
@@ -16004,21 +16419,49 @@ public final class App extends Activity {
                 "AndroidManifest.xml",
                 "Builder.json",
                 "Java",
-                "Kotlin",
-                "Native",
                 "Res",
-                "Rust",
                 "proguard-rules.pro",
             ],
-            "the root holds the manifest, a folder for every language, the resource \
-             folder and the shrinking rules"
+            "the root holds the manifest, the Java folder, the resource folder and the \
+             shrinking rules"
         );
 
         std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
-    fn every_language_gets_a_folder_and_the_chosen_one_is_what_gets_built() {
+    fn an_older_project_loses_the_starters_nobody_wrote_in() {
+        let directory = temp_directory("omni-scaffold-idle");
+        let root = directory.join("Older");
+        let text = root.to_str().unwrap().to_string();
+        crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
+        let spec = crate::scaffold::Spec::default();
+        std::fs::create_dir_all(root.join("Kotlin")).unwrap();
+        std::fs::create_dir_all(root.join("Rust")).unwrap();
+        std::fs::write(
+            root.join("Kotlin/App.kt"),
+            crate::scaffold::starter_text("kotlin", &spec),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Rust/App.rs"),
+            crate::scaffold::starter_text("rust", &spec),
+        )
+        .unwrap();
+        std::fs::write(root.join("Rust/Mine.rs"), "fn mine() {}\n").unwrap();
+        let dropped = crate::scaffold::drop_idle_starters(&text);
+        assert_eq!(dropped, 2, "the two untouched starters go");
+        assert!(!root.join("Kotlin").exists(), "an emptied folder goes too");
+        assert!(
+            root.join("Rust/Mine.rs").is_file(),
+            "what the developer wrote stays"
+        );
+        assert!(root.join("Java/App.java").is_file());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn only_java_gets_a_folder_because_only_java_is_built() {
         let directory = temp_directory("omni-scaffold-one");
         let root = directory.join("OnlyRust");
         let spec = crate::scaffold::Spec {
@@ -16036,9 +16479,6 @@ public final class App extends Activity {
             made.folders,
             vec![
                 "Java",
-                "Kotlin",
-                "Native",
-                "Rust",
                 "Res",
                 "Res/mipmap-mdpi",
                 "Res/mipmap-hdpi",
@@ -16048,20 +16488,17 @@ public final class App extends Activity {
                 "Res/values",
                 "Res/values-tr",
             ],
-            "every language gets its folder, one folder per density the launcher asks \
-             for, and one per locale chosen"
+            "Java gets its folder, one folder per density the launcher asks for, and \
+             one per locale chosen"
         );
-        for named in [
-            "Java/App.java",
-            "Kotlin/App.kt",
-            "Native/App.cpp",
-            "Native/App.hpp",
-            "Native/CMakeLists.txt",
-            "Rust/App.rs",
-            "Rust/Cargo.toml",
-            "proguard-rules.pro",
-        ] {
+        for named in ["Java/App.java", "proguard-rules.pro"] {
             assert!(root.join(named).is_file(), "{named} is not there");
+        }
+        for named in ["Kotlin", "Native", "Rust"] {
+            assert!(
+                !root.join(named).exists(),
+                "{named} is not written, nothing here builds it"
+            );
         }
         assert!(!root.join("Res/values-de").exists());
         assert!(
@@ -16069,30 +16506,17 @@ public final class App extends Activity {
             "a project made here is not a Gradle project"
         );
 
-        let cmake = std::fs::read_to_string(root.join("Native/CMakeLists.txt")).unwrap();
-        assert!(
-            cmake.contains("add_library(only_rust SHARED App.cpp)"),
-            "{cmake}"
-        );
-        let cargo = std::fs::read_to_string(root.join("Rust/Cargo.toml")).unwrap();
-        assert!(cargo.contains("name = \"only_rust\""), "{cargo}");
-        assert!(cargo.contains("path = \"App.rs\""), "{cargo}");
         let rules = std::fs::read_to_string(root.join("proguard-rules.pro")).unwrap();
         assert!(rules.contains("-keep class com.tr.yt.App"), "{rules}");
 
         assert!(
-            crate::builder::uncompiled_source(root.to_str().unwrap())
-                .iter()
-                .any(|(language, _)| *language == "rust"),
-            "the language the developer asked for is still reported as uncompiled"
-        );
-        assert!(
             !crate::builder::uncompiled_source(root.to_str().unwrap())
                 .iter()
                 .any(|(language, _)| *language == "kotlin"),
-            "a starter nobody has touched is not source the developer wrote"
+            "a new project carries no source the developer did not write"
         );
 
+        std::fs::create_dir_all(root.join("Kotlin")).unwrap();
         std::fs::write(root.join("Kotlin/App.kt"), "package com.tr.yt\n").unwrap();
         assert!(
             crate::builder::uncompiled_source(root.to_str().unwrap())
@@ -19758,6 +20182,7 @@ class Screen
                 children: Vec::new(),
                 text: String::new(),
                 position: crate::xml::Position { line: 1, column: 1 },
+                child_at: Vec::new(),
             };
             for _ in 0..(xorshift(seed) % 5) {
                 element.attributes.push(crate::xml::Attribute {
@@ -25293,6 +25718,235 @@ public class Shaped {
             "java: arrays written out, two dimensions, boxing, locks, assertions, class \
              literals, varargs and stepping an element -- all verified"
         );
+    }
+
+    const CASES_THAT_NAME_CONSTANTS: &str = r####"
+package com.my.app;
+
+import static com.my.app.Codes.LIMIT;
+
+interface Codes {
+    int LIMIT = 40;
+    String WORD = "go";
+}
+
+final class Keys {
+    static final int UP = 19;
+    static final int DOWN = UP + 1;
+    static final char STAR = '*';
+    static final int MASK = (1 << 5) | 3;
+}
+
+enum Side { LEFT, RIGHT }
+
+public class Chooser implements Codes {
+    static final int OWN = -7;
+    static final String STOP = "st" + "op";
+
+    static String which(int code) {
+        switch (code) {
+            case Keys.UP: return "up";
+            case Keys.DOWN: return "down";
+            case Keys.MASK: return "mask";
+            case OWN: return "own";
+            case LIMIT: return "limit";
+            case Codes.LIMIT + 1: return "past";
+            case (int) Keys.STAR: return "star";
+            default: return "none";
+        }
+    }
+
+    static int word(String said) {
+        switch (said) {
+            case WORD: return 1;
+            case STOP: return 2;
+            default: return 0;
+        }
+    }
+
+    static String side(Side one) {
+        return switch (one) {
+            case Side.LEFT -> "l";
+            case RIGHT -> "r";
+        };
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+        for (int code : new int[] {19, 20, 35, -7, 40, 41, 42, 0}) {
+            out.append(which(code)).append(' ');
+        }
+        out.append(word("go")).append(word("stop")).append(word("x")).append(' ');
+        out.append(side(Side.LEFT)).append(side(Side.RIGHT));
+        System.out.println(out);
+    }
+}
+"####;
+
+    #[test]
+    fn a_case_may_name_a_constant_wherever_it_is_declared() {
+        let produced = compile(CASES_THAT_NAME_CONSTANTS, &empty())
+            .expect("constants of this class, another, an interface and a static import");
+        match jvm_runs(&produced, "com.my.app.Chooser") {
+            None => eprintln!("java: no JVM here to run it"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(said.trim(), "up down mask own limit past star none 120 lr");
+                eprintln!("java: named constants answer case labels the way javac folds them");
+            }
+        }
+
+        let twice = r#"
+            package com.my.app;
+
+            final class Twice {
+                static final int ONE = 1;
+                static final int ALSO_ONE = 2 - 1;
+
+                int pick(int value) {
+                    switch (value) {
+                        case ONE: return 1;
+                        case ALSO_ONE: return 2;
+                        default: return 0;
+                    }
+                }
+            }
+        "#;
+        let refused = compile(twice, &empty()).expect_err("two names for one value");
+        assert_eq!(refused.code, "EJ240");
+
+        let unknown = r#"
+            package com.my.app;
+
+            final class Unknown {
+                int pick(int value, int other) {
+                    switch (value) {
+                        case other: return 1;
+                        default: return 0;
+                    }
+                }
+            }
+        "#;
+        let refused = compile(unknown, &empty()).expect_err("a parameter is no constant");
+        assert_eq!(refused.code, "EJ239");
+    }
+
+    #[test]
+    fn a_platform_constant_and_a_nested_import_reach_an_android_class() {
+        let source = r#"
+            package com.my.app;
+
+            import android.view.KeyEvent;
+            import android.view.View;
+            import android.view.View.OnClickListener;
+
+            public class Pad {
+                int moved(int key) {
+                    switch (key) {
+                        case KeyEvent.KEYCODE_DPAD_UP: return -1;
+                        case KeyEvent.KEYCODE_DPAD_DOWN: return 1;
+                        default: return 0;
+                    }
+                }
+
+                OnClickListener listener() {
+                    return new OnClickListener() {
+                        public void onClick(View view) {
+                        }
+                    };
+                }
+            }
+        "#;
+        let produced = compile(source, &empty())
+            .expect("KeyEvent's constants and View.OnClickListener are known");
+        let anonymous = produced
+            .iter()
+            .find(|(name, _)| name.ends_with("Pad$1.class"))
+            .expect("the listener is a class of its own");
+        let class = crate::jvm::read(&anonymous.1).expect("which reads back");
+        let (inside, method) = class
+            .enclosing_method
+            .clone()
+            .expect("an anonymous class names the method it is written in");
+        assert_eq!(inside.replace('.', "/"), "com/my/app/Pad");
+        assert_eq!(
+            method,
+            Some((
+                "listener".to_string(),
+                "()Landroid/view/View$OnClickListener;".to_string()
+            ))
+        );
+
+        let translated: Vec<_> = produced
+            .iter()
+            .flat_map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let listener = translated
+            .iter()
+            .find(|one| one.descriptor == "Lcom/my/app/Pad$1;")
+            .expect("the listener reaches Dalvik");
+        let enclosing = listener
+            .annotations
+            .iter()
+            .find(|one| one.descriptor == "Ldalvik/annotation/EnclosingMethod;")
+            .expect("and says where it was written");
+        assert!(matches!(
+            &enclosing.values[0].1,
+            crate::jvm::Element::Method { name, .. } if name == "listener"
+        ));
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(
+                text.contains("sparse-switch") || text.contains("packed-switch"),
+                "the switch over two key codes is in the dex:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_to_super_is_matched_by_the_types_it_passes() {
+        let source = r#"
+            package com.my.app;
+
+            class Base {
+                final String said;
+
+                Base(int one, int two) {
+                    said = "ints";
+                }
+
+                Base(int one, CharSequence two) {
+                    said = "text " + two;
+                }
+            }
+
+            public class Child extends Base {
+                Child(CharSequence word) {
+                    super(1, word);
+                }
+
+                Child(int number) {
+                    super(1, number);
+                }
+
+                public static void main(String[] args) {
+                    System.out.println(new Child("hi").said + " " + new Child(2).said);
+                }
+            }
+        "#;
+        let produced = compile(source, &empty()).expect("both constructors are reachable");
+        match jvm_runs(&produced, "com.my.app.Child") {
+            None => eprintln!("java: no JVM here to run it"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => assert_eq!(said.trim(), "text hi ints"),
+        }
     }
 
     fn jvm_runs(produced: &[(String, Vec<u8>)], main: &str) -> Option<Result<String, String>> {
@@ -34754,7 +35408,8 @@ mod vibe_coding {
             [Low, Medium, High, Deep]
         );
         assert_eq!(efforts_of("anthropic", "claude-opus-5-5"), [High, Deep]);
-        assert_eq!(efforts_of("copilot", "claude-opus-5.5"), [High, Deep]);
+        assert_eq!(efforts_of("copilot", "gpt-4.1"), [Low, High]);
+        assert_eq!(efforts_of("copilot", "gpt-5-mini"), [Low, Medium, High]);
         assert_eq!(
             efforts_of("anthropic", "claude-sonnet-5"),
             [Low, Medium, High]
@@ -35157,6 +35812,132 @@ mod vibe_coding {
             .unwrap();
         assert_eq!(first.get("provider").and_then(Json::text), Some("cerebras"));
         std::fs::remove_dir_all(&folder).ok();
+    }
+
+    fn listed_ids(tier: Tier, reply: &str) -> Vec<String> {
+        crate::vibe_coding::usable_models(tier, &json::read(reply).unwrap())
+            .into_iter()
+            .map(|one| one.id)
+            .collect()
+    }
+
+    const GATEWAY: &str = r#"{"data":[
+        {"id":"kilo-auto/free","isFree":true,"context_length":256000,
+         "architecture":{"output_modalities":["text"]},"pricing":{"prompt":"0","completion":"0"}},
+        {"id":"kilo-auto/efficient","isFree":false,"context_length":1000000,
+         "architecture":{"output_modalities":["text"]},"pricing":{"prompt":"-1","completion":"-1"}},
+        {"id":"qwen/qwen3.8-27b:free","context_length":131072,
+         "architecture":{"output_modalities":["text"]},"pricing":{"prompt":"0","completion":"0"}},
+        {"id":"anthropic/claude-sonnet-5","context_length":200000,
+         "architecture":{"output_modalities":["text"]},"pricing":{"prompt":"0.000003","completion":"0.000015"}},
+        {"id":"google/lyria-3-pro-preview","isFree":true,"context_length":32000,
+         "architecture":{"output_modalities":["text","audio"]},"pricing":{"prompt":"0","completion":"0"}},
+        {"id":"nvidia/nemotron-3.5-content-safety:free","isFree":true,"context_length":128000,
+         "architecture":{"output_modalities":["text"]},"pricing":{"prompt":"0","completion":"0"}},
+        {"id":"liquid/tiny:free","isFree":true,"context_length":4096,
+         "architecture":{"output_modalities":["text"]},"pricing":{"prompt":"0","completion":"0"}}
+    ]}"#;
+
+    #[test]
+    fn a_free_gateway_lists_only_the_free_chat_models() {
+        assert_eq!(
+            listed_ids(Tier::Keyless, GATEWAY),
+            vec!["kilo-auto/free", "qwen/qwen3.8-27b:free"]
+        );
+        assert_eq!(
+            listed_ids(Tier::Free, GATEWAY),
+            vec!["kilo-auto/free", "qwen/qwen3.8-27b:free"]
+        );
+    }
+
+    #[test]
+    fn an_own_key_lists_the_paid_chat_models_too() {
+        assert_eq!(
+            listed_ids(Tier::Own, GATEWAY),
+            vec![
+                "anthropic/claude-sonnet-5",
+                "kilo-auto/efficient",
+                "kilo-auto/free",
+                "qwen/qwen3.8-27b:free"
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_billed_and_video_models_are_left_out() {
+        let reply = r#"{"object":"list","data":[
+            {"id":"GLM-5.3-Flash","model_type":"chat","usage_based_only":false,
+             "pricing":{"input":0.02,"output":0.04},"context_window":{"tokens":400000}},
+            {"id":"DeepSeek-V4-Flash","model_type":"chat","usage_based_only":true,
+             "pricing":{"input":0.02,"output":0.04},"context_window":{"tokens":400000}},
+            {"id":"wan-2","model_type":"video","usage_based_only":false,"context_window":{"tokens":8000}}
+        ]}"#;
+        assert_eq!(listed_ids(Tier::Keyless, reply), vec!["GLM-5.3-Flash"]);
+    }
+
+    #[test]
+    fn anonymous_tiers_stay_and_paid_tiers_go() {
+        let reply = r#"[
+            {"name":"openai-fast","tier":"anonymous","output_modalities":["text"]},
+            {"name":"openai-large","tier":"seed","output_modalities":["text"]},
+            {"name":"midjourney","tier":"anonymous","output_modalities":["image"]}
+        ]"#;
+        assert_eq!(listed_ids(Tier::Keyless, reply), vec!["openai-fast"]);
+    }
+
+    #[test]
+    fn gemini_lists_only_what_generates_content() {
+        let reply = r#"{"models":[
+            {"name":"models/gemini-2.5-flash","inputTokenLimit":1048576,
+             "supportedGenerationMethods":["generateContent","countTokens"]},
+            {"name":"models/text-embedding-004","inputTokenLimit":2048,
+             "supportedGenerationMethods":["embedContent"]},
+            {"name":"models/gemini-2.5-flash-preview-tts","inputTokenLimit":8192,
+             "supportedGenerationMethods":["generateContent"]}
+        ]}"#;
+        assert_eq!(listed_ids(Tier::Free, reply), vec!["gemini-2.5-flash"]);
+    }
+
+    #[test]
+    fn premium_copilot_models_wait_for_a_paid_seat() {
+        let reply = r#"{"data":[
+            {"id":"gpt-4.1","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000}},
+             "billing":{"is_premium":false}},
+            {"id":"claude-opus-5.5","capabilities":{"type":"chat","limits":{"max_context_window_tokens":200000}},
+             "billing":{"is_premium":true}},
+            {"id":"text-embedding-3-small","capabilities":{"type":"embeddings"}}
+        ]}"#;
+        assert_eq!(listed_ids(Tier::Free, reply), vec!["gpt-4.1"]);
+        assert_eq!(
+            listed_ids(Tier::Own, reply),
+            vec!["claude-opus-5.5", "gpt-4.1"]
+        );
+    }
+
+    #[test]
+    fn the_models_question_answers_over_the_bridge() {
+        let asked = format!(
+            "{{\"op\":\"models\",\"tier\":\"keyless\",\"reply\":{}}}",
+            json_quoted(GATEWAY)
+        );
+        let said = json::read(&answer(&asked)).unwrap();
+        let ids: Vec<String> = said
+            .get("models")
+            .and_then(Json::list)
+            .unwrap()
+            .iter()
+            .filter_map(|one| one.get("id").and_then(Json::text).map(str::to_string))
+            .collect();
+        assert_eq!(ids, vec!["kilo-auto/free", "qwen/qwen3.8-27b:free"]);
+    }
+
+    fn json_quoted(said: &str) -> String {
+        let mut w = crate::json::Writer::new();
+        w.begin_array(None);
+        w.element_str(said);
+        w.end_array();
+        let whole = w.finish();
+        whole[1..whole.len() - 1].to_string()
     }
 }
 
