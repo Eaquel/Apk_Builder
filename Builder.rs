@@ -982,8 +982,14 @@ pub mod diag {
     }
 }
 
-#[path = "Speech.rs"]
+#[path = "Diagnostic_Speech.rs"]
 pub mod speech;
+
+#[path = "Terminal.rs"]
+pub mod terminal;
+
+#[path = "Terminal_Speech.rs"]
+pub mod terminal_speech;
 
 pub mod caps {
     use crate::json::Writer;
@@ -43345,6 +43351,18 @@ pub mod ffi {
             w.end_array();
             w.end_object();
             match CString::new(w.finish()) {
+                Ok(answer) => answer.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_terminal_docs(tag: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let asked = text_from(tag).unwrap_or_default();
+            match CString::new(crate::terminal::docs_json(&asked)) {
                 Ok(answer) => answer.into_raw(),
                 Err(_) => std::ptr::null_mut(),
             }

@@ -862,6 +862,16 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSpeak(
   return HandBack(env, omni_speak(held.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTerminalDocs(
+    JNIEnv *env, jobject , jstring tag) {
+  std::string held;
+  if (tag != nullptr && !JavaStringToUtf8(env, tag, &held)) {
+    ThrowJava(env, kIllegalState, "A language has to be named as text.");
+    return nullptr;
+  }
+  return HandBack(env, omni_terminal_docs(held.c_str()));
+}
+
 JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
     JNIEnv *env, jobject , jstring timings) {
   if (timings == nullptr) {

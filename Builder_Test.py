@@ -30,7 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT / "Tests"
 CORE = ROOT / "Builder.rs"
-SPEECH = ROOT / "Speech.rs"
+SPEECH = ROOT / "Diagnostic_Speech.rs"
+TERMINAL = ROOT / "Terminal.rs"
+TERMINAL_SPEECH = ROOT / "Terminal_Speech.rs"
 CORE_TESTS = ROOT / "Builder_Test.rs"
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -120,6 +122,8 @@ def check_layout() -> str:
     required = [
         CORE,
         SPEECH,
+        TERMINAL,
+        TERMINAL_SPEECH,
         CORE_TESTS,
         ROOT / "Cargo.toml",
         ROOT / "Builder_Test.py",
@@ -164,7 +168,7 @@ def check_layout() -> str:
     if stray:
         raise AssertionError(f"tests live in Builder_Test.py alone, found {stray}")
 
-    sources = [CORE, SPEECH, ANDROID]
+    sources = [CORE, SPEECH, TERMINAL, TERMINAL_SPEECH, ANDROID]
     sources += sorted(COMPILERS.glob("*.rs"))
     sources += sorted((COMPILERS / "Java").glob("*.rs"))
     carried = [
@@ -189,6 +193,8 @@ def check_comments() -> str:
     watched: list[Path] = [
         CORE,
         SPEECH,
+        TERMINAL,
+        TERMINAL_SPEECH,
         CORE_TESTS,
         KOTLIN,
         ROOT / "Builder_Test.py",

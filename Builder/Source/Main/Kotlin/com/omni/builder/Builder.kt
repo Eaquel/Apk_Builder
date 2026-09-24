@@ -564,6 +564,8 @@ object Builder {
 
     external fun nativeSpeak(tag: String): String
 
+    external fun nativeTerminalDocs(tag: String): String
+
     external fun nativeShellOpen(folder: String, home: String, rows: Int, columns: Int): Int
 
     external fun nativeShellRead(handle: Int, into: ByteArray, wait: Int): Int
@@ -3438,16 +3440,6 @@ class BuilderActivity : Activity() {
 
         val HELP_BANDS = listOf(3, 4, 1, 1, 2, 2, 6, 2, 2, 5, 3)
 
-        val DOC_BAND_NAMES = listOf(
-            R.string.omni_help_band_all,
-            R.string.omni_band_start,
-            R.string.omni_band_making,
-            R.string.omni_band_features,
-            R.string.omni_band_tools,
-        )
-
-        val DOC_BANDS = listOf(1, 2, 2, 3, 3, 4, 3, 2, 3, 4, 4, 4)
-
         val TALK_STEPS = listOf(
             R.string.omni_talk_step_ask to R.string.omni_talk_step_ask_note,
             R.string.omni_talk_folder to R.string.omni_talk_folder_note,
@@ -3589,26 +3581,20 @@ class BuilderActivity : Activity() {
             R.string.omni_feedback_kind_other_note,
         )
 
+        val GUIDE_TINTS = listOf(
+            0xFF2C7BE5.toInt(),
+            0xFF1FC77A.toInt(),
+            0xFF8B5CF6.toInt(),
+            0xFFF08A24.toInt(),
+            0xFFEC4899.toInt(),
+            0xFF06B6D4.toInt(),
+        )
+
         val HELP_POPULAR = listOf(
             R.string.omni_help_band_adb,
             R.string.omni_menu_assistant,
-            R.string.omni_help_band_using,
+            R.string.omni_help_band_terminal,
             R.string.omni_help_band_fixing,
-        )
-
-        val DOC_ROWS = listOf(
-            R.string.omni_doc_home to R.string.omni_doc_home_note,
-            R.string.omni_doc_new to R.string.omni_doc_new_note,
-            R.string.omni_doc_kinds to R.string.omni_doc_kinds_note,
-            R.string.omni_doc_files to R.string.omni_doc_files_note,
-            R.string.omni_doc_build to R.string.omni_doc_build_note,
-            R.string.omni_doc_logcat to R.string.omni_doc_logcat_note,
-            R.string.omni_doc_theme to R.string.omni_doc_theme_note,
-            R.string.omni_doc_web to R.string.omni_doc_web_note,
-            R.string.omni_doc_settings to R.string.omni_doc_settings_note,
-            R.string.omni_doc_feedback to R.string.omni_doc_feedback_note,
-            R.string.omni_doc_talk to R.string.omni_doc_talk_note,
-            R.string.omni_doc_rate to R.string.omni_doc_rate_note,
         )
 
         const val WATCH_CODE_MILLIS = 1_200L
@@ -3853,7 +3839,9 @@ class BuilderActivity : Activity() {
     private val feedbackShots = mutableListOf<String>()
     private var helpFor = ""
     private var helpBand = 0
-    private var docBand = 0
+    private var guideSection = 0
+    private var guideOpen = -1
+    private var guideHeld: Pair<String, List<GuideSection>>? = null
     private var helpOpen = -1
     private var adbTab = 0
     private var osTab = 0
@@ -4548,7 +4536,7 @@ class BuilderActivity : Activity() {
         when (here) {
             is Screen.WebToApk -> R.string.omni_web_title
             is Screen.Help -> R.string.omni_help_title
-            is Screen.HelpDocs -> R.string.omni_help_docs
+            is Screen.HelpDocs -> R.string.omni_help_terminal
             is Screen.HelpFaq -> R.string.omni_help_faq
             is Screen.Settings -> R.string.omni_tab_settings
             is Screen.Keys -> R.string.omni_keys_title
@@ -14304,10 +14292,10 @@ class BuilderActivity : Activity() {
                         getString(R.string.omni_help_talk_note),
                     ) { go(Screen.HelpTalk) },
                     helpEntry(
-                        Mark.Shape.PHONE,
+                        Mark.Shape.CODE,
                         palette.ok,
-                        getString(R.string.omni_help_band_using),
-                        getString(R.string.omni_help_docs_note),
+                        getString(R.string.omni_help_band_terminal),
+                        getString(R.string.omni_help_terminal_note),
                     ) { go(Screen.HelpDocs) },
                     helpEntry(
                         Mark.Shape.BOOK,
@@ -14338,116 +14326,264 @@ class BuilderActivity : Activity() {
             )
         }
 
-    private fun numberedRow(at: Int, mark: Mark.Shape, tint: Int, title: String, detail: String) =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(gap(3) / 2, gap(3) / 2, gap(3) / 2, gap(3) / 2)
-            isClickable = true
-            isFocusable = true
-            contentDescription = said(title, detail)
-            readAs(Button::class.java.name)
-            background = touchable(
-                GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = gap(3).toFloat()
-                    setColor(palette.surface)
-                    setStroke(1, palette.divider)
-                },
-                palette.accent,
-            )
-            setOnClickListener { showNote(title, detail) }
-            addView(
-                filledMark(mark, tint, gap(2)),
-                LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginEnd = gap(3) },
-            )
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        TextView(context).apply {
-                            text = getString(R.string.omni_help_numbered, at, title)
-                            setTextColor(palette.foreground)
-                            typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        }
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = detail
-                            setTextColor(palette.muted)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                            setLineSpacing(0f, 1f)
-                            setPadding(0, gap(1) / 2, 0, 0)
-                        }
-                    )
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-            )
-            addView(
-                View(context).apply {
-                    foreground = Mark(Mark.Shape.CHEVRON_RIGHT, palette.accent, 1.15f)
-                },
-                LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginStart = gap(2) },
-            )
+    private data class GuideBlock(val code: Boolean, val body: String)
+
+    private data class GuideEntry(val number: Int, val heading: String, val blocks: List<GuideBlock>) {
+        val words: String = (heading + " " + blocks.joinToString(" ") { it.body })
+            .lowercase(Locale.ROOT)
+    }
+
+    private data class GuideSection(val title: String, val lead: String, val entries: List<GuideEntry>)
+
+    private fun terminalGuide(): List<GuideSection> {
+        val tag = Preferences.language(this).ifEmpty { deviceLanguage() }
+        guideHeld?.let { (held, sections) -> if (held == tag) return sections }
+        if (Builder.load() !is Builder.LoadState.Loaded) return emptyList()
+        val sections = runCatching {
+            val said = JSONObject(Builder.nativeTerminalDocs(tag)).optJSONArray("sections")
+                ?: JSONArray()
+            (0 until said.length()).map { at ->
+                val section = said.getJSONObject(at)
+                val entries = section.optJSONArray("entries") ?: JSONArray()
+                GuideSection(
+                    section.optString("title"),
+                    section.optString("lead"),
+                    (0 until entries.length()).map { index ->
+                        val entry = entries.getJSONObject(index)
+                        val blocks = entry.optJSONArray("blocks") ?: JSONArray()
+                        GuideEntry(
+                            entry.optInt("number"),
+                            entry.optString("heading"),
+                            (0 until blocks.length()).map { one ->
+                                val block = blocks.getJSONObject(one)
+                                GuideBlock(block.optString("kind") == "code", block.optString("body"))
+                            },
+                        )
+                    },
+                )
+            }
+        }.getOrElse {
+            OmniLog.event(LogLevel.WARN, "native", "The terminal guide could not be read.")
+            emptyList()
         }
+        if (sections.isNotEmpty()) {
+            guideHeld = tag to sections
+        }
+        return sections
+    }
 
     private fun renderHelpDocs() {
         content.addView(
             guideHead(
-                Mark.Shape.NOTE,
-                0xFF8B5CF6.toInt(),
-                getString(R.string.omni_help_docs),
-                getString(R.string.omni_help_docs_body),
+                Mark.Shape.CODE,
+                0xFF1FC77A.toInt(),
+                getString(R.string.omni_help_terminal),
+                getString(R.string.omni_help_terminal_body),
                 R.drawable.omni_art_docs_read,
             )
         )
+        val sections = terminalGuide()
+        if (sections.isEmpty()) {
+            content.addView(quiet(getString(R.string.omni_help_none)))
+            helpFooter()
+            return
+        }
+        val picked = guideSection.coerceIn(0, sections.lastIndex)
         content.addView(
-            seekField(getString(R.string.omni_docs_search), helpFor) { helpFor = it }
-        )
-        content.addView(
-            bandRow(DOC_BAND_NAMES.map { getString(it) }, docBand) {
-                docBand = it
+            bandRow(sections.map { it.title }, picked) {
+                guideSection = it
+                guideOpen = -1
                 render(false)
             }
         )
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val needle = helpFor.trim().lowercase(Locale.getDefault())
-        var shown = 0
-        DOC_ROWS.forEachIndexed { index, row ->
-            val whole = (getString(row.first) + " " + getString(row.second))
-                .lowercase(Locale.getDefault())
-            if (docBand != 0 && DOC_BANDS[index] != docBand) return@forEachIndexed
-            if (needle.isNotEmpty() && !whole.contains(needle)) return@forEachIndexed
-            shown += 1
-            val (mark, tint) = docMark(index)
-            list.addView(
-                numberedRow(index + 1, mark, tint, getString(row.first), getString(row.second)),
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                    topMargin = gap(1)
-                },
+        val section = sections[picked]
+        if (section.lead.isNotEmpty()) {
+            content.addView(
+                TextView(this).apply {
+                    text = section.lead
+                    setTextColor(palette.foreground)
+                    typeface = Type.heading
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    setPadding(0, gap(1), 0, gap(2))
+                }
             )
         }
-        content.addView(list)
-        if (shown == 0) {
-            content.addView(quiet(getString(R.string.omni_help_none)))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val hollow = quiet(getString(R.string.omni_help_none))
+        fun fill() {
+            list.removeAllViews()
+            val needle = helpFor.trim().lowercase(Locale.ROOT)
+            section.entries
+                .filter { needle.isEmpty() || it.words.contains(needle) }
+                .forEach { entry ->
+                    list.addView(
+                        guideRow(entry) {
+                            guideOpen = if (guideOpen == entry.number) -1 else entry.number
+                            fill()
+                        }
+                    )
+                }
+            hollow.visibility = if (list.childCount == 0) View.VISIBLE else View.GONE
         }
+        content.addView(
+            seekField(getString(R.string.omni_terminal_search), helpFor) {
+                helpFor = it
+                fill()
+            }
+        )
+        content.addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        content.addView(hollow)
+        fill()
         helpFooter()
     }
 
-    private fun docMark(at: Int): Pair<Mark.Shape, Int> = when (at) {
-        0 -> Mark.Shape.HOME to 0xFF2C7BE5.toInt()
-        1 -> Mark.Shape.ADD to 0xFF1FC77A.toInt()
-        2 -> Mark.Shape.CODE to 0xFF8B5CF6.toInt()
-        3 -> Mark.Shape.FOLDER to 0xFFF08A24.toInt()
-        4 -> Mark.Shape.PLAY to 0xFFEC4899.toInt()
-        5 -> Mark.Shape.NOTE to 0xFF06B6D4.toInt()
-        6 -> Mark.Shape.BRUSH to 0xFFF43F5E.toInt()
-        7 -> Mark.Shape.WEB to 0xFF2C7BE5.toInt()
-        8 -> Mark.Shape.GEAR to 0xFFF08A24.toInt()
-        9 -> Mark.Shape.SPEECH to 0xFF1FC77A.toInt()
-        10 -> Mark.Shape.BRAIN to 0xFF8B5CF6.toInt()
-        else -> Mark.Shape.STAR to 0xFFF5B301.toInt()
+    private fun guideRow(entry: GuideEntry, onToggle: () -> Unit): View {
+        val open = entry.number == guideOpen
+        val tint = GUIDE_TINTS[(entry.number - 1).mod(GUIDE_TINTS.size)]
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(gap(3), gap(3), gap(3), gap(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = gap(3).toFloat()
+                setColor(if (open) palette.surface else Color.TRANSPARENT)
+                setStroke(gap(1) / 2, if (open) Ink.fade(tint, 0.5f) else palette.divider)
+            }
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(1)
+                bottomMargin = gap(1)
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = entry.heading
+                    readAs(Button::class.java.name)
+                    background = reacting(Color.TRANSPARENT, gap(2).toFloat(), tint)
+                    setOnClickListener { onToggle() }
+                    addView(
+                        filledMark(Mark.Shape.CODE, Ink.fade(tint, 0.9f), gap(2)),
+                        LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
+                    )
+                    addView(
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.VERTICAL
+                            addView(
+                                TextView(context).apply {
+                                    text = entry.heading
+                                    setTextColor(palette.foreground)
+                                    typeface = Type.heading
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                }
+                            )
+                            val first = entry.blocks.firstOrNull { !it.code }?.body.orEmpty()
+                            if (!open && first.isNotEmpty()) {
+                                addView(
+                                    TextView(context).apply {
+                                        text = first
+                                        setTextColor(palette.muted)
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                        maxLines = 2
+                                        ellipsize = android.text.TextUtils.TruncateAt.END
+                                        setPadding(0, gap(1) / 2, 0, 0)
+                                    }
+                                )
+                            }
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        View(context).apply {
+                            foreground = Mark(
+                                if (open) Mark.Shape.CHEVRON_UP else Mark.Shape.CHEVRON_DOWN,
+                                tint,
+                                1.1f,
+                            )
+                        },
+                        LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginStart = gap(2) },
+                    )
+                }
+            )
+            if (open) {
+                entry.blocks.forEach { block ->
+                    if (block.code) {
+                        addView(
+                            commandPanel(block.body),
+                            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                                topMargin = gap(2)
+                            },
+                        )
+                    } else {
+                        addView(
+                            TextView(context).apply {
+                                text = block.body
+                                setTextColor(Ink.hot(palette.muted, 0.35f))
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setLineSpacing(gap(1) / 2f, 1f)
+                                setTextIsSelectable(true)
+                                setPadding(0, gap(2), 0, 0)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun commandPanel(body: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.TOP
+        setPadding(gap(3), gap(2), gap(2), gap(2))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = gap(2).toFloat()
+            setColor(palette.background)
+            setStroke(1, palette.divider)
+        }
+        addView(
+            HorizontalScrollView(context).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(
+                    TextView(context).apply {
+                        text = body
+                        setTextColor(Ink.hot(palette.foreground, 0.1f))
+                        typeface = Type.data
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        setLineSpacing(gap(1) / 2f, 1f)
+                        setTextIsSelectable(true)
+                    },
+                    WRAP_CONTENT,
+                    WRAP_CONTENT,
+                )
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        addView(
+            View(context).apply {
+                foreground = Mark(Mark.Shape.COPY, palette.muted)
+                isClickable = true
+                isFocusable = true
+                contentDescription = getString(R.string.omni_action_copy)
+                readAs(Button::class.java.name)
+                background = reacting(Color.TRANSPARENT, gap(5).toFloat(), palette.accent)
+                setOnClickListener {
+                    val clipboard = getSystemService(ClipboardManager::class.java)
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(
+                            ClipData.newPlainText(getString(R.string.omni_help_terminal), body)
+                        )
+                        flash(
+                            getString(R.string.omni_settings_logs_copied),
+                            palette.ok,
+                            Mark.Shape.COPY,
+                        )
+                    }
+                }
+            },
+            LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginStart = gap(2) },
+        )
     }
 
     private fun foldRow(at: Int, question: String, answer: String): View {

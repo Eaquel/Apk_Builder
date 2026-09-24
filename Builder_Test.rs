@@ -34433,3 +34433,163 @@ mod rust {
         assert!(error.suggestion.is_some());
     }
 }
+mod terminal {
+    use crate::terminal::{docs_json, document, read, Block, Section};
+    use crate::terminal_speech::DOCUMENTS;
+
+    fn code_of(section: &Section) -> Vec<Vec<String>> {
+        section
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Code(body) => Some(body.clone()),
+                        Block::Text(_) => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_language_the_app_speaks_has_the_terminal_guide() {
+        let spoken: Vec<&str> = DOCUMENTS.iter().map(|(tag, _)| *tag).collect();
+        assert_eq!(spoken, crate::speech::LANGUAGES);
+        for (tag, text) in DOCUMENTS {
+            let sections = read(text);
+            let counts: Vec<usize> = sections.iter().map(|one| one.entries.len()).collect();
+            assert_eq!(counts, [150, 25], "{tag} holds {counts:?}");
+            for section in &sections {
+                assert!(
+                    !section.title.is_empty(),
+                    "{tag} has a section with no title"
+                );
+                for (at, entry) in section.entries.iter().enumerate() {
+                    assert_eq!(entry.number, at + 1, "{tag}: {}", entry.heading);
+                    assert!(
+                        entry.heading.starts_with(&format!("{}- ", at + 1)),
+                        "{tag}: {}",
+                        entry.heading
+                    );
+                    assert!(
+                        entry
+                            .blocks
+                            .iter()
+                            .any(|block| matches!(block, Block::Text(said) if !said.is_empty())),
+                        "{tag}: {} explains nothing",
+                        entry.heading
+                    );
+                }
+            }
+            assert!(
+                !sections[1].lead.is_empty(),
+                "{tag} has no lead for the connection commands"
+            );
+        }
+    }
+
+    #[test]
+    fn the_commands_are_the_same_in_every_language() {
+        let described = [1, 2, 5, 13, 14, 18, 20, 22, 24];
+        let english = read(document("en").1);
+        let logcat = code_of(&english[0]);
+        let connecting = code_of(&english[1]);
+        assert_eq!(logcat.iter().filter(|one| one.is_empty()).count(), 1);
+        for (tag, text) in DOCUMENTS {
+            let sections = read(text);
+            assert_eq!(
+                code_of(&sections[0]),
+                logcat,
+                "{tag} changed a logcat command"
+            );
+            let theirs = code_of(&sections[1]);
+            assert_eq!(theirs.len(), connecting.len(), "{tag}");
+            for (at, (ours, said)) in connecting.iter().zip(&theirs).enumerate() {
+                if described.contains(&(at + 1)) {
+                    assert_eq!(ours.len(), said.len(), "{tag} entry {}", at + 1);
+                } else {
+                    assert_eq!(ours, said, "{tag} changed connection entry {}", at + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_turkish_guide_is_written_the_way_it_was_given() {
+        let sections = read(document("tr").1);
+        assert_eq!(sections[0].title, "Logcat Komutları");
+        assert_eq!(sections[1].title, "Android Debug Bridge Bağlanma");
+        assert_eq!(sections[1].lead, "Adb Kablosuz Bağlanma Komutları");
+        assert_eq!(sections[0].entries[0].heading, "1- Adb Logcat");
+        assert_eq!(sections[1].entries[2].heading, "3- Adb Pair Komutu");
+        let pairing: Vec<&Block> = sections[1].entries[2].blocks.iter().collect();
+        assert!(pairing.iter().any(|block| matches!(
+            block,
+            Block::Code(body) if body.contains("Enter pairing code:")
+        )));
+    }
+
+    #[test]
+    fn a_language_is_found_the_way_speech_finds_one() {
+        assert_eq!(document("tr").0, "tr");
+        assert_eq!(document("TR").0, "tr");
+        assert_eq!(document("tr-TR").0, "tr");
+        assert_eq!(document("pt-BR").0, "pt-BR");
+        assert_eq!(document("pt-br").0, "pt-BR");
+        assert_eq!(document("pt-PT").0, "pt");
+        assert_eq!(document("zh_CN").0, "zh");
+        assert_eq!(document("xx").0, "en");
+        assert_eq!(document("").0, "en");
+    }
+
+    #[test]
+    fn the_app_reads_the_guide_as_json() {
+        let said = docs_json("de");
+        let read_back = crate::json::read(&said).expect("the guide is valid JSON");
+        assert_eq!(
+            read_back.get("language").and_then(|one| one.text()),
+            Some("de")
+        );
+        let sections = read_back
+            .get("sections")
+            .and_then(|one| one.list())
+            .expect("sections");
+        assert_eq!(sections.len(), 2);
+        let entries = sections[0]
+            .get("entries")
+            .and_then(|one| one.list())
+            .expect("entries");
+        assert_eq!(entries.len(), 150);
+        assert_eq!(
+            entries[0].get("number").and_then(|one| one.integer()),
+            Some(1)
+        );
+        let blocks = entries[0]
+            .get("blocks")
+            .and_then(|one| one.list())
+            .expect("blocks");
+        assert!(blocks
+            .iter()
+            .any(|one| one.get("kind").and_then(|kind| kind.text()) == Some("code")));
+        assert!(blocks.iter().all(|one| one
+            .get("body")
+            .and_then(|body| body.text())
+            .is_some_and(|body| !body.is_empty())));
+    }
+
+    #[test]
+    fn a_fence_left_open_still_keeps_what_it_held() {
+        let sections = read("@@ One\n1- First\n\nSaid.\n\n```\nadb logcat\n");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            sections[0].entries[0].blocks,
+            vec![
+                Block::Text("Said.".to_string()),
+                Block::Code("adb logcat".to_string()),
+            ]
+        );
+    }
+}
