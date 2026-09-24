@@ -3756,6 +3756,21 @@ class BuilderActivity : Activity() {
 
         const val AGENT_DELETE = "<<<OMNI DELETE "
 
+        const val AGENT_READ = "<<<OMNI READ "
+
+        const val AGENT_FILE = "<<<OMNI FILE "
+
+        const val AGENT_READ_BYTES = 96L * 1024L
+
+        const val AGENT_READ_TOTAL = 320L * 1024L
+
+        const val AGENT_SHOWN = "Those are the files you asked to read. Carry on: write what " +
+            "the request needs, or end with the done line if nothing is left to do."
+
+        const val AGENT_MISSING = "There is no such file: "
+
+        const val AGENT_TOO_LARGE = "That file is too large to show whole: "
+
         const val AGENT_END = ">>>"
 
         const val AGENT_DONE = "<<<OMNI DONE>>>"
@@ -3794,6 +3809,11 @@ class BuilderActivity : Activity() {
 
             To remove one:
             <<<OMNI DELETE Java/com/tr/yt/Old.java>>>
+
+            To read one before you change it, on a line of its own:
+            <<<OMNI READ Java/com/tr/yt/App.java>>>
+            Its contents come back in the next message. Read only what you need;
+            the list below names every file the project holds.
 
             Paths are relative to the project root and never climb out of it.
             After your blocks are written the project is compiled; if it refuses,
@@ -10653,6 +10673,37 @@ class BuilderActivity : Activity() {
         return Change(path, kind, added, removed, shown.take(AGENT_DIFF_LINES))
     }
 
+    private fun agentReads(said: String): List<String> =
+        said.lines()
+            .map { it.trim() }
+            .filter { it.startsWith(AGENT_READ) }
+            .map { it.removePrefix(AGENT_READ).removeSuffix(AGENT_END).trim() }
+            .filter { agentPath(it) }
+            .distinct()
+
+    private fun agentShown(root: String, reads: List<String>): String {
+        val out = StringBuilder()
+        var spent = 0L
+        reads.forEach { named ->
+            val file = File(root, named)
+            if (!file.isFile) {
+                out.append(AGENT_MISSING).append(named).append("\n\n")
+                return@forEach
+            }
+            val size = file.length()
+            if (size > AGENT_READ_BYTES || spent + size > AGENT_READ_TOTAL) {
+                out.append(AGENT_TOO_LARGE).append(named).append("\n\n")
+                return@forEach
+            }
+            spent += size
+            val text = runCatching { file.readText() }.getOrDefault("")
+            out.append(AGENT_FILE).append(named).append("\n")
+                .append(text.trimEnd('\n')).append("\n")
+                .append(AGENT_END).append("\n\n")
+        }
+        return out.toString().trimEnd()
+    }
+
     private fun agentPath(named: String): Boolean =
         named.isNotEmpty() &&
             !named.contains("..") &&
@@ -12243,7 +12294,16 @@ class BuilderActivity : Activity() {
         val steps = agentSteps(said)
         val told = if (steps.isEmpty()) emptyList() else agentApply(root, steps)
         val ended = said.contains(AGENT_DONE)
+        val reads = agentReads(said)
         agentRound += 1
+        if (reads.isNotEmpty() && !ended && agentRound < AGENT_ROUNDS) {
+            talkDraft = (told + listOf(agentShown(root, reads), AGENT_SHOWN))
+                .filter { it.isNotEmpty() }
+                .joinToString("\n")
+            render(false)
+            sendToTheAssistant()
+            return
+        }
         if (steps.isNotEmpty() && !ended && agentRound < AGENT_ROUNDS) {
             talkDraft = told.joinToString("\n") + "\n\n" + AGENT_CARRY
             render(false)
