@@ -29849,6 +29849,305 @@ pub mod shrink {
         seen
     }
 
+    pub const STANDING_RULES: &str = "-keep @androidx.annotation.Keep class *\n\
+-keepclasseswithmembers class * { @androidx.annotation.Keep <methods>; }\n\
+-keepclasseswithmembers class * { @androidx.annotation.Keep <fields>; }\n\
+-keepclasseswithmembers class * { @androidx.annotation.Keep <init>(...); }\n\
+-keep @android.support.annotation.Keep class *\n\
+-keepclasseswithmembers class * { native <methods>; }\n";
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    struct Rule {
+        members_only: bool,
+        annotated: Option<String>,
+        kind: Option<String>,
+        names: Vec<(bool, String)>,
+        above: Option<Vec<(bool, String)>>,
+        members: String,
+    }
+
+    fn without_comments(text: &str) -> String {
+        text.lines()
+            .map(|line| match line.find('#') {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn options(text: &str) -> Vec<String> {
+        let text = without_comments(text);
+        let mut out: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        let mut here = String::new();
+        let mut previous = '\n';
+        for one in text.chars() {
+            match one {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                '-' if depth == 0 && previous.is_whitespace() => {
+                    if !here.trim().is_empty() {
+                        out.push(here.trim().to_string());
+                    }
+                    here.clear();
+                }
+                _ => {}
+            }
+            here.push(one);
+            previous = one;
+        }
+        if !here.trim().is_empty() {
+            out.push(here.trim().to_string());
+        }
+        out
+    }
+
+    fn name_list(said: &str) -> Vec<(bool, String)> {
+        said.split(',')
+            .map(str::trim)
+            .filter(|one| !one.is_empty())
+            .map(|one| match one.strip_prefix('!') {
+                Some(rest) => (true, rest.trim().to_string()),
+                None => (false, one.to_string()),
+            })
+            .collect()
+    }
+
+    fn rule_of(option: &str) -> Option<Rule> {
+        let (head, members) = match option.find('{') {
+            Some(at) => (
+                &option[..at],
+                option[at + 1..]
+                    .trim_end()
+                    .trim_end_matches('}')
+                    .to_string(),
+            ),
+            None => (option, String::new()),
+        };
+        let mut words = head.split_whitespace();
+        let first = words.next()?;
+        let (name, modifiers) = match first.split_once(',') {
+            Some((name, rest)) => (name, rest.to_string()),
+            None => (first, String::new()),
+        };
+        let mut rest: Vec<&str> = words.collect();
+        while rest.first().is_some_and(|one| one.starts_with(',')) {
+            rest.remove(0);
+        }
+        if modifiers.contains("allowshrinking") {
+            return None;
+        }
+        let members_only = match name {
+            "-keep" | "-keepclasseswithmembers" => false,
+            "-keepclassmembers" => true,
+            _ => return None,
+        };
+        let mut rule = Rule {
+            members_only,
+            members,
+            ..Rule::default()
+        };
+        let mut at = 0usize;
+        let mut expect_name = false;
+        let mut above = false;
+        while at < rest.len() {
+            let word = rest[at];
+            if let Some(annotation) = word.strip_prefix('@') {
+                if !above {
+                    rule.annotated = Some(annotation.to_string());
+                }
+            } else if matches!(word, "class" | "interface" | "enum" | "@interface") {
+                rule.kind = Some(word.to_string());
+                expect_name = true;
+            } else if matches!(word, "extends" | "implements") {
+                above = true;
+                expect_name = true;
+            } else if expect_name {
+                let mut listed = word.to_string();
+                while listed.ends_with(',') && at + 1 < rest.len() {
+                    at += 1;
+                    listed.push_str(rest[at]);
+                }
+                if above {
+                    rule.above = Some(name_list(&listed));
+                } else {
+                    rule.names = name_list(&listed);
+                }
+                expect_name = false;
+            }
+            at += 1;
+        }
+        if rule.names.is_empty() {
+            return None;
+        }
+        Some(rule)
+    }
+
+    fn matches_pattern(pattern: &[char], name: &[char]) -> bool {
+        match pattern.first() {
+            None => name.is_empty(),
+            Some('*') if pattern.get(1) == Some(&'*') => {
+                (0..=name.len()).any(|skip| matches_pattern(&pattern[2..], &name[skip..]))
+            }
+            Some('*') => {
+                let mut skip = 0usize;
+                loop {
+                    if matches_pattern(&pattern[1..], &name[skip..]) {
+                        return true;
+                    }
+                    if skip >= name.len() || name[skip] == '.' {
+                        return false;
+                    }
+                    skip += 1;
+                }
+            }
+            Some('?') => {
+                !name.is_empty() && name[0] != '.' && matches_pattern(&pattern[1..], &name[1..])
+            }
+            Some(one) => {
+                !name.is_empty() && name[0] == *one && matches_pattern(&pattern[1..], &name[1..])
+            }
+        }
+    }
+
+    fn named_by(listed: &[(bool, String)], dotted: &str) -> bool {
+        let name: Vec<char> = dotted.chars().collect();
+        let mut kept = false;
+        for (negated, pattern) in listed {
+            let whole = pattern == "*";
+            let pattern: Vec<char> = pattern.chars().collect();
+            if whole || matches_pattern(&pattern, &name) {
+                if *negated {
+                    return false;
+                }
+                kept = true;
+            }
+        }
+        kept
+    }
+
+    fn dotted(descriptor: &str) -> String {
+        descriptor
+            .trim_start_matches('L')
+            .trim_end_matches(';')
+            .replace('/', ".")
+    }
+
+    fn carries(annotations: &[crate::jvm::Annotation], wanted: &str) -> bool {
+        annotations
+            .iter()
+            .any(|one| dotted(&one.descriptor) == wanted)
+    }
+
+    fn above_of(
+        classes: &std::collections::BTreeMap<String, &Class>,
+        descriptor: &str,
+    ) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut waiting = vec![descriptor.to_string()];
+        while let Some(one) = waiting.pop() {
+            let Some(class) = classes.get(&one) else {
+                continue;
+            };
+            let mut next = class.interfaces.clone();
+            next.push(class.superclass.clone());
+            for held in next {
+                if !held.is_empty() && !out.contains(&held) {
+                    out.push(held.clone());
+                    waiting.push(held);
+                }
+            }
+        }
+        out
+    }
+
+    fn has_the_members(class: &Class, members: &str) -> bool {
+        let said = members.trim();
+        if said.is_empty() || said.contains("*;") {
+            return true;
+        }
+        let annotation = said
+            .split_whitespace()
+            .find_map(|one| one.strip_prefix('@'))
+            .map(str::to_string);
+        let methods = || {
+            class
+                .direct_methods
+                .iter()
+                .chain(class.virtual_methods.iter())
+        };
+        let fields = || {
+            class
+                .static_fields
+                .iter()
+                .chain(class.instance_fields.iter())
+        };
+        if said.contains("native") {
+            return methods().any(|one| one.access_flags & 0x0100 != 0);
+        }
+        if let Some(wanted) = annotation {
+            if said.contains("<fields>") {
+                return fields().any(|one| carries(&one.annotations, &wanted));
+            }
+            if said.contains("<init>") {
+                return methods().any(|one| {
+                    one.reference.name == "<init>" && carries(&one.annotations, &wanted)
+                });
+            }
+            return methods().any(|one| carries(&one.annotations, &wanted))
+                || fields().any(|one| carries(&one.annotations, &wanted));
+        }
+        true
+    }
+
+    pub fn kept_by_rules(classes: &[Class], texts: &[String]) -> Vec<String> {
+        let rules: Vec<Rule> = texts
+            .iter()
+            .flat_map(|text| options(text))
+            .filter_map(|option| rule_of(&option))
+            .filter(|rule| !rule.members_only)
+            .collect();
+        if rules.is_empty() {
+            return Vec::new();
+        }
+        let by_name: std::collections::BTreeMap<String, &Class> = classes
+            .iter()
+            .map(|one| (one.descriptor.clone(), one))
+            .collect();
+        let mut out = Vec::new();
+        for class in classes {
+            let name = dotted(&class.descriptor);
+            let kept = rules.iter().any(|rule| {
+                if !named_by(&rule.names, &name) {
+                    return false;
+                }
+                match rule.kind.as_deref() {
+                    Some("interface") if class.access_flags & 0x0200 == 0 => return false,
+                    Some("enum") if class.access_flags & 0x4000 == 0 => return false,
+                    Some("@interface") if class.access_flags & 0x2000 == 0 => return false,
+                    _ => {}
+                }
+                if let Some(wanted) = &rule.annotated {
+                    if !carries(&class.annotations, wanted) {
+                        return false;
+                    }
+                }
+                if let Some(listed) = &rule.above {
+                    let above = above_of(&by_name, &class.descriptor);
+                    if !above.iter().any(|one| named_by(listed, &dotted(one))) {
+                        return false;
+                    }
+                }
+                has_the_members(class, &rule.members)
+            });
+            if kept {
+                out.push(class.descriptor.clone());
+            }
+        }
+        out
+    }
+
     pub fn apply(classes: Vec<Class>, roots: &[String]) -> (Vec<Class>, Trimmed) {
         if roots.is_empty() {
             let kept = classes.len();
@@ -30912,6 +31211,8 @@ pub mod gradle {
         pub plugins: Vec<String>,
         pub processors: Vec<Dependency>,
         pub unread: Vec<String>,
+        pub placeholders: Vec<(String, String)>,
+        pub flavors: Vec<String>,
     }
 
     pub fn plain(text: &str) -> String {
@@ -31633,6 +31934,148 @@ pub mod gradle {
         }
     }
 
+    pub fn named_blocks(text: &str) -> Vec<(String, String)> {
+        let held: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < held.len() {
+            if held[at] == '"' || held[at] == '\'' {
+                let (_, next) = quoted(&held, at);
+                at = next;
+                continue;
+            }
+            if !is_name(held[at]) || (at > 0 && is_name(held[at - 1])) {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            while at < held.len() && is_name(held[at]) {
+                at += 1;
+            }
+            let word: String = held[start..at].iter().collect();
+            let mut named = word.clone();
+            let mut after = skip_blank(&held, at);
+            if after < held.len() && held[after] == '(' {
+                let mut depth = 0usize;
+                let open = after;
+                while after < held.len() {
+                    match held[after] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                after += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    after += 1;
+                }
+                let inside: String = held[open..after].iter().collect();
+                if let Some(quoted_name) = unquoted(&inner_text(&inside)) {
+                    named = quoted_name;
+                }
+                after = skip_blank(&held, after);
+            }
+            if after < held.len() && held[after] == '{' {
+                if let Some(shut) = closing(&held, after) {
+                    out.push((named, held[after + 1..shut].iter().collect()));
+                    at = shut + 1;
+                    continue;
+                }
+            }
+        }
+        out
+    }
+
+    pub fn placeholders(text: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for said in statements(text) {
+            let Some(at) = said.find("anifestPlaceholders") else {
+                continue;
+            };
+            let rest: Vec<char> = said[at + "anifestPlaceholders".len()..].chars().collect();
+            let mut tokens: Vec<String> = Vec::new();
+            let mut here = 0usize;
+            while here < rest.len() {
+                let one = rest[here];
+                if one == '"' || one == '\'' {
+                    let (taken, next) = quoted(&rest, here);
+                    tokens.push(taken.trim_matches(['"', '\'']).to_string());
+                    here = next;
+                    continue;
+                }
+                if is_name(one) {
+                    let start = here;
+                    while here < rest.len() && is_name(rest[here]) {
+                        here += 1;
+                    }
+                    let word: String = rest[start..here].iter().collect();
+                    if !matches!(
+                        word.as_str(),
+                        "to" | "mapOf" | "mutableMapOf" | "put" | "putAll"
+                    ) {
+                        tokens.push(word);
+                    }
+                    continue;
+                }
+                here += 1;
+            }
+            for pair in tokens.chunks(2) {
+                if let [key, value] = pair {
+                    out.retain(|(held, _)| held != key);
+                    out.push((key.clone(), value.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn chosen_flavors(android: &str) -> (Vec<(String, String)>, Vec<String>) {
+        let Some(listed) = block(android, "productFlavors") else {
+            return (Vec::new(), Vec::new());
+        };
+        let flavors = named_blocks(&listed);
+        if flavors.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let dimensions: Vec<String> = statements(android)
+            .iter()
+            .filter(|one| first_word(one) == "flavorDimensions" || one.contains("flavorDimensions"))
+            .flat_map(|one| literals(one))
+            .collect();
+        let dimension_of = |body: &str| -> String {
+            statements(body)
+                .iter()
+                .find(|one| one.trim_start().starts_with("dimension"))
+                .and_then(|one| literals(one).into_iter().next())
+                .unwrap_or_default()
+        };
+        let mut chosen: Vec<(String, String)> = Vec::new();
+        if dimensions.is_empty() {
+            chosen.push(flavors[0].clone());
+        } else {
+            for dimension in &dimensions {
+                if let Some(one) = flavors
+                    .iter()
+                    .find(|(_, body)| dimension_of(body) == *dimension)
+                {
+                    chosen.push(one.clone());
+                }
+            }
+            if chosen.is_empty() {
+                chosen.push(flavors[0].clone());
+            }
+        }
+        let left: Vec<String> = flavors
+            .iter()
+            .filter(|(name, _)| !chosen.iter().any(|(held, _)| held == name))
+            .map(|(name, _)| name.clone())
+            .collect();
+        (chosen, left)
+    }
+
     pub fn plugins(text: &str, into: &mut Read) {
         if let Some(body) = block(text, "plugins") {
             for said in statements(&body) {
@@ -31867,6 +32310,23 @@ pub mod gradle {
             found.settings.application_id = found.settings.namespace.clone();
         }
         found.settings.package = found.settings.namespace.clone();
+        let features = block(&android, "buildFeatures").unwrap_or_default();
+        for feature in [
+            "viewBinding",
+            "dataBinding",
+            "aidl",
+            "compose",
+            "renderScript",
+            "mlModelBinding",
+        ] {
+            if flag(&features, &[feature]) == Some(true)
+                || flag(&android, &[&format!("{feature}.enabled")]) == Some(true)
+            {
+                found
+                    .unread
+                    .push(format!("buildFeatures {{ {feature} true }}"));
+            }
+        }
 
         if let Some(held) = number(&android, &["compileSdk", "compileSdkVersion"]) {
             found.settings.compile_sdk = held;
@@ -31887,7 +32347,66 @@ pub mod gradle {
         let release = block(&android, "buildTypes")
             .and_then(|types| block(&types, "release"))
             .unwrap_or_default();
-        for place in [&default, &release] {
+        let (chosen, left) = chosen_flavors(&android);
+        let mut suffix = String::new();
+        for (name, body) in &chosen {
+            found.flavors.push(name.clone());
+            if let Some(held) = value(body, "applicationId") {
+                found.settings.application_id = held;
+            }
+            if let Some(held) = value(body, "applicationIdSuffix") {
+                suffix.push_str(&held);
+            }
+            if let Some(held) = number(body, &["minSdk", "minSdkVersion"]) {
+                found.settings.min_sdk = held;
+            }
+            if let Some(held) = number(body, &["targetSdk", "targetSdkVersion"]) {
+                found.settings.target_sdk = held;
+            }
+            if let Some(held) = number(body, &["versionCode"]) {
+                found.settings.version_code = held.max(1);
+            }
+            if let Some(held) = value(body, "versionName") {
+                found.settings.version_name = held;
+            }
+            if let Some(held) = value(body, "versionNameSuffix") {
+                found.settings.version_name.push_str(&held);
+            }
+        }
+        if !chosen.is_empty() {
+            found.unread.push(format!(
+                "productFlavors: {} is built{}",
+                chosen
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+"),
+                if left.is_empty() {
+                    String::new()
+                } else {
+                    format!(", not {}", left.join(", "))
+                }
+            ));
+        }
+        found.placeholders = placeholders(&default);
+        for (_, body) in &chosen {
+            for (key, held) in placeholders(body) {
+                found.placeholders.retain(|(one, _)| *one != key);
+                found.placeholders.push((key, held));
+            }
+        }
+        for (key, held) in placeholders(&release) {
+            found.placeholders.retain(|(one, _)| *one != key);
+            found.placeholders.push((key, held));
+        }
+        if !suffix.is_empty() {
+            found.settings.application_id.push_str(&suffix);
+        }
+        let flavor_bodies: Vec<&String> = chosen.iter().map(|(_, body)| body).collect();
+        let mut places: Vec<&String> = vec![&default];
+        places.extend(flavor_bodies);
+        places.push(&release);
+        for place in places {
             for said in statements(place) {
                 let said = said.trim();
                 let (keyword, into) = if said.starts_with("buildConfigField") {
@@ -32154,6 +32673,63 @@ pub mod gradle {
         Ok(())
     }
 
+    fn adopt_source_set(
+        root: &std::path::Path,
+        module: &str,
+        set: &str,
+        out: &mut Adopted,
+    ) -> Result<(), Diagnostic> {
+        let here = if module.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(module)
+        };
+        let base = here.join("src").join(set);
+        if !base.is_dir() {
+            return Ok(());
+        }
+        for (gradle_folder, omni_folder) in SOURCE_MAP {
+            let Some(inside) = gradle_folder.strip_prefix("src/main/") else {
+                continue;
+            };
+            let from = base.join(inside);
+            if !from.is_dir() {
+                continue;
+            }
+            let mut held = Vec::new();
+            walk(&from, "", &mut held);
+            for (named, path) in held {
+                let folder = if *omni_folder == crate::scaffold::JAVA_FOLDER {
+                    language_folder(&named)
+                } else {
+                    omni_folder
+                };
+                if carry(&path, &root.join(folder).join(&named))? {
+                    out.moved += 1;
+                }
+            }
+            std::fs::remove_dir_all(&from).ok();
+        }
+        let manifest = base.join("AndroidManifest.xml");
+        if let Some(flavored) = text_of(&manifest) {
+            let main = here.join("src/main/AndroidManifest.xml");
+            if let Some(text) = text_of(&main) {
+                let merged = crate::builder::merged_manifest_as(&text, &[flavored], "")?;
+                std::fs::write(&main, merged).map_err(|why| {
+                    fail(
+                        "EG206",
+                        "A file from the Gradle project could not be moved.",
+                    )
+                    .with_context(format!("Path: {}", main.display()))
+                    .with_context(format!("Reason: {why}"))
+                })?;
+                std::fs::remove_file(&manifest).ok();
+                out.moved += 1;
+            }
+        }
+        Ok(())
+    }
+
     fn adopt_library_module(
         root: &std::path::Path,
         module: &str,
@@ -32263,7 +32839,11 @@ pub mod gradle {
             out.unread
                 .push(format!("annotationProcessor {}:{}", one.name, one.version));
         }
+        for flavor in &found.flavors {
+            adopt_source_set(here, &module, flavor, &mut out)?;
+        }
         adopt_module(here, &module, true, &mut out)?;
+        let placeholders = found.placeholders.clone();
         let mut settings = found.settings;
         let mut waiting = found.modules.clone();
         let mut done: Vec<String> = vec![module.clone()];
@@ -32316,6 +32896,33 @@ pub mod gradle {
         }
 
         settings.processors = out.processors.clone();
+        if !placeholders.is_empty() {
+            let mut manifests = vec![here.join("AndroidManifest.xml")];
+            manifests.extend(
+                crate::builder::local_modules(root)
+                    .into_iter()
+                    .map(|(folder, _)| folder.join("AndroidManifest.xml")),
+            );
+            for path in manifests {
+                let Some(text) = text_of(&path) else {
+                    continue;
+                };
+                let mut filled = text.clone();
+                for (key, held) in &placeholders {
+                    filled = filled.replace(&format!("${{{key}}}"), held);
+                }
+                if filled != text {
+                    std::fs::write(&path, filled).map_err(|why| {
+                        fail(
+                            "EG206",
+                            "A file from the Gradle project could not be moved.",
+                        )
+                        .with_context(format!("Path: {}", path.display()))
+                        .with_context(format!("Reason: {why}"))
+                    })?;
+                }
+            }
+        }
         if settings.namespace.is_empty() {
             let mut quiet = crate::diag::Sink::new();
             let manifest = crate::scaffold::read_manifest(root)?;
@@ -44436,6 +45043,8 @@ pub mod builder {
         pub shrink: bool,
 
         pub seal_resources: bool,
+
+        pub keep_rules: Vec<String>,
     }
 
     pub struct Icons {
@@ -45058,6 +45667,7 @@ pub mod builder {
             library_resources: Vec::new(),
             application_id: String::new(),
             library_packages: Vec::new(),
+            keep_rules: Vec::new(),
             sealed: None,
             shrink: true,
             seal_resources: false,
@@ -45186,6 +45796,7 @@ pub mod builder {
             library_resources: Vec::new(),
             application_id: String::new(),
             library_packages: Vec::new(),
+            keep_rules: Vec::new(),
             sealed: None,
             shrink: true,
             seal_resources: false,
@@ -45256,6 +45867,7 @@ pub mod builder {
         project.library_values_names = brought.values_names;
         project.library_resources = brought.resources;
         project.library_packages = brought.packages;
+        project.keep_rules = keep_rules_of(root, held.as_ref(), &brought.rules);
 
         let mut sink = crate::diag::Sink::new();
         let table = compile_resources(&project, &mut sink)?;
@@ -46077,6 +46689,36 @@ public final class R {{
         out
     }
 
+    pub fn keep_rules_of(
+        root: &str,
+        held: Option<&crate::settings::Settings>,
+        brought: &[String],
+    ) -> Vec<String> {
+        let mut out = vec![crate::shrink::STANDING_RULES.to_string()];
+        let mut files: Vec<String> = vec![crate::settings::RULES_FILE.to_string()];
+        if let Some(held) = held {
+            for one in held.shrinking.files.iter().chain(
+                held.variants
+                    .iter()
+                    .filter(|one| one.name == crate::settings::RELEASE_VARIANT)
+                    .flat_map(|one| one.proguard.iter()),
+            ) {
+                if !files.contains(one) {
+                    files.push(one.clone());
+                }
+            }
+            out.extend(held.shrinking.rules.iter().cloned());
+        }
+        for one in files {
+            let path = std::path::Path::new(root).join(&one);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push(text);
+            }
+        }
+        out.extend(brought.iter().cloned());
+        out
+    }
+
     #[derive(Default)]
     pub struct Brought {
         pub values: Vec<(String, String)>,
@@ -46088,6 +46730,8 @@ public final class R {{
         pub manifests: Vec<String>,
 
         pub carried: Vec<(String, Vec<u8>)>,
+
+        pub rules: Vec<String>,
     }
 
     pub fn brought_by_libraries(root: &str) -> Result<Brought, Diagnostic> {
@@ -46131,6 +46775,11 @@ public final class R {{
                 if entry.name.starts_with("assets/") {
                     let held = entry_bytes(&bytes, entry, &where_from)?;
                     out.carried.push((entry.name.clone(), held));
+                    continue;
+                }
+                if entry.name == "proguard.txt" {
+                    let held = entry_bytes(&bytes, entry, &where_from)?;
+                    out.rules.push(String::from_utf8_lossy(&held).to_string());
                     continue;
                 }
                 if let Some(rest) = entry.name.strip_prefix("jni/") {
@@ -46744,6 +47393,10 @@ public final class R {{
                 let mut roots = crate::shrink::roots_from_manifest(&project.manifest, &package);
                 roots.extend(crate::shrink::beyond_the_package(&project.code, &package));
                 roots.extend(crate::shrink::found_by_name(&project.code));
+                roots.extend(crate::shrink::kept_by_rules(
+                    &project.code,
+                    &project.keep_rules,
+                ));
                 let texts: Vec<String> = project
                     .resources
                     .iter()

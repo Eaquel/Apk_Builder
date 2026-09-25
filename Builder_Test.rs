@@ -11677,6 +11677,7 @@ public class Walk {
             sealed: None,
             shrink: true,
             seal_resources: false,
+            keep_rules: Vec::new(),
         }
     }
 
@@ -12347,6 +12348,7 @@ public class Walk {
                 sealed: None,
                 shrink: true,
                 seal_resources: false,
+                keep_rules: Vec::new(),
             };
             let mut sink = Sink::new();
             let built = crate::builder::build(&project, &key, 1_787_000_000, &mut sink)
@@ -25017,6 +25019,165 @@ Viewbinding   = false
             crate::dalvik::translate_class(&class)
                 .unwrap_or_else(|error| panic!("{name} does not become dex: {}", error.message));
         }
+    }
+    #[test]
+    fn keep_rules_root_the_classes_they_name() {
+        let class = |name: &str, above: &str| crate::dexwrite::Class::named(name, above, 0x0001);
+        let mut tagged = class("Lcom/a/Tagged;", "Ljava/lang/Object;");
+        tagged.annotations.push(crate::jvm::Annotation {
+            descriptor: "Lcom/a/Keep;".to_string(),
+            visibility: crate::jvm::Visibility::Build,
+            values: Vec::new(),
+        });
+        let classes = vec![
+            class("Lcom/a/Plugin;", "Ljava/lang/Object;"),
+            class("Lcom/a/Base;", "Ljava/lang/Object;"),
+            class("Lcom/a/deep/Child;", "Lcom/a/Base;"),
+            class("Lcom/a/Grand;", "Lcom/a/deep/Child;"),
+            class("Lcom/b/Other;", "Lcom/a/Base;"),
+            class("Lcom/a/Gone;", "Ljava/lang/Object;"),
+            class("Lcom/a/Members;", "Ljava/lang/Object;"),
+            tagged,
+        ];
+        let rules = vec!["# a comment -keep class com.a.Gone\n\
+             -keep class com.a.Plugin { *; }\n\
+             -keep class com.a.** extends com.a.Base\n\
+             -keep @com.a.Keep class *\n\
+             -keepclassmembers class com.a.Members { *; }\n\
+             -keep,allowshrinking class com.a.Gone\n\
+             -dontwarn com.a.**\n"
+            .to_string()];
+        let kept = crate::shrink::kept_by_rules(&classes, &rules);
+        for wanted in [
+            "Lcom/a/Plugin;",
+            "Lcom/a/deep/Child;",
+            "Lcom/a/Grand;",
+            "Lcom/a/Tagged;",
+        ] {
+            assert!(
+                kept.contains(&wanted.to_string()),
+                "{wanted} is kept: {kept:?}"
+            );
+        }
+        for dropped in [
+            "Lcom/a/Base;",
+            "Lcom/b/Other;",
+            "Lcom/a/Gone;",
+            "Lcom/a/Members;",
+        ] {
+            assert!(
+                !kept.contains(&dropped.to_string()),
+                "{dropped} is not rooted: {kept:?}"
+            );
+        }
+        assert!(
+            crate::shrink::kept_by_rules(
+                &classes,
+                &["-keep class !com.a.Plugin,com.a.* { *; }".to_string()]
+            )
+            .iter()
+            .all(|one| one != "Lcom/a/Plugin;"),
+            "a negated name is left out"
+        );
+    }
+
+    #[test]
+    fn a_gradle_flavor_is_built_with_its_sources_and_placeholders() {
+        let directory = temp_directory("omni-flavors");
+        let at = |path: &str, text: &str| {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        at("settings.gradle", "include ':app'\n");
+        at("build.gradle", "");
+        at(
+            "app/build.gradle",
+            "plugins { id 'com.android.application' }\n\
+             android {\n\
+                 namespace 'com.demo.app'\n\
+                 compileSdk 34\n\
+                 defaultConfig {\n\
+                     applicationId 'com.demo.app'\n\
+                     minSdk 26\n\
+                     targetSdk 34\n\
+                     manifestPlaceholders = [scheme: \"demoapp\", host: 'example.com']\n\
+                 }\n\
+                 buildFeatures { viewBinding true }\n\
+                 flavorDimensions 'tier'\n\
+                 productFlavors {\n\
+                     free { dimension 'tier'; applicationIdSuffix '.free'; versionNameSuffix '-free' }\n\
+                     paid { dimension 'tier' }\n\
+                 }\n\
+             }\n",
+        );
+        at(
+            "app/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+             <application><activity android:name=\".Main\">\
+             <intent-filter><data android:scheme=\"${scheme}\" android:host=\"${host}\" /></intent-filter>\
+             </activity></application></manifest>",
+        );
+        at(
+            "app/src/main/java/com/demo/app/Main.java",
+            "package com.demo.app; public class Main {}",
+        );
+        at(
+            "app/src/free/java/com/demo/app/Tier.java",
+            "package com.demo.app; class Tier {}",
+        );
+        at(
+            "app/src/paid/java/com/demo/app/Tier.java",
+            "package com.demo.app; class Tier { int paid; }",
+        );
+        at(
+            "app/src/free/res/values/flavor.xml",
+            "<resources><string name=\"tier\">free</string></resources>",
+        );
+
+        let root = directory.to_str().unwrap().to_string();
+        let adopted = crate::gradle::adopt(&root)
+            .unwrap()
+            .expect("a Gradle project");
+        assert!(
+            adopted
+                .unread
+                .iter()
+                .any(|one| one == "productFlavors: free is built, not paid"),
+            "{:?}",
+            adopted.unread
+        );
+        assert!(
+            adopted
+                .unread
+                .iter()
+                .any(|one| one == "buildFeatures { viewBinding true }"),
+            "a feature this does not carry is said out loud: {:?}",
+            adopted.unread
+        );
+        let tier = std::fs::read_to_string(directory.join("Java/com/demo/app/Tier.java")).unwrap();
+        assert!(
+            !tier.contains("paid"),
+            "the chosen flavor's source is the one taken"
+        );
+        assert!(directory.join("Res/values/flavor.xml").is_file());
+        let manifest = std::fs::read_to_string(directory.join("AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains("android:scheme=\"demoapp\""),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("android:host=\"example.com\""),
+            "{manifest}"
+        );
+        let settings = crate::settings::held(&root).unwrap().unwrap();
+        assert_eq!(settings.application_id, "com.demo.app.free");
+        assert!(
+            settings.version_name.ends_with("-free"),
+            "{}",
+            settings.version_name
+        );
+        std::fs::remove_dir_all(&directory).ok();
     }
 }
 
