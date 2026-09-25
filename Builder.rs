@@ -28179,6 +28179,20 @@ pub mod shrink {
             .collect()
     }
 
+    pub fn found_by_name(classes: &[Class]) -> Vec<String> {
+        classes
+            .iter()
+            .filter(|one| {
+                one.descriptor
+                    .strip_suffix(";")
+                    .and_then(|rest| rest.strip_suffix(crate::room::IMPL_SUFFIX))
+                    .map(|rest| format!("{rest};"))
+                    .is_some_and(|base| one.superclass == base || one.interfaces.contains(&base))
+            })
+            .map(|one| one.descriptor.clone())
+            .collect()
+    }
+
     pub fn named_in_resources(texts: &[String], classes: &[Class], package: &str) -> Vec<String> {
         let present: BTreeSet<&str> = classes.iter().map(|one| one.descriptor.as_str()).collect();
         let mut out = BTreeSet::new();
@@ -28396,6 +28410,13 @@ pub mod settings {
         pub file: String,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Declared {
+        pub kind: String,
+        pub name: String,
+        pub value: String,
+    }
+
     pub const JAVA_LEVEL: &str = "17";
 
     pub const RULES_FILE: &str = "proguard-rules.pro";
@@ -28545,6 +28566,8 @@ pub mod settings {
         pub abis: Vec<String>,
         pub dependencies: Vec<Dependency>,
         pub processors: Vec<Dependency>,
+        pub build_config: Vec<Declared>,
+        pub res_values: Vec<Declared>,
         pub shrink: bool,
         pub seal_resources: bool,
         pub key_alias: String,
@@ -28575,6 +28598,8 @@ pub mod settings {
                 abis: vec![crate::scaffold::ARM64.to_string()],
                 dependencies: Vec::new(),
                 processors: Vec::new(),
+                build_config: Vec::new(),
+                res_values: Vec::new(),
                 shrink: true,
                 seal_resources: false,
                 key_alias: String::new(),
@@ -28705,9 +28730,12 @@ pub mod settings {
 
             w.blank();
             w.note("What Gradle would hand to kapt, ksp or annotationProcessor.");
-            w.note("This build does not run them, so anything they would have");
-            w.note("written has to be in the project already. They are kept here");
-            w.note("so nothing is lost when the project goes back to Gradle.");
+            w.note("Room's compiler is run here: the classes it would write are");
+            w.note("made while building. Lifecycle's is not needed, the library");
+            w.note("does the same work without it. Any other is not run, so what");
+            w.note("it would have written has to be in the project already. They");
+            w.note("are kept here so nothing is lost when the project goes back");
+            w.note("to Gradle.");
             w.note(
                 "Example: { \"name\": \"androidx.room:room-compiler\", \"version\": \"2.6.1\" }",
             );
@@ -28717,6 +28745,35 @@ pub mod settings {
                 w.field_str("name", &one.name);
                 w.field_str("version", &one.version);
                 w.field_str("file", &one.file);
+                w.end_object();
+            }
+            w.end_array();
+
+            w.blank();
+            w.note("What Gradle's buildConfigField adds to the generated");
+            w.note("BuildConfig class. value is written into Java as it stands,");
+            w.note("so a String keeps its quotes.");
+            w.note("Example: { \"type\": \"String\", \"name\": \"API_URL\", \"value\": \"\\\"https://example.com\\\"\" }");
+            w.begin_array(Some("buildConfigFields"));
+            for one in &self.build_config {
+                w.begin_object(None);
+                w.field_str("type", &one.kind);
+                w.field_str("name", &one.name);
+                w.field_str("value", &one.value);
+                w.end_object();
+            }
+            w.end_array();
+
+            w.blank();
+            w.note("What Gradle's resValue adds to the resources, as if a values");
+            w.note("file had declared it.");
+            w.note("Example: { \"type\": \"string\", \"name\": \"server\", \"value\": \"example.com\" }");
+            w.begin_array(Some("resValues"));
+            for one in &self.res_values {
+                w.begin_object(None);
+                w.field_str("type", &one.kind);
+                w.field_str("name", &one.name);
+                w.field_str("value", &one.value);
                 w.end_object();
             }
             w.end_array();
@@ -28961,6 +29018,31 @@ pub mod settings {
                     out.dependencies = found;
                 } else {
                     out.processors = found;
+                }
+            }
+            for (named, into) in [("buildConfigFields", 0), ("resValues", 1)] {
+                let Some(listed) = held.get(named).and_then(|one| one.list()) else {
+                    continue;
+                };
+                let found: Vec<Declared> = listed
+                    .iter()
+                    .filter_map(|one| {
+                        Some(Declared {
+                            kind: one.get("type")?.text()?.to_string(),
+                            name: one.get("name")?.text()?.to_string(),
+                            value: one
+                                .get("value")
+                                .and_then(|held| held.text())
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                    })
+                    .filter(|one| !one.kind.is_empty() && !one.name.is_empty())
+                    .collect();
+                if into == 0 {
+                    out.build_config = found;
+                } else {
+                    out.res_values = found;
                 }
             }
             if let Some(build) = held.get("build") {
@@ -29293,6 +29375,11 @@ pub mod gradle {
     ];
 
     pub const PROCESSING_CONFIGURATIONS: &[&str] = &["annotationProcessor", "kapt", "ksp"];
+
+    pub const DONE_WITHOUT: &[&str] = &[
+        "android.arch.lifecycle:compiler",
+        "androidx.lifecycle:lifecycle-compiler",
+    ];
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
@@ -29651,6 +29738,37 @@ pub mod gradle {
             }
         }
         None
+    }
+
+    pub fn literals(text: &str) -> Vec<String> {
+        let held: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < held.len() {
+            let mark = held[at];
+            if mark != '"' && mark != '\'' {
+                at += 1;
+                continue;
+            }
+            at += 1;
+            let mut one = String::new();
+            while at < held.len() && held[at] != mark {
+                if held[at] == '\\' && at + 1 < held.len() {
+                    at += 1;
+                    one.push(match held[at] {
+                        'n' => '\n',
+                        't' => '\t',
+                        other => other,
+                    });
+                } else {
+                    one.push(held[at]);
+                }
+                at += 1;
+            }
+            at += 1;
+            out.push(one);
+        }
+        out
     }
 
     pub fn catalogue(text: &str) -> crate::settings::Catalogue {
@@ -30255,6 +30373,35 @@ pub mod gradle {
         let release = block(&android, "buildTypes")
             .and_then(|types| block(&types, "release"))
             .unwrap_or_default();
+        for place in [&default, &release] {
+            for said in statements(place) {
+                let said = said.trim();
+                let (keyword, into) = if said.starts_with("buildConfigField") {
+                    ("buildConfigField", 0)
+                } else if said.starts_with("resValue") {
+                    ("resValue", 1)
+                } else {
+                    continue;
+                };
+                let held = literals(&said[keyword.len()..]);
+                let [kind, name, value] = held.as_slice() else {
+                    found.unread.push(said.to_string());
+                    continue;
+                };
+                let one = crate::settings::Declared {
+                    kind: filled(kind, &known),
+                    name: filled(name, &known),
+                    value: filled(value, &known),
+                };
+                let listed = if into == 0 {
+                    &mut found.settings.build_config
+                } else {
+                    &mut found.settings.res_values
+                };
+                listed.retain(|held| held.name != one.name || held.kind != one.kind);
+                listed.push(one);
+            }
+        }
         let minify = flag(&release, &["minifyEnabled", "isMinifyEnabled"]).unwrap_or(false);
         let shrink = flag(&release, &["shrinkResources", "isShrinkResources"]).unwrap_or(minify);
         found.settings.shrink = minify;
@@ -30508,6 +30655,9 @@ pub mod gradle {
             unread: found.unread.clone(),
         };
         for one in &found.processors {
+            if crate::room::runs_here(&one.name) || DONE_WITHOUT.contains(&one.name.as_str()) {
+                continue;
+            }
             out.unread
                 .push(format!("annotationProcessor {}:{}", one.name, one.version));
         }
@@ -39349,6 +39499,3167 @@ pub mod keystore {
     }
 }
 
+pub mod room {
+    use crate::compilers::java::{Annotated, Classpath, Expression, Shape, Unit, Written};
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.room",
+            message,
+        )
+    }
+
+    pub const IMPL_SUFFIX: &str = "_Impl";
+    pub const GENERATED_FOLDER: &str = "Room";
+    pub const MASTER_TABLE: &str = "room_master_table";
+    pub const IDENTITY_SEPARATOR: &str = "?:?";
+    pub const LEGACY_SEPARATOR: &str = "\u{af}\\_(\u{30c4})_/\u{af}";
+
+    pub const COMPILERS: &[&str] = &[
+        "androidx.room:room-compiler",
+        "android.arch.persistence.room:compiler",
+    ];
+
+    pub fn runs_here(name: &str) -> bool {
+        COMPILERS.contains(&name)
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Era {
+        Arch,
+        AndroidX,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Flavor {
+        pub era: Era,
+        pub room: &'static str,
+        pub sqlite: &'static str,
+        pub lifecycle: &'static str,
+        pub validation_result: bool,
+        pub column_arity: usize,
+        pub index_orders: bool,
+        pub tracker_maps: bool,
+        pub query_util: usize,
+        pub cursor_util: bool,
+        pub live_data: usize,
+        pub not_suspending: bool,
+        pub converters_map: bool,
+        pub auto_migrations: bool,
+        pub pre_migrate: bool,
+        pub destructive: bool,
+        pub clear_tables: bool,
+    }
+
+    fn arities(classpath: &Classpath, class: &str, name: &str) -> Vec<usize> {
+        classpath
+            .get(class)
+            .map(|known| {
+                known
+                    .methods
+                    .iter()
+                    .filter(|one| one.name == name)
+                    .map(|one| one.parameters.len())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn declares(classpath: &Classpath, class: &str, name: &str) -> bool {
+        !arities(classpath, class, name).is_empty()
+    }
+
+    pub fn flavor(era: Era, classpath: &Classpath) -> Option<Flavor> {
+        let (room, sqlite, lifecycle) = match era {
+            Era::Arch => (
+                "android.arch.persistence.room",
+                "android.arch.persistence.db",
+                "android.arch.lifecycle",
+            ),
+            Era::AndroidX => ("androidx.room", "androidx.sqlite.db", "androidx.lifecycle"),
+        };
+        let slashed = room.replace('.', "/");
+        let database = format!("{slashed}/RoomDatabase");
+        classpath.get(&database)?;
+        let helper = format!("{slashed}/RoomOpenHelper");
+        let tracker = format!("{slashed}/InvalidationTracker");
+        let column = arities(
+            classpath,
+            &format!("{slashed}/util/TableInfo$Column"),
+            "<init>",
+        );
+        let index = arities(
+            classpath,
+            &format!("{slashed}/util/TableInfo$Index"),
+            "<init>",
+        );
+        let query = arities(classpath, &format!("{slashed}/util/DBUtil"), "query");
+        let live = arities(classpath, &tracker, "createLiveData");
+        let computable = format!("{}/ComputableLiveData", lifecycle.replace('.', "/"));
+        Some(Flavor {
+            era,
+            room,
+            sqlite,
+            lifecycle,
+            validation_result: classpath
+                .get(&format!("{helper}$ValidationResult"))
+                .is_some(),
+            column_arity: if column.contains(&6) { 6 } else { 4 },
+            index_orders: index.contains(&4),
+            tracker_maps: arities(classpath, &tracker, "<init>").contains(&4),
+            query_util: if query.contains(&4) {
+                4
+            } else if query.contains(&3) {
+                3
+            } else {
+                0
+            },
+            cursor_util: declares(
+                classpath,
+                &format!("{slashed}/util/CursorUtil"),
+                "getColumnIndex",
+            ),
+            live_data: if live.contains(&3) {
+                3
+            } else if live.contains(&2) {
+                2
+            } else if classpath.get(&computable).is_some() {
+                0
+            } else {
+                1
+            },
+            not_suspending: declares(classpath, &database, "assertNotSuspendingTransaction"),
+            converters_map: declares(classpath, &database, "getRequiredTypeConverters"),
+            auto_migrations: declares(classpath, &database, "getAutoMigrations"),
+            pre_migrate: declares(classpath, &format!("{helper}$Delegate"), "onPreMigrate"),
+            destructive: declares(
+                classpath,
+                &format!("{database}$Callback"),
+                "onDestructiveMigration",
+            ),
+            clear_tables: declares(classpath, &database, "clearAllTables"),
+        })
+    }
+
+    pub fn md5_hex(input: &[u8]) -> String {
+        const SHIFTS: [u32; 64] = [
+            7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20,
+            5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+            6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        ];
+        let table: Vec<u32> = (0..64)
+            .map(|at| ((at as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32)
+            .collect();
+        let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+        let mut message = input.to_vec();
+        let length = (input.len() as u64).wrapping_mul(8);
+        message.push(0x80);
+        while message.len() % 64 != 56 {
+            message.push(0);
+        }
+        message.extend_from_slice(&length.to_le_bytes());
+        for chunk in message.chunks(64) {
+            let words: Vec<u32> = chunk
+                .chunks(4)
+                .map(|four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+                .collect();
+            let [mut a, mut b, mut c, mut d] = state;
+            for at in 0..64 {
+                let (mixed, pick) = match at / 16 {
+                    0 => ((b & c) | (!b & d), at),
+                    1 => ((d & b) | (!d & c), (5 * at + 1) % 16),
+                    2 => (b ^ c ^ d, (3 * at + 5) % 16),
+                    _ => (c ^ (b | !d), (7 * at) % 16),
+                };
+                let turned = a
+                    .wrapping_add(mixed)
+                    .wrapping_add(table[at])
+                    .wrapping_add(words[pick]);
+                a = d;
+                d = c;
+                c = b;
+                b = b.wrapping_add(turned.rotate_left(SHIFTS[at]));
+            }
+            state[0] = state[0].wrapping_add(a);
+            state[1] = state[1].wrapping_add(b);
+            state[2] = state[2].wrapping_add(c);
+            state[3] = state[3].wrapping_add(d);
+        }
+        state
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn identity_key(parts: &[String]) -> String {
+        let mut out = String::new();
+        for one in parts {
+            out.push_str(one);
+            out.push_str(IDENTITY_SEPARATOR);
+        }
+        md5_hex(out.as_bytes())
+    }
+
+    fn english_sorted(mut parts: Vec<String>) -> Vec<String> {
+        parts.sort_by_key(|one| one.to_lowercase());
+        parts
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Base {
+        Bool,
+        Byte,
+        Short,
+        Int,
+        Long,
+        Char,
+        Float,
+        Double,
+        Text,
+        Blob,
+    }
+
+    impl Base {
+        fn affinity(self) -> &'static str {
+            match self {
+                Base::Float | Base::Double => "REAL",
+                Base::Text => "TEXT",
+                Base::Blob => "BLOB",
+                _ => "INTEGER",
+            }
+        }
+
+        fn boxed_name(self) -> &'static str {
+            match self {
+                Base::Bool => "Boolean",
+                Base::Byte => "Byte",
+                Base::Short => "Short",
+                Base::Int => "Integer",
+                Base::Long => "Long",
+                Base::Char => "Character",
+                Base::Float => "Float",
+                Base::Double => "Double",
+                Base::Text => "String",
+                Base::Blob => "byte[]",
+            }
+        }
+    }
+
+    fn base_of(written: &Written) -> Option<(Base, bool)> {
+        Some(match written {
+            Written::Boolean => (Base::Bool, true),
+            Written::Byte => (Base::Byte, true),
+            Written::Short => (Base::Short, true),
+            Written::Int => (Base::Int, true),
+            Written::Long => (Base::Long, true),
+            Written::Char => (Base::Char, true),
+            Written::Float => (Base::Float, true),
+            Written::Double => (Base::Double, true),
+            Written::Array(inside) if **inside == Written::Byte => (Base::Blob, false),
+            Written::Named(name, _) => {
+                let bare = name.strip_prefix("java.lang.").unwrap_or(name);
+                let base = match bare {
+                    "Boolean" => Base::Bool,
+                    "Byte" => Base::Byte,
+                    "Short" => Base::Short,
+                    "Integer" => Base::Int,
+                    "Long" => Base::Long,
+                    "Character" => Base::Char,
+                    "Float" => Base::Float,
+                    "Double" => Base::Double,
+                    "String" | "CharSequence" => Base::Text,
+                    _ => return None,
+                };
+                (base, false)
+            }
+            _ => return None,
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    struct Via {
+        to: String,
+        from: String,
+        guard_to: bool,
+        guard_from: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Kind {
+        base: Base,
+        primitive: bool,
+        via: Option<Via>,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Access {
+        Field(String),
+        Method(String),
+        Constructor,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Column {
+        field: String,
+        column: String,
+        java: String,
+        kind: Kind,
+        non_null: bool,
+        affinity: String,
+        read: Access,
+        write: Access,
+        default_value: Option<String>,
+        collate: Option<String>,
+        indexed: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Pojo {
+        java: String,
+        columns: Vec<Column>,
+        constructor: Vec<usize>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Index {
+        name: String,
+        unique: bool,
+        columns: Vec<String>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Foreign {
+        parent: String,
+        parent_columns: Vec<String>,
+        child_columns: Vec<String>,
+        on_delete: String,
+        on_update: String,
+        deferred: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Entity {
+        table: String,
+        pojo: Pojo,
+        primary: Vec<usize>,
+        auto_generate: bool,
+        indices: Vec<Index>,
+        foreign: Vec<Foreign>,
+    }
+
+    impl Entity {
+        fn column_definition(&self, at: usize) -> String {
+            let one = &self.pojo.columns[at];
+            let mut out = format!("`{}` {}", one.column, one.affinity);
+            if self.auto_generate && self.primary == [at] {
+                out.push_str(" PRIMARY KEY AUTOINCREMENT");
+            }
+            if one.non_null {
+                out.push_str(" NOT NULL");
+            }
+            if let Some(held) = &one.collate {
+                out.push_str(&format!(" COLLATE {held}"));
+            }
+            if let Some(held) = &one.default_value {
+                out.push_str(&format!(" DEFAULT {held}"));
+            }
+            out
+        }
+
+        fn create_sql(&self, table: &str) -> String {
+            let mut parts: Vec<String> = (0..self.pojo.columns.len())
+                .map(|at| self.column_definition(at))
+                .collect();
+            if !(self.auto_generate && self.primary.len() == 1) {
+                parts.push(format!(
+                    "PRIMARY KEY({})",
+                    self.primary
+                        .iter()
+                        .map(|at| format!("`{}`", self.pojo.columns[*at].column))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            for one in &self.foreign {
+                parts.push(format!(
+                    "FOREIGN KEY({}) REFERENCES `{}`({}) ON UPDATE {} ON DELETE {} {}",
+                    quoted(&one.child_columns),
+                    one.parent,
+                    quoted(&one.parent_columns),
+                    one.on_update,
+                    one.on_delete,
+                    if one.deferred {
+                        "DEFERRABLE INITIALLY DEFERRED"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            format!(
+                "CREATE TABLE IF NOT EXISTS `{table}` ({})",
+                parts.join(", ")
+            )
+        }
+
+        fn index_sql(&self, index: &Index) -> String {
+            format!(
+                "CREATE {}INDEX IF NOT EXISTS `{}` ON `{}` ({})",
+                if index.unique { "UNIQUE " } else { "" },
+                index.name,
+                self.table,
+                quoted(&index.columns)
+            )
+        }
+
+        fn identity(&self) -> String {
+            let primary: Vec<String> = self
+                .primary
+                .iter()
+                .map(|at| self.pojo.columns[*at].column.clone())
+                .collect();
+            let mut parts = vec![
+                self.table.clone(),
+                format!("{}-[{}]", self.auto_generate, primary.join(", ")),
+            ];
+            parts.extend(english_sorted(
+                self.pojo
+                    .columns
+                    .iter()
+                    .map(|one| {
+                        let mut key = format!("{}-{}-{}", one.column, one.affinity, one.non_null);
+                        if let Some(held) = &one.default_value {
+                            key.push_str(&format!("-defaultValue={held}"));
+                        }
+                        key
+                    })
+                    .collect(),
+            ));
+            parts.extend(english_sorted(
+                self.indices
+                    .iter()
+                    .map(|one| format!("{}-{}-{}", one.unique, one.name, one.columns.join(",")))
+                    .collect(),
+            ));
+            parts.extend(english_sorted(
+                self.foreign
+                    .iter()
+                    .map(|one| {
+                        format!(
+                            "{}-{}-{}-{}-{}-{}",
+                            one.parent,
+                            one.parent_columns.join(","),
+                            one.child_columns.join(","),
+                            one.on_delete,
+                            one.on_update,
+                            one.deferred
+                        )
+                    })
+                    .collect(),
+            ));
+            identity_key(&parts)
+        }
+    }
+
+    fn quoted(columns: &[String]) -> String {
+        columns
+            .iter()
+            .map(|one| format!("`{one}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn java_text(said: &str) -> String {
+        let mut out = String::with_capacity(said.len() + 2);
+        for here in said.chars() {
+            match here {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    fn capital(word: &str) -> String {
+        let mut letters = word.chars();
+        match letters.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + letters.as_str(),
+            None => String::new(),
+        }
+    }
+
+    fn bare_names(field: &str) -> Vec<String> {
+        let mut out = vec![field.to_string()];
+        let chars: Vec<char> = field.chars().collect();
+        if chars.len() > 1 && chars[0] == 'm' && chars[1].is_uppercase() {
+            let rest: String = chars[1..].iter().collect();
+            let mut lowered = rest.clone();
+            if let Some(first) = lowered.get(0..1) {
+                lowered = first.to_lowercase() + &rest[1..];
+            }
+            out.push(lowered);
+        }
+        if let Some(rest) = field.strip_prefix('_') {
+            if !rest.is_empty() {
+                out.push(rest.to_string());
+            }
+        }
+        out
+    }
+
+    fn annotation<'a>(held: &'a [Annotated], simple: &str) -> Option<&'a Annotated> {
+        held.iter().find(|one| {
+            one.name == simple
+                || one
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .is_some_and(|last| last == simple && one.name.contains('.'))
+        })
+    }
+
+    fn value<'a>(held: &'a Annotated, key: &str) -> Option<&'a Expression> {
+        held.values
+            .iter()
+            .find(|(named, _)| named == key)
+            .map(|(_, one)| one)
+    }
+
+    fn nested(expression: &Expression) -> Option<(String, Vec<(String, &Expression)>)> {
+        let Expression::Call {
+            on: None,
+            name,
+            arguments,
+            ..
+        } = expression
+        else {
+            return None;
+        };
+        let name = name.strip_prefix(crate::compilers::java::NESTED_ANNOTATION)?;
+        let mut pairs = Vec::new();
+        for one in arguments {
+            if let Expression::Assign { target, value, .. } = one {
+                if let Expression::Name(key) = target.as_ref() {
+                    pairs.push((key.clone(), value.as_ref()));
+                }
+            }
+        }
+        Some((name.rsplit('.').next().unwrap_or(name).to_string(), pairs))
+    }
+
+    fn listed(expression: &Expression) -> Vec<&Expression> {
+        match expression {
+            Expression::ArrayOf { values, .. } => values.iter().collect(),
+            other => vec![other],
+        }
+    }
+
+    fn last_name(expression: &Expression) -> Option<String> {
+        match expression {
+            Expression::Name(name) => Some(name.rsplit('.').next().unwrap_or(name).to_string()),
+            Expression::Field { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn integer(expression: &Expression) -> Option<i64> {
+        match expression {
+            Expression::Int(held) | Expression::Long(held) => Some(*held),
+            Expression::Unary {
+                operator: crate::compilers::java::Unary::Negate,
+                of,
+            } => integer(of).map(|held| -held),
+            _ => None,
+        }
+    }
+
+    fn boolean(expression: &Expression) -> Option<bool> {
+        match expression {
+            Expression::Boolean(held) => Some(*held),
+            _ => None,
+        }
+    }
+
+    struct Found<'a> {
+        units: Vec<&'a Unit>,
+    }
+
+    fn simple_of(unit: &Unit) -> &str {
+        unit.name.rsplit('$').next().unwrap_or(&unit.name)
+    }
+
+    fn dotted(unit: &Unit) -> String {
+        let name = unit.name.replace('$', ".");
+        match &unit.package {
+            Some(package) if !package.is_empty() => format!("{package}.{name}"),
+            _ => name,
+        }
+    }
+
+    fn impl_name(unit: &Unit) -> String {
+        format!("{}{IMPL_SUFFIX}", unit.name.replace('$', "_"))
+    }
+
+    fn impl_dotted(unit: &Unit) -> String {
+        match &unit.package {
+            Some(package) if !package.is_empty() => format!("{package}.{}", impl_name(unit)),
+            _ => impl_name(unit),
+        }
+    }
+
+    impl<'a> Found<'a> {
+        fn find(&self, from: &Unit, name: &str) -> Option<&'a Unit> {
+            let name = name.split('<').next().unwrap_or(name).trim();
+            if let Some(one) = self.units.iter().find(|one| dotted(one) == name) {
+                return Some(one);
+            }
+            let package = from.package.clone().unwrap_or_default();
+            let (first, rest) = match name.split_once('.') {
+                Some((first, rest)) => (first, Some(rest)),
+                None => (name, None),
+            };
+            let joined = |head: &str| match rest {
+                Some(rest) => format!("{head}.{rest}"),
+                None => head.to_string(),
+            };
+            let mut candidates: Vec<String> = Vec::new();
+            let mut outer = from.name.replace('$', ".");
+            loop {
+                candidates.push(if package.is_empty() {
+                    joined(&format!("{outer}.{first}"))
+                } else {
+                    joined(&format!("{package}.{outer}.{first}"))
+                });
+                match outer.rsplit_once('.') {
+                    Some((up, _)) => outer = up.to_string(),
+                    None => break,
+                }
+            }
+            for import in &from.imports {
+                if let Some(wide) = import.strip_suffix(".*") {
+                    candidates.push(joined(&format!("{wide}.{first}")));
+                } else if import.rsplit('.').next() == Some(first) {
+                    candidates.push(joined(import));
+                }
+            }
+            candidates.push(if package.is_empty() {
+                name.to_string()
+            } else {
+                format!("{package}.{name}")
+            });
+            for wanted in candidates {
+                if let Some(one) = self.units.iter().find(|one| dotted(one) == wanted) {
+                    return Some(one);
+                }
+            }
+            None
+        }
+
+        fn qualify(&self, from: &Unit, written: &Written) -> String {
+            match written {
+                Written::Array(inside) => format!("{}[]", self.qualify(from, inside)),
+                Written::Named(name, arguments) => {
+                    let head = match self.find(from, name) {
+                        Some(one) => dotted(one),
+                        None => {
+                            let first = name.split('.').next().unwrap_or(name);
+                            match from.imports.iter().find(|one| {
+                                !one.ends_with(".*") && one.rsplit('.').next() == Some(first)
+                            }) {
+                                Some(import) => match name.split_once('.') {
+                                    Some((_, rest)) => format!("{import}.{rest}"),
+                                    None => import.clone(),
+                                },
+                                None => name.clone(),
+                            }
+                        }
+                    };
+                    if arguments.is_empty() {
+                        head
+                    } else {
+                        format!(
+                            "{head}<{}>",
+                            arguments
+                                .iter()
+                                .map(|one| self.qualify(from, one))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                }
+                Written::Variable(_, bound) | Written::OwnVariable(_, bound) => {
+                    self.qualify(from, bound)
+                }
+                Written::Inferred => "Object".to_string(),
+                other => primitive_text(other).to_string(),
+            }
+        }
+
+        fn above(&self, unit: &'a Unit) -> Vec<(&'a Unit, Vec<Written>)> {
+            let mut out = Vec::new();
+            let mut waiting: Vec<(&'a Unit, Vec<Written>)> = vec![(unit, Vec::new())];
+            while let Some((one, given)) = waiting.pop() {
+                if out.len() > 32 {
+                    break;
+                }
+                out.push((one, given.clone()));
+                for written in &one.above {
+                    let Written::Named(name, arguments) = written else {
+                        continue;
+                    };
+                    if let Some(found) = self.find(one, name) {
+                        let passed = arguments
+                            .iter()
+                            .map(|argument| substitute(argument, &given))
+                            .collect();
+                        waiting.push((found, passed));
+                    }
+                }
+            }
+            out
+        }
+
+        fn converters(&self) -> Vec<Converter> {
+            let mut out = Vec::new();
+            for unit in &self.units {
+                for method in &unit.methods {
+                    if annotation(&method.annotations, "TypeConverter").is_none()
+                        || method.parameters.len() != 1
+                    {
+                        continue;
+                    }
+                    out.push(Converter {
+                        owner: dotted(unit),
+                        method: method.name.clone(),
+                        is_static: method.modifiers.static_,
+                        takes: self.qualify(unit, &method.parameters[0].0),
+                        gives: self.qualify(unit, &method.returns),
+                        gives_written: method.returns.clone(),
+                    });
+                }
+            }
+            out
+        }
+    }
+
+    const PRIMITIVES: &[&str] = &[
+        "boolean", "byte", "short", "int", "long", "char", "float", "double",
+    ];
+
+    fn primitive_text(written: &Written) -> &'static str {
+        match written {
+            Written::Void => "void",
+            Written::Boolean => "boolean",
+            Written::Byte => "byte",
+            Written::Short => "short",
+            Written::Char => "char",
+            Written::Int => "int",
+            Written::Long => "long",
+            Written::Float => "float",
+            Written::Double => "double",
+            _ => "Object",
+        }
+    }
+
+    fn substitute(written: &Written, given: &[Written]) -> Written {
+        match written {
+            Written::Variable(at, bound) => given
+                .get(*at)
+                .cloned()
+                .unwrap_or_else(|| substitute(bound, given)),
+            Written::Array(inside) => Written::Array(Box::new(substitute(inside, given))),
+            Written::Named(name, arguments) => Written::Named(
+                name.clone(),
+                arguments.iter().map(|one| substitute(one, given)).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Converter {
+        owner: String,
+        method: String,
+        is_static: bool,
+        takes: String,
+        gives: String,
+        gives_written: Written,
+    }
+
+    fn converter_call(one: &Converter, argument: &str) -> String {
+        if one.is_static {
+            format!("{}.{}({argument})", one.owner, one.method)
+        } else {
+            format!("{}.{}({argument})", converter_field(&one.owner), one.method)
+        }
+    }
+
+    fn converter_field(owner: &str) -> String {
+        format!("__typeConverter{}", owner.replace('.', "_"))
+    }
+
+    struct Context<'a> {
+        found: Found<'a>,
+        flavor: Flavor,
+        converters: Vec<Converter>,
+        enums: Vec<String>,
+    }
+
+    fn non_null(held: &[Annotated]) -> bool {
+        ["NonNull", "NotNull", "Nonnull"]
+            .iter()
+            .any(|one| annotation(held, one).is_some())
+    }
+
+    impl<'a> Context<'a> {
+        fn kind(&self, from: &Unit, written: &Written) -> Option<Kind> {
+            if let Some((base, primitive)) = base_of(written) {
+                return Some(Kind {
+                    base,
+                    primitive,
+                    via: None,
+                });
+            }
+            let java = self.found.qualify(from, written);
+            if self.enums.contains(&java) {
+                return Some(Kind {
+                    base: Base::Text,
+                    primitive: false,
+                    via: Some(Via {
+                        to: "{}.name()".to_string(),
+                        from: format!("{java}.valueOf({{}})"),
+                        guard_to: true,
+                        guard_from: true,
+                    }),
+                });
+            }
+            for to in &self.converters {
+                if to.takes != java {
+                    continue;
+                }
+                let Some((base, _)) = base_of(&to.gives_written) else {
+                    continue;
+                };
+                let Some(back) = self
+                    .converters
+                    .iter()
+                    .find(|back| back.gives == java && back.takes == to.gives)
+                else {
+                    continue;
+                };
+                return Some(Kind {
+                    base,
+                    primitive: false,
+                    via: Some(Via {
+                        to: converter_call(to, "{}"),
+                        from: converter_call(back, "{}"),
+                        guard_to: false,
+                        guard_from: PRIMITIVES.contains(&back.takes.as_str()),
+                    }),
+                });
+            }
+            None
+        }
+
+        fn is_pojo(&self, from: &Unit, written: &Written) -> Option<&'a Unit> {
+            let Written::Named(name, _) = written else {
+                return None;
+            };
+            let found = self.found.find(from, name)?;
+            (found.shape == Shape::Class || found.shape == Shape::Record).then_some(found)
+        }
+
+        fn pojo(&self, unit: &'a Unit) -> Result<Pojo, Diagnostic> {
+            let mut columns: Vec<Column> = Vec::new();
+            let chain = self.found.above(unit);
+            let classes: Vec<&Unit> = chain
+                .iter()
+                .map(|(one, _)| *one)
+                .filter(|one| one.shape != Shape::Interface)
+                .collect();
+            for owner in &classes {
+                for field in &owner.fields {
+                    if field.modifiers.static_
+                        || field.modifiers.transient
+                        || annotation(&field.annotations, "Ignore").is_some()
+                        || columns.iter().any(|one| one.field == field.name)
+                    {
+                        continue;
+                    }
+                    if annotation(&field.annotations, "Embedded").is_some()
+                        || annotation(&field.annotations, "Relation").is_some()
+                    {
+                        return Err(fail("EO002", "Room cannot turn this type into a column.")
+                            .with_context(format!("Class: {}", dotted(unit)))
+                            .with_context(format!("Field: {}", field.name)));
+                    }
+                    let Some(kind) = self.kind(owner, &field.what) else {
+                        return Err(fail("EO002", "Room cannot turn this type into a column.")
+                            .with_context(format!("Class: {}", dotted(unit)))
+                            .with_context(format!("Field: {}", field.name))
+                            .with_context(format!(
+                                "Type: {}",
+                                self.found.qualify(owner, &field.what)
+                            )));
+                    };
+                    let info = annotation(&field.annotations, "ColumnInfo");
+                    let column = info
+                        .and_then(|held| value(held, "name"))
+                        .and_then(text_of)
+                        .filter(|one| !one.is_empty() && one != "[field-name]")
+                        .unwrap_or_else(|| field.name.clone());
+                    let affinity = info
+                        .and_then(|held| value(held, "typeAffinity"))
+                        .and_then(affinity_named)
+                        .unwrap_or_else(|| kind.base.affinity().to_string());
+                    let default_value = info
+                        .and_then(|held| value(held, "defaultValue"))
+                        .and_then(text_of)
+                        .filter(|one| one != "[value-unspecified]");
+                    let collate = info
+                        .and_then(|held| value(held, "collate"))
+                        .and_then(collate_named);
+                    let indexed = info
+                        .and_then(|held| value(held, "index"))
+                        .and_then(boolean)
+                        .unwrap_or(false);
+                    columns.push(Column {
+                        field: field.name.clone(),
+                        column,
+                        java: self.found.qualify(owner, &field.what),
+                        non_null: kind.primitive || non_null(&field.annotations),
+                        affinity,
+                        read: Access::Field(field.name.clone()),
+                        write: Access::Field(field.name.clone()),
+                        kind,
+                        default_value,
+                        collate,
+                        indexed,
+                    });
+                }
+            }
+
+            let methods: Vec<(&Unit, &crate::compilers::java::Method)> = classes
+                .iter()
+                .flat_map(|owner| owner.methods.iter().map(move |one| (*owner, one)))
+                .filter(|(_, one)| !one.constructor && !one.modifiers.static_)
+                .collect();
+            let private: Vec<bool> = columns
+                .iter()
+                .map(|one| {
+                    classes
+                        .iter()
+                        .flat_map(|owner| owner.fields.iter())
+                        .find(|field| field.name == one.field)
+                        .is_some_and(|field| field.modifiers.private)
+                })
+                .collect();
+            for (at, one) in columns.iter_mut().enumerate() {
+                let bare = bare_names(&one.field);
+                let is_bool = one.kind.base == Base::Bool;
+                let getter = methods.iter().find(|(owner, method)| {
+                    method.parameters.is_empty()
+                        && !method.modifiers.private
+                        && self.found.qualify(owner, &method.returns) == one.java
+                        && bare.iter().any(|name| {
+                            method.name == format!("get{}", capital(name))
+                                || method.name == *name
+                                || (is_bool
+                                    && (method.name == format!("is{}", capital(name))
+                                        || method.name == format!("has{}", capital(name))))
+                        })
+                });
+                let setter = methods.iter().find(|(owner, method)| {
+                    method.parameters.len() == 1
+                        && !method.modifiers.private
+                        && self.found.qualify(owner, &method.parameters[0].0) == one.java
+                        && bare.iter().any(|name| {
+                            method.name == format!("set{}", capital(name)) || method.name == *name
+                        })
+                });
+                if private[at] {
+                    if let Some((_, method)) = getter {
+                        one.read = Access::Method(method.name.clone());
+                    }
+                    if let Some((_, method)) = setter {
+                        one.write = Access::Method(method.name.clone());
+                    }
+                }
+            }
+
+            let constructors: Vec<&crate::compilers::java::Method> = unit
+                .methods
+                .iter()
+                .filter(|one| {
+                    one.constructor
+                        && !one.modifiers.private
+                        && annotation(&one.annotations, "Ignore").is_none()
+                })
+                .collect();
+            let mut good: Vec<Vec<usize>> = Vec::new();
+            for one in &constructors {
+                let mut matched = Vec::new();
+                for (written, name) in &one.parameters {
+                    let java = self.found.qualify(unit, written);
+                    let hit = columns.iter().position(|column| {
+                        column.java == java
+                            && bare_names(&column.field).iter().any(|bare| bare == name)
+                    });
+                    match hit {
+                        Some(at) if !matched.contains(&at) => matched.push(at),
+                        _ => {
+                            matched.clear();
+                            matched.push(usize::MAX);
+                            break;
+                        }
+                    }
+                }
+                if !matched.contains(&usize::MAX) {
+                    good.push(matched);
+                }
+            }
+            let constructor = if constructors.is_empty() {
+                Vec::new()
+            } else if good.len() == 1 {
+                good.remove(0)
+            } else if let Some(at) = good.iter().position(|one| one.is_empty()) {
+                good.remove(at)
+            } else if let Some(most) = good.into_iter().max_by_key(|one| one.len()) {
+                most
+            } else {
+                return Err(
+                    fail("EO004", "Room found no way to build this class from a row.")
+                        .with_context(format!("Class: {}", dotted(unit))),
+                );
+            };
+            for at in &constructor {
+                columns[*at].write = Access::Constructor;
+            }
+            for (at, one) in columns.iter().enumerate() {
+                if private[at]
+                    && (matches!(one.read, Access::Field(_))
+                        || (matches!(one.write, Access::Field(_))))
+                {
+                    return Err(
+                        fail("EO004", "Room found no way to build this class from a row.")
+                            .with_context(format!("Class: {}", dotted(unit)))
+                            .with_context(format!("Field: {}", one.field)),
+                    );
+                }
+            }
+            Ok(Pojo {
+                java: dotted(unit),
+                columns,
+                constructor,
+            })
+        }
+
+        fn entity(&self, unit: &'a Unit) -> Result<Entity, Diagnostic> {
+            let pojo = self.pojo(unit)?;
+            let marked = annotation(&unit.annotations, "Entity");
+            let table = marked
+                .and_then(|held| value(held, "tableName"))
+                .and_then(text_of)
+                .filter(|one| !one.is_empty())
+                .unwrap_or_else(|| simple_of(unit).to_string());
+            let mut primary: Vec<usize> = Vec::new();
+            let mut auto_generate = false;
+            let chain = self.found.above(unit);
+            for (owner, _) in &chain {
+                for field in &owner.fields {
+                    if let Some(held) = annotation(&field.annotations, "PrimaryKey") {
+                        if let Some(at) =
+                            pojo.columns.iter().position(|one| one.field == field.name)
+                        {
+                            if !primary.contains(&at) {
+                                primary.push(at);
+                            }
+                            auto_generate |= value(held, "autoGenerate")
+                                .and_then(boolean)
+                                .unwrap_or(false);
+                        }
+                    }
+                }
+            }
+            if let Some(listed_keys) = marked.and_then(|held| value(held, "primaryKeys")) {
+                for one in listed(listed_keys) {
+                    if let Some(name) = text_of(one) {
+                        if let Some(at) = pojo.columns.iter().position(|held| held.column == name) {
+                            if !primary.contains(&at) {
+                                primary.push(at);
+                            }
+                        }
+                    }
+                }
+            }
+            if primary.is_empty() {
+                return Err(fail("EO005", "A Room entity has no primary key.")
+                    .with_context(format!("Class: {}", dotted(unit))));
+            }
+            let mut pojo = pojo;
+            for at in &primary {
+                let one = &mut pojo.columns[*at];
+                if !(auto_generate && one.affinity == "INTEGER") {
+                    one.non_null = one.non_null || one.kind.primitive;
+                }
+            }
+            let mut indices = Vec::new();
+            for one in &pojo.columns {
+                if one.indexed {
+                    indices.push(Index {
+                        name: format!("index_{table}_{}", one.column),
+                        unique: false,
+                        columns: vec![one.column.clone()],
+                    });
+                }
+            }
+            if let Some(held) = marked.and_then(|held| value(held, "indices")) {
+                for one in listed(held) {
+                    let Some((_, pairs)) = nested(one) else {
+                        continue;
+                    };
+                    let mut columns: Vec<String> = Vec::new();
+                    let mut name = String::new();
+                    let mut unique = false;
+                    for (key, said) in pairs {
+                        match key.as_str() {
+                            "value" => {
+                                columns = listed(said).into_iter().filter_map(text_of).collect()
+                            }
+                            "name" => name = text_of(said).unwrap_or_default(),
+                            "unique" => unique = boolean(said).unwrap_or(false),
+                            _ => {}
+                        }
+                    }
+                    if name.is_empty() {
+                        name = format!("index_{table}_{}", columns.join("_"));
+                    }
+                    indices.push(Index {
+                        name,
+                        unique,
+                        columns,
+                    });
+                }
+            }
+            let mut foreign = Vec::new();
+            if let Some(held) = marked.and_then(|held| value(held, "foreignKeys")) {
+                for one in listed(held) {
+                    let Some((_, pairs)) = nested(one) else {
+                        continue;
+                    };
+                    let mut parent = String::new();
+                    let mut parent_columns = Vec::new();
+                    let mut child_columns = Vec::new();
+                    let mut on_delete = "NO ACTION".to_string();
+                    let mut on_update = "NO ACTION".to_string();
+                    let mut deferred = false;
+                    for (key, said) in pairs {
+                        match key.as_str() {
+                            "entity" => {
+                                if let Expression::ClassLiteral {
+                                    of: Written::Named(name, _),
+                                    ..
+                                } = said
+                                {
+                                    if let Some(found) = self.found.find(unit, name) {
+                                        parent = annotation(&found.annotations, "Entity")
+                                            .and_then(|held| value(held, "tableName"))
+                                            .and_then(text_of)
+                                            .filter(|one| !one.is_empty())
+                                            .unwrap_or_else(|| simple_of(found).to_string());
+                                    }
+                                }
+                            }
+                            "parentColumns" => {
+                                parent_columns =
+                                    listed(said).into_iter().filter_map(text_of).collect()
+                            }
+                            "childColumns" => {
+                                child_columns =
+                                    listed(said).into_iter().filter_map(text_of).collect()
+                            }
+                            "onDelete" => on_delete = action_named(said),
+                            "onUpdate" => on_update = action_named(said),
+                            "deferred" => deferred = boolean(said).unwrap_or(false),
+                            _ => {}
+                        }
+                    }
+                    foreign.push(Foreign {
+                        parent,
+                        parent_columns,
+                        child_columns,
+                        on_delete,
+                        on_update,
+                        deferred,
+                    });
+                }
+            }
+            Ok(Entity {
+                table,
+                pojo,
+                primary,
+                auto_generate,
+                indices,
+                foreign,
+            })
+        }
+    }
+
+    fn text_of(expression: &Expression) -> Option<String> {
+        match expression {
+            Expression::Str(held) => Some(held.clone()),
+            Expression::Binary {
+                operator: crate::compilers::java::Binary::Add,
+                left,
+                right,
+            } => Some(text_of(left)? + &text_of(right)?),
+            _ => None,
+        }
+    }
+
+    fn affinity_named(expression: &Expression) -> Option<String> {
+        let named = last_name(expression).or_else(|| {
+            integer(expression).map(|held| {
+                match held {
+                    2 => "TEXT",
+                    3 => "INTEGER",
+                    4 => "REAL",
+                    5 => "BLOB",
+                    _ => "UNDEFINED",
+                }
+                .to_string()
+            })
+        })?;
+        matches!(named.as_str(), "TEXT" | "INTEGER" | "REAL" | "BLOB").then_some(named)
+    }
+
+    fn collate_named(expression: &Expression) -> Option<String> {
+        let named = last_name(expression).or_else(|| {
+            integer(expression).map(|held| {
+                match held {
+                    2 => "BINARY",
+                    3 => "NOCASE",
+                    4 => "RTRIM",
+                    5 => "LOCALIZED",
+                    6 => "UNICODE",
+                    _ => "UNSPECIFIED",
+                }
+                .to_string()
+            })
+        })?;
+        (named != "UNSPECIFIED").then_some(named)
+    }
+
+    fn action_named(expression: &Expression) -> String {
+        let named = last_name(expression).unwrap_or_else(|| {
+            match integer(expression).unwrap_or(1) {
+                2 => "RESTRICT",
+                3 => "SET_NULL",
+                4 => "SET_DEFAULT",
+                5 => "CASCADE",
+                _ => "NO_ACTION",
+            }
+            .to_string()
+        });
+        named.replace('_', " ")
+    }
+
+    fn conflict_named(expression: Option<&Expression>) -> &'static str {
+        let Some(expression) = expression else {
+            return "ABORT";
+        };
+        let named = last_name(expression).unwrap_or_default();
+        match (named.as_str(), integer(expression)) {
+            ("REPLACE", _) | (_, Some(1)) => "REPLACE",
+            ("ROLLBACK", _) | (_, Some(2)) => "ROLLBACK",
+            ("FAIL", _) | (_, Some(4)) => "FAIL",
+            ("IGNORE", _) | (_, Some(5)) => "IGNORE",
+            _ => "ABORT",
+        }
+    }
+
+    struct Writer {
+        out: String,
+        depth: usize,
+    }
+
+    impl Writer {
+        fn new() -> Writer {
+            Writer {
+                out: String::new(),
+                depth: 0,
+            }
+        }
+
+        fn line(&mut self, said: &str) {
+            if said.starts_with('}') {
+                self.depth = self.depth.saturating_sub(1);
+            }
+            for _ in 0..self.depth {
+                self.out.push_str("    ");
+            }
+            self.out.push_str(said);
+            self.out.push('\n');
+            if said.ends_with('{') {
+                self.depth += 1;
+            }
+        }
+    }
+
+    fn bind_lines(
+        w: &mut Writer,
+        statement: &str,
+        index: &str,
+        value: &str,
+        kind: &Kind,
+        java: &str,
+        counter: &mut usize,
+    ) {
+        *counter += 1;
+        let held = format!("_tmpBind{counter}");
+        let (stored, primitive) = match &kind.via {
+            Some(via) => {
+                w.line(&format!("final {java} {held}Source = {value};"));
+                let stored_java = kind.base.boxed_name();
+                let made = via.to.replace("{}", &format!("{held}Source"));
+                if via.guard_to {
+                    w.line(&format!(
+                        "final {stored_java} {held} = {held}Source == null ? null : {made};"
+                    ));
+                } else {
+                    w.line(&format!("final {stored_java} {held} = {made};"));
+                }
+                (held.clone(), false)
+            }
+            None => {
+                w.line(&format!("final {java} {held} = {value};"));
+                (held.clone(), kind.primitive)
+            }
+        };
+        let call = |argument: &str| -> String {
+            match kind.base {
+                Base::Bool => format!("{statement}.bindLong({index}, {argument} ? 1L : 0L);"),
+                Base::Float | Base::Double => {
+                    format!("{statement}.bindDouble({index}, {argument});")
+                }
+                Base::Text => format!("{statement}.bindString({index}, {argument}.toString());"),
+                Base::Blob => format!("{statement}.bindBlob({index}, {argument});"),
+                _ => format!("{statement}.bindLong({index}, {argument});"),
+            }
+        };
+        if primitive {
+            w.line(&call(&stored));
+            return;
+        }
+        let unboxed = match kind.base {
+            Base::Bool => format!("{stored}.booleanValue()"),
+            Base::Char => format!("(long) {stored}.charValue()"),
+            Base::Float | Base::Double => format!("{stored}.doubleValue()"),
+            Base::Text | Base::Blob => stored.clone(),
+            _ => format!("{stored}.longValue()"),
+        };
+        w.line(&format!("if ({stored} == null) {{"));
+        w.line(&format!("{statement}.bindNull({index});"));
+        w.line("} else {");
+        w.line(&call(&unboxed));
+        w.line("}");
+    }
+
+    fn read_lines(
+        w: &mut Writer,
+        cursor: &str,
+        index: &str,
+        target: &str,
+        kind: &Kind,
+        java: &str,
+    ) {
+        let raw = |base: Base| -> String {
+            match base {
+                Base::Bool => format!("{cursor}.getInt({index}) != 0"),
+                Base::Byte => format!("(byte) {cursor}.getShort({index})"),
+                Base::Short => format!("{cursor}.getShort({index})"),
+                Base::Int => format!("{cursor}.getInt({index})"),
+                Base::Long => format!("{cursor}.getLong({index})"),
+                Base::Char => format!("(char) {cursor}.getInt({index})"),
+                Base::Float => format!("{cursor}.getFloat({index})"),
+                Base::Double => format!("{cursor}.getDouble({index})"),
+                Base::Text => format!("{cursor}.getString({index})"),
+                Base::Blob => format!("{cursor}.getBlob({index})"),
+            }
+        };
+        match &kind.via {
+            Some(via) => {
+                let stored_java = if kind.base == Base::Blob {
+                    "byte[]"
+                } else {
+                    kind.base.boxed_name()
+                };
+                let stored = format!("{target}Stored");
+                w.line(&format!("final {stored_java} {stored};"));
+                w.line(&format!("if ({cursor}.isNull({index})) {{"));
+                w.line(&format!("{stored} = null;"));
+                w.line("} else {");
+                let got = raw(kind.base);
+                let boxed = if matches!(kind.base, Base::Text | Base::Blob) {
+                    got
+                } else {
+                    format!("{}.valueOf({got})", kind.base.boxed_name())
+                };
+                w.line(&format!("{stored} = {boxed};"));
+                w.line("}");
+                let made = via.from.replace("{}", &stored);
+                if via.guard_from {
+                    w.line(&format!("{target} = {stored} == null ? null : {made};"));
+                } else {
+                    w.line(&format!("{target} = {made};"));
+                }
+                let _ = java;
+            }
+            None if kind.primitive => {
+                w.line(&format!("{target} = {};", raw(kind.base)));
+            }
+            None => {
+                w.line(&format!("if ({cursor}.isNull({index})) {{"));
+                w.line(&format!("{target} = null;"));
+                w.line("} else {");
+                let got = raw(kind.base);
+                let boxed = if matches!(kind.base, Base::Text | Base::Blob) {
+                    got
+                } else {
+                    format!("{}.valueOf({got})", kind.base.boxed_name())
+                };
+                w.line(&format!("{target} = {boxed};"));
+                w.line("}");
+            }
+        }
+    }
+
+    fn default_of(kind: &Kind) -> &'static str {
+        if !kind.primitive || kind.via.is_some() {
+            return "null";
+        }
+        match kind.base {
+            Base::Bool => "false",
+            Base::Char => "'\\0'",
+            Base::Float => "0f",
+            Base::Double => "0d",
+            Base::Long => "0L",
+            Base::Byte => "(byte) 0",
+            Base::Short => "(short) 0",
+            _ => "0",
+        }
+    }
+
+    fn read_value(one: &Column, object: &str) -> String {
+        match &one.read {
+            Access::Method(name) => format!("{object}.{name}()"),
+            Access::Field(name) => format!("{object}.{name}"),
+            Access::Constructor => format!("{object}.{}", one.field),
+        }
+    }
+
+    fn row_lines(
+        w: &mut Writer,
+        context: &Context<'_>,
+        pojo: &Pojo,
+        cursor: &str,
+        indices: &[String],
+        target: &str,
+    ) {
+        let _ = context;
+        let temp = |at: usize| format!("_tmp{}", capital(&pojo.columns[at].field));
+        for at in &pojo.constructor {
+            let one = &pojo.columns[*at];
+            w.line(&format!("final {} {};", one.java, temp(*at)));
+            w.line(&format!("if ({} == -1) {{", indices[*at]));
+            w.line(&format!("{} = {};", temp(*at), default_of(&one.kind)));
+            w.line("} else {");
+            read_lines(w, cursor, &indices[*at], &temp(*at), &one.kind, &one.java);
+            w.line("}");
+        }
+        let arguments: Vec<String> = pojo.constructor.iter().map(|at| temp(*at)).collect();
+        w.line(&format!(
+            "{target} = new {}({});",
+            pojo.java,
+            arguments.join(", ")
+        ));
+        for (at, one) in pojo.columns.iter().enumerate() {
+            if pojo.constructor.contains(&at) {
+                continue;
+            }
+            w.line(&format!("if ({} != -1) {{", indices[at]));
+            w.line(&format!("final {} {};", one.java, temp(at)));
+            read_lines(w, cursor, &indices[at], &temp(at), &one.kind, &one.java);
+            match &one.write {
+                Access::Method(name) => w.line(&format!("{target}.{name}({});", temp(at))),
+                Access::Field(name) => w.line(&format!("{target}.{name} = {};", temp(at))),
+                Access::Constructor => {}
+            }
+            w.line("}");
+        }
+    }
+
+    fn column_index(flavor: &Flavor, cursor: &str, column: &str) -> String {
+        if flavor.cursor_util {
+            format!(
+                "{}.util.CursorUtil.getColumnIndex({cursor}, \"{}\")",
+                flavor.room,
+                java_text(column)
+            )
+        } else {
+            format!("{cursor}.getColumnIndex(\"{}\")", java_text(column))
+        }
+    }
+
+    fn open_query(flavor: &Flavor, statement: &str) -> String {
+        match flavor.query_util {
+            4 => format!(
+                "{}.util.DBUtil.query(__db, {statement}, false, null)",
+                flavor.room
+            ),
+            3 => format!(
+                "{}.util.DBUtil.query(__db, {statement}, false)",
+                flavor.room
+            ),
+            _ => format!("__db.query({statement})"),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Piece {
+        Text(String),
+        Bind(usize),
+    }
+
+    fn pieces(sql: &str, parameters: &[String]) -> Result<Vec<Piece>, String> {
+        let chars: Vec<char> = sql.chars().collect();
+        let mut out = Vec::new();
+        let mut text = String::new();
+        let mut at = 0usize;
+        let mut next = 0usize;
+        let mut quote: Option<char> = None;
+        while at < chars.len() {
+            let here = chars[at];
+            if let Some(mark) = quote {
+                text.push(here);
+                if here == mark {
+                    quote = None;
+                }
+                at += 1;
+                continue;
+            }
+            match here {
+                '\'' | '"' | '`' => {
+                    quote = Some(here);
+                    text.push(here);
+                    at += 1;
+                }
+                ':' | '@' | '$'
+                    if chars
+                        .get(at + 1)
+                        .is_some_and(|one| one.is_alphabetic() || *one == '_') =>
+                {
+                    let mut end = at + 1;
+                    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                        end += 1;
+                    }
+                    let name: String = chars[at + 1..end].iter().collect();
+                    let Some(position) = parameters.iter().position(|one| *one == name) else {
+                        return Err(name);
+                    };
+                    out.push(Piece::Text(std::mem::take(&mut text)));
+                    out.push(Piece::Bind(position));
+                    at = end;
+                }
+                '?' => {
+                    let mut end = at + 1;
+                    while end < chars.len() && chars[end].is_ascii_digit() {
+                        end += 1;
+                    }
+                    let position = if end > at + 1 {
+                        chars[at + 1..end]
+                            .iter()
+                            .collect::<String>()
+                            .parse::<usize>()
+                            .unwrap_or(1)
+                            .saturating_sub(1)
+                    } else {
+                        next
+                    };
+                    next = position + 1;
+                    if position >= parameters.len() {
+                        return Err("?".to_string());
+                    }
+                    out.push(Piece::Text(std::mem::take(&mut text)));
+                    out.push(Piece::Bind(position));
+                    at = end;
+                }
+                _ => {
+                    text.push(here);
+                    at += 1;
+                }
+            }
+        }
+        out.push(Piece::Text(text));
+        Ok(out)
+    }
+
+    fn tables_in(sql: &str, known: &[String]) -> Vec<String> {
+        let words: Vec<String> = sql
+            .split(|here: char| !(here.is_alphanumeric() || here == '_'))
+            .filter(|one| !one.is_empty())
+            .map(|one| one.to_lowercase())
+            .collect();
+        let mut out = Vec::new();
+        for one in known {
+            if words.contains(&one.to_lowercase()) && !out.contains(one) {
+                out.push(one.clone());
+            }
+        }
+        out
+    }
+
+    fn first_word(sql: &str) -> String {
+        sql.trim_start_matches(|here: char| here.is_whitespace() || here == '(')
+            .split(|here: char| !here.is_alphabetic())
+            .next()
+            .unwrap_or("")
+            .to_uppercase()
+    }
+
+    #[derive(Clone, Debug)]
+    enum Many {
+        One,
+        List,
+        Array,
+    }
+
+    fn many_of(context: &Context<'_>, from: &Unit, written: &Written) -> Option<(Many, Written)> {
+        match written {
+            Written::Array(inside) if **inside != Written::Byte => {
+                Some((Many::Array, (**inside).clone()))
+            }
+            Written::Named(name, arguments) if arguments.len() == 1 => {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                if matches!(
+                    bare,
+                    "List" | "ArrayList" | "Collection" | "Iterable" | "Set" | "HashSet"
+                ) {
+                    Some((Many::List, arguments[0].clone()))
+                } else {
+                    let _ = (context, from);
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    struct DaoWriter<'c, 'a> {
+        context: &'c Context<'a>,
+        entities: &'c [(String, Entity)],
+        tables: Vec<String>,
+        fields: Vec<String>,
+        setup: Vec<String>,
+        body: Writer,
+        counter: usize,
+    }
+
+    impl<'c, 'a> DaoWriter<'c, 'a> {
+        fn entity_for(&self, java: &str) -> Option<&'c Entity> {
+            self.entities
+                .iter()
+                .find(|(named, _)| named == java)
+                .map(|(_, one)| one)
+        }
+
+        fn adapter(&mut self, entity: &Entity, what: &str, conflict: &str) -> String {
+            let simple = entity
+                .pojo
+                .java
+                .rsplit('.')
+                .next()
+                .unwrap_or("Entity")
+                .to_string();
+            let name = format!(
+                "__{what}AdapterOf{simple}{}",
+                capital(&conflict.to_lowercase())
+            );
+            if self
+                .fields
+                .iter()
+                .any(|one| one.contains(&format!(" {name};")))
+            {
+                return name;
+            }
+            let room = self.context.flavor.room;
+            let sqlite = self.context.flavor.sqlite;
+            let class = if what == "insertion" {
+                "EntityInsertionAdapter"
+            } else {
+                "EntityDeletionOrUpdateAdapter"
+            };
+            self.fields.push(format!(
+                "private final {room}.{class}<{}> {name};",
+                entity.pojo.java
+            ));
+            let columns = &entity.pojo.columns;
+            let sql = match what {
+                "insertion" => format!(
+                    "INSERT OR {conflict} INTO `{}` ({}) VALUES ({})",
+                    entity.table,
+                    columns
+                        .iter()
+                        .map(|one| format!("`{}`", one.column))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    columns
+                        .iter()
+                        .enumerate()
+                        .map(|(at, one)| {
+                            if entity.auto_generate && entity.primary == [at] && one.kind.primitive
+                            {
+                                "nullif(?, 0)".to_string()
+                            } else {
+                                "?".to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                "deletion" => format!(
+                    "DELETE FROM `{}` WHERE {}",
+                    entity.table,
+                    entity
+                        .primary
+                        .iter()
+                        .map(|at| format!("`{}` = ?", columns[*at].column))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                ),
+                _ => format!(
+                    "UPDATE OR {conflict} `{}` SET {} WHERE {}",
+                    entity.table,
+                    columns
+                        .iter()
+                        .map(|one| format!("`{}` = ?", one.column))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    entity
+                        .primary
+                        .iter()
+                        .map(|at| format!("`{}` = ?", columns[*at].column))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                ),
+            };
+            let mut w = Writer::new();
+            w.depth = 2;
+            w.line(&format!(
+                "this.{name} = new {room}.{class}<{}>(__db) {{",
+                entity.pojo.java
+            ));
+            w.line("public String createQuery() {");
+            w.line(&format!("return \"{}\";", java_text(&sql)));
+            w.line("}");
+            w.line(&format!(
+                "public void bind({sqlite}.SupportSQLiteStatement statement, {} entity) {{",
+                entity.pojo.java
+            ));
+            let mut position = 0usize;
+            let bound: Vec<usize> = match what {
+                "deletion" => entity.primary.clone(),
+                "insertion" => (0..columns.len()).collect(),
+                _ => (0..columns.len())
+                    .chain(entity.primary.iter().copied())
+                    .collect(),
+            };
+            for at in bound {
+                position += 1;
+                let one = &columns[at];
+                bind_lines(
+                    &mut w,
+                    "statement",
+                    &position.to_string(),
+                    &read_value(one, "entity"),
+                    &one.kind,
+                    &one.java,
+                    &mut self.counter,
+                );
+            }
+            w.line("}");
+            w.line("};");
+            self.setup.push(w.out);
+            name
+        }
+
+        fn begin(&mut self) {
+            if self.context.flavor.not_suspending {
+                self.body.line("__db.assertNotSuspendingTransaction();");
+            }
+        }
+
+        fn changes(
+            &mut self,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            what: &str,
+            conflict: &str,
+        ) -> Result<(), Diagnostic> {
+            let returns = self.context.found.qualify(from, &method.returns);
+            let mut calls = Vec::new();
+            for (written, name) in &method.parameters {
+                let (many, inner) = match many_of(self.context, from, written) {
+                    Some(found) => found,
+                    None if method.variadic => (Many::Array, written.clone()),
+                    None => (Many::One, written.clone()),
+                };
+                let java = self.context.found.qualify(from, &inner);
+                let Some(entity) = self.entity_for(&java) else {
+                    return Err(fail("EO003", "Room cannot return this type from a query.")
+                        .with_context(format!("Method: {}", method.name))
+                        .with_context(format!("Type: {java}")));
+                };
+                let entity = entity.clone();
+                let adapter = self.adapter(&entity, what, conflict);
+                calls.push((adapter, many, name.clone()));
+            }
+            self.body.line(&format!(
+                "public {returns} {}({}) {{",
+                method.name,
+                self.parameters(from, method)
+            ));
+            self.begin();
+            self.body.line("__db.beginTransaction();");
+            self.body.line("try {");
+            let single = calls.len() == 1;
+            let mut total = false;
+            if what == "insertion" {
+                for (adapter, many, name) in &calls {
+                    let returning = single && returns != "void";
+                    let call = match (many, returning, returns.as_str()) {
+                        (_, false, _) => format!("{adapter}.insert({name});"),
+                        (Many::One, true, _) => {
+                            format!("final long _result = {adapter}.insertAndReturnId({name});")
+                        }
+                        (_, true, "long[]") => format!(
+                            "final long[] _result = {adapter}.insertAndReturnIdsArray({name});"
+                        ),
+                        (_, true, "Long[]" | "java.lang.Long[]") => format!(
+                            "final Long[] _result = {adapter}.insertAndReturnIdsArrayBox({name});"
+                        ),
+                        (_, true, _) => format!(
+                            "final java.util.List<Long> _result = {adapter}.insertAndReturnIdsList({name});"
+                        ),
+                    };
+                    total = returning;
+                    self.body.line(&call);
+                }
+            } else {
+                let counting = returns != "void";
+                if counting {
+                    self.body.line("int _total = 0;");
+                }
+                for (adapter, many, name) in &calls {
+                    let call = match many {
+                        Many::One => format!("{adapter}.handle({name})"),
+                        _ => format!("{adapter}.handleMultiple({name})"),
+                    };
+                    if counting {
+                        self.body.line(&format!("_total += {call};"));
+                    } else {
+                        self.body.line(&format!("{call};"));
+                    }
+                }
+                total = counting;
+            }
+            self.body.line("__db.setTransactionSuccessful();");
+            if total {
+                if what == "insertion" {
+                    self.body.line("return _result;");
+                } else {
+                    self.body.line("return _total;");
+                }
+            }
+            self.body.line("} finally {");
+            self.body.line("__db.endTransaction();");
+            self.body.line("}");
+            self.body.line("}");
+            self.body.line("");
+            Ok(())
+        }
+
+        fn parameters(&self, from: &Unit, method: &crate::compilers::java::Method) -> String {
+            method
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(at, (written, name))| {
+                    let java = self.context.found.qualify(from, written);
+                    if method.variadic && at + 1 == method.parameters.len() {
+                        format!(
+                            "final {} {name}",
+                            java.strip_suffix("[]")
+                                .map(|one| format!("{one}..."))
+                                .unwrap_or(java)
+                        )
+                    } else {
+                        format!("final {java} {name}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+
+        fn bind_arguments(
+            &mut self,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            parts: &[Piece],
+            statement: &str,
+        ) -> Result<(), Diagnostic> {
+            self.body.line("int _argIndex = 1;");
+            for one in parts {
+                let Piece::Bind(at) = one else {
+                    continue;
+                };
+                let (written, name) = &method.parameters[*at];
+                let many = if method.variadic && *at + 1 == method.parameters.len() {
+                    match written {
+                        Written::Array(inside) => Some((Many::Array, (**inside).clone())),
+                        other => Some((Many::Array, other.clone())),
+                    }
+                } else {
+                    many_of(self.context, from, written)
+                };
+                match many {
+                    Some((_, inner)) => {
+                        let kind = self.argument_kind(from, method, &inner)?;
+                        let java = self.context.found.qualify(from, &inner);
+                        self.body.line(&format!("if ({name} != null) {{"));
+                        self.body.line(&format!("for ({java} _item : {name}) {{"));
+                        let mut w = Writer::new();
+                        w.depth = self.body.depth;
+                        bind_lines(
+                            &mut w,
+                            statement,
+                            "_argIndex",
+                            "_item",
+                            &kind,
+                            &java,
+                            &mut self.counter,
+                        );
+                        self.body.out.push_str(&w.out);
+                        self.body.line("_argIndex++;");
+                        self.body.line("}");
+                        self.body.line("}");
+                    }
+                    None => {
+                        let kind = self.argument_kind(from, method, written)?;
+                        let java = self.context.found.qualify(from, written);
+                        let mut w = Writer::new();
+                        w.depth = self.body.depth;
+                        bind_lines(
+                            &mut w,
+                            statement,
+                            "_argIndex",
+                            name,
+                            &kind,
+                            &java,
+                            &mut self.counter,
+                        );
+                        self.body.out.push_str(&w.out);
+                        self.body.line("_argIndex++;");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn argument_kind(
+            &self,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            written: &Written,
+        ) -> Result<Kind, Diagnostic> {
+            self.context.kind(from, written).ok_or_else(|| {
+                fail("EO002", "Room cannot turn this type into a column.")
+                    .with_context(format!("Method: {}", method.name))
+                    .with_context(format!(
+                        "Type: {}",
+                        self.context.found.qualify(from, written)
+                    ))
+            })
+        }
+
+        fn sql_lines(
+            &mut self,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            parts: &[Piece],
+        ) {
+            let dynamic = parts.iter().any(|one| {
+                let Piece::Bind(at) = one else {
+                    return false;
+                };
+                (method.variadic && *at + 1 == method.parameters.len())
+                    || many_of(self.context, from, &method.parameters[*at].0).is_some()
+            });
+            if !dynamic {
+                let sql: String = parts
+                    .iter()
+                    .map(|one| match one {
+                        Piece::Text(held) => held.clone(),
+                        Piece::Bind(_) => "?".to_string(),
+                    })
+                    .collect();
+                self.body
+                    .line(&format!("final String _sql = \"{}\";", java_text(&sql)));
+                let count = parts
+                    .iter()
+                    .filter(|one| matches!(one, Piece::Bind(_)))
+                    .count();
+                self.body.line(&format!("final int _argCount = {count};"));
+                return;
+            }
+            self.body
+                .line("final StringBuilder _builder = new StringBuilder();");
+            self.body.line("int _argCount = 0;");
+            for one in parts {
+                match one {
+                    Piece::Text(held) => {
+                        if !held.is_empty() {
+                            self.body
+                                .line(&format!("_builder.append(\"{}\");", java_text(held)));
+                        }
+                    }
+                    Piece::Bind(at) => {
+                        let (written, name) = &method.parameters[*at];
+                        let is_many = (method.variadic && *at + 1 == method.parameters.len())
+                            || many_of(self.context, from, written).is_some();
+                        if is_many {
+                            let size = match many_of(self.context, from, written) {
+                                Some((Many::List, _)) => format!("{name}.size()"),
+                                _ => format!("{name}.length"),
+                            };
+                            self.body.line(&format!(
+                                "final int _size{at} = {name} == null ? 0 : {size};"
+                            ));
+                            self.body
+                                .line(&format!("for (int _i = 0; _i < _size{at}; _i++) {{"));
+                            self.body.line("if (_i > 0) {");
+                            self.body.line("_builder.append(\",\");");
+                            self.body.line("}");
+                            self.body.line("_builder.append(\"?\");");
+                            self.body.line("}");
+                            self.body.line(&format!("_argCount += _size{at};"));
+                        } else {
+                            self.body.line("_builder.append(\"?\");");
+                            self.body.line("_argCount += 1;");
+                        }
+                    }
+                }
+            }
+            self.body.line("final String _sql = _builder.toString();");
+        }
+
+        fn query(
+            &mut self,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            sql: &str,
+        ) -> Result<(), Diagnostic> {
+            let names: Vec<String> = method
+                .parameters
+                .iter()
+                .map(|(_, name)| name.clone())
+                .collect();
+            let parts = pieces(sql, &names).map_err(|missing| {
+                fail("EO001", "Room cannot read this query.")
+                    .with_context(format!("Method: {}", method.name))
+                    .with_context(format!("Name: {missing}"))
+            })?;
+            let returns = self.context.found.qualify(from, &method.returns);
+            let word = first_word(sql);
+            let reads = matches!(word.as_str(), "SELECT" | "WITH" | "PRAGMA" | "VALUES");
+            self.body.line(&format!(
+                "public {returns} {}({}) {{",
+                method.name,
+                self.parameters(from, method)
+            ));
+            if !reads {
+                self.writes(from, method, &parts, &returns, &word)?;
+                self.body.line("}");
+                self.body.line("");
+                return Ok(());
+            }
+            let (live, shown) = match &method.returns {
+                Written::Named(name, arguments)
+                    if arguments.len() == 1 && name.rsplit('.').next() == Some("LiveData") =>
+                {
+                    (true, arguments[0].clone())
+                }
+                other => (false, other.clone()),
+            };
+            let shown_java = self.context.found.qualify(from, &shown);
+            self.sql_lines(from, method, &parts);
+            let room = self.context.flavor.room;
+            self.body.line(&format!(
+                "final {room}.RoomSQLiteQuery _statement = {room}.RoomSQLiteQuery.acquire(_sql, _argCount);"
+            ));
+            self.bind_arguments(from, method, &parts, "_statement")?;
+            if shown_java == "android.database.Cursor" || shown_java == "Cursor" {
+                self.begin();
+                self.body.line("return __db.query(_statement);");
+                self.body.line("}");
+                self.body.line("");
+                return Ok(());
+            }
+            let mut mapping = Writer::new();
+            self.mapping(&mut mapping, from, method, &shown, &shown_java)?;
+            if !live {
+                self.begin();
+                self.body.line(&format!(
+                    "final android.database.Cursor _cursor = {};",
+                    open_query(&self.context.flavor, "_statement")
+                ));
+                self.body.line("try {");
+                self.splice(&mapping.out);
+                self.body.line("} finally {");
+                self.body.line("_cursor.close();");
+                self.body.line("_statement.release();");
+                self.body.line("}");
+                self.body.line("}");
+                self.body.line("");
+                return Ok(());
+            }
+            let tables = tables_in(sql, &self.tables);
+            let named: Vec<String> = tables
+                .iter()
+                .map(|one| format!("\"{}\"", java_text(one)))
+                .collect();
+            let flavor = self.context.flavor.clone();
+            match flavor.live_data {
+                2 | 3 => {
+                    let middle = if flavor.live_data == 3 { "false, " } else { "" };
+                    self.body.line(&format!(
+                        "return __db.getInvalidationTracker().createLiveData(new String[] {{{}}}, {middle}new java.util.concurrent.Callable<{shown_java}>() {{",
+                        named.join(", ")
+                    ));
+                    self.body
+                        .line(&format!("public {shown_java} call() throws Exception {{"));
+                    self.body.line(&format!(
+                        "final android.database.Cursor _cursor = {};",
+                        open_query(&flavor, "_statement")
+                    ));
+                    self.body.line("try {");
+                    self.splice(&mapping.out);
+                    self.body.line("} finally {");
+                    self.body.line("_cursor.close();");
+                    self.body.line("}");
+                    self.body.line("}");
+                    self.body.line("protected void finalize() {");
+                    self.body.line("_statement.release();");
+                    self.body.line("}");
+                    self.body.line("});");
+                }
+                _ => {
+                    let lifecycle = flavor.lifecycle;
+                    self.body.line(&format!(
+                        "return new {lifecycle}.ComputableLiveData<{shown_java}>() {{"
+                    ));
+                    self.body.line(&format!(
+                        "private {room}.InvalidationTracker.Observer _observer;"
+                    ));
+                    self.body
+                        .line(&format!("protected {shown_java} compute() {{"));
+                    self.body.line("if (_observer == null) {");
+                    self.body.line(&format!(
+                        "final {lifecycle}.ComputableLiveData<{shown_java}> _live = this;"
+                    ));
+                    let (first, rest) = match named.split_first() {
+                        Some((first, rest)) => (first.clone(), rest.to_vec()),
+                        None => ("\"room_master_table\"".to_string(), Vec::new()),
+                    };
+                    let mut listed_tables = vec![first];
+                    listed_tables.extend(rest);
+                    self.body.line(&format!(
+                        "_observer = new {room}.InvalidationTracker.Observer({}) {{",
+                        listed_tables.join(", ")
+                    ));
+                    self.body
+                        .line("public void onInvalidated(java.util.Set<String> tables) {");
+                    self.body.line("_live.invalidate();");
+                    self.body.line("}");
+                    self.body.line("};");
+                    self.body
+                        .line("__db.getInvalidationTracker().addWeakObserver(_observer);");
+                    self.body.line("}");
+                    self.body.line(&format!(
+                        "final android.database.Cursor _cursor = {};",
+                        open_query(&flavor, "_statement")
+                    ));
+                    self.body.line("try {");
+                    self.splice(&mapping.out);
+                    self.body.line("} finally {");
+                    self.body.line("_cursor.close();");
+                    self.body.line("}");
+                    self.body.line("}");
+                    self.body.line("protected void finalize() {");
+                    self.body.line("_statement.release();");
+                    self.body.line("}");
+                    self.body.line("}.getLiveData();");
+                }
+            }
+            self.body.line("}");
+            self.body.line("");
+            Ok(())
+        }
+
+        fn splice(&mut self, text: &str) {
+            for line in text.lines() {
+                self.body.line(line.trim_start());
+            }
+        }
+
+        fn mapping(
+            &mut self,
+            w: &mut Writer,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            shown: &Written,
+            shown_java: &str,
+        ) -> Result<(), Diagnostic> {
+            let (many, element) = match shown {
+                Written::Array(inside) if **inside != Written::Byte => {
+                    (Many::Array, (**inside).clone())
+                }
+                other => match many_of(self.context, from, other) {
+                    Some(found) => found,
+                    None => (Many::One, other.clone()),
+                },
+            };
+            let element_java = self.context.found.qualify(from, &element);
+            let unsupported = || {
+                fail("EO003", "Room cannot return this type from a query.")
+                    .with_context(format!("Method: {}", method.name))
+                    .with_context(format!("Type: {shown_java}"))
+            };
+            let single = self.context.kind(from, &element);
+            let pojo = if single.is_none() {
+                let unit = self
+                    .context
+                    .is_pojo(from, &element)
+                    .ok_or_else(unsupported)?;
+                Some(self.context.pojo(unit)?)
+            } else {
+                None
+            };
+            let mut indices = Vec::new();
+            if let Some(pojo) = &pojo {
+                for (at, one) in pojo.columns.iter().enumerate() {
+                    let name = format!("_cursorIndexOf{}{at}", capital(&one.field));
+                    w.line(&format!(
+                        "final int {name} = {};",
+                        column_index(&self.context.flavor, "_cursor", &one.column)
+                    ));
+                    indices.push(name);
+                }
+            }
+            let row = |w: &mut Writer, target: &str| {
+                if let Some(pojo) = &pojo {
+                    row_lines(w, self.context, pojo, "_cursor", &indices, target);
+                } else if let Some(kind) = &single {
+                    read_lines(w, "_cursor", "0", target, kind, &element_java);
+                }
+            };
+            match many {
+                Many::One => {
+                    w.line(&format!("final {shown_java} _result;"));
+                    w.line("if (_cursor.moveToFirst()) {");
+                    row(w, "_result");
+                    w.line("} else {");
+                    let empty = match &single {
+                        Some(kind) => default_of(kind),
+                        None => "null",
+                    };
+                    w.line(&format!("_result = {empty};"));
+                    w.line("}");
+                    w.line("return _result;");
+                }
+                Many::List => {
+                    let made = if shown_java.starts_with("java.util.Set")
+                        || shown_java.starts_with("Set<")
+                        || shown_java.starts_with("java.util.HashSet")
+                        || shown_java.starts_with("HashSet<")
+                    {
+                        format!("new java.util.HashSet<{element_java}>()")
+                    } else {
+                        format!("new java.util.ArrayList<{element_java}>(_cursor.getCount())")
+                    };
+                    w.line(&format!("final {shown_java} _result = {made};"));
+                    w.line("while (_cursor.moveToNext()) {");
+                    w.line(&format!("final {element_java} _item;"));
+                    row(w, "_item");
+                    w.line("_result.add(_item);");
+                    w.line("}");
+                    w.line("return _result;");
+                }
+                Many::Array => {
+                    let bare = element_java.split('<').next().unwrap_or(&element_java);
+                    w.line(&format!(
+                        "final {shown_java} _result = new {bare}[_cursor.getCount()];"
+                    ));
+                    w.line("int _index = 0;");
+                    w.line("while (_cursor.moveToNext()) {");
+                    w.line(&format!("final {element_java} _item;"));
+                    row(w, "_item");
+                    w.line("_result[_index] = _item;");
+                    w.line("_index++;");
+                    w.line("}");
+                    w.line("return _result;");
+                }
+            }
+            Ok(())
+        }
+
+        fn writes(
+            &mut self,
+            from: &Unit,
+            method: &crate::compilers::java::Method,
+            parts: &[Piece],
+            returns: &str,
+            word: &str,
+        ) -> Result<(), Diagnostic> {
+            let dynamic = parts.iter().any(|one| {
+                let Piece::Bind(at) = one else {
+                    return false;
+                };
+                (method.variadic && *at + 1 == method.parameters.len())
+                    || many_of(self.context, from, &method.parameters[*at].0).is_some()
+            });
+            let sqlite = self.context.flavor.sqlite;
+            let room = self.context.flavor.room;
+            let execute = if word == "INSERT" || word == "REPLACE" {
+                "executeInsert()"
+            } else {
+                "executeUpdateDelete()"
+            };
+            let result = match returns {
+                "void" | "java.lang.Void" | "Void" => None,
+                "long" | "Long" | "java.lang.Long" if execute == "executeInsert()" => Some("long"),
+                "int" | "Integer" | "java.lang.Integer" => Some("int"),
+                "long" | "Long" | "java.lang.Long" => Some("long"),
+                _ => {
+                    return Err(fail("EO003", "Room cannot return this type from a query.")
+                        .with_context(format!("Method: {}", method.name))
+                        .with_context(format!("Type: {returns}")))
+                }
+            };
+            self.begin();
+            let shared = if dynamic {
+                self.sql_lines(from, method, parts);
+                self.body.line(&format!(
+                    "final {sqlite}.SupportSQLiteStatement _stmt = __db.compileStatement(_sql);"
+                ));
+                None
+            } else {
+                let name = format!("__preparedStmtOf{}", capital(&method.name));
+                let sql: String = parts
+                    .iter()
+                    .map(|one| match one {
+                        Piece::Text(held) => held.clone(),
+                        Piece::Bind(_) => "?".to_string(),
+                    })
+                    .collect();
+                self.fields.push(format!(
+                    "private final {room}.SharedSQLiteStatement {name};"
+                ));
+                let mut w = Writer::new();
+                w.depth = 2;
+                w.line(&format!(
+                    "this.{name} = new {room}.SharedSQLiteStatement(__db) {{"
+                ));
+                w.line("public String createQuery() {");
+                w.line(&format!("return \"{}\";", java_text(&sql)));
+                w.line("}");
+                w.line("};");
+                self.setup.push(w.out);
+                self.body.line(&format!(
+                    "final {sqlite}.SupportSQLiteStatement _stmt = {name}.acquire();"
+                ));
+                Some(name)
+            };
+            self.bind_arguments(from, method, parts, "_stmt")?;
+            self.body.line("__db.beginTransaction();");
+            self.body.line("try {");
+            match result {
+                Some(kind) => {
+                    let cast = if kind == "int" && execute == "executeInsert()" {
+                        "(int) "
+                    } else {
+                        ""
+                    };
+                    self.body
+                        .line(&format!("final {kind} _result = {cast}_stmt.{execute};"));
+                }
+                None => self.body.line(&format!("_stmt.{execute};")),
+            }
+            self.body.line("__db.setTransactionSuccessful();");
+            if result.is_some() {
+                self.body.line("return _result;");
+            }
+            self.body.line("} finally {");
+            self.body.line("__db.endTransaction();");
+            if let Some(name) = shared {
+                self.body.line(&format!("{name}.release(_stmt);"));
+            }
+            self.body.line("}");
+            Ok(())
+        }
+    }
+
+    fn dao_source(
+        context: &Context<'_>,
+        dao: &Unit,
+        entities: &[(String, Entity)],
+        tables: &[String],
+    ) -> Result<String, Diagnostic> {
+        let mut writer = DaoWriter {
+            context,
+            entities,
+            tables: tables.to_vec(),
+            fields: Vec::new(),
+            setup: Vec::new(),
+            body: Writer::new(),
+            counter: 0,
+        };
+        writer.body.depth = 1;
+        let chain = context.found.above(dao);
+        let mut done: Vec<String> = Vec::new();
+        for (owner, given) in &chain {
+            for method in &owner.methods {
+                if method.constructor || method.modifiers.static_ || method.modifiers.private {
+                    continue;
+                }
+                let key = format!("{}/{}", method.name, method.parameters.len());
+                if done.contains(&key) {
+                    continue;
+                }
+                let resolved = crate::compilers::java::Method {
+                    returns: substitute(&method.returns, given),
+                    parameters: method
+                        .parameters
+                        .iter()
+                        .map(|(written, name)| (substitute(written, given), name.clone()))
+                        .collect(),
+                    ..method.clone()
+                };
+                let concrete = method.body.is_some();
+                if concrete {
+                    if annotation(&method.annotations, "Transaction").is_some()
+                        && owner.shape != Shape::Interface
+                    {
+                        done.push(key);
+                        let returns = context.found.qualify(owner, &resolved.returns);
+                        let names: Vec<String> = resolved
+                            .parameters
+                            .iter()
+                            .map(|(_, name)| name.clone())
+                            .collect();
+                        writer.body.line(&format!(
+                            "public {returns} {}({}) {{",
+                            resolved.name,
+                            writer.parameters(owner, &resolved)
+                        ));
+                        writer.body.line("__db.beginTransaction();");
+                        writer.body.line("try {");
+                        if returns == "void" {
+                            writer.body.line(&format!(
+                                "super.{}({});",
+                                resolved.name,
+                                names.join(", ")
+                            ));
+                            writer.body.line("__db.setTransactionSuccessful();");
+                        } else {
+                            writer.body.line(&format!(
+                                "final {returns} _result = super.{}({});",
+                                resolved.name,
+                                names.join(", ")
+                            ));
+                            writer.body.line("__db.setTransactionSuccessful();");
+                            writer.body.line("return _result;");
+                        }
+                        writer.body.line("} finally {");
+                        writer.body.line("__db.endTransaction();");
+                        writer.body.line("}");
+                        writer.body.line("}");
+                        writer.body.line("");
+                    } else {
+                        done.push(key);
+                    }
+                    continue;
+                }
+                done.push(key);
+                if let Some(held) = annotation(&method.annotations, "Query") {
+                    let sql =
+                        value(held, "value").and_then(|one| constant_text(context, owner, one));
+                    let Some(sql) = sql else {
+                        return Err(fail("EO001", "Room cannot read this query.")
+                            .with_context(format!("Method: {}", method.name)));
+                    };
+                    writer.query(owner, &resolved, &sql)?;
+                } else if let Some(held) = annotation(&method.annotations, "Insert") {
+                    let conflict = conflict_named(value(held, "onConflict"));
+                    writer.changes(owner, &resolved, "insertion", conflict)?;
+                } else if annotation(&method.annotations, "Delete").is_some() {
+                    writer.changes(owner, &resolved, "deletion", "ABORT")?;
+                } else if let Some(held) = annotation(&method.annotations, "Update") {
+                    let conflict = conflict_named(value(held, "onConflict"));
+                    writer.changes(owner, &resolved, "update", conflict)?;
+                } else if owner.shape == Shape::Interface || method.modifiers.abstract_ {
+                    return Err(fail("EO001", "Room cannot read this query.")
+                        .with_context(format!("Method: {}", method.name)));
+                }
+            }
+        }
+
+        let room = context.flavor.room;
+        let name = impl_name(dao);
+        let takes_database = dao.methods.iter().any(|one| {
+            one.constructor
+                && one.parameters.len() == 1
+                && matches!(&one.parameters[0].0, Written::Named(named, _) if named.ends_with("RoomDatabase"))
+        });
+        let mut out = String::new();
+        if let Some(package) = &dao.package {
+            out.push_str(&format!("package {package};\n\n"));
+        }
+        out.push_str("@SuppressWarnings({\"unchecked\", \"deprecation\"})\n");
+        let relation = if dao.shape == Shape::Interface {
+            "implements"
+        } else {
+            "extends"
+        };
+        out.push_str(&format!(
+            "public final class {name} {relation} {} {{\n",
+            dotted(dao)
+        ));
+        out.push_str(&format!("    private final {room}.RoomDatabase __db;\n\n"));
+        for one in &writer.fields {
+            out.push_str(&format!("    {one}\n\n"));
+        }
+        let mut owners: Vec<&str> = context
+            .converters
+            .iter()
+            .filter(|one| !one.is_static)
+            .map(|one| one.owner.as_str())
+            .collect();
+        owners.dedup();
+        let mut seen: Vec<&str> = Vec::new();
+        for owner in owners {
+            if seen.contains(&owner) {
+                continue;
+            }
+            seen.push(owner);
+            out.push_str(&format!(
+                "    private final {owner} {} = new {owner}();\n\n",
+                converter_field(owner)
+            ));
+        }
+        out.push_str(&format!("    public {name}({room}.RoomDatabase __db) {{\n"));
+        if takes_database {
+            out.push_str("        super(__db);\n");
+        }
+        out.push_str("        this.__db = __db;\n");
+        for one in &writer.setup {
+            out.push_str(one);
+        }
+        out.push_str("    }\n\n");
+        out.push_str(&writer.body.out);
+        if context.flavor.converters_map {
+            out.push_str("    public static java.util.List<Class<?>> getRequiredConverters() {\n");
+            out.push_str("        return java.util.Collections.emptyList();\n");
+            out.push_str("    }\n");
+        }
+        out.push_str("}\n");
+        Ok(out)
+    }
+
+    fn constant_text(
+        context: &Context<'_>,
+        from: &Unit,
+        expression: &Expression,
+    ) -> Option<String> {
+        match expression {
+            Expression::Str(held) => Some(held.clone()),
+            Expression::Binary {
+                operator: crate::compilers::java::Binary::Add,
+                left,
+                right,
+            } => Some(constant_text(context, from, left)? + &constant_text(context, from, right)?),
+            Expression::Int(held) | Expression::Long(held) => Some(held.to_string()),
+            Expression::Name(name) => {
+                let (owner, field) = match name.rsplit_once('.') {
+                    Some((owner, field)) => (context.found.find(from, owner)?, field.to_string()),
+                    None => (from, name.clone()),
+                };
+                constant_field(context, owner, &field)
+            }
+            Expression::Field { of, name } => {
+                let Expression::Name(owner) = of.as_ref() else {
+                    return None;
+                };
+                let owner = context.found.find(from, owner)?;
+                constant_field(context, owner, name)
+            }
+            _ => None,
+        }
+    }
+
+    fn constant_field(context: &Context<'_>, owner: &Unit, name: &str) -> Option<String> {
+        for (unit, _) in context.found.above(owner) {
+            if let Some(field) = unit.fields.iter().find(|one| one.name == name) {
+                return constant_text(context, unit, field.value.as_ref()?);
+            }
+        }
+        None
+    }
+
+    fn database_source(
+        context: &Context<'_>,
+        database: &Unit,
+        entities: &[(String, Entity)],
+        daos: &[(String, &Unit)],
+        version: i64,
+    ) -> String {
+        let flavor = &context.flavor;
+        let room = flavor.room;
+        let sqlite = flavor.sqlite;
+        let linked = entities.iter().any(|(_, one)| !one.foreign.is_empty());
+        let mut ordered: Vec<&Entity> = entities.iter().map(|(_, one)| one).collect();
+        ordered.sort_by(|a, b| a.table.cmp(&b.table));
+        let identity = identity_key(&english_sorted(
+            entities.iter().map(|(_, one)| one.identity()).collect(),
+        ));
+        let mut legacy: Vec<String> = ordered
+            .iter()
+            .map(|one| one.create_sql(&one.table))
+            .collect();
+        for one in &ordered {
+            for index in &one.indices {
+                let full = one.index_sql(index);
+                let after = full
+                    .split_once("IF NOT EXISTS")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or("");
+                legacy.push(format!(
+                    "{}{after}",
+                    if index.unique {
+                        "CREATE UNIQUE INDEX"
+                    } else {
+                        "CREATE  INDEX"
+                    }
+                ));
+            }
+        }
+        let legacy = md5_hex(legacy.join(LEGACY_SEPARATOR).as_bytes());
+        let name = impl_name(database);
+        let mut w = Writer::new();
+        if let Some(package) = &database.package {
+            w.line(&format!("package {package};"));
+            w.line("");
+        }
+        w.line("@SuppressWarnings({\"unchecked\", \"deprecation\"})");
+        w.line(&format!(
+            "public final class {name} extends {} {{",
+            dotted(database)
+        ));
+        for (field, dao) in daos {
+            w.line(&format!("private volatile {} _{field};", dotted(dao)));
+        }
+        w.line("");
+        w.line(&format!(
+            "protected {sqlite}.SupportSQLiteOpenHelper createOpenHelper({room}.DatabaseConfiguration configuration) {{"
+        ));
+        w.line(&format!(
+            "final {sqlite}.SupportSQLiteOpenHelper.Callback _openCallback = new {room}.RoomOpenHelper(configuration, new {room}.RoomOpenHelper.Delegate({version}) {{"
+        ));
+        w.line(&format!(
+            "public void createAllTables({sqlite}.SupportSQLiteDatabase _db) {{"
+        ));
+        for one in entities.iter().map(|(_, one)| one) {
+            w.line(&format!(
+                "_db.execSQL(\"{}\");",
+                java_text(&one.create_sql(&one.table))
+            ));
+            for index in &one.indices {
+                w.line(&format!(
+                    "_db.execSQL(\"{}\");",
+                    java_text(&one.index_sql(index))
+                ));
+            }
+        }
+        w.line(&format!(
+            "_db.execSQL(\"CREATE TABLE IF NOT EXISTS {MASTER_TABLE} (id INTEGER PRIMARY KEY,identity_hash TEXT)\");"
+        ));
+        w.line(&format!(
+            "_db.execSQL(\"INSERT OR REPLACE INTO {MASTER_TABLE} (id,identity_hash) VALUES(42, '{identity}')\");"
+        ));
+        w.line("}");
+        w.line("");
+        w.line(&format!(
+            "public void dropAllTables({sqlite}.SupportSQLiteDatabase _db) {{"
+        ));
+        for one in entities.iter().map(|(_, one)| one) {
+            w.line(&format!(
+                "_db.execSQL(\"DROP TABLE IF EXISTS `{}`\");",
+                java_text(&one.table)
+            ));
+        }
+        if flavor.destructive {
+            w.line("__onDestructiveMigration(_db);");
+        }
+        w.line("}");
+        w.line("");
+        for hook in ["onCreate", "onOpen"] {
+            let access = if hook == "onCreate" && !flavor.validation_result {
+                "protected"
+            } else {
+                "public"
+            };
+            w.line(&format!(
+                "{access} void {hook}({sqlite}.SupportSQLiteDatabase _db) {{"
+            ));
+            w.line(&format!("__{hook}(_db);"));
+            w.line("}");
+            w.line("");
+        }
+        if flavor.pre_migrate {
+            w.line(&format!(
+                "public void onPreMigrate({sqlite}.SupportSQLiteDatabase _db) {{"
+            ));
+            w.line(&format!("{room}.util.DBUtil.dropFtsSyncTriggers(_db);"));
+            w.line("}");
+            w.line("");
+            w.line(&format!(
+                "public void onPostMigrate({sqlite}.SupportSQLiteDatabase _db) {{"
+            ));
+            w.line("}");
+            w.line("");
+        }
+        let info = format!("{room}.util.TableInfo");
+        if flavor.validation_result {
+            w.line(&format!(
+                "public {room}.RoomOpenHelper.ValidationResult onValidateSchema({sqlite}.SupportSQLiteDatabase _db) {{"
+            ));
+        } else {
+            w.line(&format!(
+                "protected void validateMigration({sqlite}.SupportSQLiteDatabase _db) {{"
+            ));
+        }
+        for (at, one) in entities.iter().map(|(_, one)| one).enumerate() {
+            w.line(&format!(
+                "final java.util.HashMap<String, {info}.Column> _columns{at} = new java.util.HashMap<String, {info}.Column>({});",
+                one.pojo.columns.len()
+            ));
+            for (index, column) in one.pojo.columns.iter().enumerate() {
+                let position = one
+                    .primary
+                    .iter()
+                    .position(|held| *held == index)
+                    .map(|held| held + 1)
+                    .unwrap_or(0);
+                let extra = if flavor.column_arity == 6 {
+                    format!(
+                        ", {}, {info}.CREATED_FROM_ENTITY",
+                        column
+                            .default_value
+                            .as_ref()
+                            .map(|held| format!("\"{}\"", java_text(held)))
+                            .unwrap_or_else(|| "null".to_string())
+                    )
+                } else {
+                    String::new()
+                };
+                w.line(&format!(
+                    "_columns{at}.put(\"{0}\", new {info}.Column(\"{0}\", \"{1}\", {2}, {position}{extra}));",
+                    java_text(&column.column),
+                    column.affinity,
+                    column.non_null
+                ));
+            }
+            w.line(&format!(
+                "final java.util.HashSet<{info}.ForeignKey> _foreign{at} = new java.util.HashSet<{info}.ForeignKey>({});",
+                one.foreign.len()
+            ));
+            for key in &one.foreign {
+                w.line(&format!(
+                    "_foreign{at}.add(new {info}.ForeignKey(\"{}\", \"{}\", \"{}\", java.util.Arrays.asList({}), java.util.Arrays.asList({})));",
+                    java_text(&key.parent),
+                    key.on_delete,
+                    key.on_update,
+                    key.child_columns.iter().map(|held| format!("\"{}\"", java_text(held))).collect::<Vec<_>>().join(", "),
+                    key.parent_columns.iter().map(|held| format!("\"{}\"", java_text(held))).collect::<Vec<_>>().join(", ")
+                ));
+            }
+            w.line(&format!(
+                "final java.util.HashSet<{info}.Index> _indices{at} = new java.util.HashSet<{info}.Index>({});",
+                one.indices.len()
+            ));
+            for index in &one.indices {
+                let columns = index
+                    .columns
+                    .iter()
+                    .map(|held| format!("\"{}\"", java_text(held)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let orders = if flavor.index_orders {
+                    format!(
+                        ", java.util.Arrays.asList({})",
+                        index
+                            .columns
+                            .iter()
+                            .map(|_| "\"ASC\"")
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                } else {
+                    String::new()
+                };
+                w.line(&format!(
+                    "_indices{at}.add(new {info}.Index(\"{}\", {}, java.util.Arrays.asList({columns}){orders}));",
+                    java_text(&index.name),
+                    index.unique
+                ));
+            }
+            w.line(&format!(
+                "final {info} _info{at} = new {info}(\"{0}\", _columns{at}, _foreign{at}, _indices{at});",
+                java_text(&one.table)
+            ));
+            w.line(&format!(
+                "final {info} _existing{at} = {info}.read(_db, \"{}\");",
+                java_text(&one.table)
+            ));
+            w.line(&format!("if (!_info{at}.equals(_existing{at})) {{"));
+            let said = format!(
+                "\"{}({}).\\n Expected:\\n\" + _info{at} + \"\\n Found:\\n\" + _existing{at}",
+                java_text(&one.table),
+                one.pojo.java
+            );
+            if flavor.validation_result {
+                w.line(&format!(
+                    "return new {room}.RoomOpenHelper.ValidationResult(false, {said});"
+                ));
+            } else {
+                w.line(&format!(
+                    "throw new IllegalStateException(\"Migration didn't properly handle \" + {said});"
+                ));
+            }
+            w.line("}");
+        }
+        if flavor.validation_result {
+            w.line(&format!(
+                "return new {room}.RoomOpenHelper.ValidationResult(true, null);"
+            ));
+        }
+        w.line("}");
+        w.line(&format!("}}, \"{identity}\", \"{legacy}\");"));
+        w.line(&format!(
+            "final {sqlite}.SupportSQLiteOpenHelper.Configuration _sqliteConfig = {sqlite}.SupportSQLiteOpenHelper.Configuration.builder(configuration.context).name(configuration.name).callback(_openCallback).build();"
+        ));
+        w.line("return configuration.sqliteOpenHelperFactory.create(_sqliteConfig);");
+        w.line("}");
+        w.line("");
+        let mut hooks = vec!["onCreate", "onOpen"];
+        if flavor.destructive {
+            hooks.push("onDestructiveMigration");
+        }
+        for hook in hooks {
+            w.line(&format!(
+                "final void __{hook}({sqlite}.SupportSQLiteDatabase _db) {{"
+            ));
+            if hook == "onOpen" {
+                w.line("mDatabase = _db;");
+                if linked {
+                    w.line("_db.execSQL(\"PRAGMA foreign_keys = ON\");");
+                }
+                w.line("internalInitInvalidationTracker(_db);");
+            }
+            w.line("if (mCallbacks != null) {");
+            w.line("for (int _i = 0, _size = mCallbacks.size(); _i < _size; _i++) {");
+            w.line(&format!(
+                "(({room}.RoomDatabase.Callback) mCallbacks.get(_i)).{hook}(_db);"
+            ));
+            w.line("}");
+            w.line("}");
+            w.line("}");
+            w.line("");
+        }
+        let tables: Vec<String> = entities
+            .iter()
+            .map(|(_, one)| format!("\"{}\"", java_text(&one.table)))
+            .collect();
+        w.line(&format!(
+            "protected {room}.InvalidationTracker createInvalidationTracker() {{"
+        ));
+        if flavor.tracker_maps {
+            w.line("final java.util.HashMap<String, String> _shadowTablesMap = new java.util.HashMap<String, String>(0);");
+            w.line("final java.util.HashMap<String, java.util.Set<String>> _viewTables = new java.util.HashMap<String, java.util.Set<String>>(0);");
+            w.line(&format!(
+                "return new {room}.InvalidationTracker(this, _shadowTablesMap, _viewTables, {});",
+                tables.join(", ")
+            ));
+        } else {
+            w.line(&format!(
+                "return new {room}.InvalidationTracker(this, {});",
+                tables.join(", ")
+            ));
+        }
+        w.line("}");
+        w.line("");
+        if flavor.clear_tables {
+            w.line("public void clearAllTables() {");
+            w.line("super.assertNotMainThread();");
+            w.line(&format!(
+                "final {sqlite}.SupportSQLiteDatabase _db = super.getOpenHelper().getWritableDatabase();"
+            ));
+            if linked {
+                w.line("final boolean _supportsDeferForeignKeys = android.os.Build.VERSION.SDK_INT >= 21;");
+            }
+            w.line("try {");
+            if linked {
+                w.line("if (!_supportsDeferForeignKeys) {");
+                w.line("_db.execSQL(\"PRAGMA foreign_keys = FALSE\");");
+                w.line("}");
+            }
+            w.line("super.beginTransaction();");
+            if linked {
+                w.line("if (_supportsDeferForeignKeys) {");
+                w.line("_db.execSQL(\"PRAGMA defer_foreign_keys = TRUE\");");
+                w.line("}");
+            }
+            for one in entities.iter().map(|(_, one)| one) {
+                w.line(&format!(
+                    "_db.execSQL(\"DELETE FROM `{}`\");",
+                    java_text(&one.table)
+                ));
+            }
+            w.line("super.setTransactionSuccessful();");
+            w.line("} finally {");
+            w.line("super.endTransaction();");
+            if linked {
+                w.line("if (!_supportsDeferForeignKeys) {");
+                w.line("_db.execSQL(\"PRAGMA foreign_keys = TRUE\");");
+                w.line("}");
+            }
+            w.line("_db.query(\"PRAGMA wal_checkpoint(FULL)\").close();");
+            w.line("if (!_db.inTransaction()) {");
+            w.line("_db.execSQL(\"VACUUM\");");
+            w.line("}");
+            w.line("}");
+            w.line("}");
+            w.line("");
+        }
+        if flavor.converters_map {
+            w.line("protected java.util.Map<Class<?>, java.util.List<Class<?>>> getRequiredTypeConverters() {");
+            w.line("final java.util.HashMap<Class<?>, java.util.List<Class<?>>> _typeConvertersMap = new java.util.HashMap<Class<?>, java.util.List<Class<?>>>();");
+            for (_, dao) in daos {
+                w.line(&format!(
+                    "_typeConvertersMap.put({}.class, {}.getRequiredConverters());",
+                    dotted(dao),
+                    impl_dotted(dao)
+                ));
+            }
+            w.line("return _typeConvertersMap;");
+            w.line("}");
+            w.line("");
+        }
+        if flavor.auto_migrations {
+            w.line(&format!(
+                "public java.util.Set<Class<? extends {room}.migration.AutoMigrationSpec>> getRequiredAutoMigrationSpecs() {{"
+            ));
+            w.line(&format!(
+                "return new java.util.HashSet<Class<? extends {room}.migration.AutoMigrationSpec>>();"
+            ));
+            w.line("}");
+            w.line("");
+            w.line(&format!(
+                "public java.util.List<{room}.migration.Migration> getAutoMigrations(java.util.Map<Class<? extends {room}.migration.AutoMigrationSpec>, {room}.migration.AutoMigrationSpec> autoMigrationSpecs) {{"
+            ));
+            w.line(&format!(
+                "return new java.util.ArrayList<{room}.migration.Migration>();"
+            ));
+            w.line("}");
+            w.line("");
+        }
+        for (field, dao) in daos {
+            let method = field;
+            w.line(&format!("public {} {method}() {{", dotted(dao)));
+            w.line(&format!("if (_{field} != null) {{"));
+            w.line(&format!("return _{field};"));
+            w.line("} else {");
+            w.line("synchronized (this) {");
+            w.line(&format!("if (_{field} == null) {{"));
+            w.line(&format!("_{field} = new {}(this);", impl_dotted(dao)));
+            w.line("}");
+            w.line(&format!("return _{field};"));
+            w.line("}");
+            w.line("}");
+            w.line("}");
+            w.line("");
+        }
+        w.line("}");
+        w.out
+    }
+
+    fn era_of(unit: &Unit) -> Option<Era> {
+        let mentions = |prefix: &str| {
+            unit.imports.iter().any(|one| one.starts_with(prefix))
+                || unit
+                    .annotations
+                    .iter()
+                    .any(|one| one.name.starts_with(prefix))
+        };
+        if mentions("androidx.room") {
+            Some(Era::AndroidX)
+        } else if mentions("android.arch.persistence.room") {
+            Some(Era::Arch)
+        } else {
+            None
+        }
+    }
+
+    pub fn generated(
+        sources: &[(String, String)],
+        classpath: &Classpath,
+    ) -> Result<Vec<(String, String)>, Diagnostic> {
+        if !sources.iter().any(|(_, text)| text.contains("@Database")) {
+            return Ok(Vec::new());
+        }
+        let mut parsed: Vec<Unit> = Vec::new();
+        for (_, text) in sources {
+            if let Ok(units) = crate::compilers::java::parse(text) {
+                parsed.extend(units);
+            }
+        }
+        let found = Found {
+            units: parsed.iter().collect(),
+        };
+        let databases: Vec<&Unit> = found
+            .units
+            .iter()
+            .copied()
+            .filter(|one| {
+                annotation(&one.annotations, "Database").is_some() && era_of(one).is_some()
+            })
+            .collect();
+        let mut out = Vec::new();
+        let mut written: Vec<String> = Vec::new();
+        for database in databases {
+            let Some(era) = era_of(database) else {
+                continue;
+            };
+            let Some(flavor) = flavor(era, classpath) else {
+                continue;
+            };
+            let enums: Vec<String> = found
+                .units
+                .iter()
+                .filter(|one| one.shape == Shape::Enum)
+                .map(|one| dotted(one))
+                .collect();
+            let context = Context {
+                converters: found.converters(),
+                found: Found {
+                    units: found.units.clone(),
+                },
+                flavor,
+                enums,
+            };
+            let marked = annotation(&database.annotations, "Database");
+            let version = marked
+                .and_then(|held| value(held, "version"))
+                .and_then(integer)
+                .unwrap_or(1);
+            let mut entities: Vec<(String, Entity)> = Vec::new();
+            for one in marked
+                .and_then(|held| value(held, "entities"))
+                .map(listed)
+                .unwrap_or_default()
+            {
+                let Expression::ClassLiteral {
+                    of: Written::Named(name, _),
+                    ..
+                } = one
+                else {
+                    continue;
+                };
+                let Some(unit) = context.found.find(database, name) else {
+                    return Err(
+                        fail("EO006", "Room names a class this project does not hold.")
+                            .with_context(format!("Class: {}", dotted(database)))
+                            .with_context(format!("Name: {name}")),
+                    );
+                };
+                entities.push((dotted(unit), context.entity(unit)?));
+            }
+            let tables: Vec<String> = entities.iter().map(|(_, one)| one.table.clone()).collect();
+            let mut daos: Vec<(String, &Unit)> = Vec::new();
+            for (owner, given) in context.found.above(database) {
+                for method in &owner.methods {
+                    if method.body.is_some() || method.constructor || !method.parameters.is_empty()
+                    {
+                        continue;
+                    }
+                    let returns = substitute(&method.returns, &given);
+                    let Written::Named(name, _) = &returns else {
+                        continue;
+                    };
+                    let Some(dao) = context.found.find(owner, name) else {
+                        continue;
+                    };
+                    if annotation(&dao.annotations, "Dao").is_none()
+                        || daos.iter().any(|(field, _)| *field == method.name)
+                    {
+                        continue;
+                    }
+                    daos.push((method.name.clone(), dao));
+                }
+            }
+            for (_, dao) in &daos {
+                let named = impl_dotted(dao);
+                if written.contains(&named) {
+                    continue;
+                }
+                written.push(named.clone());
+                out.push((
+                    format!("{GENERATED_FOLDER}/{}.java", named.replace('.', "/")),
+                    dao_source(&context, dao, &entities, &tables)?,
+                ));
+            }
+            let named = impl_dotted(database);
+            if !written.contains(&named) {
+                written.push(named.clone());
+                out.push((
+                    format!("{GENERATED_FOLDER}/{}.java", named.replace('.', "/")),
+                    database_source(&context, database, &entities, &daos, version),
+                ));
+            }
+        }
+        Ok(out)
+    }
+}
+
 pub mod builder {
     use crate::archive::Builder as ArchiveBuilder;
     use crate::certificate;
@@ -40208,6 +43519,12 @@ pub mod builder {
             .into_iter()
             .map(|(folder, _, text)| (folder, text))
             .collect();
+        if let Some(text) = held.as_ref().and_then(res_values_source) {
+            project
+                .values
+                .push((crate::resources::Config::VALUES_DIRECTORY.to_string(), text));
+            project.values_names.push(GENERATED_VALUES.to_string());
+        }
         project.resources = crate::scaffold::resource_files(root);
 
         let mut carried: Vec<(String, Vec<u8>)> = Vec::new();
@@ -40520,17 +43837,60 @@ pub mod builder {
         identity: &str,
         settings: &crate::settings::Settings,
     ) -> String {
-        format!(
+        let mut out = format!(
             "package {namespace};\n\npublic final class {BUILD_CONFIG} {{\n    \
              public static final boolean DEBUG = false;\n    \
              public static final String APPLICATION_ID = \"{}\";\n    \
              public static final String BUILD_TYPE = \"{BUILD_TYPE}\";\n    \
              public static final int VERSION_CODE = {};\n    \
-             public static final String VERSION_NAME = \"{}\";\n}}\n",
+             public static final String VERSION_NAME = \"{}\";\n",
             java_text(identity),
             settings.version_code,
             java_text(&settings.version_name),
-        )
+        );
+        for one in &settings.build_config {
+            if one.value.trim().is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "    public static final {} {} = {};\n",
+                one.kind.trim(),
+                one.name.trim(),
+                one.value.trim()
+            ));
+        }
+        out.push_str("}\n");
+        out
+    }
+
+    pub const GENERATED_VALUES: &str = "gradleResValues.xml";
+
+    fn xml_text(said: &str) -> String {
+        said.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    pub fn res_values_source(settings: &crate::settings::Settings) -> Option<String> {
+        if settings.res_values.is_empty() {
+            return None;
+        }
+        let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n");
+        for one in &settings.res_values {
+            let kind = one.kind.trim();
+            let name = xml_text(one.name.trim());
+            if kind == "id" {
+                out.push_str(&format!("    <item type=\"id\" name=\"{name}\" />\n"));
+            } else {
+                out.push_str(&format!(
+                    "    <{kind} name=\"{name}\">{}</{kind}>\n",
+                    xml_text(&one.value)
+                ));
+            }
+        }
+        out.push_str("</resources>\n");
+        Some(out)
     }
 
     fn declares_build_config(root: &str, namespace: &str) -> bool {
@@ -40740,6 +44100,8 @@ public final class R {{
 
         let classpath = what_it_may_call_into(root)?;
         crate::progress::keep_going()?;
+        let made = crate::room::generated(&read, &classpath)?;
+        read.extend(made);
         let produced = crate::compilers::java::compile_together(&read, &classpath)?;
         let mut out = Vec::new();
         for (name, bytes) in produced {
@@ -41578,6 +44940,7 @@ public final class R {{
             let written = if project.shrink {
                 let mut roots = crate::shrink::roots_from_manifest(&project.manifest, &package);
                 roots.extend(crate::shrink::beyond_the_package(&project.code, &package));
+                roots.extend(crate::shrink::found_by_name(&project.code));
                 let texts: Vec<String> = project
                     .resources
                     .iter()

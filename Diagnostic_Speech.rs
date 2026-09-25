@@ -144,6 +144,7 @@ const TURKISH_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "NUL ile biten bir dizgenin sonlandırıcısı yok."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Bir PNG, biçimin kendisi için ayırdığı sekiz baytla başlar. Burada başka hiçbir şey kabul edilmez, çünkü başka hiçbir şey okunmaz."),
     ("A PNG ends with IEND. A file without one was cut short.", "Bir PNG, IEND ile biter. Bunu taşımayan dosya yarıda kesilmiş demektir."),
+    ("A Room entity has no primary key.", "Bir Room varlığının birincil anahtarı yok."),
     ("A UTCTime is not in the form a certificate uses.", "Bir UTCTime, sertifikaların kullandığı biçimde değil."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Bir ZIP64 ek alanı, taşıması gereken boyutlardan kısa."),
     ("A ZIP64 record is not where the archive says it is.", "Bir ZIP64 kaydı, arşivin söylediği yerde değil."),
@@ -755,6 +756,11 @@ const TURKISH_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Tam bir araç başlığı değil, bir sürüm dizesi bildirin."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Her anahtarı bir kez bildirin. İlk değer tutuldu ve bu girdi yok sayıldı."),
     ("Report only the keys listed in the toolchain lock.", "Yalnızca araç zinciri kilidinde listelenen anahtarları bildirin."),
+    ("Room cannot read this query.", "Room bu sorguyu okuyamıyor."),
+    ("Room cannot return this type from a query.", "Room bu türü bir sorgudan döndüremiyor."),
+    ("Room cannot turn this type into a column.", "Room bu türü bir sütuna çeviremiyor."),
+    ("Room found no way to build this class from a row.", "Room bu sınıfı bir satırdan kurmanın yolunu bulamadı."),
+    ("Room names a class this project does not hold.", "Room bu projede olmayan bir sınıfı adlandırıyor."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Bir argümanı, istediğiniz aşırı yüklemenin aldığı türe dönüştürerek hangisi olduğunu belirtin. Dil bunu seçmek yerine belirsiz sayar; burası da öyle."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "android:allowBackup değerini false yapın ya da hassas olan her şeyi dışarıda bırakan kurallar bildirin."),
     ("Set android:exported to false, or require a permission with android:permission.", "android:exported değerini false yapın ya da android:permission ile bir izin şart koşun."),
@@ -1185,7 +1191,6 @@ const TURKISH_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Türü yazın ya da bir değer verin."),
     ("Write the type.", "Türü yazın."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Bir çıktı bağlamasına yazın. Kaynak ağacı bilerek salt okunur bağlanır."),
-
 ];
 
 const TURKISH_WORDS: &[(&str, &str)] = &[
@@ -1423,6 +1428,7 @@ const GERMAN_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "Einer NUL-beendeten Zeichenkette fehlt der Abschluss."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Ein PNG beginnt mit den acht Byte, die das Format dafür reserviert. Hier wird nichts anderes angenommen, weil nichts anderes gelesen wird."),
     ("A PNG ends with IEND. A file without one was cut short.", "Ein PNG endet mit IEND. Eine Datei ohne dieses Ende wurde abgeschnitten."),
+    ("A Room entity has no primary key.", "Eine Room-Entität hat keinen Primärschlüssel."),
     ("A UTCTime is not in the form a certificate uses.", "Eine UTCTime hat nicht die Form, die ein Zertifikat verwendet."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Ein ZIP64-Zusatzfeld ist kürzer als die Größen, die es tragen muss."),
     ("A ZIP64 record is not where the archive says it is.", "Ein ZIP64-Satz liegt nicht dort, wo das Archiv ihn nennt."),
@@ -2034,6 +2040,11 @@ const GERMAN_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Melden Sie eine Versionszeichenkette, kein ganzes Werkzeugbanner."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Melden Sie jeden Schlüssel einmal. Der erste Wert wurde behalten und dieser Eintrag übergangen."),
     ("Report only the keys listed in the toolchain lock.", "Melden Sie nur die Schlüssel, die in der Toolchain-Sperre stehen."),
+    ("Room cannot read this query.", "Room kann diese Abfrage nicht lesen."),
+    ("Room cannot return this type from a query.", "Room kann diesen Typ nicht aus einer Abfrage zurückgeben."),
+    ("Room cannot turn this type into a column.", "Room kann diesen Typ nicht in eine Spalte umwandeln."),
+    ("Room found no way to build this class from a row.", "Room hat keinen Weg gefunden, diese Klasse aus einer Zeile zu bauen."),
+    ("Room names a class this project does not hold.", "Room nennt eine Klasse, die dieses Projekt nicht enthält."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Sagen Sie welche, indem Sie ein Argument auf den Typ umwandeln, den die gewünschte nimmt. Die Sprache nennt das mehrdeutig, statt zu wählen, und hier ist es genauso."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Setzen Sie android:allowBackup auf false, oder deklarieren Sie Regeln, die alles Empfindliche ausschließen."),
     ("Set android:exported to false, or require a permission with android:permission.", "Setzen Sie android:exported auf false, oder verlangen Sie mit android:permission eine Berechtigung."),
@@ -2464,7 +2475,6 @@ const GERMAN_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Schreiben Sie den Typ, oder geben Sie ihm einen Wert."),
     ("Write the type.", "Schreiben Sie den Typ."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Schreiben Sie in einen Ausgabe-Einhängepunkt. Ein Quellbaum ist mit Absicht nur lesbar eingehängt."),
-
 ];
 
 const GERMAN_WORDS: &[(&str, &str)] = &[
@@ -2702,6 +2712,7 @@ const SPANISH_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "A una cadena terminada en NUL le falta el terminador."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Un PNG empieza con los ocho bytes que el formato le reserva. Aquí no se acepta nada más, porque no se lee nada más."),
     ("A PNG ends with IEND. A file without one was cut short.", "Un PNG termina con IEND. Un archivo sin él quedó cortado."),
+    ("A Room entity has no primary key.", "Una entidad de Room no tiene clave primaria."),
     ("A UTCTime is not in the form a certificate uses.", "Un UTCTime no tiene la forma que usa un certificado."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Un campo extra ZIP64 es más corto que los tamaños que debe llevar."),
     ("A ZIP64 record is not where the archive says it is.", "Un registro ZIP64 no está donde el archivo dice que está."),
@@ -3313,6 +3324,11 @@ const SPANISH_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Informe de una cadena de versión, no de un rótulo completo de la herramienta."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Informe de cada clave una vez. Se conservó el primer valor y esta entrada se ignoró."),
     ("Report only the keys listed in the toolchain lock.", "Informe solo de las claves listadas en el bloqueo de la cadena de herramientas."),
+    ("Room cannot read this query.", "Room no puede leer esta consulta."),
+    ("Room cannot return this type from a query.", "Room no puede devolver este tipo desde una consulta."),
+    ("Room cannot turn this type into a column.", "Room no puede convertir este tipo en una columna."),
+    ("Room found no way to build this class from a row.", "Room no encontró forma de construir esta clase a partir de una fila."),
+    ("Room names a class this project does not hold.", "Room nombra una clase que este proyecto no contiene."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Diga cuál convirtiendo un argumento al tipo que toma esa. El lenguaje llama a esto ambiguo en lugar de elegir, y aquí igual."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Ponga android:allowBackup en false, o declare reglas que excluyan todo lo sensible."),
     ("Set android:exported to false, or require a permission with android:permission.", "Ponga android:exported en false, o exija un permiso con android:permission."),
@@ -3743,7 +3759,6 @@ const SPANISH_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Escriba el tipo, o déle un valor."),
     ("Write the type.", "Escriba el tipo."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Escriba en un punto de montaje de salida. Un árbol de fuentes se monta de solo lectura a propósito."),
-
 ];
 
 const SPANISH_WORDS: &[(&str, &str)] = &[
@@ -3981,6 +3996,7 @@ const FRENCH_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "Une chaîne terminée par NUL n a pas de terminateur."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Un PNG commence par les huit octets que le format lui réserve. Rien d'autre n'est accepté ici, parce que rien d'autre n'est lu."),
     ("A PNG ends with IEND. A file without one was cut short.", "Un PNG se termine par IEND. Un fichier qui n'en a pas a été tronqué."),
+    ("A Room entity has no primary key.", "Une entité Room n'a pas de clé primaire."),
     ("A UTCTime is not in the form a certificate uses.", "Un UTCTime n'est pas dans la forme qu'utilise un certificat."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Un champ supplémentaire ZIP64 est plus court que les tailles qu il doit porter."),
     ("A ZIP64 record is not where the archive says it is.", "Un enregistrement ZIP64 n est pas là où l archive le dit."),
@@ -4592,6 +4608,11 @@ const FRENCH_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Rapportez une chaîne de version, pas une bannière d'outil complète."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Rapportez chaque clé une seule fois. La première valeur a été gardée et cette entrée a été ignorée."),
     ("Report only the keys listed in the toolchain lock.", "Ne rapportez que les clés listées dans le verrou de la chaîne d'outils."),
+    ("Room cannot read this query.", "Room ne peut pas lire cette requête."),
+    ("Room cannot return this type from a query.", "Room ne peut pas renvoyer ce type depuis une requête."),
+    ("Room cannot turn this type into a column.", "Room ne peut pas transformer ce type en colonne."),
+    ("Room found no way to build this class from a row.", "Room n'a trouvé aucun moyen de construire cette classe à partir d'une ligne."),
+    ("Room names a class this project does not hold.", "Room nomme une classe que ce projet ne contient pas."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Dites laquelle en transtypant un argument vers le type que celle-ci prend. Le langage qualifie cela d'ambigu plutôt que de choisir, et ceci fait de même."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Mettez android:allowBackup à false, ou déclarez des règles qui excluent tout ce qui est sensible."),
     ("Set android:exported to false, or require a permission with android:permission.", "Mettez android:exported à false, ou exigez une permission avec android:permission."),
@@ -5022,7 +5043,6 @@ const FRENCH_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Écrivez le type, ou donnez-lui une valeur."),
     ("Write the type.", "Écrivez le type."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Écrivez vers un point de montage de sortie. Un arbre de sources est monté en lecture seule à dessein."),
-
 ];
 
 const FRENCH_WORDS: &[(&str, &str)] = &[
@@ -5263,6 +5283,7 @@ const ITALIAN_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "A una stringa terminata da NUL manca il terminatore."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Un PNG comincia con gli otto byte che il formato gli riserva. Nient'altro è accettato qui, perché nient'altro è letto."),
     ("A PNG ends with IEND. A file without one was cut short.", "Un PNG finisce con IEND. Un file che non ne ha uno è stato troncato."),
+    ("A Room entity has no primary key.", "Un'entità Room non ha una chiave primaria."),
     ("A UTCTime is not in the form a certificate uses.", "Un UTCTime non è nella forma che usa un certificato."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Un campo extra ZIP64 è più corto delle dimensioni che deve portare."),
     ("A ZIP64 record is not where the archive says it is.", "Un record ZIP64 non è dove l archivio dice che sia."),
@@ -5874,6 +5895,11 @@ const ITALIAN_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Riportate una stringa di versione, non un'intera insegna dello strumento."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Riportate ogni chiave una volta sola. Il primo valore è stato tenuto e questa voce è stata ignorata."),
     ("Report only the keys listed in the toolchain lock.", "Riportate solo le chiavi elencate nel blocco della catena di strumenti."),
+    ("Room cannot read this query.", "Room non riesce a leggere questa query."),
+    ("Room cannot return this type from a query.", "Room non può restituire questo tipo da una query."),
+    ("Room cannot turn this type into a column.", "Room non può trasformare questo tipo in una colonna."),
+    ("Room found no way to build this class from a row.", "Room non ha trovato un modo per costruire questa classe da una riga."),
+    ("Room names a class this project does not hold.", "Room nomina una classe che questo progetto non contiene."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Dite quale, facendo un cast di un argomento al tipo che quello prende. Il linguaggio chiama questo ambiguo invece di scegliere, e così fa anche questo."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Impostate android:allowBackup a false, oppure dichiarate regole che escludano tutto ciò che è delicato."),
     ("Set android:exported to false, or require a permission with android:permission.", "Impostate android:exported a false, oppure richiedete un permesso con android:permission."),
@@ -6304,7 +6330,6 @@ const ITALIAN_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Scrivete il tipo, oppure dategli un valore."),
     ("Write the type.", "Scrivete il tipo."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Scrivete verso un punto di montaggio di uscita. Un albero di sorgenti è montato in sola lettura di proposito."),
-
 ];
 
 const ITALIAN_WORDS: &[(&str, &str)] = &[
@@ -6545,6 +6570,7 @@ const PORTUGUESE_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "A uma cadeia terminada em NUL falta o terminador."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Um PNG começa com os oito bytes que o formato reserva para ele. Nada mais é aceito aqui, porque nada mais é lido."),
     ("A PNG ends with IEND. A file without one was cut short.", "Um PNG termina com IEND. Um arquivo sem ele foi truncado."),
+    ("A Room entity has no primary key.", "Uma entidade Room não tem chave primária."),
     ("A UTCTime is not in the form a certificate uses.", "Um UTCTime não está na forma que um certificado usa."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Um campo extra ZIP64 é mais curto que os tamanhos que tem de levar."),
     ("A ZIP64 record is not where the archive says it is.", "Um registo ZIP64 não está onde o arquivo diz que está."),
@@ -7156,6 +7182,11 @@ const PORTUGUESE_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Relate uma cadeia de versão, não um letreiro inteiro da ferramenta."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Relate cada chave uma vez. O primeiro valor foi mantido e esta entrada foi ignorada."),
     ("Report only the keys listed in the toolchain lock.", "Relate apenas as chaves listadas na trava da cadeia de ferramentas."),
+    ("Room cannot read this query.", "O Room não consegue ler esta consulta."),
+    ("Room cannot return this type from a query.", "O Room não consegue devolver este tipo a partir de uma consulta."),
+    ("Room cannot turn this type into a column.", "O Room não consegue transformar este tipo numa coluna."),
+    ("Room found no way to build this class from a row.", "O Room não encontrou forma de construir esta classe a partir de uma linha."),
+    ("Room names a class this project does not hold.", "O Room nomeia uma classe que este projeto não contém."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Diga qual, convertendo um argumento para o tipo que aquele recebe. A linguagem chama isso de ambíguo em vez de escolher, e isto também."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Ponha android:allowBackup como false, ou declare regras que excluam tudo o que é sensível."),
     ("Set android:exported to false, or require a permission with android:permission.", "Ponha android:exported como false, ou exija uma permissão com android:permission."),
@@ -7586,7 +7617,6 @@ const PORTUGUESE_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Escreva o tipo, ou dê-lhe um valor."),
     ("Write the type.", "Escreva o tipo."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Escreva para um ponto de montagem de saída. Uma árvore de fontes é montada somente para leitura de propósito."),
-
 ];
 
 const PORTUGUESE_WORDS: &[(&str, &str)] = &[
@@ -7824,6 +7854,7 @@ const RUSSIAN_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "У строки, оканчивающейся NUL, нет завершителя."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG начинается с восьми байт, которые формат для этого отводит. Больше здесь ничего не принимается, потому что больше ничего не читается."),
     ("A PNG ends with IEND. A file without one was cut short.", "PNG заканчивается на IEND. Файл без него был обрезан."),
+    ("A Room entity has no primary key.", "У сущности Room нет первичного ключа."),
     ("A UTCTime is not in the form a certificate uses.", "UTCTime записан не в той форме, какую использует сертификат."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Дополнительное поле ZIP64 короче размеров, которые оно должно нести."),
     ("A ZIP64 record is not where the archive says it is.", "Запись ZIP64 находится не там, где её называет архив."),
@@ -8435,6 +8466,11 @@ const RUSSIAN_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Сообщайте строку версии, а не целую заставку инструмента."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Сообщайте каждый ключ один раз. Первое значение оставлено, а эта запись пропущена."),
     ("Report only the keys listed in the toolchain lock.", "Сообщайте только ключи, перечисленные в замке набора инструментов."),
+    ("Room cannot read this query.", "Room не может прочитать этот запрос."),
+    ("Room cannot return this type from a query.", "Room не может вернуть этот тип из запроса."),
+    ("Room cannot turn this type into a column.", "Room не может превратить этот тип в столбец."),
+    ("Room found no way to build this class from a row.", "Room не нашёл способа построить этот класс из строки."),
+    ("Room names a class this project does not hold.", "Room называет класс, которого нет в этом проекте."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Скажите, какой именно, приведя аргумент к типу, который берёт этот. Язык называет это неоднозначным, а не выбирает сам, и это тоже."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Поставьте android:allowBackup в false или объявите правила, исключающие всё чувствительное."),
     ("Set android:exported to false, or require a permission with android:permission.", "Поставьте android:exported в false или потребуйте разрешение через android:permission."),
@@ -8865,7 +8901,6 @@ const RUSSIAN_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Напишите тип или дайте этому значение."),
     ("Write the type.", "Напишите тип."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Пишите в выходную точку монтирования. Дерево исходников намеренно смонтировано только для чтения."),
-
 ];
 
 const RUSSIAN_WORDS: &[(&str, &str)] = &[
@@ -9103,6 +9138,7 @@ const ARABIC_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "سلسلة منتهية بـ NUL بلا منه."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "يبدأ ملف PNG بالبايتات الثمانية التي يحجزها له التنسيق. لا يُقبل هنا شيء غير ذلك، لأنه لا يُقرأ شيء غير ذلك."),
     ("A PNG ends with IEND. A file without one was cut short.", "ينتهي ملف PNG بـ IEND. والملف الذي لا يحمله قد بُتر."),
+    ("A Room entity has no primary key.", "كيان Room ليس له مفتاح أساسي."),
     ("A UTCTime is not in the form a certificate uses.", "قيمة UTCTime ليست بالصيغة التي تستخدمها الشهادة."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "حقل ZIP64 الإضافي أقصر من الأحجام التي عليه حملها."),
     ("A ZIP64 record is not where the archive says it is.", "سجل ZIP64 ليس حيث يقول الأرشيف إنه موجود."),
@@ -9714,6 +9750,11 @@ const ARABIC_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "أبلغ عن سلسلة إصدار، لا عن لافتة أداة كاملة."),
     ("Report each key once. The first value was kept and this entry was ignored.", "أبلغ عن كل مفتاح مرة واحدة. أُبقيت القيمة الأولى وأُهمل هذا المدخل."),
     ("Report only the keys listed in the toolchain lock.", "أبلغ فقط عن المفاتيح المدرجة في قفل سلسلة الأدوات."),
+    ("Room cannot read this query.", "لا يستطيع Room قراءة هذا الاستعلام."),
+    ("Room cannot return this type from a query.", "لا يستطيع Room إرجاع هذا النوع من استعلام."),
+    ("Room cannot turn this type into a column.", "لا يستطيع Room تحويل هذا النوع إلى عمود."),
+    ("Room found no way to build this class from a row.", "لم يجد Room طريقة لبناء هذه الفئة من صف."),
+    ("Room names a class this project does not hold.", "يذكر Room فئة لا يحتويها هذا المشروع."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "قل أيّها بتحويل وسيط إلى النوع الذي تأخذه. واللغة تسمّي هذا ملتبسًا بدل أن تختار، وكذلك يفعل هذا."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "اضبط android:allowBackup على false، أو أعلن قواعد تستبعد كل ما هو حساس."),
     ("Set android:exported to false, or require a permission with android:permission.", "اضبط android:exported على false، أو اشترط إذنًا بـ android:permission."),
@@ -10144,7 +10185,6 @@ const ARABIC_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "اكتب النوع، أو أعطه قيمة."),
     ("Write the type.", "اكتب النوع."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "اكتب إلى نقطة وصل مخرجات. فشجرة المصدر موصولة للقراءة فقط عن قصد."),
-
 ];
 
 const ARABIC_WORDS: &[(&str, &str)] = &[
@@ -10382,6 +10422,7 @@ const CHINESE_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "以 NUL 结尾的字符串没有终止符。"),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG 以格式为它保留的那八个字节开头。这里不接受别的，因为这里也不读别的。"),
     ("A PNG ends with IEND. A file without one was cut short.", "PNG 以 IEND 结尾。没有它的文件是被截断的。"),
+    ("A Room entity has no primary key.", "某个 Room 实体没有主键。"),
     ("A UTCTime is not in the form a certificate uses.", "UTCTime 不是证书所用的形式。"),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "某个 ZIP64 额外字段比它必须携带的大小还短。"),
     ("A ZIP64 record is not where the archive says it is.", "某个 ZIP64 记录不在归档所说的位置。"),
@@ -10993,6 +11034,11 @@ const CHINESE_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "请报告一个版本字符串，而不是整幅工具横幅。"),
     ("Report each key once. The first value was kept and this entry was ignored.", "每个键请只报告一次。第一个值被保留，这一条被忽略了。"),
     ("Report only the keys listed in the toolchain lock.", "请只报告工具链锁中列出的键。"),
+    ("Room cannot read this query.", "Room 无法读取此查询。"),
+    ("Room cannot return this type from a query.", "Room 无法从查询返回此类型。"),
+    ("Room cannot turn this type into a column.", "Room 无法将此类型转换为列。"),
+    ("Room found no way to build this class from a row.", "Room 找不到从一行构建此类的方法。"),
+    ("Room names a class this project does not hold.", "Room 引用了此项目中不存在的类。"),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "请把某个实参转换为其中一个所接受的类型，以指明是哪一个。语言把这称作有歧义而不去替你选，此处也一样。"),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "请把 android:allowBackup 设为 false，或者声明排除一切敏感内容的规则。"),
     ("Set android:exported to false, or require a permission with android:permission.", "请把 android:exported 设为 false，或者用 android:permission 要求一个权限。"),
@@ -11423,7 +11469,6 @@ const CHINESE_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "请写出类型，或者给它一个值。"),
     ("Write the type.", "请写出类型。"),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "请写入一个输出挂载点。源码树是有意以只读方式挂载的。"),
-
 ];
 
 const CHINESE_WORDS: &[(&str, &str)] = &[
@@ -11661,6 +11706,7 @@ const JAPANESE_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "NUL で終わる文字列に終端がありません。"),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG は、形式が自らのために取ってある八バイトで始まります。ここではそれ以外は受け付けません。ほかは読まないからです。"),
     ("A PNG ends with IEND. A file without one was cut short.", "PNG は IEND で終わります。それを持たないファイルは途中で切れています。"),
+    ("A Room entity has no primary key.", "Room のエンティティに主キーがありません。"),
     ("A UTCTime is not in the form a certificate uses.", "UTCTime が証明書の使う形になっていません。"),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "ZIP64 の追加欄が、運ぶべき大きさより短くなっています。"),
     ("A ZIP64 record is not where the archive says it is.", "ZIP64 の記録が、書庫の言う場所にありません。"),
@@ -12272,6 +12318,11 @@ const JAPANESE_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "ツールの飾り書きではなく、版の文字列を報告してください。"),
     ("Report each key once. The first value was kept and this entry was ignored.", "各キーは一度だけ報告してください。最初の値を残し、この項目は無視しました。"),
     ("Report only the keys listed in the toolchain lock.", "ツールチェーンの錠に並んだキーだけを報告してください。"),
+    ("Room cannot read this query.", "Room はこのクエリを読み取れません。"),
+    ("Room cannot return this type from a query.", "Room はクエリからこの型を返せません。"),
+    ("Room cannot turn this type into a column.", "Room はこの型を列に変換できません。"),
+    ("Room found no way to build this class from a row.", "Room は行からこのクラスを組み立てる方法を見つけられませんでした。"),
+    ("Room names a class this project does not hold.", "Room がこのプロジェクトにないクラスを指定しています。"),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "引数を、片方が取る型にキャストして、どちらかを述べてください。言語はこれを選ばずに曖昧と呼びます。ここでも同じです。"),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "android:allowBackup を false にするか、機微なものをすべて外す規則を宣言してください。"),
     ("Set android:exported to false, or require a permission with android:permission.", "android:exported を false にするか、android:permission で権限を求めてください。"),
@@ -12702,7 +12753,6 @@ const JAPANESE_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "型を書くか、値を与えてください。"),
     ("Write the type.", "型を書いてください。"),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "出力のマウントへ書いてください。ソースの木は、意図して読み取り専用でマウントされます。"),
-
 ];
 
 const JAPANESE_WORDS: &[(&str, &str)] = &[
@@ -12940,6 +12990,7 @@ const KOREAN_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "NUL로 끝나는 문자열에 끝맺음이 없습니다."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG는 그 형식이 저를 위해 남겨 둔 여덟 바이트로 시작합니다. 여기서는 그 밖의 것은 받지 않습니다. 그 밖의 것은 읽지 않기 때문입니다."),
     ("A PNG ends with IEND. A file without one was cut short.", "PNG는 IEND로 끝납니다. 그것이 없는 파일은 도중에 잘렸습니다."),
+    ("A Room entity has no primary key.", "Room 엔터티에 기본 키가 없습니다."),
     ("A UTCTime is not in the form a certificate uses.", "UTCTime이 인증서가 쓰는 꼴이 아닙니다."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "ZIP64 덧붙임 칸이 지녀야 할 크기보다 짧습니다."),
     ("A ZIP64 record is not where the archive says it is.", "ZIP64 기록이 보관집이 말하는 자리에 없습니다."),
@@ -13551,6 +13602,11 @@ const KOREAN_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "도구의 온전한 머리글이 아니라 판 문자열을 알리십시오."),
     ("Report each key once. The first value was kept and this entry was ignored.", "열쇠마다 한 번만 알리십시오. 첫 값을 남기고 이 항목은 못 본 척했습니다."),
     ("Report only the keys listed in the toolchain lock.", "도구 사슬 잠금에 적힌 열쇠만 알리십시오."),
+    ("Room cannot read this query.", "Room이 이 쿼리를 읽을 수 없습니다."),
+    ("Room cannot return this type from a query.", "Room이 쿼리에서 이 타입을 반환할 수 없습니다."),
+    ("Room cannot turn this type into a column.", "Room이 이 타입을 열로 바꿀 수 없습니다."),
+    ("Room found no way to build this class from a row.", "Room이 행에서 이 클래스를 만들 방법을 찾지 못했습니다."),
+    ("Room names a class this project does not hold.", "Room이 이 프로젝트에 없는 클래스를 가리킵니다."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "인자를 한쪽이 받는 형으로 바꿔서 어느 쪽인지 밝히십시오. 말은 이것을 고르지 않고 헷갈린다고 하며, 여기서도 그렇습니다."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "android:allowBackup을 false로 두거나, 민감한 것을 모두 빼는 규칙을 선언하십시오."),
     ("Set android:exported to false, or require a permission with android:permission.", "android:exported를 false로 두거나, android:permission으로 권한을 요구하십시오."),
@@ -13981,7 +14037,6 @@ const KOREAN_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "형을 적거나 값을 주십시오."),
     ("Write the type.", "형을 적으십시오."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "산출 마운트에 쓰십시오. 원본 나무는 뜻을 두고 읽기만 되게 마운트됩니다."),
-
 ];
 
 const KOREAN_WORDS: &[(&str, &str)] = &[
@@ -14219,6 +14274,7 @@ const HINDI_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "NUL से समाप्त होने वाली शृंखला में समापक नहीं है।"),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "PNG उन आठ बाइटों से शुरू होता है जिन्हें यह प्रारूप अपने लिए रखता है। यहाँ और कुछ स्वीकार नहीं होता, क्योंकि और कुछ पढ़ा ही नहीं जाता।"),
     ("A PNG ends with IEND. A file without one was cut short.", "PNG का अंत IEND से होता है। जिस फ़ाइल में वह नहीं, वह बीच में कट गई है।"),
+    ("A Room entity has no primary key.", "एक Room एंटिटी की कोई प्राइमरी की नहीं है।"),
     ("A UTCTime is not in the form a certificate uses.", "UTCTime उस रूप में नहीं है जिसे प्रमाणपत्र काम में लेते हैं।"),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "एक ZIP64 अतिरिक्त क्षेत्र उन आकारों से छोटा है जो उसे रखने हैं।"),
     ("A ZIP64 record is not where the archive says it is.", "एक ZIP64 अभिलेख वहाँ नहीं है जहाँ संग्रह कहता है।"),
@@ -14830,6 +14886,11 @@ const HINDI_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "औज़ार का पूरा शीर्षवाक्य नहीं, संस्करण का स्ट्रिंग बताइए।"),
     ("Report each key once. The first value was kept and this entry was ignored.", "हर कुंजी एक ही बार बताइए। पहला मान रखा गया और यह प्रविष्टि अनदेखी कर दी गई।"),
     ("Report only the keys listed in the toolchain lock.", "केवल वे कुंजियाँ बताइए जो औज़ार-शृंखला के ताले में सूचीबद्ध हैं।"),
+    ("Room cannot read this query.", "Room यह क्वेरी नहीं पढ़ सकता।"),
+    ("Room cannot return this type from a query.", "Room किसी क्वेरी से यह टाइप नहीं लौटा सकता।"),
+    ("Room cannot turn this type into a column.", "Room इस टाइप को कॉलम में नहीं बदल सकता।"),
+    ("Room found no way to build this class from a row.", "Room को किसी पंक्ति से यह क्लास बनाने का तरीका नहीं मिला।"),
+    ("Room names a class this project does not hold.", "Room ऐसी क्लास का नाम लेता है जो इस प्रोजेक्ट में नहीं है।"),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "किसी तर्क को उस प्रकार में बदलकर बताइए कि कौन-सी। भाषा चुनने के बजाय इसे अस्पष्ट कहती है, और यह भी वही करता है।"),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "android:allowBackup को false कीजिए, या ऐसे नियम घोषित कीजिए जो हर संवेदनशील चीज़ को बाहर रखें।"),
     ("Set android:exported to false, or require a permission with android:permission.", "android:exported को false कीजिए, या android:permission से एक अनुमति माँगिए।"),
@@ -15260,7 +15321,6 @@ const HINDI_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "प्रकार लिखिए या उसे एक मान दीजिए।"),
     ("Write the type.", "प्रकार लिखिए।"),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "किसी निर्गम-आरोहण पर लिखिए। स्रोत-वृक्ष जान-बूझकर केवल-पढ़ने के लिए आरोहित किया जाता है।"),
-
 ];
 
 const HINDI_WORDS: &[(&str, &str)] = &[
@@ -15498,6 +15558,7 @@ const INDONESIAN_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "Sebuah untai berakhiran NUL tidak punya penutup."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Sebuah PNG dimulai dengan delapan bita yang disisihkan format itu untuk dirinya. Tidak ada yang lain diterima di sini, karena tidak ada yang lain dibaca."),
     ("A PNG ends with IEND. A file without one was cut short.", "Sebuah PNG berakhir dengan IEND. Berkas tanpa itu terpotong di tengah."),
+    ("A Room entity has no primary key.", "Sebuah entitas Room tidak punya kunci primer."),
     ("A UTCTime is not in the form a certificate uses.", "Sebuah UTCTime tidak dalam bentuk yang dipakai sertifikat."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Sebuah bidang tambahan ZIP64 lebih pendek daripada ukuran yang harus dibawanya."),
     ("A ZIP64 record is not where the archive says it is.", "Sebuah catatan ZIP64 tidak berada di tempat yang disebut arsip."),
@@ -16109,6 +16170,11 @@ const INDONESIAN_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Laporkan untai versi, bukan sepanduk perkakas selengkapnya."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Laporkan setiap kunci sekali. Nilai pertama disimpan dan entri ini diabaikan."),
     ("Report only the keys listed in the toolchain lock.", "Laporkan hanya kunci yang terdaftar di kunci rantai perkakas."),
+    ("Room cannot read this query.", "Room tidak dapat membaca kueri ini."),
+    ("Room cannot return this type from a query.", "Room tidak dapat mengembalikan tipe ini dari kueri."),
+    ("Room cannot turn this type into a column.", "Room tidak dapat mengubah tipe ini menjadi kolom."),
+    ("Room found no way to build this class from a row.", "Room tidak menemukan cara membangun kelas ini dari sebuah baris."),
+    ("Room names a class this project does not hold.", "Room menyebut kelas yang tidak ada di proyek ini."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Sebutkan yang mana dengan mengecast sebuah argumen ke jenis yang diterima salah satunya. Bahasa ini menyebutnya mendua alih-alih memilih, dan begitu pula yang ini."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Setel android:allowBackup ke false, atau nyatakan aturan yang mengecualikan apa pun yang peka."),
     ("Set android:exported to false, or require a permission with android:permission.", "Setel android:exported ke false, atau wajibkan sebuah izin dengan android:permission."),
@@ -16539,7 +16605,6 @@ const INDONESIAN_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Tulis jenisnya, atau beri ia sebuah nilai."),
     ("Write the type.", "Tulis jenisnya."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Tulis ke kaitan keluaran. Pohon sumber sengaja dikaitkan hanya-baca."),
-
 ];
 
 const INDONESIAN_WORDS: &[(&str, &str)] = &[
@@ -16777,6 +16842,7 @@ const BRAZILIAN_LINES: &[(&str, &str)] = &[
     ("A NUL-terminated string has no terminator.", "Falta o terminador a uma cadeia terminada em NUL."),
     ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Um PNG começa com os oito bytes que o formato reserva para ele. Mais nada é aceito aqui, porque mais nada é lido."),
     ("A PNG ends with IEND. A file without one was cut short.", "Um PNG termina com IEND. Um arquivo sem ele foi cortado no meio."),
+    ("A Room entity has no primary key.", "Uma entidade Room não tem chave primária."),
     ("A UTCTime is not in the form a certificate uses.", "Um UTCTime não está na forma que um certificado usa."),
     ("A ZIP64 extra field is shorter than the sizes it must carry.", "Um campo extra ZIP64 é mais curto que os tamanhos que precisa carregar."),
     ("A ZIP64 record is not where the archive says it is.", "Um registro ZIP64 não está onde o arquivo diz que está."),
@@ -17388,6 +17454,11 @@ const BRAZILIAN_LINES: &[(&str, &str)] = &[
     ("Report a version string, not a full tool banner.", "Relate uma string de versão, não o banner inteiro da ferramenta."),
     ("Report each key once. The first value was kept and this entry was ignored.", "Relate cada chave uma vez. O primeiro valor foi mantido e esta entrada foi ignorada."),
     ("Report only the keys listed in the toolchain lock.", "Relate apenas as chaves listadas no lock da cadeia de ferramentas."),
+    ("Room cannot read this query.", "O Room não consegue ler esta consulta."),
+    ("Room cannot return this type from a query.", "O Room não consegue retornar este tipo de uma consulta."),
+    ("Room cannot turn this type into a column.", "O Room não consegue transformar este tipo em uma coluna."),
+    ("Room found no way to build this class from a row.", "O Room não encontrou um jeito de montar esta classe a partir de uma linha."),
+    ("Room names a class this project does not hold.", "O Room cita uma classe que este projeto não tem."),
     ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Diga qual convertendo um argumento para o tipo que um deles recebe. A linguagem chama isso de ambíguo em vez de escolher, e isto também."),
     ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "Deixe android:allowBackup em false, ou declare regras que excluam qualquer coisa sensível."),
     ("Set android:exported to false, or require a permission with android:permission.", "Deixe android:exported em false, ou exija uma permissão com android:permission."),
@@ -17818,7 +17889,6 @@ const BRAZILIAN_LINES: &[(&str, &str)] = &[
     ("Write the type, or give it a value.", "Escreva o tipo, ou dê um valor a ele."),
     ("Write the type.", "Escreva o tipo."),
     ("Write to an output mount. A source tree is mounted read-only on purpose.", "Escreva numa montagem de saída. Uma árvore de código é montada como somente leitura de propósito."),
-
 ];
 
 const BRAZILIAN_WORDS: &[(&str, &str)] = &[

@@ -2650,6 +2650,42 @@ impl Parser {
     }
 
     fn annotation_value(&mut self) -> Result<Expression, Diagnostic> {
+        if self.is_mark("@") {
+            self.take();
+            let name = self.qualified()?;
+            let mut arguments = Vec::new();
+            if self.eat_mark("(") {
+                if !self.is_mark(")") {
+                    loop {
+                        let named = match (&self.here().token, self.ahead(1)) {
+                            (Token::Identifier(word), Token::Punctuation("=")) => {
+                                let held = word.clone();
+                                self.take();
+                                self.take();
+                                held
+                            }
+                            _ => "value".to_string(),
+                        };
+                        arguments.push(Expression::Assign {
+                            target: Box::new(Expression::Name(named)),
+                            operator: None,
+                            value: Box::new(self.annotation_value()?),
+                        });
+                        if !self.eat_mark(",") {
+                            break;
+                        }
+                    }
+                }
+                self.want_mark(")")?;
+            }
+            return Ok(Expression::Call {
+                on: None,
+                super_call: false,
+                name: format!("{NESTED_ANNOTATION}{name}"),
+                arguments,
+                held: Vec::new(),
+            });
+        }
         if self.is_mark("{") {
             let line = self.line();
             self.take();
@@ -4964,6 +5000,8 @@ impl Parser {
         }
     }
 }
+
+pub const NESTED_ANNOTATION: &str = "@";
 
 pub fn parse(source: &str) -> Result<Vec<Unit>, Diagnostic> {
     let tokens = Lexer::new(source).tokens()?;
@@ -12469,13 +12507,17 @@ impl Emitter<'_> {
             self.signature_for(&class, "<init>", arguments, line)?
         };
         let descriptor = match signature {
+            Some(found) if belongs.is_none() => {
+                self.arguments_for_signature(&found, arguments, line)?;
+                found.descriptor()
+            }
             Some(found) => {
                 self.what_the_call_can_throw(&found, line)?;
 
-                let wanted = if belongs.is_some() && !found.parameters.is_empty() {
-                    &found.parameters[1..]
-                } else {
+                let wanted = if found.parameters.is_empty() {
                     &found.parameters[..]
+                } else {
+                    &found.parameters[1..]
                 };
                 self.arguments_for(wanted, arguments, line)?;
                 found.descriptor()

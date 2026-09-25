@@ -15698,6 +15698,15 @@ android {
         targetSdkVersion 27
         versionCode 3
         versionName "1.2"
+        buildConfigField "String", "API_URL", "\"https://example.com/$roomVersion\""
+        buildConfigField 'boolean', 'LOUD', 'true'
+        resValue "string", "server", "example.com"
+    }
+    buildTypes {
+        release {
+            buildConfigField "boolean", "LOUD", "false"
+            resValue "bool", "shipped", "true"
+        }
     }
 }
 
@@ -15773,8 +15782,238 @@ dependencies {
         assert_eq!(found.settings.application_id, "com.example.renamed");
         assert_eq!(found.settings.min_sdk, 15);
         assert_eq!(found.settings.version_code, 3);
+
+        let fields: Vec<String> = found
+            .settings
+            .build_config
+            .iter()
+            .map(|one| format!("{} {} = {}", one.kind, one.name, one.value))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "String API_URL = \"https://example.com/1.1.1\"",
+                "boolean LOUD = false"
+            ],
+            "the release build type wins over defaultConfig"
+        );
+        let source = crate::builder::build_config_source(
+            &found.settings.namespace,
+            &found.settings.application_id,
+            &found.settings,
+        );
+        assert!(
+            source.contains("public static final String API_URL = \"https://example.com/1.1.1\";")
+        );
+        assert!(source.contains("public static final boolean LOUD = false;"));
+        assert!(source.contains("APPLICATION_ID = \"com.example.renamed\""));
+        let compiled =
+            crate::compilers::java::compile(&source, &crate::compilers::java::Classpath::new())
+                .expect("the generated BuildConfig compiles");
+        assert!(compiled
+            .iter()
+            .any(|(name, _)| name == "com/example/original/BuildConfig.class"));
+
+        let values =
+            crate::builder::res_values_source(&found.settings).expect("resValue declared some");
+        let mut table = crate::resources::Table::new();
+        let mut sink = crate::diag::Sink::new();
+        assert!(
+            table.read_values(&values, "values/gradleResValues.xml", &mut sink),
+            "{values}"
+        );
+        assert!(values.contains("<string name=\"server\">example.com</string>"));
+        assert!(values.contains("<bool name=\"shipped\">true</bool>"));
+
+        let written = found.settings.to_json();
+        std::fs::write(root.join("Builder.json"), &written).unwrap();
+        let back = crate::settings::held(text)
+            .unwrap()
+            .expect("the settings read back");
+        assert_eq!(back.build_config, found.settings.build_config);
+        assert_eq!(back.res_values, found.settings.res_values);
         eprintln!("gradle: an old Groovy build, its ext variables and its applicationId");
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    fn room_classpath(stubs: &[&str]) -> crate::compilers::java::Classpath {
+        let mut classpath = crate::compilers::java::Classpath::new();
+        for stub in stubs {
+            let compiled =
+                crate::compilers::java::compile(stub, &classpath).expect("a stub compiles");
+            for (_, bytes) in compiled {
+                let class = crate::jvm::read(&bytes).expect("a stub reads back");
+                classpath.learn(&class).expect("a stub is learned");
+            }
+        }
+        classpath
+    }
+
+    fn room_words(package: &str) -> Vec<(String, String)> {
+        vec![
+            (
+                "Java/Word.java".to_string(),
+                format!(
+                    "package com.android.example.roomwordssample;\n\
+                     import {package}.ColumnInfo;\n\
+                     import {package}.Entity;\n\
+                     import {package}.Ignore;\n\
+                     import {package}.PrimaryKey;\n\
+                     @Entity(tableName = \"word_table\")\n\
+                     public class Word {{\n\
+                     \x20   @PrimaryKey(autoGenerate = true)\n\
+                     \x20   private int id;\n\
+                     \x20   @NonNull\n\
+                     \x20   @ColumnInfo(name = \"word\")\n\
+                     \x20   private String mWord;\n\
+                     \x20   public Word(@NonNull String word) {{ this.mWord = word; }}\n\
+                     \x20   @Ignore\n\
+                     \x20   public Word(int id, @NonNull String word) {{ this.id = id; this.mWord = word; }}\n\
+                     \x20   public String getWord() {{ return this.mWord; }}\n\
+                     \x20   public int getId() {{ return id; }}\n\
+                     \x20   public void setId(int id) {{ this.id = id; }}\n\
+                     }}\n"
+                ),
+            ),
+            (
+                "Java/WordDao.java".to_string(),
+                format!(
+                    "package com.android.example.roomwordssample;\n\
+                     import java.util.List;\n\
+                     import {package}.*;\n\
+                     @Dao\n\
+                     public interface WordDao {{\n\
+                     \x20   @Insert(onConflict = OnConflictStrategy.IGNORE)\n\
+                     \x20   void insert(Word word);\n\
+                     \x20   @Query(\"DELETE FROM word_table\")\n\
+                     \x20   void deleteAll();\n\
+                     \x20   @Delete\n\
+                     \x20   void deleteWord(Word word);\n\
+                     \x20   @Update\n\
+                     \x20   int update(Word... word);\n\
+                     \x20   @Query(\"SELECT * from word_table LIMIT 1\")\n\
+                     \x20   Word[] getAnyWord();\n\
+                     \x20   @Query(\"SELECT * from word_table WHERE id IN (:ids) AND word = :word\")\n\
+                     \x20   List<Word> chosen(List<Integer> ids, String word);\n\
+                     \x20   @Query(\"SELECT COUNT(*) FROM word_table\")\n\
+                     \x20   int count();\n\
+                     }}\n"
+                ),
+            ),
+            (
+                "Java/WordRoomDatabase.java".to_string(),
+                format!(
+                    "package com.android.example.roomwordssample;\n\
+                     import {package}.Database;\n\
+                     import {package}.RoomDatabase;\n\
+                     @Database(entities = {{Word.class}}, version = 2, exportSchema = false)\n\
+                     public abstract class WordRoomDatabase extends RoomDatabase {{\n\
+                     \x20   public abstract WordDao wordDao();\n\
+                     }}\n"
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn room_writes_what_its_compiler_would() {
+        assert_eq!(
+            crate::room::md5_hex(b""),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+        assert_eq!(
+            crate::room::md5_hex(b"abc"),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+        assert_eq!(
+            crate::room::md5_hex(b"The quick brown fox jumps over the lazy dog"),
+            "9e107d9d372bb6826bd81d3542a419d6"
+        );
+        assert_eq!(
+            crate::room::md5_hex(
+                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+            ),
+            "57edf4a22be3c955ac49da2e2107b67a"
+        );
+
+        let old = room_classpath(&[
+            "package android.arch.persistence.room;\npublic abstract class RoomDatabase {}\n",
+        ]);
+        let made = crate::room::generated(&room_words("android.arch.persistence.room"), &old)
+            .expect("Room writes its classes");
+        let names: Vec<&str> = made.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Room/com/android/example/roomwordssample/WordDao_Impl.java",
+                "Room/com/android/example/roomwordssample/WordRoomDatabase_Impl.java",
+            ]
+        );
+        let database = &made[1].1;
+        assert!(
+            database.contains(
+                "CREATE TABLE IF NOT EXISTS `word_table` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `word` TEXT NOT NULL)"
+            ),
+            "{database}"
+        );
+        assert!(
+            database.contains(
+                "}, \"53ca100b95fcccb1c9dbc436b7260338\", \"27cea995e93d027d290e3f3c63d36d98\");"
+            ),
+            "the identity Room itself would write: {database}"
+        );
+        assert!(database.contains("new android.arch.persistence.room.RoomOpenHelper.Delegate(2)"));
+        assert!(database.contains("protected void validateMigration("));
+        let dao = &made[0].1;
+        assert!(dao
+            .contains("INSERT OR IGNORE INTO `word_table` (`id`,`word`) VALUES (nullif(?, 0),?)"));
+        assert!(dao.contains("DELETE FROM `word_table` WHERE `id` = ?"));
+        assert!(dao.contains("UPDATE OR ABORT `word_table` SET `id` = ?,`word` = ? WHERE `id` = ?"));
+        assert!(dao.contains("_builder.append(\"SELECT * from word_table WHERE id IN (\");"));
+        assert!(dao.contains("_argCount += _size0;"));
+        assert!(
+            dao.contains("_tmpMWord = _cursor.getString(_cursorIndexOfMWord1);"),
+            "{dao}"
+        );
+        assert!(dao.contains("_item.setId(_tmpId);"));
+        assert!(dao
+            .contains("public int update(final com.android.example.roomwordssample.Word... word)"));
+
+        let new = room_classpath(&[
+            "package androidx.room;\n\
+             public abstract class RoomDatabase {\n\
+             \x20   public void assertNotSuspendingTransaction() {}\n\
+             \x20   protected java.util.Map getRequiredTypeConverters() { return null; }\n\
+             \x20   public void clearAllTables() {}\n\
+             }\n",
+            "package androidx.room;\n\
+             public class RoomOpenHelper {\n\
+             \x20   public static class ValidationResult {}\n\
+             }\n",
+        ]);
+        let made = crate::room::generated(&room_words("androidx.room"), &new)
+            .expect("Room writes its classes");
+        let database = &made[1].1;
+        assert!(database
+            .contains("public androidx.room.RoomOpenHelper.ValidationResult onValidateSchema("));
+        assert!(database.contains(
+            "}, \"53ca100b95fcccb1c9dbc436b7260338\", \"27cea995e93d027d290e3f3c63d36d98\");"
+        ));
+        assert!(database.contains("getRequiredTypeConverters()"));
+        assert!(made[0].1.contains("__db.assertNotSuspendingTransaction();"));
+
+        let mut broken = room_words("androidx.room");
+        broken[0].1 = broken[0].1.replace("@PrimaryKey(autoGenerate = true)", "");
+        let refused = crate::room::generated(&broken, &new).expect_err("no primary key");
+        assert_eq!(refused.code, "EO005");
+
+        let mut broken = room_words("androidx.room");
+        broken[1].1 = broken[1]
+            .1
+            .replace("(:ids) AND word = :word", "(:ids) AND word = :missing");
+        let refused = crate::room::generated(&broken, &new).expect_err("a name the method lacks");
+        assert_eq!(refused.code, "EO001");
+        eprintln!("room: the classes room-compiler would write, with its identity hash");
     }
 
     #[test]
