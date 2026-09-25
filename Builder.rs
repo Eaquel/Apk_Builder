@@ -15843,7 +15843,10 @@ pub mod signing {
         algorithm: crate::rsa::DigestAlgorithm,
     ) -> Result<(u32, Vec<u8>), Diagnostic> {
         let (central_directory_offset, end_record_offset) = locate(package)?;
-        let block_offset = central_directory_offset;
+        let block_offset = match find_block(package, central_directory_offset)? {
+            Some(block) => block.offset(),
+            None => central_directory_offset,
+        };
         match algorithm {
             crate::rsa::DigestAlgorithm::Sha256 => Ok((
                 0x0103u32,
@@ -28010,7 +28013,7 @@ pub mod verity {
         sized(&mut body, &[]);
 
         let mut out = Vec::with_capacity(body.len() + 4);
-        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
         out.extend_from_slice(&body);
         out
     }
@@ -28038,6 +28041,7 @@ pub mod verity {
         certificate: &[u8],
         apk_digest: &[u8],
         algorithm_id: u32,
+        rotated: bool,
     ) -> Result<Vec<u8>, Diagnostic> {
         if package.is_empty() {
             return Err(fail(
@@ -28049,13 +28053,18 @@ pub mod verity {
         let public_key = crate::x509::Certificate::public_key_info(certificate)?;
         let held = signed_data(package.len() as u64, &tree.root, apk_digest, certificate);
         let signature = crate::rsa::sign(key, crate::rsa::DigestAlgorithm::Sha256, &held)?;
-        let signing = signing_info(
+        let mut signing = signing_info(
             apk_digest,
             certificate,
             &public_key,
             algorithm_id,
             &signature,
         );
+        if rotated {
+            let again = signing.clone();
+            signing.extend_from_slice(&crate::signing::V31_BLOCK_ID.to_le_bytes());
+            sized(&mut signing, &again);
+        }
 
         let mut out = Vec::new();
         out.extend_from_slice(&VERSION.to_le_bytes());
@@ -28063,6 +28072,1511 @@ pub mod verity {
         sized(&mut out, &signing);
         sized(&mut out, &flattened(&tree));
         Ok(out)
+    }
+}
+
+pub mod desugar {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    pub const HOME: &str = "omni/desugar/Backports";
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Called {
+        Static,
+        Virtual,
+        Interface,
+    }
+
+    pub const BACKPORTS: &[(&str, &str, &str, Called, u32, &str)] = &[
+        ("java/lang/String", "isBlank", "()Z", Called::Virtual, 33, "isBlank"),
+        ("java/lang/String", "strip", "()Ljava/lang/String;", Called::Virtual, 33, "strip"),
+        ("java/lang/String", "stripLeading", "()Ljava/lang/String;", Called::Virtual, 33, "stripLeading"),
+        ("java/lang/String", "stripTrailing", "()Ljava/lang/String;", Called::Virtual, 33, "stripTrailing"),
+        ("java/lang/String", "repeat", "(I)Ljava/lang/String;", Called::Virtual, 33, "repeat"),
+        ("java/lang/String", "lines", "()Ljava/util/stream/Stream;", Called::Virtual, 33, "lines"),
+        ("java/lang/String", "formatted", "([Ljava/lang/Object;)Ljava/lang/String;", Called::Virtual, 34, "formatted"),
+        ("java/lang/String", "transform", "(Ljava/util/function/Function;)Ljava/lang/Object;", Called::Virtual, 34, "transform"),
+        ("java/lang/CharSequence", "isEmpty", "()Z", Called::Interface, 35, "isEmpty"),
+        ("java/lang/CharSequence", "compare", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)I", Called::Static, 34, "compare"),
+        ("java/util/function/Predicate", "not", "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;", Called::Static, 33, "not"),
+        ("java/util/Optional", "isEmpty", "()Z", Called::Virtual, 33, "isEmpty"),
+        ("java/util/Optional", "orElseThrow", "()Ljava/lang/Object;", Called::Virtual, 33, "orElseThrow"),
+        ("java/util/Optional", "ifPresentOrElse", "(Ljava/util/function/Consumer;Ljava/lang/Runnable;)V", Called::Virtual, 33, "ifPresentOrElse"),
+        ("java/util/Optional", "or", "(Ljava/util/function/Supplier;)Ljava/util/Optional;", Called::Virtual, 33, "or"),
+        ("java/util/Optional", "stream", "()Ljava/util/stream/Stream;", Called::Virtual, 33, "stream"),
+        ("java/util/OptionalInt", "isEmpty", "()Z", Called::Virtual, 33, "isEmpty"),
+        ("java/util/OptionalInt", "orElseThrow", "()I", Called::Virtual, 33, "orElseThrow"),
+        ("java/util/OptionalLong", "isEmpty", "()Z", Called::Virtual, 33, "isEmpty"),
+        ("java/util/OptionalLong", "orElseThrow", "()J", Called::Virtual, 33, "orElseThrow"),
+        ("java/util/OptionalDouble", "isEmpty", "()Z", Called::Virtual, 33, "isEmpty"),
+        ("java/util/OptionalDouble", "orElseThrow", "()D", Called::Virtual, 33, "orElseThrow"),
+        ("java/util/stream/Stream", "toList", "()Ljava/util/List;", Called::Interface, 34, "toList"),
+        ("java/util/stream/Stream", "ofNullable", "(Ljava/lang/Object;)Ljava/util/stream/Stream;", Called::Static, 34, "ofNullable"),
+        ("java/util/stream/Stream", "takeWhile", "(Ljava/util/function/Predicate;)Ljava/util/stream/Stream;", Called::Interface, 34, "takeWhile"),
+        ("java/util/stream/Stream", "dropWhile", "(Ljava/util/function/Predicate;)Ljava/util/stream/Stream;", Called::Interface, 34, "dropWhile"),
+        ("java/util/stream/Stream", "iterate", "(Ljava/lang/Object;Ljava/util/function/Predicate;Ljava/util/function/UnaryOperator;)Ljava/util/stream/Stream;", Called::Static, 34, "iterate"),
+        ("java/util/stream/Stream", "mapMulti", "(Ljava/util/function/BiConsumer;)Ljava/util/stream/Stream;", Called::Interface, 34, "mapMulti"),
+        ("java/util/List", "of", "()Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "of", "([Ljava/lang/Object;)Ljava/util/List;", Called::Static, 30, "listOf"),
+        ("java/util/List", "copyOf", "(Ljava/util/Collection;)Ljava/util/List;", Called::Static, 31, "listCopyOf"),
+        ("java/util/Set", "of", "()Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "of", "([Ljava/lang/Object;)Ljava/util/Set;", Called::Static, 30, "setOf"),
+        ("java/util/Set", "copyOf", "(Ljava/util/Collection;)Ljava/util/Set;", Called::Static, 31, "setCopyOf"),
+        ("java/util/Map", "of", "()Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "of", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;", Called::Static, 30, "mapOf"),
+        ("java/util/Map", "ofEntries", "([Ljava/util/Map$Entry;)Ljava/util/Map;", Called::Static, 30, "mapOfEntries"),
+        ("java/util/Map", "entry", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map$Entry;", Called::Static, 30, "mapEntry"),
+        ("java/util/Map", "copyOf", "(Ljava/util/Map;)Ljava/util/Map;", Called::Static, 31, "mapCopyOf"),
+        ("java/util/stream/Collectors", "toUnmodifiableList", "()Ljava/util/stream/Collector;", Called::Static, 33, "toUnmodifiableList"),
+        ("java/util/stream/Collectors", "toUnmodifiableSet", "()Ljava/util/stream/Collector;", Called::Static, 33, "toUnmodifiableSet"),
+        ("java/util/stream/Collectors", "toUnmodifiableMap", "(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;", Called::Static, 33, "toUnmodifiableMap"),
+        ("java/util/stream/Collectors", "toUnmodifiableMap", "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;)Ljava/util/stream/Collector;", Called::Static, 33, "toUnmodifiableMap"),
+        ("java/util/Objects", "requireNonNullElse", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", Called::Static, 30, "requireNonNullElse"),
+        ("java/util/Objects", "requireNonNullElseGet", "(Ljava/lang/Object;Ljava/util/function/Supplier;)Ljava/lang/Object;", Called::Static, 30, "requireNonNullElseGet"),
+        ("java/util/Objects", "checkIndex", "(II)I", Called::Static, 30, "checkIndex"),
+        ("java/util/Objects", "checkFromToIndex", "(III)I", Called::Static, 30, "checkFromToIndex"),
+        ("java/util/Objects", "checkFromIndexSize", "(III)I", Called::Static, 30, "checkFromIndexSize"),
+        ("java/lang/Math", "floorDiv", "(JI)J", Called::Static, 31, "floorDiv"),
+        ("java/lang/Math", "floorMod", "(JI)I", Called::Static, 31, "floorMod"),
+        ("java/lang/Math", "multiplyExact", "(JI)J", Called::Static, 31, "multiplyExact"),
+        ("java/lang/Math", "multiplyFull", "(II)J", Called::Static, 31, "multiplyFull"),
+        ("java/lang/Math", "multiplyHigh", "(JJ)J", Called::Static, 31, "multiplyHigh"),
+        ("java/lang/Math", "absExact", "(I)I", Called::Static, 34, "absExact"),
+        ("java/lang/Math", "absExact", "(J)J", Called::Static, 34, "absExact"),
+        ("java/lang/Math", "clamp", "(JII)I", Called::Static, 35, "clamp"),
+        ("java/lang/Math", "clamp", "(JJJ)J", Called::Static, 35, "clamp"),
+        ("java/lang/Math", "clamp", "(DDD)D", Called::Static, 35, "clamp"),
+        ("java/lang/Math", "clamp", "(FFF)F", Called::Static, 35, "clamp"),
+        ("java/lang/Math", "ceilDiv", "(II)I", Called::Static, 35, "ceilDiv"),
+        ("java/lang/Math", "ceilDiv", "(JJ)J", Called::Static, 35, "ceilDiv"),
+        ("java/lang/Math", "divideExact", "(II)I", Called::Static, 35, "divideExact"),
+        ("java/lang/Math", "divideExact", "(JJ)J", Called::Static, 35, "divideExact"),
+        ("java/lang/Math", "floorDivExact", "(II)I", Called::Static, 35, "floorDivExact"),
+        ("java/lang/Math", "floorDivExact", "(JJ)J", Called::Static, 35, "floorDivExact"),
+        ("java/lang/Character", "toString", "(I)Ljava/lang/String;", Called::Static, 35, "toString"),
+        ("java/lang/Integer", "parseInt", "(Ljava/lang/CharSequence;III)I", Called::Static, 33, "parseInt"),
+        ("java/lang/Long", "parseLong", "(Ljava/lang/CharSequence;III)J", Called::Static, 33, "parseLong"),
+        ("java/io/InputStream", "readAllBytes", "()[B", Called::Virtual, 33, "readAllBytes"),
+        ("java/io/InputStream", "readNBytes", "(I)[B", Called::Virtual, 33, "readNBytes"),
+        ("java/io/InputStream", "readNBytes", "([BII)I", Called::Virtual, 33, "readNBytes"),
+        ("java/io/InputStream", "transferTo", "(Ljava/io/OutputStream;)J", Called::Virtual, 33, "transferTo"),
+        ("java/io/InputStream", "skipNBytes", "(J)V", Called::Virtual, 34, "skipNBytes"),
+        ("java/util/Collection", "toArray", "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;", Called::Interface, 33, "toArray"),
+        ("java/lang/Thread", "onSpinWait", "()V", Called::Static, 33, "onSpinWait"),
+        ("java/lang/Thread", "threadId", "()J", Called::Virtual, 36, "threadId"),
+        ("java/util/ServiceLoader", "stream", "()Ljava/util/stream/Stream;", Called::Virtual, 35, "stream"),
+        ("java/util/ServiceLoader", "findFirst", "()Ljava/util/Optional;", Called::Virtual, 34, "findFirst"),
+    ];
+    pub const OVERRIDDEN: &[(&str, &str, &str, u32)] = &[
+        ("java/lang/String", "isEmpty", "()Z", 9),
+        ("java/nio/CharBuffer", "isEmpty", "()Z", 34),
+    ];
+
+    pub const CLASSES: &[(&str, u32, &str)] = &[
+        (
+            "java/lang/MatchException",
+            36,
+            "omni/desugar/MatchException",
+        ),
+        ("java/lang/Record", 34, "omni/desugar/RecordTag"),
+        (
+            "java/util/ServiceLoader$Provider",
+            35,
+            "omni/desugar/ServiceProvider",
+        ),
+    ];
+
+    pub const SOURCES: &[(&str, &str)] = &[
+        (
+            "omni/desugar/Backports.java",
+            r####"package omni.desugar;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.Spliterator;
+import java.util.Spliterators;
+import java.util.function.BiConsumer;
+import java.util.function.BinaryOperator;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.IntFunction;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+
+public final class Backports {
+    private Backports() {
+    }
+
+    public static boolean isBlank(String text) {
+        int at = 0;
+        while (at < text.length()) {
+            int point = text.codePointAt(at);
+            if (!Character.isWhitespace(point)) {
+                return false;
+            }
+            at += Character.charCount(point);
+        }
+        return true;
+    }
+
+    public static String stripLeading(String text) {
+        int at = 0;
+        while (at < text.length()) {
+            int point = text.codePointAt(at);
+            if (!Character.isWhitespace(point)) {
+                break;
+            }
+            at += Character.charCount(point);
+        }
+        return text.substring(at);
+    }
+
+    public static String stripTrailing(String text) {
+        int at = text.length();
+        while (at > 0) {
+            int point = text.codePointBefore(at);
+            if (!Character.isWhitespace(point)) {
+                break;
+            }
+            at -= Character.charCount(point);
+        }
+        return text.substring(0, at);
+    }
+
+    public static String strip(String text) {
+        return stripTrailing(stripLeading(text));
+    }
+
+    public static String repeat(String text, int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count is negative: " + count);
+        }
+        StringBuilder out = new StringBuilder(text.length() * count);
+        for (int at = 0; at < count; at++) {
+            out.append(text);
+        }
+        return out.toString();
+    }
+
+    public static Stream<String> lines(String text) {
+        List<String> found = new ArrayList<>();
+        int start = 0;
+        int at = 0;
+        while (at < text.length()) {
+            char here = text.charAt(at);
+            if (here == '\n' || here == '\r') {
+                found.add(text.substring(start, at));
+                if (here == '\r' && at + 1 < text.length() && text.charAt(at + 1) == '\n') {
+                    at++;
+                }
+                start = at + 1;
+            }
+            at++;
+        }
+        if (start < text.length()) {
+            found.add(text.substring(start));
+        }
+        return found.stream();
+    }
+
+    public static String formatted(String text, Object[] arguments) {
+        return String.format(text, arguments);
+    }
+
+    public static Object transform(String text, Function<String, Object> through) {
+        return through.apply(text);
+    }
+
+    public static boolean isEmpty(CharSequence text) {
+        return text.length() == 0;
+    }
+
+    public static int compare(CharSequence left, CharSequence right) {
+        if (left == right) {
+            return 0;
+        }
+        int shortest = Math.min(left.length(), right.length());
+        for (int at = 0; at < shortest; at++) {
+            char one = left.charAt(at);
+            char two = right.charAt(at);
+            if (one != two) {
+                return one - two;
+            }
+        }
+        return left.length() - right.length();
+    }
+
+    public static <T> Predicate<T> not(Predicate<T> target) {
+        Objects.requireNonNull(target);
+        return new Predicate<T>() {
+            public boolean test(T value) {
+                return !target.test(value);
+            }
+        };
+    }
+
+    public static boolean isEmpty(Optional<Object> held) {
+        return !held.isPresent();
+    }
+
+    public static Object orElseThrow(Optional<Object> held) {
+        if (!held.isPresent()) {
+            throw new NoSuchElementException("No value present");
+        }
+        return held.get();
+    }
+
+    public static void ifPresentOrElse(Optional<Object> held, Consumer<Object> action, Runnable otherwise) {
+        if (held.isPresent()) {
+            action.accept(held.get());
+        } else {
+            otherwise.run();
+        }
+    }
+
+    public static Optional<Object> or(Optional<Object> held, Supplier<Optional<Object>> otherwise) {
+        Objects.requireNonNull(otherwise);
+        if (held.isPresent()) {
+            return held;
+        }
+        return Objects.requireNonNull(otherwise.get());
+    }
+
+    public static Stream<Object> stream(Optional<Object> held) {
+        if (held.isPresent()) {
+            return Stream.of(held.get());
+        }
+        return Stream.empty();
+    }
+
+    public static boolean isEmpty(OptionalInt held) {
+        return !held.isPresent();
+    }
+
+    public static int orElseThrow(OptionalInt held) {
+        if (!held.isPresent()) {
+            throw new NoSuchElementException("No value present");
+        }
+        return held.getAsInt();
+    }
+
+    public static boolean isEmpty(OptionalLong held) {
+        return !held.isPresent();
+    }
+
+    public static long orElseThrow(OptionalLong held) {
+        if (!held.isPresent()) {
+            throw new NoSuchElementException("No value present");
+        }
+        return held.getAsLong();
+    }
+
+    public static boolean isEmpty(OptionalDouble held) {
+        return !held.isPresent();
+    }
+
+    public static double orElseThrow(OptionalDouble held) {
+        if (!held.isPresent()) {
+            throw new NoSuchElementException("No value present");
+        }
+        return held.getAsDouble();
+    }
+
+    public static List<Object> toList(Stream<Object> stream) {
+        return Collections.unmodifiableList(new ArrayList<>(Arrays.asList(stream.toArray())));
+    }
+
+    public static Stream<Object> ofNullable(Object value) {
+        if (value == null) {
+            return Stream.empty();
+        }
+        return Stream.of(value);
+    }
+
+    public static Stream<Object> takeWhile(Stream<Object> stream, Predicate<Object> keep) {
+        Iterator<Object> from = stream.iterator();
+        Iterator<Object> taken = new Iterator<Object>() {
+            private Object waiting;
+            private boolean ready;
+            private boolean over;
+
+            public boolean hasNext() {
+                if (over) {
+                    return false;
+                }
+                if (ready) {
+                    return true;
+                }
+                if (!from.hasNext()) {
+                    over = true;
+                    return false;
+                }
+                Object next = from.next();
+                if (!keep.test(next)) {
+                    over = true;
+                    return false;
+                }
+                waiting = next;
+                ready = true;
+                return true;
+            }
+
+            public Object next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
+                ready = false;
+                return waiting;
+            }
+        };
+        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(taken, Spliterator.ORDERED), false);
+    }
+
+    public static Stream<Object> dropWhile(Stream<Object> stream, Predicate<Object> skip) {
+        Iterator<Object> from = stream.iterator();
+        Iterator<Object> dropped = new Iterator<Object>() {
+            private Object waiting;
+            private boolean ready;
+            private boolean passed;
+
+            public boolean hasNext() {
+                if (ready) {
+                    return true;
+                }
+                while (from.hasNext()) {
+                    Object next = from.next();
+                    if (passed || !skip.test(next)) {
+                        passed = true;
+                        waiting = next;
+                        ready = true;
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            public Object next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
+                ready = false;
+                return waiting;
+            }
+        };
+        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(dropped, Spliterator.ORDERED), false);
+    }
+
+    public static Stream<Object> iterate(Object seed, Predicate<Object> going, UnaryOperator<Object> next) {
+        Objects.requireNonNull(next);
+        Objects.requireNonNull(going);
+        Iterator<Object> walked = new Iterator<Object>() {
+            private Object here = seed;
+            private boolean started;
+            private boolean ready;
+            private boolean over;
+
+            public boolean hasNext() {
+                if (over) {
+                    return false;
+                }
+                if (ready) {
+                    return true;
+                }
+                if (started) {
+                    here = next.apply(here);
+                }
+                started = true;
+                if (!going.test(here)) {
+                    over = true;
+                    return false;
+                }
+                ready = true;
+                return true;
+            }
+
+            public Object next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
+                ready = false;
+                return here;
+            }
+        };
+        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(walked, Spliterator.ORDERED), false);
+    }
+
+    public static Stream<Object> mapMulti(Stream<Object> stream, BiConsumer<Object, Consumer<Object>> mapper) {
+        Objects.requireNonNull(mapper);
+        return stream.flatMap(new Function<Object, Stream<Object>>() {
+            public Stream<Object> apply(Object value) {
+                List<Object> buffer = new ArrayList<>();
+                mapper.accept(value, new Consumer<Object>() {
+                    public void accept(Object made) {
+                        buffer.add(made);
+                    }
+                });
+                return buffer.stream();
+            }
+        });
+    }
+
+    private static Object[] everyOneThere(Object[] held) {
+        for (Object one : held) {
+            Objects.requireNonNull(one);
+        }
+        return held;
+    }
+
+    public static List<Object> listOf() {
+        return Collections.emptyList();
+    }
+
+    public static List<Object> listOf(Object a) {
+        return listOf(new Object[] {a});
+    }
+
+    public static List<Object> listOf(Object a, Object b) {
+        return listOf(new Object[] {a, b});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c) {
+        return listOf(new Object[] {a, b, c});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d) {
+        return listOf(new Object[] {a, b, c, d});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d, Object e) {
+        return listOf(new Object[] {a, b, c, d, e});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d, Object e, Object f) {
+        return listOf(new Object[] {a, b, c, d, e, f});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g) {
+        return listOf(new Object[] {a, b, c, d, e, f, g});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g, Object h) {
+        return listOf(new Object[] {a, b, c, d, e, f, g, h});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g, Object h, Object i) {
+        return listOf(new Object[] {a, b, c, d, e, f, g, h, i});
+    }
+
+    public static List<Object> listOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g, Object h, Object i, Object j) {
+        return listOf(new Object[] {a, b, c, d, e, f, g, h, i, j});
+    }
+
+    public static List<Object> listOf(Object[] held) {
+        return Collections.unmodifiableList(new ArrayList<>(Arrays.asList(everyOneThere(held.clone()))));
+    }
+
+    public static List<Object> listCopyOf(Collection<Object> held) {
+        return listOf(held.toArray());
+    }
+
+    public static Set<Object> setOf(Object[] held) {
+        Set<Object> out = new HashSet<>();
+        for (Object one : everyOneThere(held.clone())) {
+            if (!out.add(one)) {
+                throw new IllegalArgumentException("duplicate element: " + one);
+            }
+        }
+        return Collections.unmodifiableSet(out);
+    }
+
+    public static Set<Object> setOf() {
+        return Collections.emptySet();
+    }
+
+    public static Set<Object> setOf(Object a) {
+        return setOf(new Object[] {a});
+    }
+
+    public static Set<Object> setOf(Object a, Object b) {
+        return setOf(new Object[] {a, b});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c) {
+        return setOf(new Object[] {a, b, c});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d) {
+        return setOf(new Object[] {a, b, c, d});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d, Object e) {
+        return setOf(new Object[] {a, b, c, d, e});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d, Object e, Object f) {
+        return setOf(new Object[] {a, b, c, d, e, f});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g) {
+        return setOf(new Object[] {a, b, c, d, e, f, g});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g, Object h) {
+        return setOf(new Object[] {a, b, c, d, e, f, g, h});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g, Object h, Object i) {
+        return setOf(new Object[] {a, b, c, d, e, f, g, h, i});
+    }
+
+    public static Set<Object> setOf(Object a, Object b, Object c, Object d, Object e, Object f, Object g, Object h, Object i, Object j) {
+        return setOf(new Object[] {a, b, c, d, e, f, g, h, i, j});
+    }
+
+    public static Set<Object> setCopyOf(Collection<Object> held) {
+        Set<Object> out = new HashSet<>();
+        for (Object one : held) {
+            out.add(Objects.requireNonNull(one));
+        }
+        return Collections.unmodifiableSet(out);
+    }
+
+    public static Map<Object, Object> mapOf(Object[] pairs) {
+        Map<Object, Object> out = new HashMap<>();
+        for (int at = 0; at < pairs.length; at += 2) {
+            Object key = Objects.requireNonNull(pairs[at]);
+            Object value = Objects.requireNonNull(pairs[at + 1]);
+            if (out.put(key, value) != null) {
+                throw new IllegalArgumentException("duplicate key: " + key);
+            }
+        }
+        return Collections.unmodifiableMap(out);
+    }
+
+    public static Map<Object, Object> mapOf() {
+        return Collections.emptyMap();
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1) {
+        return mapOf(new Object[] {k1, v1});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2) {
+        return mapOf(new Object[] {k1, v1, k2, v2});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4, Object k5, Object v5) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4, Object k5, Object v5, Object k6, Object v6) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4, Object k5, Object v5, Object k6, Object v6, Object k7, Object v7) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4, Object k5, Object v5, Object k6, Object v6, Object k7, Object v7, Object k8, Object v8) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4, Object k5, Object v5, Object k6, Object v6, Object k7, Object v7, Object k8, Object v8, Object k9, Object v9) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8, k9, v9});
+    }
+
+    public static Map<Object, Object> mapOf(Object k1, Object v1, Object k2, Object v2, Object k3, Object v3, Object k4, Object v4, Object k5, Object v5, Object k6, Object v6, Object k7, Object v7, Object k8, Object v8, Object k9, Object v9, Object k10, Object v10) {
+        return mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8, k9, v9, k10, v10});
+    }
+
+    public static Map<Object, Object> mapOfEntries(Map.Entry<Object, Object>[] entries) {
+        Object[] pairs = new Object[entries.length * 2];
+        for (int at = 0; at < entries.length; at++) {
+            pairs[at * 2] = entries[at].getKey();
+            pairs[at * 2 + 1] = entries[at].getValue();
+        }
+        return mapOf(pairs);
+    }
+
+    public static Map.Entry<Object, Object> mapEntry(Object key, Object value) {
+        return new AbstractMap.SimpleImmutableEntry<>(Objects.requireNonNull(key), Objects.requireNonNull(value));
+    }
+
+    public static Map<Object, Object> mapCopyOf(Map<Object, Object> held) {
+        Map<Object, Object> out = new HashMap<>();
+        for (Map.Entry<Object, Object> one : held.entrySet()) {
+            out.put(Objects.requireNonNull(one.getKey()), Objects.requireNonNull(one.getValue()));
+        }
+        return Collections.unmodifiableMap(out);
+    }
+
+    public static Collector<Object, Object, Object> toUnmodifiableList() {
+        return Collectors.collectingAndThen(Collectors.toList(), new Function<List<Object>, Object>() {
+            public Object apply(List<Object> made) {
+                return listCopyOf(made);
+            }
+        });
+    }
+
+    public static Collector<Object, Object, Object> toUnmodifiableSet() {
+        return Collectors.collectingAndThen(Collectors.toList(), new Function<List<Object>, Object>() {
+            public Object apply(List<Object> made) {
+                return setCopyOf(made);
+            }
+        });
+    }
+
+    public static Collector<Object, Object, Object> toUnmodifiableMap(Function<Object, Object> keys, Function<Object, Object> values) {
+        return Collectors.collectingAndThen(Collectors.toMap(keys, values), new Function<Map<Object, Object>, Object>() {
+            public Object apply(Map<Object, Object> made) {
+                return mapCopyOf(made);
+            }
+        });
+    }
+
+    public static Collector<Object, Object, Object> toUnmodifiableMap(Function<Object, Object> keys, Function<Object, Object> values, BinaryOperator<Object> merge) {
+        return Collectors.collectingAndThen(Collectors.toMap(keys, values, merge), new Function<Map<Object, Object>, Object>() {
+            public Object apply(Map<Object, Object> made) {
+                return mapCopyOf(made);
+            }
+        });
+    }
+
+    public static Object requireNonNullElse(Object value, Object otherwise) {
+        if (value != null) {
+            return value;
+        }
+        return Objects.requireNonNull(otherwise, "defaultObj");
+    }
+
+    public static Object requireNonNullElseGet(Object value, Supplier<Object> otherwise) {
+        if (value != null) {
+            return value;
+        }
+        return Objects.requireNonNull(Objects.requireNonNull(otherwise, "supplier").get(), "supplier.get()");
+    }
+
+    public static int checkIndex(int index, int length) {
+        if (index < 0 || index >= length) {
+            throw new IndexOutOfBoundsException("Index " + index + " out of bounds for length " + length);
+        }
+        return index;
+    }
+
+    public static int checkFromToIndex(int from, int to, int length) {
+        if (from < 0 || from > to || to > length) {
+            throw new IndexOutOfBoundsException("Range [" + from + ", " + to + ") out of bounds for length " + length);
+        }
+        return from;
+    }
+
+    public static int checkFromIndexSize(int from, int size, int length) {
+        if ((length | from | size) < 0 || size > length - from) {
+            throw new IndexOutOfBoundsException("Range [" + from + ", " + from + " + " + size + ") out of bounds for length " + length);
+        }
+        return from;
+    }
+
+    public static long floorDiv(long dividend, int divisor) {
+        return Math.floorDiv(dividend, (long) divisor);
+    }
+
+    public static int floorMod(long dividend, int divisor) {
+        return (int) Math.floorMod(dividend, (long) divisor);
+    }
+
+    public static long multiplyExact(long left, int right) {
+        return Math.multiplyExact(left, (long) right);
+    }
+
+    public static long multiplyFull(int left, int right) {
+        return (long) left * (long) right;
+    }
+
+    public static long multiplyHigh(long left, long right) {
+        long leftHigh = left >> 32;
+        long leftLow = left & 0xFFFFFFFFL;
+        long rightHigh = right >> 32;
+        long rightLow = right & 0xFFFFFFFFL;
+        long lowLow = leftLow * rightLow;
+        long carry = lowLow >>> 32;
+        long middle = leftHigh * rightLow + carry;
+        long middleLow = middle & 0xFFFFFFFFL;
+        long middleHigh = middle >> 32;
+        middleLow += leftLow * rightHigh;
+        return leftHigh * rightHigh + middleHigh + (middleLow >> 32);
+    }
+
+    public static int absExact(int value) {
+        if (value == Integer.MIN_VALUE) {
+            throw new ArithmeticException("Overflow to represent absolute value of Integer.MIN_VALUE");
+        }
+        return Math.abs(value);
+    }
+
+    public static long absExact(long value) {
+        if (value == Long.MIN_VALUE) {
+            throw new ArithmeticException("Overflow to represent absolute value of Long.MIN_VALUE");
+        }
+        return Math.abs(value);
+    }
+
+    public static int clamp(long value, int min, int max) {
+        if (min > max) {
+            throw new IllegalArgumentException(min + " > " + max);
+        }
+        return (int) Math.min(max, Math.max(value, min));
+    }
+
+    public static long clamp(long value, long min, long max) {
+        if (min > max) {
+            throw new IllegalArgumentException(min + " > " + max);
+        }
+        return Math.min(max, Math.max(value, min));
+    }
+
+    public static double clamp(double value, double min, double max) {
+        if (!(min < max)) {
+            if (Double.isNaN(min)) {
+                throw new IllegalArgumentException("min is NaN");
+            }
+            if (Double.isNaN(max)) {
+                throw new IllegalArgumentException("max is NaN");
+            }
+            if (Double.compare(min, max) > 0) {
+                throw new IllegalArgumentException(min + " > " + max);
+            }
+        }
+        return Math.min(max, Math.max(value, min));
+    }
+
+    public static float clamp(float value, float min, float max) {
+        if (!(min < max)) {
+            if (Float.isNaN(min)) {
+                throw new IllegalArgumentException("min is NaN");
+            }
+            if (Float.isNaN(max)) {
+                throw new IllegalArgumentException("max is NaN");
+            }
+            if (Float.compare(min, max) > 0) {
+                throw new IllegalArgumentException(min + " > " + max);
+            }
+        }
+        return Math.min(max, Math.max(value, min));
+    }
+
+    public static int ceilDiv(int dividend, int divisor) {
+        int quotient = dividend / divisor;
+        if ((dividend ^ divisor) >= 0 && quotient * divisor != dividend) {
+            return quotient + 1;
+        }
+        return quotient;
+    }
+
+    public static long ceilDiv(long dividend, long divisor) {
+        long quotient = dividend / divisor;
+        if ((dividend ^ divisor) >= 0 && quotient * divisor != dividend) {
+            return quotient + 1;
+        }
+        return quotient;
+    }
+
+    public static int divideExact(int dividend, int divisor) {
+        if (dividend == Integer.MIN_VALUE && divisor == -1) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return dividend / divisor;
+    }
+
+    public static long divideExact(long dividend, long divisor) {
+        if (dividend == Long.MIN_VALUE && divisor == -1) {
+            throw new ArithmeticException("long overflow");
+        }
+        return dividend / divisor;
+    }
+
+    public static int floorDivExact(int dividend, int divisor) {
+        if (dividend == Integer.MIN_VALUE && divisor == -1) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return Math.floorDiv(dividend, divisor);
+    }
+
+    public static long floorDivExact(long dividend, long divisor) {
+        if (dividend == Long.MIN_VALUE && divisor == -1) {
+            throw new ArithmeticException("long overflow");
+        }
+        return Math.floorDiv(dividend, divisor);
+    }
+
+    public static String toString(int point) {
+        return new String(Character.toChars(point));
+    }
+
+    public static int parseInt(CharSequence text, int from, int to, int radix) {
+        Objects.requireNonNull(text);
+        return Integer.parseInt(text.subSequence(from, to).toString(), radix);
+    }
+
+    public static long parseLong(CharSequence text, int from, int to, int radix) {
+        Objects.requireNonNull(text);
+        return Long.parseLong(text.subSequence(from, to).toString(), radix);
+    }
+
+    public static byte[] readAllBytes(InputStream from) throws IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = from.read(buffer, 0, buffer.length)) >= 0) {
+            out.write(buffer, 0, read);
+        }
+        return out.toByteArray();
+    }
+
+    public static byte[] readNBytes(InputStream from, int length) throws IOException {
+        if (length < 0) {
+            throw new IllegalArgumentException("len < 0");
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[Math.min(length, 8192)];
+        int left = length;
+        while (left > 0) {
+            int read = from.read(buffer, 0, Math.min(left, buffer.length));
+            if (read < 0) {
+                break;
+            }
+            out.write(buffer, 0, read);
+            left -= read;
+        }
+        return out.toByteArray();
+    }
+
+    public static int readNBytes(InputStream from, byte[] into, int offset, int length) throws IOException {
+        checkFromIndexSize(offset, length, into.length);
+        int done = 0;
+        while (done < length) {
+            int read = from.read(into, offset + done, length - done);
+            if (read < 0) {
+                break;
+            }
+            done += read;
+        }
+        return done;
+    }
+
+    public static long transferTo(InputStream from, OutputStream to) throws IOException {
+        Objects.requireNonNull(to, "out");
+        long moved = 0;
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = from.read(buffer, 0, buffer.length)) >= 0) {
+            to.write(buffer, 0, read);
+            moved += read;
+        }
+        return moved;
+    }
+
+    public static void skipNBytes(InputStream from, long count) throws IOException {
+        while (count > 0) {
+            long skipped = from.skip(count);
+            if (skipped > 0) {
+                count -= skipped;
+            } else if (skipped == 0) {
+                if (from.read() == -1) {
+                    throw new java.io.EOFException();
+                }
+                count--;
+            } else {
+                throw new IOException("Unable to skip exactly");
+            }
+        }
+    }
+
+    public static Object[] toArray(Collection<Object> held, IntFunction<Object[]> make) {
+        return held.toArray(make.apply(0));
+    }
+
+    public static void onSpinWait() {
+    }
+
+    public static long threadId(Thread thread) {
+        return thread.getId();
+    }
+
+    public static Stream<Object> stream(java.util.ServiceLoader<Object> loader) {
+        List<Object> found = new ArrayList<>();
+        for (Object one : loader) {
+            found.add(new ServiceProvider.Found(one));
+        }
+        return found.stream();
+    }
+
+    public static Optional<Object> findFirst(java.util.ServiceLoader<Object> loader) {
+        Iterator<Object> walked = loader.iterator();
+        if (walked.hasNext()) {
+            return Optional.of(walked.next());
+        }
+        return Optional.empty();
+    }
+}
+"####,
+        ),
+        (
+            "omni/desugar/MatchException.java",
+            r####"package omni.desugar;
+
+public final class MatchException extends RuntimeException {
+    public MatchException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+"####,
+        ),
+        (
+            "omni/desugar/ServiceProvider.java",
+            r####"package omni.desugar;
+
+import java.util.function.Supplier;
+
+public interface ServiceProvider extends Supplier<Object> {
+    Class<?> type();
+
+    Object get();
+
+    final class Found implements ServiceProvider {
+        private final Object held;
+
+        Found(Object held) {
+            this.held = held;
+        }
+
+        public Class<?> type() {
+            return held.getClass();
+        }
+
+        public Object get() {
+            return held;
+        }
+    }
+}
+"####,
+        ),
+        (
+            "omni/desugar/RecordTag.java",
+            r####"package omni.desugar;
+
+public abstract class RecordTag {
+    protected RecordTag() {
+    }
+}
+"####,
+        ),
+    ];
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.desugar",
+            message,
+        )
+    }
+
+    type Compiled = Result<Vec<(String, Vec<u8>)>, String>;
+
+    fn helpers() -> Result<&'static [(String, Vec<u8>)], Diagnostic> {
+        static HELD: std::sync::OnceLock<Compiled> = std::sync::OnceLock::new();
+        let held = HELD.get_or_init(|| {
+            let sources: Vec<(String, String)> = SOURCES
+                .iter()
+                .map(|(name, text)| (name.to_string(), text.to_string()))
+                .collect();
+            crate::compilers::java::compile_together(
+                &sources,
+                &crate::compilers::java::Classpath::new(),
+            )
+            .map_err(|error| error.message)
+        });
+        match held {
+            Ok(made) => Ok(made),
+            Err(why) => Err(fail(
+                "ED001",
+                "The classes that stand in for newer Java APIs could not be compiled.",
+            )
+            .with_context(format!("Reason: {why}"))),
+        }
+    }
+
+    pub fn lowered(
+        classes: Vec<(String, Vec<u8>)>,
+        min_sdk: u32,
+    ) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+        let mut used = false;
+        let mut out = Vec::with_capacity(classes.len());
+        for (name, bytes) in classes {
+            let (made, touched) = rewritten(&bytes, min_sdk)
+                .map_err(|error| error.with_context(format!("Class: {name}")))?;
+            used |= touched;
+            out.push((name, made));
+        }
+        if used {
+            for (name, bytes) in helpers()? {
+                if !out.iter().any(|(held, _)| held == name) {
+                    out.push((name.clone(), bytes.clone()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    struct Pool {
+        count: u16,
+        end: usize,
+        tags: Vec<u8>,
+        at: Vec<usize>,
+    }
+
+    fn u16_at(bytes: &[u8], at: usize) -> Result<u16, Diagnostic> {
+        bytes
+            .get(at..at + 2)
+            .map(|held| u16::from_be_bytes([held[0], held[1]]))
+            .ok_or_else(|| fail("ED002", "A class file ends before it should."))
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> Result<u32, Diagnostic> {
+        bytes
+            .get(at..at + 4)
+            .map(|held| u32::from_be_bytes([held[0], held[1], held[2], held[3]]))
+            .ok_or_else(|| fail("ED002", "A class file ends before it should."))
+    }
+
+    fn pool_of(bytes: &[u8]) -> Result<Pool, Diagnostic> {
+        let count = u16_at(bytes, 8)?;
+        let mut tags = vec![0u8; usize::from(count)];
+        let mut at = vec![0usize; usize::from(count)];
+        let mut here = 10usize;
+        let mut index = 1usize;
+        while index < usize::from(count) {
+            let tag = *bytes
+                .get(here)
+                .ok_or_else(|| fail("ED002", "A class file ends before it should."))?;
+            tags[index] = tag;
+            at[index] = here;
+            let size = match tag {
+                1 => 3 + usize::from(u16_at(bytes, here + 1)?),
+                3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 => 5,
+                5 | 6 => 9,
+                7 | 8 | 16 | 19 | 20 => 3,
+                15 => 4,
+                _ => {
+                    return Err(fail(
+                        "ED003",
+                        "A class file holds a constant this does not know.",
+                    ))
+                }
+            };
+            here += size;
+            index += if tag == 5 || tag == 6 { 2 } else { 1 };
+        }
+        Ok(Pool {
+            count,
+            end: here,
+            tags,
+            at,
+        })
+    }
+
+    fn text(bytes: &[u8], pool: &Pool, index: u16) -> Option<String> {
+        let index = usize::from(index);
+        if pool.tags.get(index) != Some(&1) {
+            return None;
+        }
+        let at = pool.at[index];
+        let length = usize::from(u16_at(bytes, at + 1).ok()?);
+        String::from_utf8(bytes.get(at + 3..at + 3 + length)?.to_vec()).ok()
+    }
+
+    fn class_name(bytes: &[u8], pool: &Pool, index: u16) -> Option<String> {
+        if pool.tags.get(usize::from(index)) != Some(&7) {
+            return None;
+        }
+        text(
+            bytes,
+            pool,
+            u16_at(bytes, pool.at[usize::from(index)] + 1).ok()?,
+        )
+    }
+
+    fn reaches(owner: &str, wanted: &str) -> bool {
+        owner == wanted
+            || crate::compilers::java::Classpath::everything()
+                .ancestors(owner)
+                .iter()
+                .any(|one| one == wanted)
+    }
+
+    fn backport_for(
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        min_sdk: u32,
+    ) -> Option<(Called, String, String)> {
+        let found = BACKPORTS
+            .iter()
+            .find(|(held, named, taken, called, since, _)| {
+                *since > min_sdk
+                    && *named == name
+                    && *taken == descriptor
+                    && if *called == Called::Static {
+                        *held == owner
+                    } else {
+                        owner.starts_with("java/") && reaches(owner, held)
+                    }
+            })?;
+        if OVERRIDDEN.iter().any(|(held, named, taken, since)| {
+            *held == owner && *named == name && *taken == descriptor && *since <= min_sdk
+        }) {
+            return None;
+        }
+        let (held, _, _, called, _, helper) = found;
+        let descriptor = if *called == Called::Static {
+            descriptor.to_string()
+        } else {
+            format!("(L{held};{}", &descriptor[1..])
+        };
+        Some((*called, helper.to_string(), descriptor))
+    }
+
+    fn utf8(out: &mut Vec<u8>, said: &str) {
+        let bytes = crate::binary::modified_utf8::encode(said);
+        out.push(1);
+        out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        out.extend_from_slice(&bytes);
+    }
+
+    fn rewritten(bytes: &[u8], min_sdk: u32) -> Result<(Vec<u8>, bool), Diagnostic> {
+        if bytes.len() < 10 || bytes[..4] != [0xca, 0xfe, 0xba, 0xbe] {
+            return Ok((bytes.to_vec(), false));
+        }
+        let pool = pool_of(bytes)?;
+        let mut added: Vec<u8> = Vec::new();
+        let mut next = pool.count;
+        let mut patches: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut instance: Vec<u16> = Vec::new();
+        let mut home_class: Option<u16> = None;
+
+        let fresh_utf8 = |added: &mut Vec<u8>, next: &mut u16, said: &str| -> u16 {
+            utf8(added, said);
+            *next += 1;
+            *next - 1
+        };
+
+        for index in 1..usize::from(pool.count) {
+            if pool.tags[index] != 7 {
+                continue;
+            }
+            let Some(named) = class_name(bytes, &pool, index as u16) else {
+                continue;
+            };
+            let Some((_, _, instead)) = CLASSES
+                .iter()
+                .find(|(held, since, _)| *held == named && *since > min_sdk)
+            else {
+                continue;
+            };
+            let name_at = fresh_utf8(&mut added, &mut next, instead);
+            let mut entry = vec![7u8];
+            entry.extend_from_slice(&name_at.to_be_bytes());
+            patches.push((pool.at[index], entry));
+        }
+
+        for index in 1..usize::from(pool.count) {
+            let tag = pool.tags[index];
+            if tag != 10 && tag != 11 {
+                continue;
+            }
+            let at = pool.at[index];
+            let owner_at = u16_at(bytes, at + 1)?;
+            let pair_at = u16_at(bytes, at + 3)?;
+            let Some(owner) = class_name(bytes, &pool, owner_at) else {
+                continue;
+            };
+            if pool.tags.get(usize::from(pair_at)) != Some(&12) {
+                continue;
+            }
+            let pair = pool.at[usize::from(pair_at)];
+            let (Some(name), Some(descriptor)) = (
+                text(bytes, &pool, u16_at(bytes, pair + 1)?),
+                text(bytes, &pool, u16_at(bytes, pair + 3)?),
+            ) else {
+                continue;
+            };
+            let Some((called, helper, helper_descriptor)) =
+                backport_for(&owner, &name, &descriptor, min_sdk)
+            else {
+                continue;
+            };
+            let class_at = match home_class {
+                Some(held) => held,
+                None => {
+                    let named = fresh_utf8(&mut added, &mut next, HOME);
+                    added.push(7);
+                    added.extend_from_slice(&named.to_be_bytes());
+                    next += 1;
+                    home_class = Some(next - 1);
+                    next - 1
+                }
+            };
+            let helper_name = fresh_utf8(&mut added, &mut next, &helper);
+            let helper_type = fresh_utf8(&mut added, &mut next, &helper_descriptor);
+            added.push(12);
+            added.extend_from_slice(&helper_name.to_be_bytes());
+            added.extend_from_slice(&helper_type.to_be_bytes());
+            next += 1;
+            let pair_now = next - 1;
+            let mut entry = vec![10u8];
+            entry.extend_from_slice(&class_at.to_be_bytes());
+            entry.extend_from_slice(&pair_now.to_be_bytes());
+            patches.push((at, entry));
+            if called != Called::Static {
+                instance.push(index as u16);
+            }
+        }
+
+        let mentions = (1..usize::from(pool.count)).any(|index| {
+            pool.tags[index] == 1
+                && text(bytes, &pool, index as u16).is_some_and(|said| {
+                    CLASSES.iter().any(|(from, since, _)| {
+                        *since > min_sdk && said.contains(&format!("L{from};"))
+                    })
+                })
+        });
+        if patches.is_empty() && !mentions {
+            return Ok((bytes.to_vec(), false));
+        }
+        if next == u16::MAX {
+            return Err(fail(
+                "ED004",
+                "A class has no room left for the constants a stand-in needs.",
+            ));
+        }
+
+        let mut rest = bytes[pool.end..].to_vec();
+        if !instance.is_empty() {
+            for (start, length) in code_ranges(bytes, &pool)? {
+                let code = start - pool.end;
+                retarget(&mut rest[code..code + length], &instance)?;
+            }
+        }
+
+        let renamed: Vec<(String, String)> = CLASSES
+            .iter()
+            .filter(|(_, since, _)| *since > min_sdk)
+            .map(|(from, _, to)| (format!("L{from};"), format!("L{to};")))
+            .collect();
+        let mut out = Vec::with_capacity(bytes.len() + added.len());
+        out.extend_from_slice(&bytes[..8]);
+        out.extend_from_slice(&next.to_be_bytes());
+        let mut index = 1usize;
+        while index < usize::from(pool.count) {
+            let at = pool.at[index];
+            let tag = pool.tags[index];
+            let size = match tag {
+                1 => 3 + usize::from(u16_at(bytes, at + 1)?),
+                5 | 6 => 9,
+                7 | 8 | 16 | 19 | 20 => 3,
+                15 => 4,
+                _ => 5,
+            };
+            if let Some((_, entry)) = patches.iter().find(|(held, _)| *held == at) {
+                out.extend_from_slice(entry);
+            } else if tag == 1 {
+                let said = text(bytes, &pool, index as u16);
+                match said {
+                    Some(said) if renamed.iter().any(|(from, _)| said.contains(from.as_str())) => {
+                        let mut changed = said.clone();
+                        for (from, to) in &renamed {
+                            changed = changed.replace(from.as_str(), to);
+                        }
+                        utf8(&mut out, &changed);
+                    }
+                    _ => out.extend_from_slice(&bytes[at..at + size]),
+                }
+            } else {
+                out.extend_from_slice(&bytes[at..at + size]);
+            }
+            index += if tag == 5 || tag == 6 { 2 } else { 1 };
+        }
+        out.extend_from_slice(&added);
+        out.extend_from_slice(&rest);
+        Ok((out, true))
+    }
+
+    fn skip_attributes(bytes: &[u8], mut at: usize) -> Result<usize, Diagnostic> {
+        let count = u16_at(bytes, at)?;
+        at += 2;
+        for _ in 0..count {
+            let length = u32_at(bytes, at + 2)? as usize;
+            at += 6 + length;
+        }
+        Ok(at)
+    }
+
+    fn code_ranges(bytes: &[u8], pool: &Pool) -> Result<Vec<(usize, usize)>, Diagnostic> {
+        let mut at = pool.end + 6;
+        let interfaces = usize::from(u16_at(bytes, at)?);
+        at += 2 + 2 * interfaces;
+        let fields = u16_at(bytes, at)?;
+        at += 2;
+        for _ in 0..fields {
+            at = skip_attributes(bytes, at + 6)?;
+        }
+        let methods = u16_at(bytes, at)?;
+        at += 2;
+        let mut out = Vec::new();
+        for _ in 0..methods {
+            at += 6;
+            let count = u16_at(bytes, at)?;
+            at += 2;
+            for _ in 0..count {
+                let named = u16_at(bytes, at)?;
+                let length = u32_at(bytes, at + 2)? as usize;
+                if text(bytes, pool, named).as_deref() == Some("Code") {
+                    let code_length = u32_at(bytes, at + 10)? as usize;
+                    let start = at + 14;
+                    if start + code_length > bytes.len() {
+                        return Err(fail("ED002", "A class file ends before it should."));
+                    }
+                    out.push((start, code_length));
+                }
+                at += 6 + length;
+            }
+        }
+        Ok(out)
+    }
+
+    fn retarget(code: &mut [u8], instance: &[u16]) -> Result<(), Diagnostic> {
+        let mut pc = 0usize;
+        while pc < code.len() {
+            let opcode = code[pc];
+            let size = match opcode {
+                0x10 | 0x12 | 0x15..=0x19 | 0x36..=0x3a | 0xa9 | 0xbc => 2,
+                0x11
+                | 0x13
+                | 0x14
+                | 0x84
+                | 0x99..=0xa8
+                | 0xb2..=0xb8
+                | 0xbb
+                | 0xbd
+                | 0xc0
+                | 0xc1
+                | 0xc6
+                | 0xc7 => 3,
+                0xc5 => 4,
+                0xb9 | 0xba | 0xc8 | 0xc9 => 5,
+                0xc4 => {
+                    if code.get(pc + 1) == Some(&0x84) {
+                        6
+                    } else {
+                        4
+                    }
+                }
+                0xaa => {
+                    let base = pc + 1 + (4 - (pc + 1) % 4) % 4;
+                    let low = i32::from_be_bytes(slice4(code, base + 4)?);
+                    let high = i32::from_be_bytes(slice4(code, base + 8)?);
+                    base + 12 + 4 * ((high - low + 1).max(0) as usize) - pc
+                }
+                0xab => {
+                    let base = pc + 1 + (4 - (pc + 1) % 4) % 4;
+                    let pairs = i32::from_be_bytes(slice4(code, base + 4)?);
+                    base + 8 + 8 * (pairs.max(0) as usize) - pc
+                }
+                _ => 1,
+            };
+            if (opcode == 0xb6 || opcode == 0xb9) && pc + 2 < code.len() {
+                let index = u16::from_be_bytes([code[pc + 1], code[pc + 2]]);
+                if instance.contains(&index) {
+                    code[pc] = 0xb8;
+                    if opcode == 0xb9 {
+                        code[pc + 3] = 0x00;
+                        code[pc + 4] = 0x00;
+                    }
+                }
+            }
+            pc += size;
+        }
+        Ok(())
+    }
+
+    fn slice4(code: &[u8], at: usize) -> Result<[u8; 4], Diagnostic> {
+        code.get(at..at + 4)
+            .map(|held| [held[0], held[1], held[2], held[3]])
+            .ok_or_else(|| fail("ED002", "A class file ends before it should."))
     }
 }
 
@@ -30491,6 +32005,7 @@ pub mod gradle {
         ("src/main/rust", "Rust"),
         ("src/main/res", crate::scaffold::RES_FOLDER),
         ("src/main/assets", crate::scaffold::ASSETS_FOLDER),
+        ("src/main/resources", crate::scaffold::JAVA_RESOURCES_FOLDER),
         ("src/main/jniLibs", crate::scaffold::LIBRARY_FOLDER),
         ("libs", crate::scaffold::LIBRARY_FOLDER),
     ];
@@ -30639,6 +32154,93 @@ pub mod gradle {
         Ok(())
     }
 
+    fn adopt_library_module(
+        root: &std::path::Path,
+        module: &str,
+        namespace: &str,
+        out: &mut Adopted,
+    ) -> Result<(), Diagnostic> {
+        if namespace.is_empty() {
+            return Ok(());
+        }
+        let here = root.join(module);
+        let res = here.join("src/main/res");
+        let manifest = here.join("src/main/AndroidManifest.xml");
+        if !res.is_dir() && !manifest.is_file() {
+            return Ok(());
+        }
+        let into = root
+            .join(crate::scaffold::MODULES_FOLDER)
+            .join(module.replace(['/', ':'], "_"));
+        if res.is_dir() {
+            let mut held = Vec::new();
+            walk(&res, "", &mut held);
+            for (named, path) in held {
+                if carry(&path, &into.join("res").join(&named))? {
+                    out.moved += 1;
+                }
+            }
+            std::fs::remove_dir_all(&res).ok();
+        }
+        let text = text_of(&manifest).unwrap_or_else(|| {
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" />".to_string()
+        });
+        let written = with_its_namespace(&text, namespace);
+        let target = into.join("AndroidManifest.xml");
+        std::fs::create_dir_all(&into).map_err(|why| {
+            fail(
+                "EG205",
+                "A folder for the imported source could not be made.",
+            )
+            .with_context(format!("Path: {}", into.display()))
+            .with_context(format!("Reason: {why}"))
+        })?;
+        std::fs::write(&target, written).map_err(|why| {
+            fail(
+                "EG206",
+                "A file from the Gradle project could not be moved.",
+            )
+            .with_context(format!("Path: {}", target.display()))
+            .with_context(format!("Reason: {why}"))
+        })?;
+        std::fs::remove_file(&manifest).ok();
+        out.moved += 1;
+        Ok(())
+    }
+
+    pub fn with_its_namespace(manifest: &str, namespace: &str) -> String {
+        let mut text = manifest.to_string();
+        for key in [
+            "android:name=\".",
+            "android:targetActivity=\".",
+            "android:parentActivityName=\".",
+            "android:backupAgent=\".",
+        ] {
+            let full = format!("{}{namespace}.", key.trim_end_matches('.'));
+            text = text.replace(key, &full);
+        }
+        let has_package = {
+            let mut quiet = crate::diag::Sink::new();
+            crate::xml::parse(&text, "AndroidManifest.xml", &mut quiet)
+                .and_then(|root| root.attribute("package").map(str::to_string))
+                .is_some()
+        };
+        if has_package {
+            return text;
+        }
+        match text.find("<manifest") {
+            Some(at) => {
+                let after = at + "<manifest".len();
+                format!(
+                    "{} package=\"{namespace}\"{}",
+                    &text[..after],
+                    &text[after..]
+                )
+            }
+            None => text,
+        }
+    }
+
     pub fn adopt(root: &str) -> Result<Option<Adopted>, Diagnostic> {
         if !looks_like_one(root) {
             return Ok(None);
@@ -30662,12 +32264,58 @@ pub mod gradle {
                 .push(format!("annotationProcessor {}:{}", one.name, one.version));
         }
         adopt_module(here, &module, true, &mut out)?;
-        for one in &found.modules {
-            adopt_module(here, one, false, &mut out)?;
+        let mut settings = found.settings;
+        let mut waiting = found.modules.clone();
+        let mut done: Vec<String> = vec![module.clone()];
+        while !waiting.is_empty() {
+            let one = waiting.remove(0);
+            if done.contains(&one) {
+                continue;
+            }
+            done.push(one.clone());
+            let within = read(root, &one).ok();
+            let mut namespace = String::new();
+            if let Some(within) = &within {
+                for held in &within.settings.dependencies {
+                    if !settings.dependencies.contains(held) {
+                        settings.dependencies.push(held.clone());
+                    }
+                }
+                for held in &within.processors {
+                    if !out.processors.contains(held) {
+                        out.processors.push(held.clone());
+                        if !crate::room::runs_here(&held.name)
+                            && !DONE_WITHOUT.contains(&held.name.as_str())
+                        {
+                            out.unread.push(format!(
+                                "annotationProcessor {}:{}",
+                                held.name, held.version
+                            ));
+                        }
+                    }
+                }
+                for held in &within.unread {
+                    if !out.unread.contains(held) {
+                        out.unread.push(held.clone());
+                    }
+                }
+                for held in &within.modules {
+                    if !done.contains(held) && !waiting.contains(held) {
+                        waiting.push(held.clone());
+                    }
+                    if !out.modules.contains(held) {
+                        out.modules.push(held.clone());
+                    }
+                }
+                if within.plugins.iter().any(|held| held == LIBRARY_PLUGIN) {
+                    namespace = within.settings.namespace.clone();
+                }
+            }
+            adopt_library_module(here, &one, &namespace, &mut out)?;
+            adopt_module(here, &one, false, &mut out)?;
         }
 
-        let mut settings = found.settings;
-        settings.processors = found.processors.clone();
+        settings.processors = out.processors.clone();
         if settings.namespace.is_empty() {
             let mut quiet = crate::diag::Sink::new();
             let manifest = crate::scaffold::read_manifest(root)?;
@@ -31691,6 +33339,10 @@ pub mod scaffold {
     pub const JAVA_FOLDER: &str = "Java";
 
     pub const ASSETS_FOLDER: &str = "Assets";
+
+    pub const JAVA_RESOURCES_FOLDER: &str = "Java_Resources";
+
+    pub const MODULES_FOLDER: &str = "Modules";
 
     pub const LIBRARY_FOLDER: &str = "Libraries";
 
@@ -32814,6 +34466,21 @@ pub mod scaffold {
         found
     }
 
+    pub fn java_resource_files(root: &str) -> Vec<(String, Vec<u8>)> {
+        let base = std::path::Path::new(root.trim_end_matches('/')).join(JAVA_RESOURCES_FOLDER);
+        let mut found = Vec::new();
+        gather_assets(&base, "", &mut found);
+        let mut found: Vec<(String, Vec<u8>)> = found
+            .into_iter()
+            .map(|(named, bytes)| {
+                let named = named.strip_prefix("assets/").unwrap_or(&named).to_string();
+                (named, bytes)
+            })
+            .collect();
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found
+    }
+
     fn gather_assets(at: &std::path::Path, under: &str, found: &mut Vec<(String, Vec<u8>)>) {
         let Ok(entries) = std::fs::read_dir(at) else {
             return;
@@ -32907,11 +34574,7 @@ pub mod scaffold {
         if std::path::Path::new(&icon_path(root)).is_file() {
             return Ok(false);
         }
-        let already = std::path::Path::new(root)
-            .join(RES_FOLDER)
-            .join(crate::image::LAUNCHER_SIZES[0].0)
-            .join("ic_launcher.png");
-        if already.is_file() {
+        if has_its_own_launcher_icon(root) {
             return Ok(false);
         }
         let drawn = crate::image::drawn_for(seed)?;
@@ -32928,6 +34591,55 @@ pub mod scaffold {
         })?;
         write_launcher_set(root, &drawn)?;
         Ok(true)
+    }
+
+    pub fn has_its_own_launcher_icon(root: &str) -> bool {
+        let res = std::path::Path::new(root).join(RES_FOLDER);
+        let mut named = vec!["ic_launcher".to_string(), "ic_launcher_round".to_string()];
+        if let Ok(manifest) =
+            std::fs::read_to_string(std::path::Path::new(root).join("AndroidManifest.xml"))
+        {
+            let mut quiet = crate::diag::Sink::new();
+            if let Some(parsed) = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut quiet) {
+                for application in parsed
+                    .children
+                    .iter()
+                    .filter(|one| one.name == "application")
+                {
+                    for key in ["android:icon", "android:roundIcon"] {
+                        let Some(value) = application.attribute(key) else {
+                            continue;
+                        };
+                        if let Some(rest) = value
+                            .strip_prefix("@mipmap/")
+                            .or_else(|| value.strip_prefix("@drawable/"))
+                        {
+                            named.push(rest.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let Ok(folders) = std::fs::read_dir(&res) else {
+            return false;
+        };
+        for folder in folders.flatten() {
+            let kind = folder.file_name().to_string_lossy().to_string();
+            if !(kind.starts_with("mipmap") || kind.starts_with("drawable")) {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(folder.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let file = file.file_name().to_string_lossy().to_string();
+                let stem = file.split('.').next().unwrap_or_default();
+                if named.iter().any(|one| one == stem) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn read_icon(root: &str) -> Option<crate::image::Png> {
@@ -44103,6 +45815,10 @@ public final class R {{
         let made = crate::room::generated(&read, &classpath)?;
         read.extend(made);
         let produced = crate::compilers::java::compile_together(&read, &classpath)?;
+        let min_sdk = crate::settings::held(root)?
+            .map(|held| held.min_sdk)
+            .unwrap_or(crate::compiler::OLDEST_API);
+        let produced = crate::desugar::lowered(produced, min_sdk)?;
         let mut out = Vec::new();
         for (name, bytes) in produced {
             crate::progress::keep_going()?;
@@ -44455,12 +46171,99 @@ public final class R {{
                 });
             }
         }
+        for (folder, manifest) in local_modules(root) {
+            if let Some(text) = manifest {
+                if let Some(package) = package_of(&text) {
+                    if !out.packages.contains(&package) {
+                        out.packages.push(package);
+                    }
+                }
+                out.manifests.push(text);
+            }
+            let res = folder.join("res");
+            let Ok(kinds) = std::fs::read_dir(&res) else {
+                continue;
+            };
+            let mut kinds: Vec<std::path::PathBuf> =
+                kinds.flatten().map(|one| one.path()).collect();
+            kinds.sort();
+            for kind in kinds {
+                let Some(named) = kind
+                    .file_name()
+                    .map(|held| held.to_string_lossy().to_string())
+                else {
+                    continue;
+                };
+                let Ok(files) = std::fs::read_dir(&kind) else {
+                    continue;
+                };
+                let mut files: Vec<std::path::PathBuf> = files
+                    .flatten()
+                    .map(|one| one.path())
+                    .filter(|one| one.is_file())
+                    .collect();
+                files.sort();
+                for file in files {
+                    let name = file
+                        .file_name()
+                        .map(|held| held.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let held = std::fs::read(&file).map_err(|why| {
+                        fail("EB045", "A dependency could not be read.")
+                            .with_context(format!("Path: {}", file.display()))
+                            .with_context(format!("Reason: {why}"))
+                    })?;
+                    if named == crate::resources::Config::VALUES_DIRECTORY
+                        || named.starts_with("values-")
+                    {
+                        out.values
+                            .push((named.clone(), String::from_utf8_lossy(&held).to_string()));
+                        out.values_names.push(format!(
+                            "{}: res/{named}/{name}",
+                            folder
+                                .file_name()
+                                .map(|held| held.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        ));
+                        continue;
+                    }
+                    out.resources.push(crate::scaffold::Supplied {
+                        folder: named.clone(),
+                        name,
+                        bytes: held,
+                    });
+                }
+            }
+        }
         out.carried.extend(java_resources(root)?);
         Ok(out)
     }
 
+    pub fn local_modules(root: &str) -> Vec<(std::path::PathBuf, Option<String>)> {
+        let base = std::path::Path::new(root).join(crate::scaffold::MODULES_FOLDER);
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return Vec::new();
+        };
+        let mut found: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|one| one.path())
+            .filter(|one| one.is_dir())
+            .collect();
+        found.sort();
+        found
+            .into_iter()
+            .map(|folder| {
+                let manifest = std::fs::read_to_string(folder.join("AndroidManifest.xml")).ok();
+                (folder, manifest)
+            })
+            .collect()
+    }
+
     pub fn java_resources(root: &str) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
-        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut out: Vec<(String, Vec<u8>)> = crate::scaffold::java_resource_files(root)
+            .into_iter()
+            .filter(|(named, _)| carried_along(named))
+            .collect();
         for path in packaged_jars(root) {
             let where_from = path.display().to_string();
             let bytes = std::fs::read(&path).map_err(|why| {
@@ -45082,8 +46885,14 @@ public final class R {{
         crate::progress::enter_checked("side")?;
         let (apk_algorithm, apk_digest) =
             crate::signing::apk_digest_of(&package, rsa::DigestAlgorithm::Sha256)?;
-        let side_signature =
-            crate::verity::side_file(&package, key, certificate_der, &apk_digest, apk_algorithm)?;
+        let side_signature = crate::verity::side_file(
+            &package,
+            key,
+            certificate_der,
+            &apk_digest,
+            apk_algorithm,
+            verified.schemes.contains(&"v3.1"),
+        )?;
 
         Ok(Outcome {
             package,

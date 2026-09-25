@@ -5601,6 +5601,7 @@ final class NeverCalled {
         };
         let done = std::process::Command::new(&tool)
             .arg("verify")
+            .arg("-v")
             .arg("--min-sdk-version")
             .arg("30")
             .arg("--v4-signature-file")
@@ -5614,9 +5615,25 @@ final class NeverCalled {
             String::from_utf8_lossy(&done.stdout),
             String::from_utf8_lossy(&done.stderr),
         );
+        assert!(
+            String::from_utf8_lossy(&done.stdout)
+                .contains("Verified using v4 scheme (APK Signature Scheme v4): true"),
+            "apksigner passed the package but not its side signature:\n{}",
+            String::from_utf8_lossy(&done.stdout),
+        );
         eprintln!("apksigner accepted the v4 side signature");
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_side_signature_counts_its_own_length_as_apksig_does() {
+        let held = crate::verity::signed_data(4096, &[1u8; 32], &[2u8; 32], &[3u8; 7]);
+        assert_eq!(
+            u32::from_le_bytes(held[..4].try_into().unwrap()) as usize,
+            held.len(),
+            "Android reads the length as covering the length field too"
+        );
     }
 
     #[test]
@@ -12824,7 +12841,7 @@ public final class MainActivity extends Activity {
         for wanted in [
             "Landroid/content/SharedPreferences;.edit",
             "Landroid/os/Handler;.<init>",
-            "Ljava/text/DateFormat;.format",
+            "Ljava/text/SimpleDateFormat;.format",
             "Landroid/content/SharedPreferences$Editor;.apply",
             "Ljava/util/concurrent/atomic/AtomicInteger;.incrementAndGet",
         ] {
@@ -24773,6 +24790,234 @@ Viewbinding   = false
     fn freeing_null_is_a_no_op() {
         unsafe { crate::ffi::omni_string_free(std::ptr::null_mut()) };
     }
+    #[test]
+    fn a_project_keeps_its_own_webp_launcher_icon() {
+        let directory = temp_directory("omni-own-icon");
+        let root = directory.to_str().unwrap().to_string();
+        std::fs::create_dir_all(directory.join("Res/mipmap-hdpi")).unwrap();
+        std::fs::create_dir_all(directory.join("Res/mipmap-anydpi-v26")).unwrap();
+        std::fs::write(directory.join("Res/mipmap-hdpi/ic_launcher.webp"), b"RIFF").unwrap();
+        let adaptive =
+            "<adaptive-icon xmlns:android=\"http://schemas.android.com/apk/res/android\" />";
+        std::fs::write(
+            directory.join("Res/mipmap-anydpi-v26/ic_launcher.xml"),
+            adaptive,
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"t.icon\">\
+             <application android:icon=\"@mipmap/ic_launcher\" /></manifest>",
+        )
+        .unwrap();
+
+        assert!(crate::scaffold::has_its_own_launcher_icon(&root));
+        assert!(
+            !crate::scaffold::plant_icon(&root, "t.icon").unwrap(),
+            "no icon is drawn over the project's own"
+        );
+        assert!(!directory.join("Res/mipmap-hdpi/ic_launcher.png").exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.join("Res/mipmap-anydpi-v26/ic_launcher.xml"))
+                .unwrap(),
+            adaptive,
+            "the adaptive icon is left as it was"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_library_module_brings_its_r_class_resources_and_manifest() {
+        let directory = temp_directory("omni-modules");
+        let at = |path: &str, text: &str| {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        at("settings.gradle", "include ':app', ':core'\n");
+        at("build.gradle", "");
+        at(
+            "app/build.gradle",
+            "plugins { id 'com.android.application' }\n\
+             android { namespace 'com.demo.app'; compileSdk 34\n\
+             defaultConfig { applicationId 'com.demo.app'; minSdk 26; targetSdk 34 } }\n\
+             dependencies { implementation project(':core') }\n",
+        );
+        at(
+            "core/build.gradle",
+            "plugins { id 'com.android.library' }\n\
+             android { namespace 'com.demo.core'; compileSdk 34 }\n\
+             dependencies { implementation 'com.google.code.gson:gson:2.10.1' }\n",
+        );
+        at(
+            "app/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+             <application android:label=\"@string/app_name\" /></manifest>",
+        );
+        at(
+            "core/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+             <uses-permission android:name=\"android.permission.INTERNET\" />\
+             <application><activity android:name=\".CoreActivity\" /></application></manifest>",
+        );
+        at(
+            "app/src/main/res/values/strings.xml",
+            "<resources><string name=\"app_name\">A</string></resources>",
+        );
+        at(
+            "core/src/main/res/values/strings.xml",
+            "<resources><string name=\"core_greeting\">Hi</string></resources>",
+        );
+        at(
+            "core/src/main/resources/META-INF/services/t.Api",
+            "t.Impl\n",
+        );
+        at(
+            "core/src/main/java/com/demo/core/Greeter.java",
+            "package com.demo.core; public class Greeter {}",
+        );
+
+        let root = directory.to_str().unwrap().to_string();
+        let adopted = crate::gradle::adopt(&root)
+            .unwrap()
+            .expect("a Gradle project");
+        assert!(
+            adopted.modules.contains(&"core".to_string()),
+            "{:?}",
+            adopted.modules
+        );
+
+        let settings = crate::settings::held(&root)
+            .unwrap()
+            .expect("settings are written");
+        assert!(
+            settings
+                .dependencies
+                .iter()
+                .any(|one| one.name == "com.google.code.gson:gson"),
+            "the library module's own dependency is carried"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("Res/values/strings.xml")).unwrap(),
+            "<resources><string name=\"app_name\">A</string></resources>",
+            "the application's values stay its own"
+        );
+        let brought = crate::builder::brought_by_libraries(&root).unwrap();
+        assert!(
+            brought.packages.contains(&"com.demo.core".to_string()),
+            "{:?}",
+            brought.packages
+        );
+        assert!(
+            brought
+                .values
+                .iter()
+                .any(|(_, text)| text.contains("core_greeting")),
+            "the library's strings are not lost"
+        );
+        let merged = crate::builder::merged_manifest(
+            &std::fs::read_to_string(directory.join("AndroidManifest.xml")).unwrap(),
+            &brought.manifests,
+        )
+        .unwrap();
+        assert!(merged.contains("android.permission.INTERNET"), "{merged}");
+        assert!(merged.contains("com.demo.core.CoreActivity"), "{merged}");
+        assert!(
+            brought
+                .carried
+                .iter()
+                .any(|(name, _)| name == "META-INF/services/t.Api"),
+            "Java resources travel into the package"
+        );
+        assert!(directory.join("Java/com/demo/core/Greeter.java").is_file());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_library_manifest_names_its_classes_in_full() {
+        let text = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+                    <application><activity android:name=\".One\" /></application></manifest>";
+        let written = crate::gradle::with_its_namespace(text, "com.lib");
+        assert!(
+            written.contains("android:name=\"com.lib.One\""),
+            "{written}"
+        );
+        assert!(written.contains("package=\"com.lib\""), "{written}");
+    }
+
+    fn pool_texts(bytes: &[u8]) -> Vec<String> {
+        let class = crate::jvm::read(bytes).expect("a class file");
+        let mut out = vec![class.name.clone()];
+        out.extend(class.superclass.clone());
+        for method in &class.methods {
+            out.push(method.descriptor.clone());
+        }
+        out.extend(
+            String::from_utf8_lossy(bytes)
+                .split('\u{1}')
+                .map(str::to_string),
+        );
+        out
+    }
+
+    #[test]
+    fn newer_java_calls_are_redirected_below_their_api_level() {
+        let source = r#"
+            package t;
+            import java.util.*;
+            import java.util.function.*;
+            public class Newer {
+                record Point(int x, int y) {}
+                static List<String> kept(List<String> words) {
+                    return words.stream().filter(Predicate.not(String::isBlank)).map(String::strip).toList();
+                }
+                static Set<Integer> some() { return Set.of(1, 2, 3); }
+                static Object point() { return new Point(1, 2); }
+            }
+        "#;
+        let made = crate::compilers::java::compile_together(
+            &[("t/Newer.java".to_string(), source.to_string())],
+            &crate::compilers::java::Classpath::new(),
+        )
+        .expect("it compiles");
+
+        let untouched = crate::desugar::lowered(made.clone(), 36).unwrap();
+        assert_eq!(untouched, made, "at API 36 every call is there already");
+
+        let lowered = crate::desugar::lowered(made.clone(), 30).unwrap();
+        let names: Vec<&str> = lowered.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"omni/desugar/Backports.class"), "{names:?}");
+        assert!(names.contains(&"omni/desugar/RecordTag.class"), "{names:?}");
+        let point = lowered
+            .iter()
+            .find(|(name, _)| name == "t/Newer$Point.class")
+            .expect("the record is there");
+        let class = crate::jvm::read(&point.1).expect("it still reads");
+        assert_eq!(
+            class
+                .superclass
+                .as_deref()
+                .map(|held| held.replace('.', "/"))
+                .as_deref(),
+            Some("omni/desugar/RecordTag"),
+            "java.lang.Record is not on Android before API 34"
+        );
+        let newer = lowered
+            .iter()
+            .find(|(name, _)| name == "t/Newer.class")
+            .unwrap();
+        let said = pool_texts(&newer.1).join("\n");
+        assert!(
+            said.contains("omni/desugar/Backports"),
+            "the calls go to the stand-ins"
+        );
+        for (name, bytes) in &lowered {
+            crate::jvm::read(bytes).unwrap_or_else(|error| panic!("{name}: {}", error.message));
+            let class = crate::jvm::read(bytes).unwrap();
+            crate::dalvik::translate_class(&class)
+                .unwrap_or_else(|error| panic!("{name} does not become dex: {}", error.message));
+        }
+    }
 }
 
 mod java {
@@ -35676,7 +35921,7 @@ public class Screen extends Activity implements View.OnClickListener {
                 "EJ118",
             ),
             (
-                "public class A { void f(double d) { switch (d) { default: } } }",
+                "public class A { void f(boolean b) { switch (b) { case int i -> {} default -> {} } } }",
                 "EJ238",
             ),
             (
@@ -35877,6 +36122,366 @@ public class Screen extends Activity implements View.OnClickListener {
         assert_eq!(refused.code, "EJ227", "{}", refused.message);
 
         eprintln!("java: a class compiled here became the classpath for the next one");
+    }
+    fn java_25() -> Option<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir("/usr/lib/jvm") else {
+            return None;
+        };
+        let mut found: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path().join("bin/java"))
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                std::process::Command::new(path)
+                    .arg("-version")
+                    .output()
+                    .is_ok_and(|done| {
+                        let said = String::from_utf8_lossy(&done.stderr).to_string();
+                        said.contains("version \"25") || said.contains("version \"26")
+                    })
+            })
+            .collect();
+        found.sort();
+        found.pop()
+    }
+
+    fn runs_like_the_jdk(sources: &[(&str, &str)], main: &str, expected: &str) {
+        let named: Vec<(String, String)> = sources
+            .iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect();
+        let made = compile_together(&named, &empty()).expect("it compiles");
+        let Some(java) = java_25() else {
+            eprintln!("no JDK 25 here, so {main} was compiled but not run");
+            return;
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "omni-jvm-{}-{}",
+            main.replace('.', "-"),
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        for (name, bytes) in &made {
+            let path = directory.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let done = std::process::Command::new(java)
+            .arg("-cp")
+            .arg(&directory)
+            .arg(main)
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .output()
+            .expect("java runs");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            done.status.success(),
+            "{main} failed on the JVM:\n{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&done.stdout), expected);
+    }
+
+    #[test]
+    fn the_library_knows_what_android_jar_declares() {
+        let source = r#"
+            package t;
+            import java.math.BigDecimal;
+            import java.util.*;
+            import java.util.stream.*;
+            public class Wide {
+                static List<Long> evens(long to) {
+                    return LongStream.rangeClosed(1, to).filter(v -> v % 2 == 0).boxed().toList();
+                }
+                static BigDecimal cents(long value) { return BigDecimal.valueOf(value).movePointLeft(2); }
+                static int exact(int a, int b) { return Math.floorDivExact(a, b); }
+                static String state(Thread.State held) {
+                    return switch (held) { case NEW -> "new"; default -> "other"; };
+                }
+                static Map<String, Integer> sizes(List<String> words) {
+                    return words.stream().collect(Collectors.toUnmodifiableMap(w -> w, String::length));
+                }
+                static char[] hex(long value) { return Long.toHexString(value).toCharArray(); }
+            }
+        "#;
+        compile(source, &empty()).expect("every call here is in android.jar");
+    }
+
+    #[test]
+    fn a_method_reference_may_name_a_nested_class() {
+        let caller = r#"
+            package t;
+            import java.util.*;
+            import java.util.function.*;
+            import java.util.stream.*;
+            public class Refs {
+                static class Outer {
+                    static class Inner {
+                        final int held;
+                        Inner(int held) { this.held = held; }
+                        int twice() { return held * 2; }
+                        static Inner of(int held) { return new Inner(held); }
+                    }
+                }
+                static List<String> keys(Map<String, Integer> map) {
+                    return map.entrySet().stream().map(Map.Entry::getKey).toList();
+                }
+                static List<Integer> twice(List<Integer> values) {
+                    return values.stream().map(Outer.Inner::of).map(Outer.Inner::twice).toList();
+                }
+                static int made(List<Integer> values) {
+                    return values.stream().map(Outer.Inner::new).collect(Collectors.toList()).size();
+                }
+                public static void main(String[] args) {
+                    Map<String, Integer> map = new TreeMap<>();
+                    map.put("b", 2);
+                    map.put("a", 1);
+                    System.out.println(keys(map) + " " + twice(List.of(1, 2, 3)) + " " + made(List.of(4, 5)));
+                }
+            }
+        "#;
+        runs_like_the_jdk(&[("t/Refs.java", caller)], "t.Refs", "[a, b] [2, 4, 6] 2\n");
+    }
+
+    #[test]
+    fn a_constructor_may_do_its_own_work_before_super() {
+        let source = r#"
+            package t;
+            import java.util.Locale;
+            import java.util.Objects;
+            class Base {
+                final String endpoint;
+                Base(String endpoint) { this.endpoint = endpoint; }
+            }
+            public final class Early extends Base {
+                private final String lowered;
+                private final int dots;
+                public Early(String raw) {
+                    var cleaned = Objects.requireNonNull(raw).strip();
+                    if (cleaned.isEmpty()) {
+                        throw new IllegalArgumentException("empty");
+                    }
+                    int counted = 0;
+                    for (int at = 0; at < cleaned.length(); at++) {
+                        if (cleaned.charAt(at) == '.') counted++;
+                    }
+                    dots = counted;
+                    super(cleaned.length() > 3 ? cleaned : "short");
+                    this.lowered = cleaned.toLowerCase(Locale.ROOT);
+                }
+                public Early(int value) {
+                    String said = "n" + value;
+                    this(said);
+                }
+                public static void main(String[] args) {
+                    Early one = new Early("  A.B.Cd  ");
+                    Early two = new Early(12345);
+                    System.out.println(one.lowered + "/" + one.dots + "/" + one.endpoint + " " + two.endpoint);
+                    try {
+                        new Early("   ");
+                    } catch (IllegalArgumentException refused) {
+                        System.out.println("refused " + refused.getMessage());
+                    }
+                }
+            }
+        "#;
+        runs_like_the_jdk(
+            &[("t/Early.java", source)],
+            "t.Early",
+            "a.b.cd/2/A.B.Cd n12345\nrefused empty\n",
+        );
+
+        let reading_a_field = r#"
+            package t;
+            class Up { Up(int value) {} }
+            public class Early2 extends Up {
+                int held;
+                Early2() { int taken = held; super(taken); }
+            }
+        "#;
+        let refused = compile(reading_a_field, &empty()).expect_err("a field is read too early");
+        assert_eq!(refused.code, "EJ258", "{}", refused.message);
+
+        let calling_a_method = r#"
+            package t;
+            class Up { Up(int value) {} }
+            public class Early3 extends Up {
+                int size() { return 3; }
+                Early3() { int taken = size(); super(taken); }
+            }
+        "#;
+        let refused =
+            compile(calling_a_method, &empty()).expect_err("a method is called too early");
+        assert_eq!(refused.code, "EJ258", "{}", refused.message);
+
+        let twice = r#"
+            package t;
+            class Up { Up() {} }
+            public class Early4 extends Up {
+                Early4() { super(); super(); }
+            }
+        "#;
+        let refused = compile(twice, &empty()).expect_err("only one chain call");
+        assert_eq!(refused.code, "EJ242", "{}", refused.message);
+    }
+
+    #[test]
+    fn a_module_import_brings_in_its_packages() {
+        let source = r#"
+            import module java.base;
+
+            public final class Modular {
+                public static void main(String[] args) {
+                    List<String> kept = Stream.of(" a ", "", "b")
+                        .map(String::strip)
+                        .filter(Predicate.not(String::isEmpty))
+                        .toList();
+                    Map<String, BigInteger> big = new TreeMap<>();
+                    big.put("two", BigInteger.TWO.pow(70));
+                    System.out.println(kept + " " + big + " " + LocalDate.of(2025, 9, 16).getDayOfWeek());
+                }
+            }
+        "#;
+        runs_like_the_jdk(
+            &[("Modular.java", source)],
+            "Modular",
+            "[a, b] {two=1180591620717411303424} TUESDAY\n",
+        );
+
+        let unknown = "import module java.desktop;\nclass Desk {}\n";
+        let refused = compile(unknown, &empty()).expect_err("Android has no java.desktop");
+        assert_eq!(refused.code, "EJ259", "{}", refused.message);
+    }
+
+    #[test]
+    fn a_compact_source_file_becomes_a_final_class_named_after_it() {
+        let source = r#"
+            import java.util.stream.IntStream;
+
+            record Pair(int left, int right) {}
+
+            String greeting = "hi";
+
+            int total() { return IntStream.rangeClosed(1, 50).sum(); }
+
+            void main() {
+                System.out.println(greeting + " " + total() + " " + new Pair(1, 2) + " " + List.of(1, 2).size());
+            }
+        "#;
+        let made = compile_together(&[("Hello.java".to_string(), source.to_string())], &empty())
+            .expect("a compact source file compiles");
+        let names: Vec<&str> = made.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"Hello.class"), "{names:?}");
+        assert!(names.contains(&"Hello$Pair.class"), "{names:?}");
+        runs_like_the_jdk(
+            &[("Hello.java", source)],
+            "Hello",
+            "hi 1275 Pair[left=1, right=2] 2\n",
+        );
+
+        let refused = compile(source, &empty()).expect_err("without a file name there is no class");
+        assert_eq!(refused.code, "EJ104", "{}", refused.message);
+    }
+
+    #[test]
+    fn primitive_patterns_match_as_the_preview_says() {
+        let source = r#"
+            public final class Prim {
+                static String sign(int value) {
+                    return switch (value) {
+                        case int held when held < 0 -> "negative:" + held;
+                        case int held when held == 0 -> "zero";
+                        case int held -> "positive:" + held;
+                    };
+                }
+                static String boxed(Object value) {
+                    if (value instanceof int held) return "int:" + held;
+                    if (value instanceof double held) return "double:" + held;
+                    return String.valueOf(value);
+                }
+                static String rate(float stars) {
+                    return switch (stars) {
+                        case 0f -> "none";
+                        case 2.5f -> "half";
+                        case float held -> "custom:" + held;
+                    };
+                }
+                static String narrow(long value) {
+                    return switch (value) {
+                        case 1L -> "one";
+                        case byte held -> "byte:" + held;
+                        case int held -> "int:" + held;
+                        case long held -> "long:" + held;
+                    };
+                }
+                static String exact(double value) {
+                    if (value instanceof int held) return "int " + held;
+                    if (value instanceof float held) return "float " + held;
+                    return "double " + value;
+                }
+                static String truth(boolean value) {
+                    return switch (value) { case true -> "yes"; case false -> "no"; };
+                }
+                public static void main(String[] args) {
+                    System.out.println(sign(-7) + " " + sign(0) + " " + sign(9));
+                    System.out.println(boxed(42) + " " + boxed(2.5) + " " + boxed("x"));
+                    System.out.println(rate(0f) + " " + rate(-0f) + " " + rate(2.5f) + " " + rate(Float.NaN));
+                    System.out.println(narrow(1) + " " + narrow(-5) + " " + narrow(200) + " " + narrow(1L << 40));
+                    System.out.println(exact(3.0) + " " + exact(-0.0) + " " + exact(1.5) + " " + exact(2147483648.0) + " " + exact(1e300));
+                    System.out.println(truth(true) + truth(false) + " " + (Integer.MAX_VALUE instanceof float f) + " " + (16777216 instanceof float g));
+                }
+            }
+        "#;
+        runs_like_the_jdk(
+            &[("Prim.java", source)],
+            "Prim",
+            "negative:-7 zero positive:9\n\
+             int:42 double:2.5 x\n\
+             none custom:-0.0 half custom:NaN\n\
+             one byte:-5 int:200 long:1099511627776\n\
+             int 3 float -0.0 float 1.5 float 2.1474836E9 double 1.0E300\n\
+             yesno false true\n",
+        );
+
+        let never = r#"
+            public final class Never {
+                static String f(boolean value) {
+                    return switch (value) { case int held -> "int"; default -> "no"; };
+                }
+            }
+        "#;
+        let refused = compile(never, &empty()).expect_err("a boolean is never an int");
+        assert_eq!(refused.code, "EJ238", "{}", refused.message);
+    }
+
+    #[test]
+    fn a_desktop_only_api_is_named_as_one() {
+        for (source, whole) in [
+            (
+                "public class A { void f() { IO.println(\"x\"); } }",
+                "java.lang.IO",
+            ),
+            (
+                "import jdk.incubator.vector.*;\npublic class B { VectorSpecies<Float> held; }",
+                "jdk.incubator.vector.VectorSpecies",
+            ),
+            (
+                "import java.util.concurrent.*;\npublic class C { Object f() { return Executors.newVirtualThreadPerTaskExecutor(); } }",
+                "java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor",
+            ),
+            (
+                "public class D { Object f() { return StableValue.of(); } }",
+                "java.lang.StableValue",
+            ),
+        ] {
+            let refused = compile(source, &empty()).expect_err("Android does not have it");
+            assert_eq!(refused.code, "EJ260", "{}", refused.message);
+            assert!(
+                refused.context.iter().any(|one| one == &format!("Name: {whole}")),
+                "{:?}",
+                refused.context
+            );
+        }
     }
 }
 

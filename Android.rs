@@ -114769,3 +114769,4219 @@ pub const THE_FRAMEWORK_ATTRIBUTES: &[Attribute] = &[
     ("zygotePreloadNativeFunc", 0x010106b0, "string", &[]),
     ("zygotePreloadNativeLib", 0x010106af, "string", &[]),
 ];
+
+pub const THE_LIBRARY_BESIDE: &[(&str, &str)] = &[
+    (
+        "java.io",
+        r####"
+package java.io;
+
+public class BufferedInputStream {
+    protected int count;
+    protected int marklimit;
+    protected int markpos;
+    protected int pos;
+    public native BufferedInputStream(java.io.InputStream a0, int a1);
+    public native void mark(int a0);
+    public native boolean markSupported();
+    public native void reset() throws java.io.IOException;
+}
+
+public class BufferedOutputStream {
+    protected byte[] buf;
+    protected int count;
+    public native BufferedOutputStream(java.io.OutputStream a0, int a1);
+}
+
+public class BufferedReader {
+    public native BufferedReader(java.io.Reader a0, int a1);
+    public native void mark(int a0) throws java.io.IOException;
+    public native boolean markSupported();
+    public native int read(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native boolean ready() throws java.io.IOException;
+    public native void reset() throws java.io.IOException;
+    public native long skip(long a0) throws java.io.IOException;
+}
+
+public class BufferedWriter {
+    public native BufferedWriter(java.io.Writer a0, int a1);
+    public native void write(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native void write(java.lang.String a0, int a1, int a2) throws java.io.IOException;
+}
+
+public class ByteArrayInputStream {
+    protected byte[] buf;
+    protected int count;
+    protected int mark;
+    protected int pos;
+    public native ByteArrayInputStream(byte[] a0, int a1, int a2);
+    public native void mark(int a0);
+    public native boolean markSupported();
+    public native int readNBytes(byte[] a0, int a1, int a2);
+    public native void reset();
+    public native long transferTo(java.io.OutputStream a0) throws java.io.IOException;
+}
+
+public class ByteArrayOutputStream {
+    protected byte[] buf;
+    protected int count;
+    public native java.lang.String toString(int a0);
+    public native java.lang.String toString(java.lang.String a0) throws java.io.UnsupportedEncodingException;
+    public native java.lang.String toString(java.nio.charset.Charset a0);
+    public native void writeBytes(byte[] a0);
+    public native void writeTo(java.io.OutputStream a0) throws java.io.IOException;
+}
+
+public class File {
+    public static final java.lang.String pathSeparator;
+    public static final char pathSeparatorChar;
+    public static final char separatorChar;
+    public native boolean canExecute();
+    public native static java.io.File createTempFile(java.lang.String a0, java.lang.String a1) throws java.io.IOException;
+    public native static java.io.File createTempFile(java.lang.String a0, java.lang.String a1, java.io.File a2) throws java.io.IOException;
+    public native void deleteOnExit();
+    public native java.io.File getCanonicalFile() throws java.io.IOException;
+    public native java.lang.String getCanonicalPath() throws java.io.IOException;
+    public native long getFreeSpace();
+    public native long getTotalSpace();
+    public native long getUsableSpace();
+    public native boolean isAbsolute();
+    public native boolean isHidden();
+    public native java.lang.String[] list(java.io.FilenameFilter a0);
+    public native java.io.File[] listFiles(java.io.FileFilter a0);
+    public native java.io.File[] listFiles(java.io.FilenameFilter a0);
+    public native static java.io.File[] listRoots();
+    public native boolean setExecutable(boolean a0);
+    public native boolean setExecutable(boolean a0, boolean a1);
+    public native boolean setLastModified(long a0);
+    public native boolean setReadOnly();
+    public native boolean setReadable(boolean a0);
+    public native boolean setReadable(boolean a0, boolean a1);
+    public native boolean setWritable(boolean a0);
+    public native boolean setWritable(boolean a0, boolean a1);
+    public native java.nio.file.Path toPath();
+    public native java.net.URI toURI();
+    public native java.net.URL toURL() throws java.net.MalformedURLException;
+}
+
+public class FileInputStream {
+    protected native void finalize() throws java.io.IOException;
+    public native java.nio.channels.FileChannel getChannel();
+    public native java.io.FileDescriptor getFD() throws java.io.IOException;
+}
+
+public class FileOutputStream {
+    protected native void finalize() throws java.io.IOException;
+    public native java.nio.channels.FileChannel getChannel();
+    public native java.io.FileDescriptor getFD() throws java.io.IOException;
+}
+
+public class FileWriter {
+    public native FileWriter(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native FileWriter(java.io.File a0, java.nio.charset.Charset a1, boolean a2) throws java.io.IOException;
+    public native FileWriter(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native FileWriter(java.lang.String a0, java.nio.charset.Charset a1, boolean a2) throws java.io.IOException;
+}
+
+public abstract class InputStream {
+    public native void mark(int a0);
+    public native boolean markSupported();
+    public native static java.io.InputStream nullInputStream();
+    public native int readNBytes(byte[] a0, int a1, int a2) throws java.io.IOException;
+    public native byte[] readNBytes(int a0) throws java.io.IOException;
+    public native void reset() throws java.io.IOException;
+    public native void skipNBytes(long a0) throws java.io.IOException;
+    public native long transferTo(java.io.OutputStream a0) throws java.io.IOException;
+}
+
+public class InputStreamReader {
+    public native java.lang.String getEncoding();
+    public native int read(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native int read(java.nio.CharBuffer a0) throws java.io.IOException;
+    public native boolean ready() throws java.io.IOException;
+}
+
+public abstract class OutputStream {
+    public native static java.io.OutputStream nullOutputStream();
+}
+
+public class OutputStreamWriter {
+    public native OutputStreamWriter(java.io.OutputStream a0, java.lang.String a1) throws java.io.UnsupportedEncodingException;
+    public native OutputStreamWriter(java.io.OutputStream a0, java.nio.charset.Charset a1);
+    public native OutputStreamWriter(java.io.OutputStream a0, java.nio.charset.CharsetEncoder a1);
+    public native java.io.Writer append(java.lang.CharSequence a0, int a1, int a2) throws java.io.IOException;
+    public native java.lang.String getEncoding();
+    public native void write(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native void write(java.lang.String a0, int a1, int a2) throws java.io.IOException;
+}
+
+public class PrintStream {
+    public native PrintStream(java.io.File a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
+    public native PrintStream(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native PrintStream(java.io.OutputStream a0, boolean a1);
+    public native PrintStream(java.io.OutputStream a0, boolean a1, java.lang.String a2) throws java.io.UnsupportedEncodingException;
+    public native PrintStream(java.io.OutputStream a0, boolean a1, java.nio.charset.Charset a2);
+    public native PrintStream(java.lang.String a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
+    public native PrintStream(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native java.io.PrintStream append(char a0);
+    public native java.io.PrintStream append(java.lang.CharSequence a0);
+    public native java.io.PrintStream append(java.lang.CharSequence a0, int a1, int a2);
+    public native boolean checkError();
+    protected native void clearError();
+    public native java.io.PrintStream format(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
+    public native java.io.PrintStream printf(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
+    protected native void setError();
+    public native void writeBytes(byte[] a0);
+}
+
+public class PrintWriter {
+    protected java.io.Writer out;
+    public native PrintWriter(java.io.File a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
+    public native PrintWriter(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native PrintWriter(java.io.OutputStream a0, boolean a1);
+    public native PrintWriter(java.io.OutputStream a0, boolean a1, java.nio.charset.Charset a2);
+    public native PrintWriter(java.io.Writer a0, boolean a1);
+    public native PrintWriter(java.lang.String a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
+    public native PrintWriter(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native java.io.PrintWriter append(char a0);
+    public native java.io.PrintWriter append(java.lang.CharSequence a0, int a1, int a2);
+    public native boolean checkError();
+    protected native void clearError();
+    public native java.io.PrintWriter format(java.lang.String a0, java.lang.Object... a1);
+    public native java.io.PrintWriter format(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
+    public native void print(boolean a0);
+    public native void print(char a0);
+    public native void print(char[] a0);
+    public native void print(double a0);
+    public native void print(float a0);
+    public native void print(int a0);
+    public native void print(long a0);
+    public native java.io.PrintWriter printf(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
+    public native void println(boolean a0);
+    public native void println(char a0);
+    public native void println(char[] a0);
+    public native void println(double a0);
+    public native void println(float a0);
+    public native void println(int a0);
+    public native void println(long a0);
+    protected native void setError();
+    public native void write(char[] a0, int a1, int a2);
+    public native void write(java.lang.String a0, int a1, int a2);
+}
+
+public abstract class Reader {
+    protected java.lang.Object lock;
+    protected native Reader(java.lang.Object a0);
+    public native void mark(int a0) throws java.io.IOException;
+    public native boolean markSupported();
+    public native static java.io.Reader nullReader();
+    public abstract int read(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native int read(java.nio.CharBuffer a0) throws java.io.IOException;
+    public native boolean ready() throws java.io.IOException;
+    public native void reset() throws java.io.IOException;
+    public native long skip(long a0) throws java.io.IOException;
+    public native long transferTo(java.io.Writer a0) throws java.io.IOException;
+}
+
+public class StringReader {
+    public native void mark(int a0) throws java.io.IOException;
+    public native boolean markSupported();
+    public native int read(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native boolean ready() throws java.io.IOException;
+    public native void reset() throws java.io.IOException;
+    public native long skip(long a0) throws java.io.IOException;
+}
+
+public class StringWriter {
+    public native StringWriter(int a0);
+    public native java.io.StringWriter append(char a0);
+    public native java.io.StringWriter append(java.lang.CharSequence a0, int a1, int a2);
+    public native java.lang.StringBuffer getBuffer();
+    public native void write(char[] a0, int a1, int a2);
+    public native void write(java.lang.String a0, int a1, int a2);
+}
+
+public abstract class Writer {
+    protected java.lang.Object lock;
+    protected native Writer(java.lang.Object a0);
+    public native java.io.Writer append(char a0) throws java.io.IOException;
+    public native java.io.Writer append(java.lang.CharSequence a0, int a1, int a2) throws java.io.IOException;
+    public native static java.io.Writer nullWriter();
+    public abstract void write(char[] a0, int a1, int a2) throws java.io.IOException;
+    public native void write(java.lang.String a0, int a1, int a2) throws java.io.IOException;
+}
+"####,
+    ),
+    (
+        "java.lang",
+        r####"
+package java.lang;
+
+public interface Appendable {
+    java.lang.Appendable append(char a0) throws java.io.IOException;
+    java.lang.Appendable append(java.lang.CharSequence a0, int a1, int a2) throws java.io.IOException;
+}
+
+public class ArrayIndexOutOfBoundsException {
+    public native ArrayIndexOutOfBoundsException(int a0);
+}
+
+public class AssertionError {
+    public native AssertionError(boolean a0);
+    public native AssertionError(char a0);
+    public native AssertionError(double a0);
+    public native AssertionError(float a0);
+    public native AssertionError(int a0);
+    public native AssertionError(long a0);
+}
+
+public class Boolean {
+    public static final java.lang.Class<java.lang.Boolean> TYPE;
+    public native Boolean(java.lang.String a0);
+    public native static boolean getBoolean(java.lang.String a0);
+    public native static boolean logicalXor(boolean a0, boolean a1);
+    public native static java.lang.Boolean valueOf(java.lang.String a0);
+}
+
+public class Byte {
+    public static final int BYTES = 1;
+    public static final int SIZE = 8;
+    public static final java.lang.Class<java.lang.Byte> TYPE;
+    public native Byte(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static int compareUnsigned(byte a0, byte a1);
+    public native static java.lang.Byte decode(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static byte parseByte(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+    public native static int toUnsignedInt(byte a0);
+    public native static long toUnsignedLong(byte a0);
+    public native static java.lang.Byte valueOf(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static java.lang.Byte valueOf(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+}
+
+public interface CharSequence {
+    default java.util.stream.IntStream chars() { return null; }
+    default java.util.stream.IntStream codePoints() { return null; }
+    static int compare(java.lang.CharSequence a0, java.lang.CharSequence a1);
+    default void getChars(int a0, int a1, char[] a2, int a3) { }
+}
+
+public class Character {
+    public static final int BYTES = 2;
+    public static final byte COMBINING_SPACING_MARK = 8;
+    public static final byte CONNECTOR_PUNCTUATION = 23;
+    public static final byte CONTROL = 15;
+    public static final byte CURRENCY_SYMBOL = 26;
+    public static final byte DASH_PUNCTUATION = 20;
+    public static final byte DECIMAL_DIGIT_NUMBER = 9;
+    public static final byte DIRECTIONALITY_ARABIC_NUMBER = 6;
+    public static final byte DIRECTIONALITY_BOUNDARY_NEUTRAL = 9;
+    public static final byte DIRECTIONALITY_COMMON_NUMBER_SEPARATOR = 7;
+    public static final byte DIRECTIONALITY_EUROPEAN_NUMBER = 3;
+    public static final byte DIRECTIONALITY_EUROPEAN_NUMBER_SEPARATOR = 4;
+    public static final byte DIRECTIONALITY_EUROPEAN_NUMBER_TERMINATOR = 5;
+    public static final byte DIRECTIONALITY_FIRST_STRONG_ISOLATE = 21;
+    public static final byte DIRECTIONALITY_LEFT_TO_RIGHT = 0;
+    public static final byte DIRECTIONALITY_LEFT_TO_RIGHT_EMBEDDING = 14;
+    public static final byte DIRECTIONALITY_LEFT_TO_RIGHT_ISOLATE = 19;
+    public static final byte DIRECTIONALITY_LEFT_TO_RIGHT_OVERRIDE = 15;
+    public static final byte DIRECTIONALITY_NONSPACING_MARK = 8;
+    public static final byte DIRECTIONALITY_OTHER_NEUTRALS = 13;
+    public static final byte DIRECTIONALITY_PARAGRAPH_SEPARATOR = 10;
+    public static final byte DIRECTIONALITY_POP_DIRECTIONAL_FORMAT = 18;
+    public static final byte DIRECTIONALITY_POP_DIRECTIONAL_ISOLATE = 22;
+    public static final byte DIRECTIONALITY_RIGHT_TO_LEFT = 1;
+    public static final byte DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC = 2;
+    public static final byte DIRECTIONALITY_RIGHT_TO_LEFT_EMBEDDING = 16;
+    public static final byte DIRECTIONALITY_RIGHT_TO_LEFT_ISOLATE = 20;
+    public static final byte DIRECTIONALITY_RIGHT_TO_LEFT_OVERRIDE = 17;
+    public static final byte DIRECTIONALITY_SEGMENT_SEPARATOR = 11;
+    public static final byte DIRECTIONALITY_UNDEFINED = -1;
+    public static final byte DIRECTIONALITY_WHITESPACE = 12;
+    public static final byte ENCLOSING_MARK = 7;
+    public static final byte END_PUNCTUATION = 22;
+    public static final byte FINAL_QUOTE_PUNCTUATION = 30;
+    public static final byte FORMAT = 16;
+    public static final byte INITIAL_QUOTE_PUNCTUATION = 29;
+    public static final byte LETTER_NUMBER = 10;
+    public static final byte LINE_SEPARATOR = 13;
+    public static final byte LOWERCASE_LETTER = 2;
+    public static final byte MATH_SYMBOL = 25;
+    public static final int MAX_CODE_POINT = 1114111;
+    public static final char MAX_HIGH_SURROGATE = '\udbff';
+    public static final char MAX_LOW_SURROGATE = '\udfff';
+    public static final int MAX_RADIX = 36;
+    public static final char MAX_SURROGATE = '\udfff';
+    public static final int MIN_CODE_POINT = 0;
+    public static final char MIN_HIGH_SURROGATE = '\ud800';
+    public static final char MIN_LOW_SURROGATE = '\udc00';
+    public static final int MIN_RADIX = 2;
+    public static final int MIN_SUPPLEMENTARY_CODE_POINT = 65536;
+    public static final char MIN_SURROGATE = '\ud800';
+    public static final byte MODIFIER_LETTER = 4;
+    public static final byte MODIFIER_SYMBOL = 27;
+    public static final byte NON_SPACING_MARK = 6;
+    public static final byte OTHER_LETTER = 5;
+    public static final byte OTHER_NUMBER = 11;
+    public static final byte OTHER_PUNCTUATION = 24;
+    public static final byte OTHER_SYMBOL = 28;
+    public static final byte PARAGRAPH_SEPARATOR = 14;
+    public static final byte PRIVATE_USE = 18;
+    public static final int SIZE = 16;
+    public static final byte SPACE_SEPARATOR = 12;
+    public static final byte START_PUNCTUATION = 21;
+    public static final byte SURROGATE = 19;
+    public static final byte TITLECASE_LETTER = 3;
+    public static final java.lang.Class<java.lang.Character> TYPE;
+    public static final byte UNASSIGNED = 0;
+    public static final byte UPPERCASE_LETTER = 1;
+    public native static int charCount(int a0);
+    public native static int codePointAt(char[] a0, int a1);
+    public native static int codePointAt(char[] a0, int a1, int a2);
+    public native static int codePointAt(java.lang.CharSequence a0, int a1);
+    public native static int codePointBefore(char[] a0, int a1);
+    public native static int codePointBefore(char[] a0, int a1, int a2);
+    public native static int codePointBefore(java.lang.CharSequence a0, int a1);
+    public native static int codePointCount(char[] a0, int a1, int a2);
+    public native static int codePointCount(java.lang.CharSequence a0, int a1, int a2);
+    public native static int codePointOf(java.lang.String a0);
+    public native static int digit(char a0, int a1);
+    public native static int digit(int a0, int a1);
+    public native static char forDigit(int a0, int a1);
+    public native static byte getDirectionality(char a0);
+    public native static byte getDirectionality(int a0);
+    public native static java.lang.String getName(int a0);
+    public native static int getNumericValue(int a0);
+    public native static int getType(char a0);
+    public native static int getType(int a0);
+    public native static char highSurrogate(int a0);
+    public native static boolean isAlphabetic(int a0);
+    public native static boolean isBmpCodePoint(int a0);
+    public native static boolean isDefined(char a0);
+    public native static boolean isDefined(int a0);
+    public native static boolean isDigit(int a0);
+    public native static boolean isEmoji(int a0);
+    public native static boolean isEmojiComponent(int a0);
+    public native static boolean isEmojiModifier(int a0);
+    public native static boolean isEmojiModifierBase(int a0);
+    public native static boolean isEmojiPresentation(int a0);
+    public native static boolean isExtendedPictographic(int a0);
+    public native static boolean isHighSurrogate(char a0);
+    public native static boolean isISOControl(char a0);
+    public native static boolean isISOControl(int a0);
+    public native static boolean isIdentifierIgnorable(char a0);
+    public native static boolean isIdentifierIgnorable(int a0);
+    public native static boolean isIdeographic(int a0);
+    public native static boolean isJavaIdentifierPart(char a0);
+    public native static boolean isJavaIdentifierPart(int a0);
+    public native static boolean isJavaIdentifierStart(char a0);
+    public native static boolean isJavaIdentifierStart(int a0);
+    public native static boolean isJavaLetter(char a0);
+    public native static boolean isJavaLetterOrDigit(char a0);
+    public native static boolean isLetter(int a0);
+    public native static boolean isLetterOrDigit(int a0);
+    public native static boolean isLowSurrogate(char a0);
+    public native static boolean isLowerCase(int a0);
+    public native static boolean isMirrored(char a0);
+    public native static boolean isMirrored(int a0);
+    public native static boolean isSpace(char a0);
+    public native static boolean isSpaceChar(char a0);
+    public native static boolean isSpaceChar(int a0);
+    public native static boolean isSupplementaryCodePoint(int a0);
+    public native static boolean isSurrogate(char a0);
+    public native static boolean isSurrogatePair(char a0, char a1);
+    public native static boolean isTitleCase(char a0);
+    public native static boolean isTitleCase(int a0);
+    public native static boolean isUnicodeIdentifierPart(char a0);
+    public native static boolean isUnicodeIdentifierPart(int a0);
+    public native static boolean isUnicodeIdentifierStart(char a0);
+    public native static boolean isUnicodeIdentifierStart(int a0);
+    public native static boolean isUpperCase(int a0);
+    public native static boolean isValidCodePoint(int a0);
+    public native static boolean isWhitespace(int a0);
+    public native static char lowSurrogate(int a0);
+    public native static int offsetByCodePoints(char[] a0, int a1, int a2, int a3, int a4);
+    public native static int offsetByCodePoints(java.lang.CharSequence a0, int a1, int a2);
+    public native static char reverseBytes(char a0);
+    public native static char[] toChars(int a0);
+    public native static int toChars(int a0, char[] a1, int a2);
+    public native static int toCodePoint(char a0, char a1);
+    public native static int toLowerCase(int a0);
+    public native static java.lang.String toString(int a0);
+    public native static char toTitleCase(char a0);
+    public native static int toTitleCase(int a0);
+    public native static int toUpperCase(int a0);
+    public static class Subset {
+        protected native Subset(java.lang.String a0);
+        public native boolean equals(java.lang.Object a0);
+        public native int hashCode();
+        public native java.lang.String toString();
+    }
+    public static class UnicodeBlock extends java.lang.Character.Subset {
+        public static final java.lang.Character.UnicodeBlock ADLAM;
+        public static final java.lang.Character.UnicodeBlock AEGEAN_NUMBERS;
+        public static final java.lang.Character.UnicodeBlock AHOM;
+        public static final java.lang.Character.UnicodeBlock ALCHEMICAL_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock ALPHABETIC_PRESENTATION_FORMS;
+        public static final java.lang.Character.UnicodeBlock ANATOLIAN_HIEROGLYPHS;
+        public static final java.lang.Character.UnicodeBlock ANCIENT_GREEK_MUSICAL_NOTATION;
+        public static final java.lang.Character.UnicodeBlock ANCIENT_GREEK_NUMBERS;
+        public static final java.lang.Character.UnicodeBlock ANCIENT_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock ARABIC;
+        public static final java.lang.Character.UnicodeBlock ARABIC_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock ARABIC_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock ARABIC_EXTENDED_C;
+        public static final java.lang.Character.UnicodeBlock ARABIC_MATHEMATICAL_ALPHABETIC_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock ARABIC_PRESENTATION_FORMS_A;
+        public static final java.lang.Character.UnicodeBlock ARABIC_PRESENTATION_FORMS_B;
+        public static final java.lang.Character.UnicodeBlock ARABIC_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock ARMENIAN;
+        public static final java.lang.Character.UnicodeBlock ARROWS;
+        public static final java.lang.Character.UnicodeBlock AVESTAN;
+        public static final java.lang.Character.UnicodeBlock BALINESE;
+        public static final java.lang.Character.UnicodeBlock BAMUM;
+        public static final java.lang.Character.UnicodeBlock BAMUM_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock BASIC_LATIN;
+        public static final java.lang.Character.UnicodeBlock BASSA_VAH;
+        public static final java.lang.Character.UnicodeBlock BATAK;
+        public static final java.lang.Character.UnicodeBlock BENGALI;
+        public static final java.lang.Character.UnicodeBlock BHAIKSUKI;
+        public static final java.lang.Character.UnicodeBlock BLOCK_ELEMENTS;
+        public static final java.lang.Character.UnicodeBlock BOPOMOFO;
+        public static final java.lang.Character.UnicodeBlock BOPOMOFO_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock BOX_DRAWING;
+        public static final java.lang.Character.UnicodeBlock BRAHMI;
+        public static final java.lang.Character.UnicodeBlock BRAILLE_PATTERNS;
+        public static final java.lang.Character.UnicodeBlock BUGINESE;
+        public static final java.lang.Character.UnicodeBlock BUHID;
+        public static final java.lang.Character.UnicodeBlock BYZANTINE_MUSICAL_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock CARIAN;
+        public static final java.lang.Character.UnicodeBlock CAUCASIAN_ALBANIAN;
+        public static final java.lang.Character.UnicodeBlock CHAKMA;
+        public static final java.lang.Character.UnicodeBlock CHAM;
+        public static final java.lang.Character.UnicodeBlock CHEROKEE;
+        public static final java.lang.Character.UnicodeBlock CHEROKEE_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock CHESS_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock CHORASMIAN;
+        public static final java.lang.Character.UnicodeBlock CJK_COMPATIBILITY;
+        public static final java.lang.Character.UnicodeBlock CJK_COMPATIBILITY_FORMS;
+        public static final java.lang.Character.UnicodeBlock CJK_COMPATIBILITY_IDEOGRAPHS;
+        public static final java.lang.Character.UnicodeBlock CJK_COMPATIBILITY_IDEOGRAPHS_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock CJK_RADICALS_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock CJK_STROKES;
+        public static final java.lang.Character.UnicodeBlock CJK_SYMBOLS_AND_PUNCTUATION;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_C;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_D;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_E;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_F;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_G;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_H;
+        public static final java.lang.Character.UnicodeBlock CJK_UNIFIED_IDEOGRAPHS_EXTENSION_I;
+        public static final java.lang.Character.UnicodeBlock COMBINING_DIACRITICAL_MARKS;
+        public static final java.lang.Character.UnicodeBlock COMBINING_DIACRITICAL_MARKS_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock COMBINING_DIACRITICAL_MARKS_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock COMBINING_HALF_MARKS;
+        public static final java.lang.Character.UnicodeBlock COMBINING_MARKS_FOR_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock COMMON_INDIC_NUMBER_FORMS;
+        public static final java.lang.Character.UnicodeBlock CONTROL_PICTURES;
+        public static final java.lang.Character.UnicodeBlock COPTIC;
+        public static final java.lang.Character.UnicodeBlock COPTIC_EPACT_NUMBERS;
+        public static final java.lang.Character.UnicodeBlock COUNTING_ROD_NUMERALS;
+        public static final java.lang.Character.UnicodeBlock CUNEIFORM;
+        public static final java.lang.Character.UnicodeBlock CUNEIFORM_NUMBERS_AND_PUNCTUATION;
+        public static final java.lang.Character.UnicodeBlock CURRENCY_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock CYPRIOT_SYLLABARY;
+        public static final java.lang.Character.UnicodeBlock CYPRO_MINOAN;
+        public static final java.lang.Character.UnicodeBlock CYRILLIC;
+        public static final java.lang.Character.UnicodeBlock CYRILLIC_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock CYRILLIC_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock CYRILLIC_EXTENDED_C;
+        public static final java.lang.Character.UnicodeBlock CYRILLIC_EXTENDED_D;
+        public static final java.lang.Character.UnicodeBlock CYRILLIC_SUPPLEMENTARY;
+        public static final java.lang.Character.UnicodeBlock DESERET;
+        public static final java.lang.Character.UnicodeBlock DEVANAGARI;
+        public static final java.lang.Character.UnicodeBlock DEVANAGARI_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock DEVANAGARI_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock DINGBATS;
+        public static final java.lang.Character.UnicodeBlock DIVES_AKURU;
+        public static final java.lang.Character.UnicodeBlock DOGRA;
+        public static final java.lang.Character.UnicodeBlock DOMINO_TILES;
+        public static final java.lang.Character.UnicodeBlock DUPLOYAN;
+        public static final java.lang.Character.UnicodeBlock EARLY_DYNASTIC_CUNEIFORM;
+        public static final java.lang.Character.UnicodeBlock EGYPTIAN_HIEROGLYPHS;
+        public static final java.lang.Character.UnicodeBlock EGYPTIAN_HIEROGLYPHS_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock EGYPTIAN_HIEROGLYPH_FORMAT_CONTROLS;
+        public static final java.lang.Character.UnicodeBlock ELBASAN;
+        public static final java.lang.Character.UnicodeBlock ELYMAIC;
+        public static final java.lang.Character.UnicodeBlock EMOTICONS;
+        public static final java.lang.Character.UnicodeBlock ENCLOSED_ALPHANUMERICS;
+        public static final java.lang.Character.UnicodeBlock ENCLOSED_ALPHANUMERIC_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock ENCLOSED_CJK_LETTERS_AND_MONTHS;
+        public static final java.lang.Character.UnicodeBlock ENCLOSED_IDEOGRAPHIC_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock ETHIOPIC;
+        public static final java.lang.Character.UnicodeBlock ETHIOPIC_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock ETHIOPIC_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock ETHIOPIC_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock ETHIOPIC_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock GARAY;
+        public static final java.lang.Character.UnicodeBlock GENERAL_PUNCTUATION;
+        public static final java.lang.Character.UnicodeBlock GEOMETRIC_SHAPES;
+        public static final java.lang.Character.UnicodeBlock GEOMETRIC_SHAPES_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock GEORGIAN;
+        public static final java.lang.Character.UnicodeBlock GEORGIAN_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock GEORGIAN_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock GLAGOLITIC;
+        public static final java.lang.Character.UnicodeBlock GLAGOLITIC_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock GOTHIC;
+        public static final java.lang.Character.UnicodeBlock GRANTHA;
+        public static final java.lang.Character.UnicodeBlock GREEK;
+        public static final java.lang.Character.UnicodeBlock GREEK_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock GUJARATI;
+        public static final java.lang.Character.UnicodeBlock GUNJALA_GONDI;
+        public static final java.lang.Character.UnicodeBlock GURMUKHI;
+        public static final java.lang.Character.UnicodeBlock GURUNG_KHEMA;
+        public static final java.lang.Character.UnicodeBlock HALFWIDTH_AND_FULLWIDTH_FORMS;
+        public static final java.lang.Character.UnicodeBlock HANGUL_COMPATIBILITY_JAMO;
+        public static final java.lang.Character.UnicodeBlock HANGUL_JAMO;
+        public static final java.lang.Character.UnicodeBlock HANGUL_JAMO_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock HANGUL_JAMO_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock HANGUL_SYLLABLES;
+        public static final java.lang.Character.UnicodeBlock HANIFI_ROHINGYA;
+        public static final java.lang.Character.UnicodeBlock HANUNOO;
+        public static final java.lang.Character.UnicodeBlock HATRAN;
+        public static final java.lang.Character.UnicodeBlock HEBREW;
+        public static final java.lang.Character.UnicodeBlock HIGH_PRIVATE_USE_SURROGATES;
+        public static final java.lang.Character.UnicodeBlock HIGH_SURROGATES;
+        public static final java.lang.Character.UnicodeBlock HIRAGANA;
+        public static final java.lang.Character.UnicodeBlock IDEOGRAPHIC_DESCRIPTION_CHARACTERS;
+        public static final java.lang.Character.UnicodeBlock IDEOGRAPHIC_SYMBOLS_AND_PUNCTUATION;
+        public static final java.lang.Character.UnicodeBlock IMPERIAL_ARAMAIC;
+        public static final java.lang.Character.UnicodeBlock INDIC_SIYAQ_NUMBERS;
+        public static final java.lang.Character.UnicodeBlock INSCRIPTIONAL_PAHLAVI;
+        public static final java.lang.Character.UnicodeBlock INSCRIPTIONAL_PARTHIAN;
+        public static final java.lang.Character.UnicodeBlock IPA_EXTENSIONS;
+        public static final java.lang.Character.UnicodeBlock JAVANESE;
+        public static final java.lang.Character.UnicodeBlock KAITHI;
+        public static final java.lang.Character.UnicodeBlock KAKTOVIK_NUMERALS;
+        public static final java.lang.Character.UnicodeBlock KANA_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock KANA_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock KANA_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock KANBUN;
+        public static final java.lang.Character.UnicodeBlock KANGXI_RADICALS;
+        public static final java.lang.Character.UnicodeBlock KANNADA;
+        public static final java.lang.Character.UnicodeBlock KATAKANA;
+        public static final java.lang.Character.UnicodeBlock KATAKANA_PHONETIC_EXTENSIONS;
+        public static final java.lang.Character.UnicodeBlock KAWI;
+        public static final java.lang.Character.UnicodeBlock KAYAH_LI;
+        public static final java.lang.Character.UnicodeBlock KHAROSHTHI;
+        public static final java.lang.Character.UnicodeBlock KHITAN_SMALL_SCRIPT;
+        public static final java.lang.Character.UnicodeBlock KHMER;
+        public static final java.lang.Character.UnicodeBlock KHMER_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock KHOJKI;
+        public static final java.lang.Character.UnicodeBlock KHUDAWADI;
+        public static final java.lang.Character.UnicodeBlock KIRAT_RAI;
+        public static final java.lang.Character.UnicodeBlock LAO;
+        public static final java.lang.Character.UnicodeBlock LATIN_1_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_ADDITIONAL;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_C;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_D;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_E;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_F;
+        public static final java.lang.Character.UnicodeBlock LATIN_EXTENDED_G;
+        public static final java.lang.Character.UnicodeBlock LEPCHA;
+        public static final java.lang.Character.UnicodeBlock LETTERLIKE_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock LIMBU;
+        public static final java.lang.Character.UnicodeBlock LINEAR_A;
+        public static final java.lang.Character.UnicodeBlock LINEAR_B_IDEOGRAMS;
+        public static final java.lang.Character.UnicodeBlock LINEAR_B_SYLLABARY;
+        public static final java.lang.Character.UnicodeBlock LISU;
+        public static final java.lang.Character.UnicodeBlock LISU_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock LOW_SURROGATES;
+        public static final java.lang.Character.UnicodeBlock LYCIAN;
+        public static final java.lang.Character.UnicodeBlock LYDIAN;
+        public static final java.lang.Character.UnicodeBlock MAHAJANI;
+        public static final java.lang.Character.UnicodeBlock MAHJONG_TILES;
+        public static final java.lang.Character.UnicodeBlock MAKASAR;
+        public static final java.lang.Character.UnicodeBlock MALAYALAM;
+        public static final java.lang.Character.UnicodeBlock MANDAIC;
+        public static final java.lang.Character.UnicodeBlock MANICHAEAN;
+        public static final java.lang.Character.UnicodeBlock MARCHEN;
+        public static final java.lang.Character.UnicodeBlock MASARAM_GONDI;
+        public static final java.lang.Character.UnicodeBlock MATHEMATICAL_ALPHANUMERIC_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock MATHEMATICAL_OPERATORS;
+        public static final java.lang.Character.UnicodeBlock MAYAN_NUMERALS;
+        public static final java.lang.Character.UnicodeBlock MEDEFAIDRIN;
+        public static final java.lang.Character.UnicodeBlock MEETEI_MAYEK;
+        public static final java.lang.Character.UnicodeBlock MEETEI_MAYEK_EXTENSIONS;
+        public static final java.lang.Character.UnicodeBlock MENDE_KIKAKUI;
+        public static final java.lang.Character.UnicodeBlock MEROITIC_CURSIVE;
+        public static final java.lang.Character.UnicodeBlock MEROITIC_HIEROGLYPHS;
+        public static final java.lang.Character.UnicodeBlock MIAO;
+        public static final java.lang.Character.UnicodeBlock MISCELLANEOUS_MATHEMATICAL_SYMBOLS_A;
+        public static final java.lang.Character.UnicodeBlock MISCELLANEOUS_MATHEMATICAL_SYMBOLS_B;
+        public static final java.lang.Character.UnicodeBlock MISCELLANEOUS_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock MISCELLANEOUS_SYMBOLS_AND_ARROWS;
+        public static final java.lang.Character.UnicodeBlock MISCELLANEOUS_SYMBOLS_AND_PICTOGRAPHS;
+        public static final java.lang.Character.UnicodeBlock MISCELLANEOUS_TECHNICAL;
+        public static final java.lang.Character.UnicodeBlock MODI;
+        public static final java.lang.Character.UnicodeBlock MODIFIER_TONE_LETTERS;
+        public static final java.lang.Character.UnicodeBlock MONGOLIAN;
+        public static final java.lang.Character.UnicodeBlock MONGOLIAN_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock MRO;
+        public static final java.lang.Character.UnicodeBlock MULTANI;
+        public static final java.lang.Character.UnicodeBlock MUSICAL_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock MYANMAR;
+        public static final java.lang.Character.UnicodeBlock MYANMAR_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock MYANMAR_EXTENDED_B;
+        public static final java.lang.Character.UnicodeBlock MYANMAR_EXTENDED_C;
+        public static final java.lang.Character.UnicodeBlock NABATAEAN;
+        public static final java.lang.Character.UnicodeBlock NAG_MUNDARI;
+        public static final java.lang.Character.UnicodeBlock NANDINAGARI;
+        public static final java.lang.Character.UnicodeBlock NEWA;
+        public static final java.lang.Character.UnicodeBlock NEW_TAI_LUE;
+        public static final java.lang.Character.UnicodeBlock NKO;
+        public static final java.lang.Character.UnicodeBlock NUMBER_FORMS;
+        public static final java.lang.Character.UnicodeBlock NUSHU;
+        public static final java.lang.Character.UnicodeBlock NYIAKENG_PUACHUE_HMONG;
+        public static final java.lang.Character.UnicodeBlock OGHAM;
+        public static final java.lang.Character.UnicodeBlock OLD_HUNGARIAN;
+        public static final java.lang.Character.UnicodeBlock OLD_ITALIC;
+        public static final java.lang.Character.UnicodeBlock OLD_NORTH_ARABIAN;
+        public static final java.lang.Character.UnicodeBlock OLD_PERMIC;
+        public static final java.lang.Character.UnicodeBlock OLD_PERSIAN;
+        public static final java.lang.Character.UnicodeBlock OLD_SOGDIAN;
+        public static final java.lang.Character.UnicodeBlock OLD_SOUTH_ARABIAN;
+        public static final java.lang.Character.UnicodeBlock OLD_TURKIC;
+        public static final java.lang.Character.UnicodeBlock OLD_UYGHUR;
+        public static final java.lang.Character.UnicodeBlock OL_CHIKI;
+        public static final java.lang.Character.UnicodeBlock OL_ONAL;
+        public static final java.lang.Character.UnicodeBlock OPTICAL_CHARACTER_RECOGNITION;
+        public static final java.lang.Character.UnicodeBlock ORIYA;
+        public static final java.lang.Character.UnicodeBlock ORNAMENTAL_DINGBATS;
+        public static final java.lang.Character.UnicodeBlock OSAGE;
+        public static final java.lang.Character.UnicodeBlock OSMANYA;
+        public static final java.lang.Character.UnicodeBlock OTTOMAN_SIYAQ_NUMBERS;
+        public static final java.lang.Character.UnicodeBlock PAHAWH_HMONG;
+        public static final java.lang.Character.UnicodeBlock PALMYRENE;
+        public static final java.lang.Character.UnicodeBlock PAU_CIN_HAU;
+        public static final java.lang.Character.UnicodeBlock PHAGS_PA;
+        public static final java.lang.Character.UnicodeBlock PHAISTOS_DISC;
+        public static final java.lang.Character.UnicodeBlock PHOENICIAN;
+        public static final java.lang.Character.UnicodeBlock PHONETIC_EXTENSIONS;
+        public static final java.lang.Character.UnicodeBlock PHONETIC_EXTENSIONS_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock PLAYING_CARDS;
+        public static final java.lang.Character.UnicodeBlock PRIVATE_USE_AREA;
+        public static final java.lang.Character.UnicodeBlock PSALTER_PAHLAVI;
+        public static final java.lang.Character.UnicodeBlock REJANG;
+        public static final java.lang.Character.UnicodeBlock RUMI_NUMERAL_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock RUNIC;
+        public static final java.lang.Character.UnicodeBlock SAMARITAN;
+        public static final java.lang.Character.UnicodeBlock SAURASHTRA;
+        public static final java.lang.Character.UnicodeBlock SHARADA;
+        public static final java.lang.Character.UnicodeBlock SHAVIAN;
+        public static final java.lang.Character.UnicodeBlock SHORTHAND_FORMAT_CONTROLS;
+        public static final java.lang.Character.UnicodeBlock SIDDHAM;
+        public static final java.lang.Character.UnicodeBlock SINHALA;
+        public static final java.lang.Character.UnicodeBlock SINHALA_ARCHAIC_NUMBERS;
+        public static final java.lang.Character.UnicodeBlock SMALL_FORM_VARIANTS;
+        public static final java.lang.Character.UnicodeBlock SMALL_KANA_EXTENSION;
+        public static final java.lang.Character.UnicodeBlock SOGDIAN;
+        public static final java.lang.Character.UnicodeBlock SORA_SOMPENG;
+        public static final java.lang.Character.UnicodeBlock SOYOMBO;
+        public static final java.lang.Character.UnicodeBlock SPACING_MODIFIER_LETTERS;
+        public static final java.lang.Character.UnicodeBlock SPECIALS;
+        public static final java.lang.Character.UnicodeBlock SUNDANESE;
+        public static final java.lang.Character.UnicodeBlock SUNDANESE_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock SUNUWAR;
+        public static final java.lang.Character.UnicodeBlock SUPERSCRIPTS_AND_SUBSCRIPTS;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTAL_ARROWS_A;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTAL_ARROWS_B;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTAL_ARROWS_C;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTAL_MATHEMATICAL_OPERATORS;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTAL_PUNCTUATION;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTAL_SYMBOLS_AND_PICTOGRAPHS;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTARY_PRIVATE_USE_AREA_A;
+        public static final java.lang.Character.UnicodeBlock SUPPLEMENTARY_PRIVATE_USE_AREA_B;
+        public static final java.lang.Character.UnicodeBlock SURROGATES_AREA;
+        public static final java.lang.Character.UnicodeBlock SUTTON_SIGNWRITING;
+        public static final java.lang.Character.UnicodeBlock SYLOTI_NAGRI;
+        public static final java.lang.Character.UnicodeBlock SYMBOLS_AND_PICTOGRAPHS_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock SYMBOLS_FOR_LEGACY_COMPUTING;
+        public static final java.lang.Character.UnicodeBlock SYMBOLS_FOR_LEGACY_COMPUTING_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock SYRIAC;
+        public static final java.lang.Character.UnicodeBlock SYRIAC_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock TAGALOG;
+        public static final java.lang.Character.UnicodeBlock TAGBANWA;
+        public static final java.lang.Character.UnicodeBlock TAGS;
+        public static final java.lang.Character.UnicodeBlock TAI_LE;
+        public static final java.lang.Character.UnicodeBlock TAI_THAM;
+        public static final java.lang.Character.UnicodeBlock TAI_VIET;
+        public static final java.lang.Character.UnicodeBlock TAI_XUAN_JING_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock TAKRI;
+        public static final java.lang.Character.UnicodeBlock TAMIL;
+        public static final java.lang.Character.UnicodeBlock TAMIL_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock TANGSA;
+        public static final java.lang.Character.UnicodeBlock TANGUT;
+        public static final java.lang.Character.UnicodeBlock TANGUT_COMPONENTS;
+        public static final java.lang.Character.UnicodeBlock TANGUT_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock TELUGU;
+        public static final java.lang.Character.UnicodeBlock THAANA;
+        public static final java.lang.Character.UnicodeBlock THAI;
+        public static final java.lang.Character.UnicodeBlock TIBETAN;
+        public static final java.lang.Character.UnicodeBlock TIFINAGH;
+        public static final java.lang.Character.UnicodeBlock TIRHUTA;
+        public static final java.lang.Character.UnicodeBlock TODHRI;
+        public static final java.lang.Character.UnicodeBlock TOTO;
+        public static final java.lang.Character.UnicodeBlock TRANSPORT_AND_MAP_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock TULU_TIGALARI;
+        public static final java.lang.Character.UnicodeBlock UGARITIC;
+        public static final java.lang.Character.UnicodeBlock UNIFIED_CANADIAN_ABORIGINAL_SYLLABICS;
+        public static final java.lang.Character.UnicodeBlock UNIFIED_CANADIAN_ABORIGINAL_SYLLABICS_EXTENDED;
+        public static final java.lang.Character.UnicodeBlock UNIFIED_CANADIAN_ABORIGINAL_SYLLABICS_EXTENDED_A;
+        public static final java.lang.Character.UnicodeBlock VAI;
+        public static final java.lang.Character.UnicodeBlock VARIATION_SELECTORS;
+        public static final java.lang.Character.UnicodeBlock VARIATION_SELECTORS_SUPPLEMENT;
+        public static final java.lang.Character.UnicodeBlock VEDIC_EXTENSIONS;
+        public static final java.lang.Character.UnicodeBlock VERTICAL_FORMS;
+        public static final java.lang.Character.UnicodeBlock VITHKUQI;
+        public static final java.lang.Character.UnicodeBlock WANCHO;
+        public static final java.lang.Character.UnicodeBlock WARANG_CITI;
+        public static final java.lang.Character.UnicodeBlock YEZIDI;
+        public static final java.lang.Character.UnicodeBlock YIJING_HEXAGRAM_SYMBOLS;
+        public static final java.lang.Character.UnicodeBlock YI_RADICALS;
+        public static final java.lang.Character.UnicodeBlock YI_SYLLABLES;
+        public static final java.lang.Character.UnicodeBlock ZANABAZAR_SQUARE;
+        public static final java.lang.Character.UnicodeBlock ZNAMENNY_MUSICAL_NOTATION;
+        public native static java.lang.Character.UnicodeBlock forName(java.lang.String a0);
+        public native static java.lang.Character.UnicodeBlock of(char a0);
+        public native static java.lang.Character.UnicodeBlock of(int a0);
+    }
+    public static class UnicodeScript extends java.lang.Enum {
+        public static final java.lang.Character.UnicodeScript ADLAM;
+        public static final java.lang.Character.UnicodeScript AHOM;
+        public static final java.lang.Character.UnicodeScript ANATOLIAN_HIEROGLYPHS;
+        public static final java.lang.Character.UnicodeScript ARABIC;
+        public static final java.lang.Character.UnicodeScript ARMENIAN;
+        public static final java.lang.Character.UnicodeScript AVESTAN;
+        public static final java.lang.Character.UnicodeScript BALINESE;
+        public static final java.lang.Character.UnicodeScript BAMUM;
+        public static final java.lang.Character.UnicodeScript BASSA_VAH;
+        public static final java.lang.Character.UnicodeScript BATAK;
+        public static final java.lang.Character.UnicodeScript BENGALI;
+        public static final java.lang.Character.UnicodeScript BHAIKSUKI;
+        public static final java.lang.Character.UnicodeScript BOPOMOFO;
+        public static final java.lang.Character.UnicodeScript BRAHMI;
+        public static final java.lang.Character.UnicodeScript BRAILLE;
+        public static final java.lang.Character.UnicodeScript BUGINESE;
+        public static final java.lang.Character.UnicodeScript BUHID;
+        public static final java.lang.Character.UnicodeScript CANADIAN_ABORIGINAL;
+        public static final java.lang.Character.UnicodeScript CARIAN;
+        public static final java.lang.Character.UnicodeScript CAUCASIAN_ALBANIAN;
+        public static final java.lang.Character.UnicodeScript CHAKMA;
+        public static final java.lang.Character.UnicodeScript CHAM;
+        public static final java.lang.Character.UnicodeScript CHEROKEE;
+        public static final java.lang.Character.UnicodeScript CHORASMIAN;
+        public static final java.lang.Character.UnicodeScript COMMON;
+        public static final java.lang.Character.UnicodeScript COPTIC;
+        public static final java.lang.Character.UnicodeScript CUNEIFORM;
+        public static final java.lang.Character.UnicodeScript CYPRIOT;
+        public static final java.lang.Character.UnicodeScript CYPRO_MINOAN;
+        public static final java.lang.Character.UnicodeScript CYRILLIC;
+        public static final java.lang.Character.UnicodeScript DESERET;
+        public static final java.lang.Character.UnicodeScript DEVANAGARI;
+        public static final java.lang.Character.UnicodeScript DIVES_AKURU;
+        public static final java.lang.Character.UnicodeScript DOGRA;
+        public static final java.lang.Character.UnicodeScript DUPLOYAN;
+        public static final java.lang.Character.UnicodeScript EGYPTIAN_HIEROGLYPHS;
+        public static final java.lang.Character.UnicodeScript ELBASAN;
+        public static final java.lang.Character.UnicodeScript ELYMAIC;
+        public static final java.lang.Character.UnicodeScript ETHIOPIC;
+        public static final java.lang.Character.UnicodeScript GARAY;
+        public static final java.lang.Character.UnicodeScript GEORGIAN;
+        public static final java.lang.Character.UnicodeScript GLAGOLITIC;
+        public static final java.lang.Character.UnicodeScript GOTHIC;
+        public static final java.lang.Character.UnicodeScript GRANTHA;
+        public static final java.lang.Character.UnicodeScript GREEK;
+        public static final java.lang.Character.UnicodeScript GUJARATI;
+        public static final java.lang.Character.UnicodeScript GUNJALA_GONDI;
+        public static final java.lang.Character.UnicodeScript GURMUKHI;
+        public static final java.lang.Character.UnicodeScript GURUNG_KHEMA;
+        public static final java.lang.Character.UnicodeScript HAN;
+        public static final java.lang.Character.UnicodeScript HANGUL;
+        public static final java.lang.Character.UnicodeScript HANIFI_ROHINGYA;
+        public static final java.lang.Character.UnicodeScript HANUNOO;
+        public static final java.lang.Character.UnicodeScript HATRAN;
+        public static final java.lang.Character.UnicodeScript HEBREW;
+        public static final java.lang.Character.UnicodeScript HIRAGANA;
+        public static final java.lang.Character.UnicodeScript IMPERIAL_ARAMAIC;
+        public static final java.lang.Character.UnicodeScript INHERITED;
+        public static final java.lang.Character.UnicodeScript INSCRIPTIONAL_PAHLAVI;
+        public static final java.lang.Character.UnicodeScript INSCRIPTIONAL_PARTHIAN;
+        public static final java.lang.Character.UnicodeScript JAVANESE;
+        public static final java.lang.Character.UnicodeScript KAITHI;
+        public static final java.lang.Character.UnicodeScript KANNADA;
+        public static final java.lang.Character.UnicodeScript KATAKANA;
+        public static final java.lang.Character.UnicodeScript KAWI;
+        public static final java.lang.Character.UnicodeScript KAYAH_LI;
+        public static final java.lang.Character.UnicodeScript KHAROSHTHI;
+        public static final java.lang.Character.UnicodeScript KHITAN_SMALL_SCRIPT;
+        public static final java.lang.Character.UnicodeScript KHMER;
+        public static final java.lang.Character.UnicodeScript KHOJKI;
+        public static final java.lang.Character.UnicodeScript KHUDAWADI;
+        public static final java.lang.Character.UnicodeScript KIRAT_RAI;
+        public static final java.lang.Character.UnicodeScript LAO;
+        public static final java.lang.Character.UnicodeScript LATIN;
+        public static final java.lang.Character.UnicodeScript LEPCHA;
+        public static final java.lang.Character.UnicodeScript LIMBU;
+        public static final java.lang.Character.UnicodeScript LINEAR_A;
+        public static final java.lang.Character.UnicodeScript LINEAR_B;
+        public static final java.lang.Character.UnicodeScript LISU;
+        public static final java.lang.Character.UnicodeScript LYCIAN;
+        public static final java.lang.Character.UnicodeScript LYDIAN;
+        public static final java.lang.Character.UnicodeScript MAHAJANI;
+        public static final java.lang.Character.UnicodeScript MAKASAR;
+        public static final java.lang.Character.UnicodeScript MALAYALAM;
+        public static final java.lang.Character.UnicodeScript MANDAIC;
+        public static final java.lang.Character.UnicodeScript MANICHAEAN;
+        public static final java.lang.Character.UnicodeScript MARCHEN;
+        public static final java.lang.Character.UnicodeScript MASARAM_GONDI;
+        public static final java.lang.Character.UnicodeScript MEDEFAIDRIN;
+        public static final java.lang.Character.UnicodeScript MEETEI_MAYEK;
+        public static final java.lang.Character.UnicodeScript MENDE_KIKAKUI;
+        public static final java.lang.Character.UnicodeScript MEROITIC_CURSIVE;
+        public static final java.lang.Character.UnicodeScript MEROITIC_HIEROGLYPHS;
+        public static final java.lang.Character.UnicodeScript MIAO;
+        public static final java.lang.Character.UnicodeScript MODI;
+        public static final java.lang.Character.UnicodeScript MONGOLIAN;
+        public static final java.lang.Character.UnicodeScript MRO;
+        public static final java.lang.Character.UnicodeScript MULTANI;
+        public static final java.lang.Character.UnicodeScript MYANMAR;
+        public static final java.lang.Character.UnicodeScript NABATAEAN;
+        public static final java.lang.Character.UnicodeScript NAG_MUNDARI;
+        public static final java.lang.Character.UnicodeScript NANDINAGARI;
+        public static final java.lang.Character.UnicodeScript NEWA;
+        public static final java.lang.Character.UnicodeScript NEW_TAI_LUE;
+        public static final java.lang.Character.UnicodeScript NKO;
+        public static final java.lang.Character.UnicodeScript NUSHU;
+        public static final java.lang.Character.UnicodeScript NYIAKENG_PUACHUE_HMONG;
+        public static final java.lang.Character.UnicodeScript OGHAM;
+        public static final java.lang.Character.UnicodeScript OLD_HUNGARIAN;
+        public static final java.lang.Character.UnicodeScript OLD_ITALIC;
+        public static final java.lang.Character.UnicodeScript OLD_NORTH_ARABIAN;
+        public static final java.lang.Character.UnicodeScript OLD_PERMIC;
+        public static final java.lang.Character.UnicodeScript OLD_PERSIAN;
+        public static final java.lang.Character.UnicodeScript OLD_SOGDIAN;
+        public static final java.lang.Character.UnicodeScript OLD_SOUTH_ARABIAN;
+        public static final java.lang.Character.UnicodeScript OLD_TURKIC;
+        public static final java.lang.Character.UnicodeScript OLD_UYGHUR;
+        public static final java.lang.Character.UnicodeScript OL_CHIKI;
+        public static final java.lang.Character.UnicodeScript OL_ONAL;
+        public static final java.lang.Character.UnicodeScript ORIYA;
+        public static final java.lang.Character.UnicodeScript OSAGE;
+        public static final java.lang.Character.UnicodeScript OSMANYA;
+        public static final java.lang.Character.UnicodeScript PAHAWH_HMONG;
+        public static final java.lang.Character.UnicodeScript PALMYRENE;
+        public static final java.lang.Character.UnicodeScript PAU_CIN_HAU;
+        public static final java.lang.Character.UnicodeScript PHAGS_PA;
+        public static final java.lang.Character.UnicodeScript PHOENICIAN;
+        public static final java.lang.Character.UnicodeScript PSALTER_PAHLAVI;
+        public static final java.lang.Character.UnicodeScript REJANG;
+        public static final java.lang.Character.UnicodeScript RUNIC;
+        public static final java.lang.Character.UnicodeScript SAMARITAN;
+        public static final java.lang.Character.UnicodeScript SAURASHTRA;
+        public static final java.lang.Character.UnicodeScript SHARADA;
+        public static final java.lang.Character.UnicodeScript SHAVIAN;
+        public static final java.lang.Character.UnicodeScript SIDDHAM;
+        public static final java.lang.Character.UnicodeScript SIGNWRITING;
+        public static final java.lang.Character.UnicodeScript SINHALA;
+        public static final java.lang.Character.UnicodeScript SOGDIAN;
+        public static final java.lang.Character.UnicodeScript SORA_SOMPENG;
+        public static final java.lang.Character.UnicodeScript SOYOMBO;
+        public static final java.lang.Character.UnicodeScript SUNDANESE;
+        public static final java.lang.Character.UnicodeScript SUNUWAR;
+        public static final java.lang.Character.UnicodeScript SYLOTI_NAGRI;
+        public static final java.lang.Character.UnicodeScript SYRIAC;
+        public static final java.lang.Character.UnicodeScript TAGALOG;
+        public static final java.lang.Character.UnicodeScript TAGBANWA;
+        public static final java.lang.Character.UnicodeScript TAI_LE;
+        public static final java.lang.Character.UnicodeScript TAI_THAM;
+        public static final java.lang.Character.UnicodeScript TAI_VIET;
+        public static final java.lang.Character.UnicodeScript TAKRI;
+        public static final java.lang.Character.UnicodeScript TAMIL;
+        public static final java.lang.Character.UnicodeScript TANGSA;
+        public static final java.lang.Character.UnicodeScript TANGUT;
+        public static final java.lang.Character.UnicodeScript TELUGU;
+        public static final java.lang.Character.UnicodeScript THAANA;
+        public static final java.lang.Character.UnicodeScript THAI;
+        public static final java.lang.Character.UnicodeScript TIBETAN;
+        public static final java.lang.Character.UnicodeScript TIFINAGH;
+        public static final java.lang.Character.UnicodeScript TIRHUTA;
+        public static final java.lang.Character.UnicodeScript TODHRI;
+        public static final java.lang.Character.UnicodeScript TOTO;
+        public static final java.lang.Character.UnicodeScript TULU_TIGALARI;
+        public static final java.lang.Character.UnicodeScript UGARITIC;
+        public static final java.lang.Character.UnicodeScript UNKNOWN;
+        public static final java.lang.Character.UnicodeScript VAI;
+        public static final java.lang.Character.UnicodeScript VITHKUQI;
+        public static final java.lang.Character.UnicodeScript WANCHO;
+        public static final java.lang.Character.UnicodeScript WARANG_CITI;
+        public static final java.lang.Character.UnicodeScript YEZIDI;
+        public static final java.lang.Character.UnicodeScript YI;
+        public static final java.lang.Character.UnicodeScript ZANABAZAR_SQUARE;
+        public native static java.lang.Character.UnicodeScript[] values();
+        public native static java.lang.Character.UnicodeScript valueOf(java.lang.String a0);
+        public native static java.lang.Character.UnicodeScript forName(java.lang.String a0);
+        public native static java.lang.Character.UnicodeScript of(int a0);
+    }
+}
+
+public class Class<T> {
+    public native java.lang.Class<java.lang.Object> arrayType();
+    public native java.lang.Class<java.lang.Object> componentType();
+    public native java.lang.String descriptorString();
+    public native boolean desiredAssertionStatus();
+    public native static java.lang.Class<java.lang.Object> forName(java.lang.String a0, boolean a1, java.lang.ClassLoader a2) throws java.lang.ClassNotFoundException;
+    public native <A extends java.lang.annotation.Annotation> A[] getAnnotationsByType(java.lang.Class<A> a0);
+    public native java.lang.ClassLoader getClassLoader();
+    public native java.lang.Class<java.lang.Object>[] getClasses();
+    public native java.lang.Class<java.lang.Object> getComponentType();
+    public native java.lang.reflect.Constructor<T> getConstructor(java.lang.Class<java.lang.Object>... a0) throws java.lang.NoSuchMethodException, java.lang.SecurityException;
+    public native java.lang.reflect.Constructor<java.lang.Object>[] getConstructors() throws java.lang.SecurityException;
+    public native <A extends java.lang.annotation.Annotation> A getDeclaredAnnotation(java.lang.Class<A> a0);
+    public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
+    public native <A extends java.lang.annotation.Annotation> A[] getDeclaredAnnotationsByType(java.lang.Class<A> a0);
+    public native java.lang.Class<java.lang.Object>[] getDeclaredClasses();
+    public native java.lang.reflect.Constructor<java.lang.Object>[] getDeclaredConstructors() throws java.lang.SecurityException;
+    public native java.lang.Class<java.lang.Object> getDeclaringClass();
+    public native java.lang.Class<java.lang.Object> getEnclosingClass();
+    public native java.lang.reflect.Constructor<java.lang.Object> getEnclosingConstructor();
+    public native java.lang.reflect.Method getEnclosingMethod();
+    public native java.lang.reflect.Type[] getGenericInterfaces();
+    public native java.lang.reflect.Type getGenericSuperclass();
+    public native int getModifiers();
+    public native java.lang.Class<java.lang.Object> getNestHost();
+    public native java.lang.Class<java.lang.Object>[] getNestMembers();
+    public native java.lang.Package getPackage();
+    public native java.lang.String getPackageName();
+    public native java.lang.Class<java.lang.Object>[] getPermittedSubclasses();
+    public native java.security.ProtectionDomain getProtectionDomain();
+    public native java.net.URL getResource(java.lang.String a0);
+    public native java.io.InputStream getResourceAsStream(java.lang.String a0);
+    public native java.lang.Object[] getSigners();
+    public native java.lang.String getTypeName();
+    public native java.lang.reflect.TypeVariable<java.lang.Class<T>>[] getTypeParameters();
+    public native boolean isAnnotation();
+    public native boolean isAnonymousClass();
+    public native boolean isAssignableFrom(java.lang.Class<java.lang.Object> a0);
+    public native boolean isLocalClass();
+    public native boolean isMemberClass();
+    public native boolean isNestmateOf(java.lang.Class<java.lang.Object> a0);
+    public native boolean isSealed();
+    public native boolean isSynthetic();
+    public native java.lang.String toGenericString();
+}
+
+public class ClassNotFoundException {
+    public native java.lang.Throwable getException();
+}
+
+public interface Deprecated {
+    boolean forRemoval();
+    java.lang.String since();
+}
+
+public class Double {
+    public static final int BYTES = 8;
+    public static final int MAX_EXPONENT = 1023;
+    public static final int MIN_EXPONENT = -1022;
+    public static final double MIN_NORMAL;
+    public static final int PRECISION = 53;
+    public static final int SIZE = 64;
+    public static final java.lang.Class<java.lang.Double> TYPE;
+    public native Double(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static long doubleToRawLongBits(double a0);
+    public native static boolean isFinite(double a0);
+    public native static boolean isInfinite(double a0);
+    public native static double max(double a0, double a1);
+    public native static double min(double a0, double a1);
+    public native static double sum(double a0, double a1);
+    public native static java.lang.String toHexString(double a0);
+    public native static java.lang.Double valueOf(java.lang.String a0) throws java.lang.NumberFormatException;
+}
+
+public abstract class Enum<E extends java.lang.Enum<E>> {
+    protected native Enum(java.lang.String a0, int a1);
+    protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
+    protected native void finalize();
+}
+
+public class Error {
+    protected native Error(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
+}
+
+public class Exception {
+    protected native Exception(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
+}
+
+public class Float {
+    public static final int BYTES = 4;
+    public static final int MAX_EXPONENT = 127;
+    public static final int MIN_EXPONENT = -126;
+    public static final float MIN_NORMAL;
+    public static final int PRECISION = 24;
+    public static final int SIZE = 32;
+    public static final java.lang.Class<java.lang.Float> TYPE;
+    public native Float(double a0);
+    public native Float(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static float float16ToFloat(short a0);
+    public native static short floatToFloat16(float a0);
+    public native static int floatToRawIntBits(float a0);
+    public native static boolean isFinite(float a0);
+    public native boolean isInfinite();
+    public native static boolean isInfinite(float a0);
+    public native static boolean isNaN(float a0);
+    public native static float max(float a0, float a1);
+    public native static float min(float a0, float a1);
+    public native static float sum(float a0, float a1);
+    public native static java.lang.String toHexString(float a0);
+    public native static java.lang.Float valueOf(java.lang.String a0) throws java.lang.NumberFormatException;
+}
+
+public class IndexOutOfBoundsException {
+    public native IndexOutOfBoundsException(int a0);
+    public native IndexOutOfBoundsException(long a0);
+}
+
+public class Integer {
+    public static final java.lang.Class<java.lang.Integer> TYPE;
+    public native Integer(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static int compareUnsigned(int a0, int a1);
+    public native static int compress(int a0, int a1);
+    public native static int expand(int a0, int a1);
+    public native static java.lang.Integer getInteger(java.lang.String a0);
+    public native static java.lang.Integer getInteger(java.lang.String a0, int a1);
+    public native static java.lang.Integer getInteger(java.lang.String a0, java.lang.Integer a1);
+    public native static int parseInt(java.lang.CharSequence a0, int a1, int a2, int a3) throws java.lang.NumberFormatException;
+    public native static int parseUnsignedInt(java.lang.CharSequence a0, int a1, int a2, int a3) throws java.lang.NumberFormatException;
+    public native static int parseUnsignedInt(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static int parseUnsignedInt(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+    public native static java.lang.String toUnsignedString(int a0, int a1);
+    public native static java.lang.Integer valueOf(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+}
+
+public interface Iterable<T> {
+    default void forEach(java.util.function.Consumer<T> a0) { }
+    default java.util.Spliterator<T> spliterator() { return null; }
+}
+
+public class Long {
+    public static final int BYTES = 8;
+    public static final int SIZE = 64;
+    public static final java.lang.Class<java.lang.Long> TYPE;
+    public native Long(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static int compareUnsigned(long a0, long a1);
+    public native static long compress(long a0, long a1);
+    public native static java.lang.Long decode(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static long divideUnsigned(long a0, long a1);
+    public native static long expand(long a0, long a1);
+    public native static java.lang.Long getLong(java.lang.String a0);
+    public native static java.lang.Long getLong(java.lang.String a0, java.lang.Long a1);
+    public native static java.lang.Long getLong(java.lang.String a0, long a1);
+    public native static long parseLong(java.lang.CharSequence a0, int a1, int a2, int a3) throws java.lang.NumberFormatException;
+    public native static long parseUnsignedLong(java.lang.CharSequence a0, int a1, int a2, int a3) throws java.lang.NumberFormatException;
+    public native static long parseUnsignedLong(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static long parseUnsignedLong(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+    public native static long remainderUnsigned(long a0, long a1);
+    public native static java.lang.String toUnsignedString(long a0);
+    public native static java.lang.String toUnsignedString(long a0, int a1);
+    public native static java.lang.Long valueOf(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+}
+
+public class Math {
+    public static final double TAU;
+    public native static double IEEEremainder(double a0, double a1);
+    public native static int absExact(int a0);
+    public native static long absExact(long a0);
+    public native static int ceilDiv(int a0, int a1);
+    public native static long ceilDiv(long a0, int a1);
+    public native static long ceilDiv(long a0, long a1);
+    public native static int ceilDivExact(int a0, int a1);
+    public native static long ceilDivExact(long a0, long a1);
+    public native static int ceilMod(int a0, int a1);
+    public native static int ceilMod(long a0, int a1);
+    public native static long ceilMod(long a0, long a1);
+    public native static float clamp(float a0, float a1, float a2);
+    public native static int clamp(long a0, int a1, int a2);
+    public native static float copySign(float a0, float a1);
+    public native static long decrementExact(long a0);
+    public native static int divideExact(int a0, int a1);
+    public native static long divideExact(long a0, long a1);
+    public native static long floorDiv(long a0, int a1);
+    public native static int floorDivExact(int a0, int a1);
+    public native static long floorDivExact(long a0, long a1);
+    public native static int floorMod(long a0, int a1);
+    public native static float fma(float a0, float a1, float a2);
+    public native static int getExponent(double a0);
+    public native static int getExponent(float a0);
+    public native static long incrementExact(long a0);
+    public native static long multiplyExact(long a0, int a1);
+    public native static long multiplyFull(int a0, int a1);
+    public native static long multiplyHigh(long a0, long a1);
+    public native static long negateExact(long a0);
+    public native static double nextAfter(double a0, double a1);
+    public native static float nextAfter(float a0, double a1);
+    public native static float nextDown(float a0);
+    public native static float nextUp(float a0);
+    public native static int powExact(int a0, int a1);
+    public native static long powExact(long a0, int a1);
+    public native static double scalb(double a0, int a1);
+    public native static float scalb(float a0, int a1);
+    public native static float signum(float a0);
+    public native static float ulp(float a0);
+    public native static int unsignedMultiplyExact(int a0, int a1);
+    public native static long unsignedMultiplyExact(long a0, int a1);
+    public native static long unsignedMultiplyExact(long a0, long a1);
+    public native static long unsignedMultiplyHigh(long a0, long a1);
+    public native static int unsignedPowExact(int a0, int a1);
+    public native static long unsignedPowExact(long a0, int a1);
+}
+
+public class Object {
+    protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
+    protected native void finalize() throws java.lang.Throwable;
+    public native void wait(long a0, int a1) throws java.lang.InterruptedException;
+}
+
+public class RuntimeException {
+    protected native RuntimeException(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
+}
+
+public class Short {
+    public static final int BYTES = 2;
+    public static final int SIZE = 16;
+    public static final java.lang.Class<java.lang.Short> TYPE;
+    public native Short(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static int compareUnsigned(short a0, short a1);
+    public native static java.lang.Short decode(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static short parseShort(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+    public native static short reverseBytes(short a0);
+    public native static int toUnsignedInt(short a0);
+    public native static long toUnsignedLong(short a0);
+    public native static java.lang.Short valueOf(java.lang.String a0) throws java.lang.NumberFormatException;
+    public native static java.lang.Short valueOf(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
+}
+
+public class StackTraceElement {
+    public native StackTraceElement(java.lang.String a0, java.lang.String a1, java.lang.String a2, int a3);
+    public native boolean isNativeMethod();
+}
+
+public class String {
+    public static final java.util.Comparator<java.lang.String> CASE_INSENSITIVE_ORDER;
+    public native String(byte[] a0, int a1);
+    public native String(byte[] a0, int a1, int a2, int a3);
+    public native String(int[] a0, int a1, int a2);
+    public native int codePointBefore(int a0);
+    public native int codePointCount(int a0, int a1);
+    public native java.util.stream.IntStream codePoints();
+    public native static java.lang.String copyValueOf(char[] a0, int a1, int a2);
+    public native static java.lang.String format(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
+    public native void getBytes(int a0, int a1, byte[] a2, int a3);
+    public native void getChars(int a0, int a1, char[] a2, int a3);
+    public native java.lang.String indent(int a0);
+    public native int indexOf(int a0, int a1, int a2);
+    public native int indexOf(java.lang.String a0, int a1, int a2);
+    public native int lastIndexOf(int a0, int a1);
+    public native int lastIndexOf(java.lang.String a0, int a1);
+    public native int offsetByCodePoints(int a0, int a1);
+    public native boolean regionMatches(boolean a0, int a1, java.lang.String a2, int a3, int a4);
+    public native java.lang.String[] splitWithDelimiters(java.lang.String a0, int a1);
+    public native java.lang.String stripIndent();
+    public native java.lang.String toLowerCase(java.util.Locale a0);
+    public native java.lang.String toUpperCase(java.util.Locale a0);
+    public native <R> R transform(java.util.function.Function<java.lang.String, R> a0);
+    public native java.lang.String translateEscapes();
+}
+
+public class StringBuffer {
+    public native StringBuffer(int a0);
+    public native java.lang.StringBuffer append(boolean a0);
+    public native java.lang.StringBuffer append(char[] a0);
+    public native java.lang.StringBuffer append(char[] a0, int a1, int a2);
+    public native java.lang.StringBuffer append(double a0);
+    public native java.lang.StringBuffer append(float a0);
+    public native java.lang.StringBuffer append(java.lang.CharSequence a0, int a1, int a2);
+    public native java.lang.StringBuffer append(long a0);
+    public native java.lang.StringBuffer appendCodePoint(int a0);
+    public native int capacity();
+    public native java.util.stream.IntStream chars();
+    public native int codePointAt(int a0);
+    public native int codePointBefore(int a0);
+    public native int codePointCount(int a0, int a1);
+    public native java.util.stream.IntStream codePoints();
+    public native int compareTo(java.lang.StringBuffer a0);
+    public native java.lang.StringBuffer delete(int a0, int a1);
+    public native java.lang.StringBuffer deleteCharAt(int a0);
+    public native void ensureCapacity(int a0);
+    public native void getChars(int a0, int a1, char[] a2, int a3);
+    public native int indexOf(java.lang.String a0);
+    public native int indexOf(java.lang.String a0, int a1);
+    public native java.lang.StringBuffer insert(int a0, boolean a1);
+    public native java.lang.StringBuffer insert(int a0, char a1);
+    public native java.lang.StringBuffer insert(int a0, char[] a1);
+    public native java.lang.StringBuffer insert(int a0, char[] a1, int a2, int a3);
+    public native java.lang.StringBuffer insert(int a0, double a1);
+    public native java.lang.StringBuffer insert(int a0, float a1);
+    public native java.lang.StringBuffer insert(int a0, int a1);
+    public native java.lang.StringBuffer insert(int a0, java.lang.CharSequence a1);
+    public native java.lang.StringBuffer insert(int a0, java.lang.CharSequence a1, int a2, int a3);
+    public native java.lang.StringBuffer insert(int a0, java.lang.Object a1);
+    public native java.lang.StringBuffer insert(int a0, java.lang.String a1);
+    public native java.lang.StringBuffer insert(int a0, long a1);
+    public native int lastIndexOf(java.lang.String a0);
+    public native int lastIndexOf(java.lang.String a0, int a1);
+    public native int offsetByCodePoints(int a0, int a1);
+    public native java.lang.StringBuffer repeat(int a0, int a1);
+    public native java.lang.StringBuffer repeat(java.lang.CharSequence a0, int a1);
+    public native java.lang.StringBuffer replace(int a0, int a1, java.lang.String a2);
+    public native java.lang.StringBuffer reverse();
+    public native void setCharAt(int a0, char a1);
+    public native void setLength(int a0);
+    public native java.lang.String substring(int a0);
+    public native java.lang.String substring(int a0, int a1);
+    public native void trimToSize();
+}
+
+public class StringBuilder {
+    public native java.lang.StringBuilder append(char[] a0, int a1, int a2);
+    public native java.lang.StringBuilder append(java.lang.CharSequence a0, int a1, int a2);
+    public native java.lang.StringBuilder appendCodePoint(int a0);
+    public native int capacity();
+    public native java.util.stream.IntStream chars();
+    public native int codePointAt(int a0);
+    public native int codePointBefore(int a0);
+    public native int codePointCount(int a0, int a1);
+    public native java.util.stream.IntStream codePoints();
+    public native int compareTo(java.lang.StringBuilder a0);
+    public native void ensureCapacity(int a0);
+    public native void getChars(int a0, int a1, char[] a2, int a3);
+    public native int indexOf(java.lang.String a0, int a1);
+    public native java.lang.StringBuilder insert(int a0, boolean a1);
+    public native java.lang.StringBuilder insert(int a0, char[] a1);
+    public native java.lang.StringBuilder insert(int a0, char[] a1, int a2, int a3);
+    public native java.lang.StringBuilder insert(int a0, double a1);
+    public native java.lang.StringBuilder insert(int a0, float a1);
+    public native java.lang.StringBuilder insert(int a0, java.lang.CharSequence a1, int a2, int a3);
+    public native java.lang.StringBuilder insert(int a0, long a1);
+    public native int lastIndexOf(java.lang.String a0, int a1);
+    public native int offsetByCodePoints(int a0, int a1);
+    public native java.lang.StringBuilder repeat(int a0, int a1);
+    public native java.lang.StringBuilder repeat(java.lang.CharSequence a0, int a1);
+    public native void trimToSize();
+}
+
+public class StringIndexOutOfBoundsException {
+    public native StringIndexOutOfBoundsException(int a0);
+}
+
+public class System {
+    public native static java.lang.String clearProperty(java.lang.String a0);
+    public native static java.io.Console console();
+    public native static java.util.Properties getProperties();
+    public native static java.lang.SecurityManager getSecurityManager();
+    public native static java.util.Map<java.lang.String, java.lang.String> getenv();
+    public native static java.nio.channels.Channel inheritedChannel() throws java.io.IOException;
+    public native static void load(java.lang.String a0);
+    public native static void loadLibrary(java.lang.String a0);
+    public native static java.lang.String mapLibraryName(java.lang.String a0);
+    public native static void runFinalization();
+    public native static void runFinalizersOnExit(boolean a0);
+    public native static void setErr(java.io.PrintStream a0);
+    public native static void setIn(java.io.InputStream a0);
+    public native static void setOut(java.io.PrintStream a0);
+    public native static void setProperties(java.util.Properties a0);
+    public native static java.lang.String setProperty(java.lang.String a0, java.lang.String a1);
+    public native static void setSecurityManager(java.lang.SecurityManager a0);
+}
+
+public class Thread {
+    public static final int MAX_PRIORITY = 10;
+    public static final int MIN_PRIORITY = 1;
+    public static final int NORM_PRIORITY = 5;
+    public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1, java.lang.String a2);
+    public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1, java.lang.String a2, long a3);
+    public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1, java.lang.String a2, long a3, boolean a4);
+    public native static int activeCount();
+    public native void checkAccess();
+    protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
+    public native static void dumpStack();
+    public native static int enumerate(java.lang.Thread[] a0);
+    public native static java.util.Map<java.lang.Thread, java.lang.StackTraceElement[]> getAllStackTraces();
+    public native java.lang.ClassLoader getContextClassLoader();
+    public native static java.lang.Thread.UncaughtExceptionHandler getDefaultUncaughtExceptionHandler();
+    public native int getPriority();
+    public native java.lang.StackTraceElement[] getStackTrace();
+    public native java.lang.Thread.State getState();
+    public native java.lang.ThreadGroup getThreadGroup();
+    public native java.lang.Thread.UncaughtExceptionHandler getUncaughtExceptionHandler();
+    public native static boolean holdsLock(java.lang.Object a0);
+    public native static boolean interrupted();
+    public native boolean isDaemon();
+    public native boolean isVirtual();
+    public native boolean join(java.time.Duration a0) throws java.lang.InterruptedException;
+    public native void join(long a0, int a1) throws java.lang.InterruptedException;
+    public native static void onSpinWait();
+    public native void setContextClassLoader(java.lang.ClassLoader a0);
+    public native static void setDefaultUncaughtExceptionHandler(java.lang.Thread.UncaughtExceptionHandler a0);
+    public native void setUncaughtExceptionHandler(java.lang.Thread.UncaughtExceptionHandler a0);
+    public native static void sleep(java.time.Duration a0) throws java.lang.InterruptedException;
+    public native static void sleep(long a0, int a1) throws java.lang.InterruptedException;
+    public native void stop();
+    public native long threadId();
+    public static class State extends java.lang.Enum {
+        public static final java.lang.Thread.State BLOCKED;
+        public static final java.lang.Thread.State NEW;
+        public static final java.lang.Thread.State RUNNABLE;
+        public static final java.lang.Thread.State TERMINATED;
+        public static final java.lang.Thread.State TIMED_WAITING;
+        public static final java.lang.Thread.State WAITING;
+        public native static java.lang.Thread.State[] values();
+        public native static java.lang.Thread.State valueOf(java.lang.String a0);
+    }
+    public static interface UncaughtExceptionHandler {
+        void uncaughtException(java.lang.Thread a0, java.lang.Throwable a1);
+    }
+}
+
+public class Throwable {
+    protected native Throwable(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
+    public native java.lang.Throwable fillInStackTrace();
+    public native void printStackTrace(java.io.PrintStream a0);
+    public native void printStackTrace(java.io.PrintWriter a0);
+    public native void setStackTrace(java.lang.StackTraceElement[] a0);
+}
+
+public class Void {
+    public static final java.lang.Class<java.lang.Void> TYPE;
+}
+"####,
+    ),
+    (
+        "java.lang.annotation",
+        r####"
+package java.lang.annotation;
+
+public class ElementType {
+    public static final java.lang.annotation.ElementType MODULE;
+}
+"####,
+    ),
+    (
+        "java.lang.reflect",
+        r####"
+package java.lang.reflect;
+
+public class AccessibleObject {
+    public native <T extends java.lang.annotation.Annotation> T[] getAnnotationsByType(java.lang.Class<T> a0);
+    public native <T extends java.lang.annotation.Annotation> T getDeclaredAnnotation(java.lang.Class<T> a0);
+    public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
+    public native <T extends java.lang.annotation.Annotation> T[] getDeclaredAnnotationsByType(java.lang.Class<T> a0);
+    public native static void setAccessible(java.lang.reflect.AccessibleObject[] a0, boolean a1) throws java.lang.SecurityException;
+}
+
+public class Array {
+    public native static boolean getBoolean(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static byte getByte(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static char getChar(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static double getDouble(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static float getFloat(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static int getInt(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static long getLong(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static short getShort(java.lang.Object a0, int a1) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static java.lang.Object newInstance(java.lang.Class<java.lang.Object> a0, int... a1) throws java.lang.IllegalArgumentException, java.lang.NegativeArraySizeException;
+    public native static void setBoolean(java.lang.Object a0, int a1, boolean a2);
+    public native static void setByte(java.lang.Object a0, int a1, byte a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static void setChar(java.lang.Object a0, int a1, char a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static void setDouble(java.lang.Object a0, int a1, double a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static void setFloat(java.lang.Object a0, int a1, float a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static void setInt(java.lang.Object a0, int a1, int a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static void setLong(java.lang.Object a0, int a1, long a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+    public native static void setShort(java.lang.Object a0, int a1, short a2) throws java.lang.ArrayIndexOutOfBoundsException, java.lang.IllegalArgumentException;
+}
+
+public class Constructor {
+    public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
+    public native java.lang.Class<java.lang.Object> getDeclaringClass();
+    public native java.lang.Class<java.lang.Object>[] getExceptionTypes();
+    public native java.lang.reflect.Type[] getGenericExceptionTypes();
+    public native java.lang.reflect.Type[] getGenericParameterTypes();
+    public native java.lang.annotation.Annotation[][] getParameterAnnotations();
+    public native int getParameterCount();
+    public native java.lang.reflect.TypeVariable<java.lang.reflect.Constructor<java.lang.Object>>[] getTypeParameters();
+    public native boolean isSynthetic();
+    public native boolean isVarArgs();
+    public native java.lang.String toGenericString();
+}
+
+public class Field {
+    public native <T extends java.lang.annotation.Annotation> T[] getAnnotationsByType(java.lang.Class<T> a0);
+    public native boolean getBoolean(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native byte getByte(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native char getChar(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
+    public native double getDouble(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native float getFloat(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native java.lang.reflect.Type getGenericType();
+    public native long getLong(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native short getShort(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native boolean isEnumConstant();
+    public native boolean isSynthetic();
+    public native void setBoolean(java.lang.Object a0, boolean a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setByte(java.lang.Object a0, byte a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setChar(java.lang.Object a0, char a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setDouble(java.lang.Object a0, double a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setFloat(java.lang.Object a0, float a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setInt(java.lang.Object a0, int a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setLong(java.lang.Object a0, long a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native void setShort(java.lang.Object a0, short a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
+    public native java.lang.String toGenericString();
+}
+
+public interface Member {
+    public static final int DECLARED = 1;
+    public static final int PUBLIC = 0;
+    java.lang.Class<java.lang.Object> getDeclaringClass();
+    boolean isSynthetic();
+}
+
+public class Method {
+    public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
+    public native java.lang.Class<java.lang.Object>[] getExceptionTypes();
+    public native java.lang.reflect.Type[] getGenericExceptionTypes();
+    public native java.lang.reflect.Type[] getGenericParameterTypes();
+    public native java.lang.reflect.Type getGenericReturnType();
+    public native java.lang.annotation.Annotation[][] getParameterAnnotations();
+    public native java.lang.reflect.TypeVariable<java.lang.reflect.Method>[] getTypeParameters();
+    public native boolean isDefault();
+    public native java.lang.String toGenericString();
+}
+
+public class Modifier {
+    public static final int INTERFACE = 512;
+    public static final int STRICT = 2048;
+    public static final int TRANSIENT = 128;
+    public static final int VOLATILE = 64;
+    public native static int classModifiers();
+    public native static int constructorModifiers();
+    public native static int fieldModifiers();
+    public native static int interfaceModifiers();
+    public native static boolean isInterface(int a0);
+    public native static boolean isStrict(int a0);
+    public native static boolean isSynchronized(int a0);
+    public native static boolean isTransient(int a0);
+    public native static boolean isVolatile(int a0);
+    public native static int methodModifiers();
+    public native static int parameterModifiers();
+}
+
+public class RecordComponent {
+    public native <T extends java.lang.annotation.Annotation> T getAnnotation(java.lang.Class<T> a0);
+    public native java.lang.annotation.Annotation[] getAnnotations();
+    public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
+    public native java.lang.Class<java.lang.Object> getDeclaringRecord();
+    public native java.lang.String getGenericSignature();
+    public native java.lang.reflect.Type getGenericType();
+}
+"####,
+    ),
+    (
+        "java.math",
+        r####"
+package java.math;
+
+public class BigDecimal {
+    public static final int ROUND_CEILING = 2;
+    public static final int ROUND_DOWN = 1;
+    public static final int ROUND_FLOOR = 3;
+    public static final int ROUND_HALF_DOWN = 5;
+    public static final int ROUND_HALF_EVEN = 6;
+    public static final int ROUND_HALF_UP = 4;
+    public static final int ROUND_UNNECESSARY = 7;
+    public static final int ROUND_UP = 0;
+    public native BigDecimal(char[] a0);
+    public native BigDecimal(char[] a0, int a1, int a2);
+    public native BigDecimal(char[] a0, int a1, int a2, java.math.MathContext a3);
+    public native BigDecimal(char[] a0, java.math.MathContext a1);
+    public native BigDecimal(double a0, java.math.MathContext a1);
+    public native BigDecimal(int a0, java.math.MathContext a1);
+    public native BigDecimal(java.lang.String a0, java.math.MathContext a1);
+    public native BigDecimal(java.math.BigInteger a0, int a1);
+    public native BigDecimal(java.math.BigInteger a0, int a1, java.math.MathContext a2);
+    public native BigDecimal(java.math.BigInteger a0, java.math.MathContext a1);
+    public native BigDecimal(long a0);
+    public native BigDecimal(long a0, java.math.MathContext a1);
+    public native java.math.BigDecimal abs(java.math.MathContext a0);
+    public native java.math.BigDecimal add(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native byte byteValueExact();
+    public native java.math.BigDecimal divide(java.math.BigDecimal a0, int a1);
+    public native java.math.BigDecimal divide(java.math.BigDecimal a0, int a1, int a2);
+    public native java.math.BigDecimal divide(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native java.math.BigDecimal divide(java.math.BigDecimal a0, java.math.RoundingMode a1);
+    public native java.math.BigDecimal[] divideAndRemainder(java.math.BigDecimal a0);
+    public native java.math.BigDecimal[] divideAndRemainder(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native java.math.BigDecimal divideToIntegralValue(java.math.BigDecimal a0);
+    public native java.math.BigDecimal divideToIntegralValue(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native int intValueExact();
+    public native long longValueExact();
+    public native java.math.BigDecimal max(java.math.BigDecimal a0);
+    public native java.math.BigDecimal min(java.math.BigDecimal a0);
+    public native java.math.BigDecimal movePointLeft(int a0);
+    public native java.math.BigDecimal movePointRight(int a0);
+    public native java.math.BigDecimal multiply(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native java.math.BigDecimal negate(java.math.MathContext a0);
+    public native java.math.BigDecimal plus();
+    public native java.math.BigDecimal plus(java.math.MathContext a0);
+    public native java.math.BigDecimal pow(int a0);
+    public native java.math.BigDecimal pow(int a0, java.math.MathContext a1);
+    public native int precision();
+    public native java.math.BigDecimal remainder(java.math.BigDecimal a0);
+    public native java.math.BigDecimal remainder(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native java.math.BigDecimal round(java.math.MathContext a0);
+    public native java.math.BigDecimal scaleByPowerOfTen(int a0);
+    public native java.math.BigDecimal setScale(int a0);
+    public native java.math.BigDecimal setScale(int a0, int a1);
+    public native short shortValueExact();
+    public native java.math.BigDecimal sqrt(java.math.MathContext a0);
+    public native java.math.BigDecimal stripTrailingZeros();
+    public native java.math.BigDecimal subtract(java.math.BigDecimal a0, java.math.MathContext a1);
+    public native java.math.BigInteger toBigInteger();
+    public native java.math.BigInteger toBigIntegerExact();
+    public native java.lang.String toEngineeringString();
+    public native java.math.BigDecimal ulp();
+    public native java.math.BigInteger unscaledValue();
+    public native static java.math.BigDecimal valueOf(long a0, int a1);
+}
+
+public class BigInteger {
+    public native BigInteger(byte[] a0);
+    public native BigInteger(byte[] a0, int a1, int a2);
+    public native BigInteger(int a0, byte[] a1);
+    public native BigInteger(int a0, byte[] a1, int a2, int a3);
+    public native BigInteger(int a0, int a1, java.util.Random a2);
+    public native BigInteger(int a0, java.util.Random a1);
+    public native BigInteger(java.lang.String a0, int a1);
+    public native java.math.BigInteger and(java.math.BigInteger a0);
+    public native java.math.BigInteger andNot(java.math.BigInteger a0);
+    public native int bitCount();
+    public native int bitLength();
+    public native byte byteValueExact();
+    public native java.math.BigInteger clearBit(int a0);
+    public native java.math.BigInteger[] divideAndRemainder(java.math.BigInteger a0);
+    public native java.math.BigInteger flipBit(int a0);
+    public native int getLowestSetBit();
+    public native int intValueExact();
+    public native boolean isProbablePrime(int a0);
+    public native long longValueExact();
+    public native java.math.BigInteger max(java.math.BigInteger a0);
+    public native java.math.BigInteger min(java.math.BigInteger a0);
+    public native java.math.BigInteger modInverse(java.math.BigInteger a0);
+    public native java.math.BigInteger modPow(java.math.BigInteger a0, java.math.BigInteger a1);
+    public native java.math.BigInteger nextProbablePrime();
+    public native java.math.BigInteger not();
+    public native java.math.BigInteger or(java.math.BigInteger a0);
+    public native static java.math.BigInteger probablePrime(int a0, java.util.Random a1);
+    public native java.math.BigInteger setBit(int a0);
+    public native java.math.BigInteger shiftLeft(int a0);
+    public native java.math.BigInteger shiftRight(int a0);
+    public native short shortValueExact();
+    public native java.math.BigInteger sqrt();
+    public native java.math.BigInteger[] sqrtAndRemainder();
+    public native boolean testBit(int a0);
+    public native byte[] toByteArray();
+    public native java.math.BigInteger xor(java.math.BigInteger a0);
+}
+
+public class RoundingMode {
+    public static final java.math.RoundingMode UNNECESSARY;
+    public native static java.math.RoundingMode valueOf(int a0);
+}
+"####,
+    ),
+    (
+        "java.net",
+        r####"
+package java.net;
+
+public abstract class HttpURLConnection {
+    public static final int HTTP_ACCEPTED = 202;
+    public static final int HTTP_BAD_GATEWAY = 502;
+    public static final int HTTP_BAD_METHOD = 405;
+    public static final int HTTP_BAD_REQUEST = 400;
+    public static final int HTTP_CLIENT_TIMEOUT = 408;
+    public static final int HTTP_CONFLICT = 409;
+    public static final int HTTP_CREATED = 201;
+    public static final int HTTP_ENTITY_TOO_LARGE = 413;
+    public static final int HTTP_FORBIDDEN = 403;
+    public static final int HTTP_GATEWAY_TIMEOUT = 504;
+    public static final int HTTP_GONE = 410;
+    public static final int HTTP_INTERNAL_ERROR = 500;
+    public static final int HTTP_LENGTH_REQUIRED = 411;
+    public static final int HTTP_MOVED_PERM = 301;
+    public static final int HTTP_MOVED_TEMP = 302;
+    public static final int HTTP_MULT_CHOICE = 300;
+    public static final int HTTP_NOT_ACCEPTABLE = 406;
+    public static final int HTTP_NOT_AUTHORITATIVE = 203;
+    public static final int HTTP_NOT_IMPLEMENTED = 501;
+    public static final int HTTP_NOT_MODIFIED = 304;
+    public static final int HTTP_NO_CONTENT = 204;
+    public static final int HTTP_PARTIAL = 206;
+    public static final int HTTP_PAYMENT_REQUIRED = 402;
+    public static final int HTTP_PRECON_FAILED = 412;
+    public static final int HTTP_PROXY_AUTH = 407;
+    public static final int HTTP_REQ_TOO_LONG = 414;
+    public static final int HTTP_RESET = 205;
+    public static final int HTTP_SEE_OTHER = 303;
+    public static final int HTTP_SERVER_ERROR = 500;
+    public static final int HTTP_UNAUTHORIZED = 401;
+    public static final int HTTP_UNAVAILABLE = 503;
+    public static final int HTTP_UNSUPPORTED_TYPE = 415;
+    public static final int HTTP_USE_PROXY = 305;
+    public static final int HTTP_VERSION = 505;
+    protected int chunkLength;
+    protected int fixedContentLength;
+    protected long fixedContentLengthLong;
+    protected boolean instanceFollowRedirects;
+    protected java.lang.String method;
+    protected int responseCode;
+    protected java.lang.String responseMessage;
+    protected native HttpURLConnection(java.net.URL a0);
+    public native static boolean getFollowRedirects();
+    public native java.lang.String getHeaderField(int a0);
+    public native long getHeaderFieldDate(java.lang.String a0, long a1);
+    public native java.lang.String getHeaderFieldKey(int a0);
+    public native boolean getInstanceFollowRedirects();
+    public native java.security.Permission getPermission() throws java.io.IOException;
+    public native java.lang.String getRequestMethod();
+    public native void setChunkedStreamingMode(int a0);
+    public native void setFixedLengthStreamingMode(int a0);
+    public native void setFixedLengthStreamingMode(long a0);
+    public native static void setFollowRedirects(boolean a0);
+    public native void setInstanceFollowRedirects(boolean a0);
+    public abstract boolean usingProxy();
+}
+
+public class URI {
+    public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2) throws java.net.URISyntaxException;
+    public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2, int a3, java.lang.String a4, java.lang.String a5, java.lang.String a6) throws java.net.URISyntaxException;
+    public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2, java.lang.String a3) throws java.net.URISyntaxException;
+    public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2, java.lang.String a3, java.lang.String a4) throws java.net.URISyntaxException;
+    public native java.lang.String getAuthority();
+    public native java.lang.String getFragment();
+    public native java.lang.String getRawAuthority();
+    public native java.lang.String getRawFragment();
+    public native java.lang.String getRawPath();
+    public native java.lang.String getRawQuery();
+    public native java.lang.String getRawSchemeSpecificPart();
+    public native java.lang.String getRawUserInfo();
+    public native java.lang.String getSchemeSpecificPart();
+    public native java.lang.String getUserInfo();
+    public native boolean isAbsolute();
+    public native boolean isOpaque();
+    public native java.net.URI normalize();
+    public native java.net.URI parseServerAuthority() throws java.net.URISyntaxException;
+    public native java.net.URI relativize(java.net.URI a0);
+    public native java.net.URI resolve(java.lang.String a0);
+    public native java.net.URI resolve(java.net.URI a0);
+    public native java.lang.String toASCIIString();
+}
+
+public class URL {
+    public native URL(java.lang.String a0, java.lang.String a1, int a2, java.lang.String a3) throws java.net.MalformedURLException;
+    public native URL(java.lang.String a0, java.lang.String a1, int a2, java.lang.String a3, java.net.URLStreamHandler a4) throws java.net.MalformedURLException;
+    public native URL(java.lang.String a0, java.lang.String a1, java.lang.String a2) throws java.net.MalformedURLException;
+    public native URL(java.net.URL a0, java.lang.String a1) throws java.net.MalformedURLException;
+    public native URL(java.net.URL a0, java.lang.String a1, java.net.URLStreamHandler a2) throws java.net.MalformedURLException;
+    public native java.lang.String getAuthority();
+    public native java.lang.Object getContent() throws java.io.IOException;
+    public native java.lang.Object getContent(java.lang.Class[] a0) throws java.io.IOException;
+    public native int getDefaultPort();
+    public native java.lang.String getFile();
+    public native java.lang.String getQuery();
+    public native java.lang.String getRef();
+    public native java.lang.String getUserInfo();
+    public native java.net.URLConnection openConnection(java.net.Proxy a0) throws java.io.IOException;
+    public native boolean sameFile(java.net.URL a0);
+    public native static void setURLStreamHandlerFactory(java.net.URLStreamHandlerFactory a0);
+    public native java.lang.String toExternalForm();
+    public native java.net.URI toURI() throws java.net.URISyntaxException;
+}
+
+public abstract class URLConnection {
+    protected boolean allowUserInteraction;
+    protected boolean connected;
+    protected boolean doInput;
+    protected boolean doOutput;
+    protected long ifModifiedSince;
+    protected java.net.URL url;
+    protected boolean useCaches;
+    protected native URLConnection(java.net.URL a0);
+    public native void addRequestProperty(java.lang.String a0, java.lang.String a1);
+    public native boolean getAllowUserInteraction();
+    public native int getConnectTimeout();
+    public native java.lang.Object getContent() throws java.io.IOException;
+    public native java.lang.Object getContent(java.lang.Class[] a0) throws java.io.IOException;
+    public native java.lang.String getContentEncoding();
+    public native long getContentLengthLong();
+    public native long getDate();
+    public native static boolean getDefaultAllowUserInteraction();
+    public native static java.lang.String getDefaultRequestProperty(java.lang.String a0);
+    public native boolean getDefaultUseCaches();
+    public native boolean getDoInput();
+    public native boolean getDoOutput();
+    public native long getExpiration();
+    public native static java.net.FileNameMap getFileNameMap();
+    public native java.lang.String getHeaderField(int a0);
+    public native java.lang.String getHeaderField(java.lang.String a0);
+    public native long getHeaderFieldDate(java.lang.String a0, long a1);
+    public native int getHeaderFieldInt(java.lang.String a0, int a1);
+    public native java.lang.String getHeaderFieldKey(int a0);
+    public native long getHeaderFieldLong(java.lang.String a0, long a1);
+    public native java.util.Map<java.lang.String, java.util.List<java.lang.String>> getHeaderFields();
+    public native long getIfModifiedSince();
+    public native long getLastModified();
+    public native java.security.Permission getPermission() throws java.io.IOException;
+    public native int getReadTimeout();
+    public native java.util.Map<java.lang.String, java.util.List<java.lang.String>> getRequestProperties();
+    public native java.lang.String getRequestProperty(java.lang.String a0);
+    public native java.net.URL getURL();
+    public native boolean getUseCaches();
+    public native static java.lang.String guessContentTypeFromName(java.lang.String a0);
+    public native static java.lang.String guessContentTypeFromStream(java.io.InputStream a0) throws java.io.IOException;
+    public native void setAllowUserInteraction(boolean a0);
+    public native static void setContentHandlerFactory(java.net.ContentHandlerFactory a0);
+    public native static void setDefaultAllowUserInteraction(boolean a0);
+    public native static void setDefaultRequestProperty(java.lang.String a0, java.lang.String a1);
+    public native void setDefaultUseCaches(boolean a0);
+    public native void setDoInput(boolean a0);
+    public native static void setFileNameMap(java.net.FileNameMap a0);
+    public native void setIfModifiedSince(long a0);
+    public native void setUseCaches(boolean a0);
+}
+
+public class URLDecoder {
+    public native static java.lang.String decode(java.lang.String a0);
+}
+
+public class URLEncoder {
+    public native static java.lang.String encode(java.lang.String a0);
+}
+"####,
+    ),
+    (
+        "java.nio.charset",
+        r####"
+package java.nio.charset;
+
+public abstract class Charset {
+    protected native Charset(java.lang.String a0, java.lang.String[] a1);
+    public native java.util.Set<java.lang.String> aliases();
+    public native static java.util.SortedMap<java.lang.String, java.nio.charset.Charset> availableCharsets();
+    public native boolean canEncode();
+    public native int compareTo(java.nio.charset.Charset a0);
+    public abstract boolean contains(java.nio.charset.Charset a0);
+    public native java.nio.CharBuffer decode(java.nio.ByteBuffer a0);
+    public native java.lang.String displayName();
+    public native java.lang.String displayName(java.util.Locale a0);
+    public native java.nio.ByteBuffer encode(java.lang.String a0);
+    public native java.nio.ByteBuffer encode(java.nio.CharBuffer a0);
+    public native boolean isRegistered();
+    public native static boolean isSupported(java.lang.String a0);
+    public abstract java.nio.charset.CharsetDecoder newDecoder();
+    public abstract java.nio.charset.CharsetEncoder newEncoder();
+}
+
+public class StandardCharsets {
+    public static final java.nio.charset.Charset UTF_16BE;
+    public static final java.nio.charset.Charset UTF_16LE;
+}
+"####,
+    ),
+    (
+        "java.nio.file",
+        r####"
+package java.nio.file;
+
+public class FileAlreadyExistsException {
+    public native FileAlreadyExistsException(java.lang.String a0, java.lang.String a1, java.lang.String a2);
+}
+
+public class Files {
+    public native static long copy(java.nio.file.Path a0, java.io.OutputStream a1) throws java.io.IOException;
+    public native static java.nio.file.Path createLink(java.nio.file.Path a0, java.nio.file.Path a1) throws java.io.IOException;
+    public native static java.nio.file.Path createSymbolicLink(java.nio.file.Path a0, java.nio.file.Path a1, java.nio.file.attribute.FileAttribute<java.lang.Object>... a2) throws java.io.IOException;
+    public native static java.nio.file.Path createTempDirectory(java.lang.String a0, java.nio.file.attribute.FileAttribute<java.lang.Object>... a1) throws java.io.IOException;
+    public native static java.nio.file.Path createTempDirectory(java.nio.file.Path a0, java.lang.String a1, java.nio.file.attribute.FileAttribute<java.lang.Object>... a2) throws java.io.IOException;
+    public native static java.nio.file.Path createTempFile(java.lang.String a0, java.lang.String a1, java.nio.file.attribute.FileAttribute<java.lang.Object>... a2) throws java.io.IOException;
+    public native static java.nio.file.Path createTempFile(java.nio.file.Path a0, java.lang.String a1, java.lang.String a2, java.nio.file.attribute.FileAttribute<java.lang.Object>... a3) throws java.io.IOException;
+    public native static java.util.stream.Stream<java.nio.file.Path> find(java.nio.file.Path a0, int a1, java.util.function.BiPredicate<java.nio.file.Path, java.nio.file.attribute.BasicFileAttributes> a2, java.nio.file.FileVisitOption... a3) throws java.io.IOException;
+    public native static java.lang.Object getAttribute(java.nio.file.Path a0, java.lang.String a1, java.nio.file.LinkOption... a2) throws java.io.IOException;
+    public native static <V extends java.nio.file.attribute.FileAttributeView> V getFileAttributeView(java.nio.file.Path a0, java.lang.Class<V> a1, java.nio.file.LinkOption... a2);
+    public native static java.nio.file.FileStore getFileStore(java.nio.file.Path a0) throws java.io.IOException;
+    public native static java.nio.file.attribute.FileTime getLastModifiedTime(java.nio.file.Path a0, java.nio.file.LinkOption... a1) throws java.io.IOException;
+    public native static java.nio.file.attribute.UserPrincipal getOwner(java.nio.file.Path a0, java.nio.file.LinkOption... a1) throws java.io.IOException;
+    public native static java.util.Set<java.nio.file.attribute.PosixFilePermission> getPosixFilePermissions(java.nio.file.Path a0, java.nio.file.LinkOption... a1) throws java.io.IOException;
+    public native static boolean isExecutable(java.nio.file.Path a0);
+    public native static boolean isHidden(java.nio.file.Path a0) throws java.io.IOException;
+    public native static boolean isSameFile(java.nio.file.Path a0, java.nio.file.Path a1) throws java.io.IOException;
+    public native static boolean isSymbolicLink(java.nio.file.Path a0);
+    public native static java.util.stream.Stream<java.lang.String> lines(java.nio.file.Path a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native static java.io.BufferedReader newBufferedReader(java.nio.file.Path a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native static java.io.BufferedWriter newBufferedWriter(java.nio.file.Path a0, java.nio.charset.Charset a1, java.nio.file.OpenOption... a2) throws java.io.IOException;
+    public native static java.nio.channels.SeekableByteChannel newByteChannel(java.nio.file.Path a0, java.nio.file.OpenOption... a1) throws java.io.IOException;
+    public native static java.nio.channels.SeekableByteChannel newByteChannel(java.nio.file.Path a0, java.util.Set<java.nio.file.OpenOption> a1, java.nio.file.attribute.FileAttribute<java.lang.Object>... a2) throws java.io.IOException;
+    public native static java.nio.file.DirectoryStream<java.nio.file.Path> newDirectoryStream(java.nio.file.Path a0) throws java.io.IOException;
+    public native static java.nio.file.DirectoryStream<java.nio.file.Path> newDirectoryStream(java.nio.file.Path a0, java.lang.String a1) throws java.io.IOException;
+    public native static java.nio.file.DirectoryStream<java.nio.file.Path> newDirectoryStream(java.nio.file.Path a0, java.nio.file.DirectoryStream.Filter<java.nio.file.Path> a1) throws java.io.IOException;
+    public native static java.lang.String probeContentType(java.nio.file.Path a0) throws java.io.IOException;
+    public native static java.util.List<java.lang.String> readAllLines(java.nio.file.Path a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native static <A extends java.nio.file.attribute.BasicFileAttributes> A readAttributes(java.nio.file.Path a0, java.lang.Class<A> a1, java.nio.file.LinkOption... a2) throws java.io.IOException;
+    public native static java.util.Map<java.lang.String, java.lang.Object> readAttributes(java.nio.file.Path a0, java.lang.String a1, java.nio.file.LinkOption... a2) throws java.io.IOException;
+    public native static java.lang.String readString(java.nio.file.Path a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native static java.nio.file.Path readSymbolicLink(java.nio.file.Path a0) throws java.io.IOException;
+    public native static java.nio.file.Path setAttribute(java.nio.file.Path a0, java.lang.String a1, java.lang.Object a2, java.nio.file.LinkOption... a3) throws java.io.IOException;
+    public native static java.nio.file.Path setLastModifiedTime(java.nio.file.Path a0, java.nio.file.attribute.FileTime a1) throws java.io.IOException;
+    public native static java.nio.file.Path setOwner(java.nio.file.Path a0, java.nio.file.attribute.UserPrincipal a1) throws java.io.IOException;
+    public native static java.nio.file.Path setPosixFilePermissions(java.nio.file.Path a0, java.util.Set<java.nio.file.attribute.PosixFilePermission> a1) throws java.io.IOException;
+    public native static java.util.stream.Stream<java.nio.file.Path> walk(java.nio.file.Path a0, int a1, java.nio.file.FileVisitOption... a2) throws java.io.IOException;
+    public native static java.nio.file.Path walkFileTree(java.nio.file.Path a0, java.nio.file.FileVisitor<java.nio.file.Path> a1) throws java.io.IOException;
+    public native static java.nio.file.Path walkFileTree(java.nio.file.Path a0, java.util.Set<java.nio.file.FileVisitOption> a1, int a2, java.nio.file.FileVisitor<java.nio.file.Path> a3) throws java.io.IOException;
+    public native static java.nio.file.Path write(java.nio.file.Path a0, java.lang.Iterable<java.lang.CharSequence> a1, java.nio.charset.Charset a2, java.nio.file.OpenOption... a3) throws java.io.IOException;
+    public native static java.nio.file.Path write(java.nio.file.Path a0, java.lang.Iterable<java.lang.CharSequence> a1, java.nio.file.OpenOption... a2) throws java.io.IOException;
+    public native static java.nio.file.Path writeString(java.nio.file.Path a0, java.lang.CharSequence a1, java.nio.charset.Charset a2, java.nio.file.OpenOption... a3) throws java.io.IOException;
+}
+
+public class NoSuchFileException {
+    public native NoSuchFileException(java.lang.String a0, java.lang.String a1, java.lang.String a2);
+}
+
+public interface Path {
+    java.nio.file.FileSystem getFileSystem();
+    java.nio.file.Path getRoot();
+    boolean isAbsolute();
+    java.util.Iterator<java.nio.file.Path> iterator();
+    static java.nio.file.Path of(java.net.URI a0);
+    java.nio.file.WatchKey register(java.nio.file.WatchService a0, java.nio.file.WatchEvent.Kind<java.lang.Object>... a1) throws java.io.IOException;
+    java.nio.file.WatchKey register(java.nio.file.WatchService a0, java.nio.file.WatchEvent.Kind<java.lang.Object>[] a1, java.nio.file.WatchEvent.Modifier... a2) throws java.io.IOException;
+    java.nio.file.Path relativize(java.nio.file.Path a0);
+    java.nio.file.Path resolveSibling(java.lang.String a0);
+    java.nio.file.Path resolveSibling(java.nio.file.Path a0);
+    java.nio.file.Path subpath(int a0, int a1);
+    java.nio.file.Path toRealPath(java.nio.file.LinkOption... a0) throws java.io.IOException;
+    java.net.URI toUri();
+}
+
+public class Paths {
+    public native static java.nio.file.Path get(java.net.URI a0);
+}
+
+public class StandardOpenOption {
+    public static final java.nio.file.StandardOpenOption DELETE_ON_CLOSE;
+    public static final java.nio.file.StandardOpenOption DSYNC;
+    public static final java.nio.file.StandardOpenOption SPARSE;
+    public static final java.nio.file.StandardOpenOption SYNC;
+}
+"####,
+    ),
+    (
+        "java.text",
+        r####"
+package java.text;
+
+public abstract class DateFormat {
+    public static final int AM_PM_FIELD = 14;
+    public static final int DATE_FIELD = 3;
+    public static final int DAY_OF_WEEK_FIELD = 9;
+    public static final int DAY_OF_WEEK_IN_MONTH_FIELD = 11;
+    public static final int DAY_OF_YEAR_FIELD = 10;
+    public static final int DEFAULT = 2;
+    public static final int ERA_FIELD = 0;
+    public static final int HOUR0_FIELD = 16;
+    public static final int HOUR1_FIELD = 15;
+    public static final int HOUR_OF_DAY0_FIELD = 5;
+    public static final int HOUR_OF_DAY1_FIELD = 4;
+    public static final int MILLISECOND_FIELD = 8;
+    public static final int MINUTE_FIELD = 6;
+    public static final int MONTH_FIELD = 2;
+    public static final int SECOND_FIELD = 7;
+    public static final int TIMEZONE_FIELD = 17;
+    public static final int WEEK_OF_MONTH_FIELD = 13;
+    public static final int WEEK_OF_YEAR_FIELD = 12;
+    public static final int YEAR_FIELD = 1;
+    protected java.util.Calendar calendar;
+    protected java.text.NumberFormat numberFormat;
+    public native java.lang.Object clone();
+    public native java.lang.StringBuffer format(java.lang.Object a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public abstract java.lang.StringBuffer format(java.util.Date a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native static java.util.Locale[] getAvailableLocales();
+    public native java.util.Calendar getCalendar();
+    public native static java.text.DateFormat getDateInstance(int a0);
+    public native static java.text.DateFormat getDateInstance(int a0, java.util.Locale a1);
+    public native static java.text.DateFormat getDateTimeInstance(int a0, int a1);
+    public native static java.text.DateFormat getDateTimeInstance(int a0, int a1, java.util.Locale a2);
+    public native static java.text.DateFormat getInstance();
+    public native java.text.NumberFormat getNumberFormat();
+    public native static java.text.DateFormat getTimeInstance(int a0);
+    public native static java.text.DateFormat getTimeInstance(int a0, java.util.Locale a1);
+    public native java.util.TimeZone getTimeZone();
+    public native boolean isLenient();
+    public abstract java.util.Date parse(java.lang.String a0, java.text.ParsePosition a1);
+    public native java.lang.Object parseObject(java.lang.String a0, java.text.ParsePosition a1);
+    public native void setCalendar(java.util.Calendar a0);
+    public native void setLenient(boolean a0);
+    public native void setNumberFormat(java.text.NumberFormat a0);
+    public static class Field extends java.text.Format.Field {
+        public static final java.text.DateFormat.Field AM_PM;
+        public static final java.text.DateFormat.Field DAY_OF_MONTH;
+        public static final java.text.DateFormat.Field DAY_OF_WEEK;
+        public static final java.text.DateFormat.Field DAY_OF_WEEK_IN_MONTH;
+        public static final java.text.DateFormat.Field DAY_OF_YEAR;
+        public static final java.text.DateFormat.Field ERA;
+        public static final java.text.DateFormat.Field HOUR0;
+        public static final java.text.DateFormat.Field HOUR1;
+        public static final java.text.DateFormat.Field HOUR_OF_DAY0;
+        public static final java.text.DateFormat.Field HOUR_OF_DAY1;
+        public static final java.text.DateFormat.Field MILLISECOND;
+        public static final java.text.DateFormat.Field MINUTE;
+        public static final java.text.DateFormat.Field MONTH;
+        public static final java.text.DateFormat.Field SECOND;
+        public static final java.text.DateFormat.Field TIME_ZONE;
+        public static final java.text.DateFormat.Field WEEK_OF_MONTH;
+        public static final java.text.DateFormat.Field WEEK_OF_YEAR;
+        public static final java.text.DateFormat.Field YEAR;
+        protected native Field(java.lang.String a0, int a1);
+        public native int getCalendarField();
+        public native static java.text.DateFormat.Field ofCalendarField(int a0);
+        protected native java.lang.Object readResolve() throws java.io.InvalidObjectException;
+    }
+}
+
+public class DecimalFormat {
+    public native DecimalFormat(java.lang.String a0, java.text.DecimalFormatSymbols a1);
+    public native void applyLocalizedPattern(java.lang.String a0);
+    public native java.lang.Object clone();
+    public native java.lang.StringBuffer format(double a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native java.lang.StringBuffer format(java.lang.Object a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native java.lang.StringBuffer format(long a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native java.text.AttributedCharacterIterator formatToCharacterIterator(java.lang.Object a0);
+    public native java.util.Currency getCurrency();
+    public native java.text.DecimalFormatSymbols getDecimalFormatSymbols();
+    public native int getGroupingSize();
+    public native int getMaximumFractionDigits();
+    public native int getMaximumIntegerDigits();
+    public native int getMinimumFractionDigits();
+    public native int getMinimumIntegerDigits();
+    public native int getMultiplier();
+    public native java.lang.String getNegativePrefix();
+    public native java.lang.String getNegativeSuffix();
+    public native java.lang.String getPositivePrefix();
+    public native java.lang.String getPositiveSuffix();
+    public native java.math.RoundingMode getRoundingMode();
+    public native boolean isDecimalSeparatorAlwaysShown();
+    public native boolean isGroupingUsed();
+    public native boolean isParseBigDecimal();
+    public native boolean isParseIntegerOnly();
+    public native java.lang.Number parse(java.lang.String a0, java.text.ParsePosition a1);
+    public native void setCurrency(java.util.Currency a0);
+    public native void setDecimalFormatSymbols(java.text.DecimalFormatSymbols a0);
+    public native void setDecimalSeparatorAlwaysShown(boolean a0);
+    public native void setGroupingSize(int a0);
+    public native void setMaximumIntegerDigits(int a0);
+    public native void setMinimumIntegerDigits(int a0);
+    public native void setMultiplier(int a0);
+    public native void setNegativePrefix(java.lang.String a0);
+    public native void setNegativeSuffix(java.lang.String a0);
+    public native void setParseBigDecimal(boolean a0);
+    public native void setParseIntegerOnly(boolean a0);
+    public native void setPositivePrefix(java.lang.String a0);
+    public native void setPositiveSuffix(java.lang.String a0);
+    public native void setRoundingMode(java.math.RoundingMode a0);
+    public native java.lang.String toLocalizedPattern();
+    public native java.lang.String toPattern();
+}
+
+public abstract class Format {
+    public native java.lang.Object clone();
+    public abstract java.lang.StringBuffer format(java.lang.Object a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native java.text.AttributedCharacterIterator formatToCharacterIterator(java.lang.Object a0);
+    public native java.lang.Object parseObject(java.lang.String a0) throws java.text.ParseException;
+    public abstract java.lang.Object parseObject(java.lang.String a0, java.text.ParsePosition a1);
+    public static class Field extends java.text.AttributedCharacterIterator.Attribute {
+        protected native Field(java.lang.String a0);
+    }
+}
+
+public abstract class NumberFormat {
+    public static final int FRACTION_FIELD = 1;
+    public static final int INTEGER_FIELD = 0;
+    public native java.lang.Object clone();
+    public abstract java.lang.StringBuffer format(double a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native java.lang.StringBuffer format(java.lang.Object a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public abstract java.lang.StringBuffer format(long a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native static java.util.Locale[] getAvailableLocales();
+    public native java.util.Currency getCurrency();
+    public native static java.text.NumberFormat getCurrencyInstance(java.util.Locale a0);
+    public native static java.text.NumberFormat getIntegerInstance();
+    public native static java.text.NumberFormat getIntegerInstance(java.util.Locale a0);
+    public native int getMaximumFractionDigits();
+    public native int getMaximumIntegerDigits();
+    public native int getMinimumFractionDigits();
+    public native int getMinimumIntegerDigits();
+    public native static java.text.NumberFormat getNumberInstance(java.util.Locale a0);
+    public native static java.text.NumberFormat getPercentInstance(java.util.Locale a0);
+    public native java.math.RoundingMode getRoundingMode();
+    public native boolean isGroupingUsed();
+    public native boolean isParseIntegerOnly();
+    public abstract java.lang.Number parse(java.lang.String a0, java.text.ParsePosition a1);
+    public native java.lang.Object parseObject(java.lang.String a0, java.text.ParsePosition a1);
+    public native void setCurrency(java.util.Currency a0);
+    public native void setMaximumIntegerDigits(int a0);
+    public native void setMinimumIntegerDigits(int a0);
+    public native void setParseIntegerOnly(boolean a0);
+    public native void setRoundingMode(java.math.RoundingMode a0);
+    public static class Field extends java.text.Format.Field {
+        public static final java.text.NumberFormat.Field CURRENCY;
+        public static final java.text.NumberFormat.Field DECIMAL_SEPARATOR;
+        public static final java.text.NumberFormat.Field EXPONENT;
+        public static final java.text.NumberFormat.Field EXPONENT_SIGN;
+        public static final java.text.NumberFormat.Field EXPONENT_SYMBOL;
+        public static final java.text.NumberFormat.Field FRACTION;
+        public static final java.text.NumberFormat.Field GROUPING_SEPARATOR;
+        public static final java.text.NumberFormat.Field INTEGER;
+        public static final java.text.NumberFormat.Field PERCENT;
+        public static final java.text.NumberFormat.Field PERMILLE;
+        public static final java.text.NumberFormat.Field SIGN;
+        protected native Field(java.lang.String a0);
+        protected native java.lang.Object readResolve() throws java.io.InvalidObjectException;
+    }
+}
+
+public class SimpleDateFormat {
+    public native void applyLocalizedPattern(java.lang.String a0);
+    public native java.lang.Object clone();
+    public native java.lang.StringBuffer format(java.util.Date a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
+    public native java.text.AttributedCharacterIterator formatToCharacterIterator(java.lang.Object a0);
+    public native java.util.Date get2DigitYearStart();
+    public native java.text.DateFormatSymbols getDateFormatSymbols();
+    public native java.util.Date parse(java.lang.String a0, java.text.ParsePosition a1);
+    public native void set2DigitYearStart(java.util.Date a0);
+    public native void setDateFormatSymbols(java.text.DateFormatSymbols a0);
+    public native java.lang.String toLocalizedPattern();
+}
+"####,
+    ),
+    (
+        "java.time",
+        r####"
+package java.time;
+
+public class DayOfWeek {
+    public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
+    public native static java.time.DayOfWeek from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native java.lang.String getDisplayName(java.time.format.TextStyle a0, java.util.Locale a1);
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+}
+
+public class Duration {
+    public native java.time.Duration abs();
+    public native java.time.temporal.Temporal addTo(java.time.temporal.Temporal a0);
+    public native long dividedBy(java.time.Duration a0);
+    public native java.time.Duration dividedBy(long a0);
+    public native static java.time.Duration from(java.time.temporal.TemporalAmount a0);
+    public native long get(java.time.temporal.TemporalUnit a0);
+    public native int getNano();
+    public native long getSeconds();
+    public native java.util.List<java.time.temporal.TemporalUnit> getUnits();
+    public native boolean isPositive();
+    public native java.time.Duration minus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.Duration minusDays(long a0);
+    public native java.time.Duration minusHours(long a0);
+    public native java.time.Duration minusMillis(long a0);
+    public native java.time.Duration minusMinutes(long a0);
+    public native java.time.Duration minusNanos(long a0);
+    public native java.time.Duration minusSeconds(long a0);
+    public native java.time.Duration negated();
+    public native static java.time.Duration of(long a0, java.time.temporal.TemporalUnit a1);
+    public native static java.time.Duration ofSeconds(long a0, long a1);
+    public native static java.time.Duration parse(java.lang.CharSequence a0);
+    public native java.time.Duration plus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.Duration plusDays(long a0);
+    public native java.time.Duration plusHours(long a0);
+    public native java.time.Duration plusMillis(long a0);
+    public native java.time.Duration plusMinutes(long a0);
+    public native java.time.Duration plusNanos(long a0);
+    public native java.time.Duration plusSeconds(long a0);
+    public native java.time.temporal.Temporal subtractFrom(java.time.temporal.Temporal a0);
+    public native long toDaysPart();
+    public native int toHoursPart();
+    public native int toMillisPart();
+    public native int toMinutesPart();
+    public native int toNanosPart();
+    public native int toSecondsPart();
+    public native java.time.Duration truncatedTo(java.time.temporal.TemporalUnit a0);
+    public native java.time.Duration withNanos(int a0);
+    public native java.time.Duration withSeconds(long a0);
+}
+
+public class Instant {
+    public static final java.time.Instant MAX;
+    public static final java.time.Instant MIN;
+    public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
+    public native java.time.OffsetDateTime atOffset(java.time.ZoneOffset a0);
+    public native java.time.ZonedDateTime atZone(java.time.ZoneId a0);
+    public native static java.time.Instant from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native int getNano();
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalUnit a0);
+    public native java.time.Instant minus(java.time.temporal.TemporalAmount a0);
+    public native java.time.Instant minus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.Instant minusMillis(long a0);
+    public native java.time.Instant minusNanos(long a0);
+    public native static java.time.Instant now(java.time.Clock a0);
+    public native static java.time.Instant ofEpochSecond(long a0, long a1);
+    public native static java.time.Instant parse(java.lang.CharSequence a0);
+    public native java.time.Instant plus(java.time.temporal.TemporalAmount a0);
+    public native java.time.Instant plus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.Instant plusNanos(long a0);
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+    public native java.time.Instant truncatedTo(java.time.temporal.TemporalUnit a0);
+    public native long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.Instant with(java.time.temporal.TemporalAdjuster a0);
+    public native java.time.Instant with(java.time.temporal.TemporalField a0, long a1);
+}
+
+public class LocalDate {
+    public static final java.time.LocalDate EPOCH;
+    public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
+    public native java.time.ZonedDateTime atStartOfDay(java.time.ZoneId a0);
+    public native java.time.LocalDateTime atTime(int a0, int a1);
+    public native java.time.LocalDateTime atTime(int a0, int a1, int a2);
+    public native java.time.LocalDateTime atTime(int a0, int a1, int a2, int a3);
+    public native java.time.LocalDateTime atTime(java.time.LocalTime a0);
+    public native java.time.OffsetDateTime atTime(java.time.OffsetTime a0);
+    public native java.util.stream.Stream<java.time.LocalDate> datesUntil(java.time.LocalDate a0);
+    public native java.util.stream.Stream<java.time.LocalDate> datesUntil(java.time.LocalDate a0, java.time.Period a1);
+    public native static java.time.LocalDate from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native java.time.chrono.IsoChronology getChronology();
+    public native java.time.chrono.Era getEra();
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalUnit a0);
+    public native java.time.LocalDate minus(java.time.temporal.TemporalAmount a0);
+    public native java.time.LocalDate minus(long a0, java.time.temporal.TemporalUnit a1);
+    public native static java.time.LocalDate now(java.time.Clock a0);
+    public native static java.time.LocalDate now(java.time.ZoneId a0);
+    public native static java.time.LocalDate of(int a0, java.time.Month a1, int a2);
+    public native static java.time.LocalDate ofInstant(java.time.Instant a0, java.time.ZoneId a1);
+    public native static java.time.LocalDate ofYearDay(int a0, int a1);
+    public native static java.time.LocalDate parse(java.lang.CharSequence a0, java.time.format.DateTimeFormatter a1);
+    public native java.time.LocalDate plus(java.time.temporal.TemporalAmount a0);
+    public native java.time.LocalDate plus(long a0, java.time.temporal.TemporalUnit a1);
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+    public native long toEpochSecond(java.time.LocalTime a0, java.time.ZoneOffset a1);
+    public native java.time.Period until(java.time.chrono.ChronoLocalDate a0);
+    public native long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalDate with(java.time.temporal.TemporalAdjuster a0);
+    public native java.time.LocalDate with(java.time.temporal.TemporalField a0, long a1);
+}
+
+public class LocalDateTime {
+    public static final java.time.LocalDateTime MAX;
+    public static final java.time.LocalDateTime MIN;
+    public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
+    public native java.time.OffsetDateTime atOffset(java.time.ZoneOffset a0);
+    public native java.time.ZonedDateTime atZone(java.time.ZoneId a0);
+    public native static java.time.LocalDateTime from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native java.time.DayOfWeek getDayOfWeek();
+    public native int getDayOfYear();
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native java.time.Month getMonth();
+    public native int getNano();
+    public native boolean isEqual(java.time.chrono.ChronoLocalDateTime<java.lang.Object> a0);
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalUnit a0);
+    public native java.time.LocalDateTime minus(java.time.temporal.TemporalAmount a0);
+    public native java.time.LocalDateTime minus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalDateTime minusHours(long a0);
+    public native java.time.LocalDateTime minusMinutes(long a0);
+    public native java.time.LocalDateTime minusMonths(long a0);
+    public native java.time.LocalDateTime minusNanos(long a0);
+    public native java.time.LocalDateTime minusSeconds(long a0);
+    public native java.time.LocalDateTime minusWeeks(long a0);
+    public native java.time.LocalDateTime minusYears(long a0);
+    public native static java.time.LocalDateTime now(java.time.Clock a0);
+    public native static java.time.LocalDateTime now(java.time.ZoneId a0);
+    public native static java.time.LocalDateTime of(int a0, int a1, int a2, int a3, int a4, int a5, int a6);
+    public native static java.time.LocalDateTime of(int a0, java.time.Month a1, int a2, int a3, int a4);
+    public native static java.time.LocalDateTime of(int a0, java.time.Month a1, int a2, int a3, int a4, int a5);
+    public native static java.time.LocalDateTime of(int a0, java.time.Month a1, int a2, int a3, int a4, int a5, int a6);
+    public native static java.time.LocalDateTime ofEpochSecond(long a0, int a1, java.time.ZoneOffset a2);
+    public native static java.time.LocalDateTime ofInstant(java.time.Instant a0, java.time.ZoneId a1);
+    public native static java.time.LocalDateTime parse(java.lang.CharSequence a0, java.time.format.DateTimeFormatter a1);
+    public native java.time.LocalDateTime plus(java.time.temporal.TemporalAmount a0);
+    public native java.time.LocalDateTime plus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalDateTime plusMonths(long a0);
+    public native java.time.LocalDateTime plusNanos(long a0);
+    public native java.time.LocalDateTime plusWeeks(long a0);
+    public native java.time.LocalDateTime plusYears(long a0);
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+    public native java.time.LocalDateTime truncatedTo(java.time.temporal.TemporalUnit a0);
+    public native long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalDateTime with(java.time.temporal.TemporalAdjuster a0);
+    public native java.time.LocalDateTime with(java.time.temporal.TemporalField a0, long a1);
+    public native java.time.LocalDateTime withDayOfMonth(int a0);
+    public native java.time.LocalDateTime withDayOfYear(int a0);
+    public native java.time.LocalDateTime withHour(int a0);
+    public native java.time.LocalDateTime withMinute(int a0);
+    public native java.time.LocalDateTime withMonth(int a0);
+    public native java.time.LocalDateTime withNano(int a0);
+    public native java.time.LocalDateTime withSecond(int a0);
+    public native java.time.LocalDateTime withYear(int a0);
+}
+
+public class LocalTime {
+    public static final java.time.LocalTime MIDNIGHT;
+    public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
+    public native java.time.LocalDateTime atDate(java.time.LocalDate a0);
+    public native java.time.OffsetTime atOffset(java.time.ZoneOffset a0);
+    public native static java.time.LocalTime from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native int getNano();
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalUnit a0);
+    public native java.time.LocalTime minus(java.time.temporal.TemporalAmount a0);
+    public native java.time.LocalTime minus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalTime minusHours(long a0);
+    public native java.time.LocalTime minusMinutes(long a0);
+    public native java.time.LocalTime minusNanos(long a0);
+    public native java.time.LocalTime minusSeconds(long a0);
+    public native static java.time.LocalTime now(java.time.Clock a0);
+    public native static java.time.LocalTime now(java.time.ZoneId a0);
+    public native static java.time.LocalTime of(int a0, int a1, int a2, int a3);
+    public native static java.time.LocalTime ofInstant(java.time.Instant a0, java.time.ZoneId a1);
+    public native static java.time.LocalTime ofNanoOfDay(long a0);
+    public native static java.time.LocalTime ofSecondOfDay(long a0);
+    public native static java.time.LocalTime parse(java.lang.CharSequence a0, java.time.format.DateTimeFormatter a1);
+    public native java.time.LocalTime plus(java.time.temporal.TemporalAmount a0);
+    public native java.time.LocalTime plus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalTime plusNanos(long a0);
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+    public native long toEpochSecond(java.time.LocalDate a0, java.time.ZoneOffset a1);
+    public native long toNanoOfDay();
+    public native int toSecondOfDay();
+    public native java.time.LocalTime truncatedTo(java.time.temporal.TemporalUnit a0);
+    public native long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.LocalTime with(java.time.temporal.TemporalAdjuster a0);
+    public native java.time.LocalTime with(java.time.temporal.TemporalField a0, long a1);
+    public native java.time.LocalTime withHour(int a0);
+    public native java.time.LocalTime withMinute(int a0);
+    public native java.time.LocalTime withNano(int a0);
+    public native java.time.LocalTime withSecond(int a0);
+}
+
+public class Month {
+    public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
+    public native int firstDayOfYear(boolean a0);
+    public native java.time.Month firstMonthOfQuarter();
+    public native static java.time.Month from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native java.lang.String getDisplayName(java.time.format.TextStyle a0, java.util.Locale a1);
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native int maxLength();
+    public native int minLength();
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+}
+
+public class Period {
+    public static final java.time.Period ZERO;
+    public native java.time.temporal.Temporal addTo(java.time.temporal.Temporal a0);
+    public native static java.time.Period from(java.time.temporal.TemporalAmount a0);
+    public native long get(java.time.temporal.TemporalUnit a0);
+    public native java.time.chrono.IsoChronology getChronology();
+    public native java.util.List<java.time.temporal.TemporalUnit> getUnits();
+    public native boolean isNegative();
+    public native boolean isZero();
+    public native java.time.Period minus(java.time.temporal.TemporalAmount a0);
+    public native java.time.Period minusDays(long a0);
+    public native java.time.Period minusMonths(long a0);
+    public native java.time.Period minusYears(long a0);
+    public native java.time.Period multipliedBy(int a0);
+    public native java.time.Period negated();
+    public native java.time.Period normalized();
+    public native static java.time.Period of(int a0, int a1, int a2);
+    public native static java.time.Period ofWeeks(int a0);
+    public native static java.time.Period parse(java.lang.CharSequence a0);
+    public native java.time.Period plus(java.time.temporal.TemporalAmount a0);
+    public native java.time.Period plusDays(long a0);
+    public native java.time.Period plusMonths(long a0);
+    public native java.time.Period plusYears(long a0);
+    public native java.time.temporal.Temporal subtractFrom(java.time.temporal.Temporal a0);
+    public native java.time.Period withDays(int a0);
+    public native java.time.Period withMonths(int a0);
+    public native java.time.Period withYears(int a0);
+}
+
+public abstract class ZoneId {
+    public static final java.util.Map<java.lang.String, java.lang.String> SHORT_IDS;
+    public native static java.time.ZoneId from(java.time.temporal.TemporalAccessor a0);
+    public native static java.util.Set<java.lang.String> getAvailableZoneIds();
+    public native java.lang.String getDisplayName(java.time.format.TextStyle a0, java.util.Locale a1);
+    public abstract java.time.zone.ZoneRules getRules();
+    public native java.time.ZoneId normalized();
+    public native static java.time.ZoneId of(java.lang.String a0, java.util.Map<java.lang.String, java.lang.String> a1);
+    public native static java.time.ZoneId ofOffset(java.lang.String a0, java.time.ZoneOffset a1);
+}
+
+public class ZonedDateTime {
+    public native static java.time.ZonedDateTime from(java.time.temporal.TemporalAccessor a0);
+    public native int get(java.time.temporal.TemporalField a0);
+    public native int getDayOfMonth();
+    public native java.time.DayOfWeek getDayOfWeek();
+    public native int getDayOfYear();
+    public native long getLong(java.time.temporal.TemporalField a0);
+    public native int getMinute();
+    public native java.time.Month getMonth();
+    public native int getMonthValue();
+    public native int getNano();
+    public native java.time.ZoneOffset getOffset();
+    public native int getSecond();
+    public native java.time.ZoneId getZone();
+    public native boolean isSupported(java.time.temporal.TemporalField a0);
+    public native boolean isSupported(java.time.temporal.TemporalUnit a0);
+    public native java.time.ZonedDateTime minus(java.time.temporal.TemporalAmount a0);
+    public native java.time.ZonedDateTime minus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.ZonedDateTime minusDays(long a0);
+    public native java.time.ZonedDateTime minusHours(long a0);
+    public native java.time.ZonedDateTime minusMinutes(long a0);
+    public native java.time.ZonedDateTime minusMonths(long a0);
+    public native java.time.ZonedDateTime minusNanos(long a0);
+    public native java.time.ZonedDateTime minusSeconds(long a0);
+    public native java.time.ZonedDateTime minusWeeks(long a0);
+    public native java.time.ZonedDateTime minusYears(long a0);
+    public native static java.time.ZonedDateTime of(int a0, int a1, int a2, int a3, int a4, int a5, int a6, java.time.ZoneId a7);
+    public native static java.time.ZonedDateTime of(java.time.LocalDate a0, java.time.LocalTime a1, java.time.ZoneId a2);
+    public native static java.time.ZonedDateTime of(java.time.LocalDateTime a0, java.time.ZoneId a1);
+    public native static java.time.ZonedDateTime ofInstant(java.time.Instant a0, java.time.ZoneId a1);
+    public native static java.time.ZonedDateTime ofInstant(java.time.LocalDateTime a0, java.time.ZoneOffset a1, java.time.ZoneId a2);
+    public native static java.time.ZonedDateTime ofLocal(java.time.LocalDateTime a0, java.time.ZoneId a1, java.time.ZoneOffset a2);
+    public native static java.time.ZonedDateTime ofStrict(java.time.LocalDateTime a0, java.time.ZoneOffset a1, java.time.ZoneId a2);
+    public native static java.time.ZonedDateTime parse(java.lang.CharSequence a0);
+    public native static java.time.ZonedDateTime parse(java.lang.CharSequence a0, java.time.format.DateTimeFormatter a1);
+    public native java.time.ZonedDateTime plus(java.time.temporal.TemporalAmount a0);
+    public native java.time.ZonedDateTime plus(long a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.ZonedDateTime plusDays(long a0);
+    public native java.time.ZonedDateTime plusHours(long a0);
+    public native java.time.ZonedDateTime plusMinutes(long a0);
+    public native java.time.ZonedDateTime plusMonths(long a0);
+    public native java.time.ZonedDateTime plusNanos(long a0);
+    public native java.time.ZonedDateTime plusSeconds(long a0);
+    public native java.time.ZonedDateTime plusWeeks(long a0);
+    public native java.time.ZonedDateTime plusYears(long a0);
+    public native <R> R query(java.time.temporal.TemporalQuery<R> a0);
+    public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
+    public native java.time.LocalTime toLocalTime();
+    public native java.time.OffsetDateTime toOffsetDateTime();
+    public native java.time.ZonedDateTime truncatedTo(java.time.temporal.TemporalUnit a0);
+    public native long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    public native java.time.ZonedDateTime with(java.time.temporal.TemporalAdjuster a0);
+    public native java.time.ZonedDateTime with(java.time.temporal.TemporalField a0, long a1);
+    public native java.time.ZonedDateTime withDayOfMonth(int a0);
+    public native java.time.ZonedDateTime withDayOfYear(int a0);
+    public native java.time.ZonedDateTime withEarlierOffsetAtOverlap();
+    public native java.time.ZonedDateTime withFixedOffsetZone();
+    public native java.time.ZonedDateTime withHour(int a0);
+    public native java.time.ZonedDateTime withLaterOffsetAtOverlap();
+    public native java.time.ZonedDateTime withMinute(int a0);
+    public native java.time.ZonedDateTime withMonth(int a0);
+    public native java.time.ZonedDateTime withNano(int a0);
+    public native java.time.ZonedDateTime withSecond(int a0);
+    public native java.time.ZonedDateTime withYear(int a0);
+    public native java.time.ZonedDateTime withZoneSameInstant(java.time.ZoneId a0);
+    public native java.time.ZonedDateTime withZoneSameLocal(java.time.ZoneId a0);
+}
+"####,
+    ),
+    (
+        "java.time.chrono",
+        r####"
+package java.time.chrono;
+
+public interface ChronoLocalDate {
+    default java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0) { return null; }
+    default java.time.chrono.ChronoLocalDateTime<java.lang.Object> atTime(java.time.LocalTime a0) { return null; }
+    default java.lang.String format(java.time.format.DateTimeFormatter a0) { return null; }
+    static java.time.chrono.ChronoLocalDate from(java.time.temporal.TemporalAccessor a0);
+    java.time.chrono.Chronology getChronology();
+    default java.time.chrono.Era getEra() { return null; }
+    default boolean isAfter(java.time.chrono.ChronoLocalDate a0) { return false; }
+    default boolean isBefore(java.time.chrono.ChronoLocalDate a0) { return false; }
+    default boolean isEqual(java.time.chrono.ChronoLocalDate a0) { return false; }
+    default boolean isLeapYear() { return false; }
+    default boolean isSupported(java.time.temporal.TemporalField a0) { return false; }
+    default boolean isSupported(java.time.temporal.TemporalUnit a0) { return false; }
+    int lengthOfMonth();
+    default int lengthOfYear() { return 0; }
+    default java.time.chrono.ChronoLocalDate minus(java.time.temporal.TemporalAmount a0) { return null; }
+    default java.time.chrono.ChronoLocalDate minus(long a0, java.time.temporal.TemporalUnit a1) { return null; }
+    default java.time.chrono.ChronoLocalDate plus(java.time.temporal.TemporalAmount a0) { return null; }
+    default java.time.chrono.ChronoLocalDate plus(long a0, java.time.temporal.TemporalUnit a1) { return null; }
+    default <R> R query(java.time.temporal.TemporalQuery<R> a0) { return null; }
+    static java.util.Comparator<java.time.chrono.ChronoLocalDate> timeLineOrder();
+    default long toEpochDay() { return 0; }
+    java.time.chrono.ChronoPeriod until(java.time.chrono.ChronoLocalDate a0);
+    long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    default java.time.chrono.ChronoLocalDate with(java.time.temporal.TemporalAdjuster a0) { return null; }
+    default java.time.chrono.ChronoLocalDate with(java.time.temporal.TemporalField a0, long a1) { return null; }
+}
+
+public interface ChronoLocalDateTime<D extends java.time.chrono.ChronoLocalDate> {
+    default java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0) { return null; }
+    java.time.chrono.ChronoZonedDateTime<D> atZone(java.time.ZoneId a0);
+    default java.lang.String format(java.time.format.DateTimeFormatter a0) { return null; }
+    static java.time.chrono.ChronoLocalDateTime<java.lang.Object> from(java.time.temporal.TemporalAccessor a0);
+    default java.time.chrono.Chronology getChronology() { return null; }
+    default boolean isAfter(java.time.chrono.ChronoLocalDateTime<java.lang.Object> a0) { return false; }
+    default boolean isBefore(java.time.chrono.ChronoLocalDateTime<java.lang.Object> a0) { return false; }
+    default boolean isEqual(java.time.chrono.ChronoLocalDateTime<java.lang.Object> a0) { return false; }
+    boolean isSupported(java.time.temporal.TemporalField a0);
+    default boolean isSupported(java.time.temporal.TemporalUnit a0) { return false; }
+    default java.time.chrono.ChronoLocalDateTime<D> minus(java.time.temporal.TemporalAmount a0) { return null; }
+    default java.time.chrono.ChronoLocalDateTime<D> minus(long a0, java.time.temporal.TemporalUnit a1) { return null; }
+    default java.time.chrono.ChronoLocalDateTime<D> plus(java.time.temporal.TemporalAmount a0) { return null; }
+    java.time.chrono.ChronoLocalDateTime<D> plus(long a0, java.time.temporal.TemporalUnit a1);
+    default <R> R query(java.time.temporal.TemporalQuery<R> a0) { return null; }
+    static java.util.Comparator<java.time.chrono.ChronoLocalDateTime<java.lang.Object>> timeLineOrder();
+    default long toEpochSecond(java.time.ZoneOffset a0) { return 0; }
+    default java.time.Instant toInstant(java.time.ZoneOffset a0) { return null; }
+    D toLocalDate();
+    java.time.LocalTime toLocalTime();
+    default java.time.chrono.ChronoLocalDateTime<D> with(java.time.temporal.TemporalAdjuster a0) { return null; }
+    java.time.chrono.ChronoLocalDateTime<D> with(java.time.temporal.TemporalField a0, long a1);
+}
+
+public interface ChronoZonedDateTime<D extends java.time.chrono.ChronoLocalDate> {
+    default java.lang.String format(java.time.format.DateTimeFormatter a0) { return null; }
+    static java.time.chrono.ChronoZonedDateTime<java.lang.Object> from(java.time.temporal.TemporalAccessor a0);
+    default int get(java.time.temporal.TemporalField a0) { return 0; }
+    default java.time.chrono.Chronology getChronology() { return null; }
+    default long getLong(java.time.temporal.TemporalField a0) { return 0; }
+    java.time.ZoneOffset getOffset();
+    java.time.ZoneId getZone();
+    default boolean isAfter(java.time.chrono.ChronoZonedDateTime<java.lang.Object> a0) { return false; }
+    default boolean isBefore(java.time.chrono.ChronoZonedDateTime<java.lang.Object> a0) { return false; }
+    default boolean isEqual(java.time.chrono.ChronoZonedDateTime<java.lang.Object> a0) { return false; }
+    boolean isSupported(java.time.temporal.TemporalField a0);
+    default boolean isSupported(java.time.temporal.TemporalUnit a0) { return false; }
+    default java.time.chrono.ChronoZonedDateTime<D> minus(java.time.temporal.TemporalAmount a0) { return null; }
+    default java.time.chrono.ChronoZonedDateTime<D> minus(long a0, java.time.temporal.TemporalUnit a1) { return null; }
+    default java.time.chrono.ChronoZonedDateTime<D> plus(java.time.temporal.TemporalAmount a0) { return null; }
+    java.time.chrono.ChronoZonedDateTime<D> plus(long a0, java.time.temporal.TemporalUnit a1);
+    default <R> R query(java.time.temporal.TemporalQuery<R> a0) { return null; }
+    default java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0) { return null; }
+    static java.util.Comparator<java.time.chrono.ChronoZonedDateTime<java.lang.Object>> timeLineOrder();
+    default long toEpochSecond() { return 0; }
+    default java.time.Instant toInstant() { return null; }
+    default D toLocalDate() { return null; }
+    java.time.chrono.ChronoLocalDateTime<D> toLocalDateTime();
+    default java.time.LocalTime toLocalTime() { return null; }
+    default java.time.chrono.ChronoZonedDateTime<D> with(java.time.temporal.TemporalAdjuster a0) { return null; }
+    java.time.chrono.ChronoZonedDateTime<D> with(java.time.temporal.TemporalField a0, long a1);
+    java.time.chrono.ChronoZonedDateTime<D> withEarlierOffsetAtOverlap();
+    java.time.chrono.ChronoZonedDateTime<D> withLaterOffsetAtOverlap();
+    java.time.chrono.ChronoZonedDateTime<D> withZoneSameInstant(java.time.ZoneId a0);
+    java.time.chrono.ChronoZonedDateTime<D> withZoneSameLocal(java.time.ZoneId a0);
+}
+"####,
+    ),
+    (
+        "java.time.format",
+        r####"
+package java.time.format;
+
+public class DateTimeFormatter {
+    public static final java.time.format.DateTimeFormatter BASIC_ISO_DATE;
+    public static final java.time.format.DateTimeFormatter ISO_DATE_TIME;
+    public static final java.time.format.DateTimeFormatter ISO_OFFSET_DATE;
+    public static final java.time.format.DateTimeFormatter ISO_OFFSET_DATE_TIME;
+    public static final java.time.format.DateTimeFormatter ISO_OFFSET_TIME;
+    public static final java.time.format.DateTimeFormatter ISO_ORDINAL_DATE;
+    public static final java.time.format.DateTimeFormatter ISO_TIME;
+    public static final java.time.format.DateTimeFormatter ISO_WEEK_DATE;
+    public static final java.time.format.DateTimeFormatter ISO_ZONED_DATE_TIME;
+    public static final java.time.format.DateTimeFormatter RFC_1123_DATE_TIME;
+    public native void formatTo(java.time.temporal.TemporalAccessor a0, java.lang.Appendable a1);
+    public native java.time.chrono.Chronology getChronology();
+    public native java.time.format.DecimalStyle getDecimalStyle();
+    public native java.util.Locale getLocale();
+    public native java.util.Set<java.time.temporal.TemporalField> getResolverFields();
+    public native java.time.format.ResolverStyle getResolverStyle();
+    public native java.time.ZoneId getZone();
+    public native java.time.format.DateTimeFormatter localizedBy(java.util.Locale a0);
+    public native static java.time.format.DateTimeFormatter ofLocalizedDate(java.time.format.FormatStyle a0);
+    public native static java.time.format.DateTimeFormatter ofLocalizedDateTime(java.time.format.FormatStyle a0);
+    public native static java.time.format.DateTimeFormatter ofLocalizedDateTime(java.time.format.FormatStyle a0, java.time.format.FormatStyle a1);
+    public native static java.time.format.DateTimeFormatter ofLocalizedTime(java.time.format.FormatStyle a0);
+    public native java.time.temporal.TemporalAccessor parse(java.lang.CharSequence a0);
+    public native java.time.temporal.TemporalAccessor parse(java.lang.CharSequence a0, java.text.ParsePosition a1);
+    public native <T> T parse(java.lang.CharSequence a0, java.time.temporal.TemporalQuery<T> a1);
+    public native java.time.temporal.TemporalAccessor parseBest(java.lang.CharSequence a0, java.time.temporal.TemporalQuery<java.lang.Object>... a1);
+    public native java.time.temporal.TemporalAccessor parseUnresolved(java.lang.CharSequence a0, java.text.ParsePosition a1);
+    public native static java.time.temporal.TemporalQuery<java.time.Period> parsedExcessDays();
+    public native static java.time.temporal.TemporalQuery<java.lang.Boolean> parsedLeapSecond();
+    public native java.text.Format toFormat();
+    public native java.text.Format toFormat(java.time.temporal.TemporalQuery<java.lang.Object> a0);
+    public native java.time.format.DateTimeFormatter withChronology(java.time.chrono.Chronology a0);
+    public native java.time.format.DateTimeFormatter withDecimalStyle(java.time.format.DecimalStyle a0);
+    public native java.time.format.DateTimeFormatter withResolverFields(java.time.temporal.TemporalField... a0);
+    public native java.time.format.DateTimeFormatter withResolverFields(java.util.Set<java.time.temporal.TemporalField> a0);
+    public native java.time.format.DateTimeFormatter withResolverStyle(java.time.format.ResolverStyle a0);
+    public native java.time.format.DateTimeFormatter withZone(java.time.ZoneId a0);
+}
+
+public class DateTimeParseException {
+    public native DateTimeParseException(java.lang.String a0, java.lang.CharSequence a1, int a2, java.lang.Throwable a3);
+}
+"####,
+    ),
+    (
+        "java.time.temporal",
+        r####"
+package java.time.temporal;
+
+public class ChronoUnit {
+    public static final java.time.temporal.ChronoUnit CENTURIES;
+    public static final java.time.temporal.ChronoUnit DECADES;
+    public static final java.time.temporal.ChronoUnit ERAS;
+    public static final java.time.temporal.ChronoUnit FOREVER;
+    public static final java.time.temporal.ChronoUnit HALF_DAYS;
+    public static final java.time.temporal.ChronoUnit MICROS;
+    public static final java.time.temporal.ChronoUnit MILLENNIA;
+    public native <R extends java.time.temporal.Temporal> R addTo(R a0, long a1);
+    public native java.time.Duration getDuration();
+    public native boolean isDateBased();
+    public native boolean isDurationEstimated();
+    public native boolean isSupportedBy(java.time.temporal.Temporal a0);
+    public native boolean isTimeBased();
+}
+
+public interface Temporal {
+    boolean isSupported(java.time.temporal.TemporalUnit a0);
+    default java.time.temporal.Temporal minus(java.time.temporal.TemporalAmount a0) { return null; }
+    default java.time.temporal.Temporal minus(long a0, java.time.temporal.TemporalUnit a1) { return null; }
+    default java.time.temporal.Temporal plus(java.time.temporal.TemporalAmount a0) { return null; }
+    java.time.temporal.Temporal plus(long a0, java.time.temporal.TemporalUnit a1);
+    long until(java.time.temporal.Temporal a0, java.time.temporal.TemporalUnit a1);
+    default java.time.temporal.Temporal with(java.time.temporal.TemporalAdjuster a0) { return null; }
+    java.time.temporal.Temporal with(java.time.temporal.TemporalField a0, long a1);
+}
+
+public interface TemporalAccessor {
+    default int get(java.time.temporal.TemporalField a0) { return 0; }
+    long getLong(java.time.temporal.TemporalField a0);
+    boolean isSupported(java.time.temporal.TemporalField a0);
+    default <R> R query(java.time.temporal.TemporalQuery<R> a0) { return null; }
+    default java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0) { return null; }
+}
+
+public interface TemporalAmount {
+    java.time.temporal.Temporal addTo(java.time.temporal.Temporal a0);
+    long get(java.time.temporal.TemporalUnit a0);
+    java.util.List<java.time.temporal.TemporalUnit> getUnits();
+    java.time.temporal.Temporal subtractFrom(java.time.temporal.Temporal a0);
+}
+
+public interface TemporalUnit {
+    <R extends java.time.temporal.Temporal> R addTo(R a0, long a1);
+    long between(java.time.temporal.Temporal a0, java.time.temporal.Temporal a1);
+    java.time.Duration getDuration();
+    boolean isDateBased();
+    boolean isDurationEstimated();
+    default boolean isSupportedBy(java.time.temporal.Temporal a0) { return false; }
+    boolean isTimeBased();
+}
+"####,
+    ),
+    (
+        "java.util",
+        r####"
+package java.util;
+
+public abstract class AbstractList<E> {
+    protected int modCount;
+    public native boolean addAll(int a0, java.util.Collection<E> a1);
+    public native java.util.ListIterator<E> listIterator(int a0);
+    protected native void removeRange(int a0, int a1);
+}
+
+public abstract class AbstractMap<K, V> {
+    protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
+    public static class SimpleEntry<K, V> implements java.util.Map.Entry<K, V>, java.io.Serializable {
+        public native SimpleEntry(java.util.Map.Entry<K, V> a0);
+        public native SimpleEntry(K a0, V a1);
+        public native boolean equals(java.lang.Object a0);
+        public native K getKey();
+        public native V getValue();
+        public native int hashCode();
+        public native V setValue(V a0);
+        public native java.lang.String toString();
+    }
+    public static class SimpleImmutableEntry<K, V> implements java.util.Map.Entry<K, V>, java.io.Serializable {
+        public native SimpleImmutableEntry(java.util.Map.Entry<K, V> a0);
+        public native SimpleImmutableEntry(K a0, V a1);
+        public native boolean equals(java.lang.Object a0);
+        public native K getKey();
+        public native V getValue();
+        public native int hashCode();
+        public native V setValue(V a0);
+        public native java.lang.String toString();
+    }
+}
+
+public class ArrayDeque<E> {
+    public native java.util.ArrayDeque<E> clone();
+    public native E getFirst();
+    public native E getLast();
+    public native boolean offerFirst(E a0);
+    public native boolean offerLast(E a0);
+    public native E remove();
+    public native boolean removeFirstOccurrence(java.lang.Object a0);
+    public native boolean removeLastOccurrence(java.lang.Object a0);
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public class ArrayList<E> {
+    public native boolean addAll(int a0, java.util.Collection<E> a1);
+    public native void addFirst(E a0);
+    public native void addLast(E a0);
+    public native java.lang.Object clone();
+    public native E getFirst();
+    public native E getLast();
+    public native java.util.ListIterator<E> listIterator(int a0);
+    public native E removeFirst();
+    public native E removeLast();
+    protected native void removeRange(int a0, int a1);
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public class Arrays {
+    public native static int binarySearch(byte[] a0, byte a1);
+    public native static int binarySearch(byte[] a0, int a1, int a2, byte a3);
+    public native static int binarySearch(char[] a0, char a1);
+    public native static int binarySearch(char[] a0, int a1, int a2, char a3);
+    public native static int binarySearch(double[] a0, double a1);
+    public native static int binarySearch(double[] a0, int a1, int a2, double a3);
+    public native static int binarySearch(float[] a0, float a1);
+    public native static int binarySearch(float[] a0, int a1, int a2, float a3);
+    public native static int binarySearch(int[] a0, int a1, int a2, int a3);
+    public native static int binarySearch(java.lang.Object[] a0, int a1, int a2, java.lang.Object a3);
+    public native static int binarySearch(long[] a0, int a1, int a2, long a3);
+    public native static int binarySearch(long[] a0, long a1);
+    public native static int binarySearch(short[] a0, int a1, int a2, short a3);
+    public native static int binarySearch(short[] a0, short a1);
+    public native static <T> int binarySearch(T[] a0, int a1, int a2, T a3, java.util.Comparator<T> a4);
+    public native static <T> int binarySearch(T[] a0, T a1, java.util.Comparator<T> a2);
+    public native static int compare(boolean[] a0, boolean[] a1);
+    public native static int compare(boolean[] a0, int a1, int a2, boolean[] a3, int a4, int a5);
+    public native static int compare(byte[] a0, byte[] a1);
+    public native static int compare(byte[] a0, int a1, int a2, byte[] a3, int a4, int a5);
+    public native static int compare(char[] a0, char[] a1);
+    public native static int compare(char[] a0, int a1, int a2, char[] a3, int a4, int a5);
+    public native static int compare(double[] a0, double[] a1);
+    public native static int compare(double[] a0, int a1, int a2, double[] a3, int a4, int a5);
+    public native static int compare(float[] a0, float[] a1);
+    public native static int compare(float[] a0, int a1, int a2, float[] a3, int a4, int a5);
+    public native static int compare(int[] a0, int a1, int a2, int[] a3, int a4, int a5);
+    public native static int compare(int[] a0, int[] a1);
+    public native static int compare(long[] a0, int a1, int a2, long[] a3, int a4, int a5);
+    public native static int compare(long[] a0, long[] a1);
+    public native static int compare(short[] a0, int a1, int a2, short[] a3, int a4, int a5);
+    public native static int compare(short[] a0, short[] a1);
+    public native static <T extends java.lang.Comparable<T>> int compare(T[] a0, int a1, int a2, T[] a3, int a4, int a5);
+    public native static <T> int compare(T[] a0, int a1, int a2, T[] a3, int a4, int a5, java.util.Comparator<T> a6);
+    public native static <T extends java.lang.Comparable<T>> int compare(T[] a0, T[] a1);
+    public native static <T> int compare(T[] a0, T[] a1, java.util.Comparator<T> a2);
+    public native static int compareUnsigned(byte[] a0, byte[] a1);
+    public native static int compareUnsigned(byte[] a0, int a1, int a2, byte[] a3, int a4, int a5);
+    public native static int compareUnsigned(int[] a0, int a1, int a2, int[] a3, int a4, int a5);
+    public native static int compareUnsigned(int[] a0, int[] a1);
+    public native static int compareUnsigned(long[] a0, int a1, int a2, long[] a3, int a4, int a5);
+    public native static int compareUnsigned(long[] a0, long[] a1);
+    public native static int compareUnsigned(short[] a0, int a1, int a2, short[] a3, int a4, int a5);
+    public native static int compareUnsigned(short[] a0, short[] a1);
+    public native static float[] copyOf(float[] a0, int a1);
+    public native static short[] copyOf(short[] a0, int a1);
+    public native static <T, U> T[] copyOf(U[] a0, int a1, java.lang.Class<T[]> a2);
+    public native static boolean[] copyOfRange(boolean[] a0, int a1, int a2);
+    public native static byte[] copyOfRange(byte[] a0, int a1, int a2);
+    public native static char[] copyOfRange(char[] a0, int a1, int a2);
+    public native static double[] copyOfRange(double[] a0, int a1, int a2);
+    public native static float[] copyOfRange(float[] a0, int a1, int a2);
+    public native static long[] copyOfRange(long[] a0, int a1, int a2);
+    public native static short[] copyOfRange(short[] a0, int a1, int a2);
+    public native static <T, U> T[] copyOfRange(U[] a0, int a1, int a2, java.lang.Class<T[]> a3);
+    public native static int deepHashCode(java.lang.Object[] a0);
+    public native static boolean equals(boolean[] a0, boolean[] a1);
+    public native static boolean equals(boolean[] a0, int a1, int a2, boolean[] a3, int a4, int a5);
+    public native static boolean equals(byte[] a0, byte[] a1);
+    public native static boolean equals(byte[] a0, int a1, int a2, byte[] a3, int a4, int a5);
+    public native static boolean equals(char[] a0, char[] a1);
+    public native static boolean equals(char[] a0, int a1, int a2, char[] a3, int a4, int a5);
+    public native static boolean equals(double[] a0, double[] a1);
+    public native static boolean equals(double[] a0, int a1, int a2, double[] a3, int a4, int a5);
+    public native static boolean equals(float[] a0, float[] a1);
+    public native static boolean equals(float[] a0, int a1, int a2, float[] a3, int a4, int a5);
+    public native static boolean equals(int[] a0, int a1, int a2, int[] a3, int a4, int a5);
+    public native static boolean equals(java.lang.Object[] a0, int a1, int a2, java.lang.Object[] a3, int a4, int a5);
+    public native static boolean equals(long[] a0, int a1, int a2, long[] a3, int a4, int a5);
+    public native static boolean equals(long[] a0, long[] a1);
+    public native static boolean equals(short[] a0, int a1, int a2, short[] a3, int a4, int a5);
+    public native static boolean equals(short[] a0, short[] a1);
+    public native static <T> boolean equals(T[] a0, int a1, int a2, T[] a3, int a4, int a5, java.util.Comparator<T> a6);
+    public native static <T> boolean equals(T[] a0, T[] a1, java.util.Comparator<T> a2);
+    public native static void fill(boolean[] a0, int a1, int a2, boolean a3);
+    public native static void fill(byte[] a0, byte a1);
+    public native static void fill(byte[] a0, int a1, int a2, byte a3);
+    public native static void fill(char[] a0, int a1, int a2, char a3);
+    public native static void fill(double[] a0, int a1, int a2, double a3);
+    public native static void fill(float[] a0, float a1);
+    public native static void fill(float[] a0, int a1, int a2, float a3);
+    public native static void fill(int[] a0, int a1, int a2, int a3);
+    public native static void fill(java.lang.Object[] a0, int a1, int a2, java.lang.Object a3);
+    public native static void fill(long[] a0, int a1, int a2, long a3);
+    public native static void fill(short[] a0, int a1, int a2, short a3);
+    public native static void fill(short[] a0, short a1);
+    public native static int hashCode(boolean[] a0);
+    public native static int hashCode(byte[] a0);
+    public native static int hashCode(char[] a0);
+    public native static int hashCode(double[] a0);
+    public native static int hashCode(float[] a0);
+    public native static int hashCode(long[] a0);
+    public native static int hashCode(short[] a0);
+    public native static int mismatch(boolean[] a0, boolean[] a1);
+    public native static int mismatch(boolean[] a0, int a1, int a2, boolean[] a3, int a4, int a5);
+    public native static int mismatch(byte[] a0, byte[] a1);
+    public native static int mismatch(byte[] a0, int a1, int a2, byte[] a3, int a4, int a5);
+    public native static int mismatch(char[] a0, char[] a1);
+    public native static int mismatch(char[] a0, int a1, int a2, char[] a3, int a4, int a5);
+    public native static int mismatch(double[] a0, double[] a1);
+    public native static int mismatch(double[] a0, int a1, int a2, double[] a3, int a4, int a5);
+    public native static int mismatch(float[] a0, float[] a1);
+    public native static int mismatch(float[] a0, int a1, int a2, float[] a3, int a4, int a5);
+    public native static int mismatch(int[] a0, int a1, int a2, int[] a3, int a4, int a5);
+    public native static int mismatch(int[] a0, int[] a1);
+    public native static int mismatch(java.lang.Object[] a0, int a1, int a2, java.lang.Object[] a3, int a4, int a5);
+    public native static int mismatch(java.lang.Object[] a0, java.lang.Object[] a1);
+    public native static int mismatch(long[] a0, int a1, int a2, long[] a3, int a4, int a5);
+    public native static int mismatch(long[] a0, long[] a1);
+    public native static int mismatch(short[] a0, int a1, int a2, short[] a3, int a4, int a5);
+    public native static int mismatch(short[] a0, short[] a1);
+    public native static <T> int mismatch(T[] a0, int a1, int a2, T[] a3, int a4, int a5, java.util.Comparator<T> a6);
+    public native static <T> int mismatch(T[] a0, T[] a1, java.util.Comparator<T> a2);
+    public native static void parallelPrefix(double[] a0, int a1, int a2, java.util.function.DoubleBinaryOperator a3);
+    public native static void parallelPrefix(double[] a0, java.util.function.DoubleBinaryOperator a1);
+    public native static void parallelPrefix(int[] a0, int a1, int a2, java.util.function.IntBinaryOperator a3);
+    public native static void parallelPrefix(int[] a0, java.util.function.IntBinaryOperator a1);
+    public native static void parallelPrefix(long[] a0, int a1, int a2, java.util.function.LongBinaryOperator a3);
+    public native static void parallelPrefix(long[] a0, java.util.function.LongBinaryOperator a1);
+    public native static <T> void parallelPrefix(T[] a0, int a1, int a2, java.util.function.BinaryOperator<T> a3);
+    public native static <T> void parallelPrefix(T[] a0, java.util.function.BinaryOperator<T> a1);
+    public native static void parallelSetAll(double[] a0, java.util.function.IntToDoubleFunction a1);
+    public native static void parallelSetAll(int[] a0, java.util.function.IntUnaryOperator a1);
+    public native static void parallelSetAll(long[] a0, java.util.function.IntToLongFunction a1);
+    public native static <T> void parallelSetAll(T[] a0, java.util.function.IntFunction<T> a1);
+    public native static void parallelSort(byte[] a0);
+    public native static void parallelSort(byte[] a0, int a1, int a2);
+    public native static void parallelSort(char[] a0);
+    public native static void parallelSort(char[] a0, int a1, int a2);
+    public native static void parallelSort(double[] a0);
+    public native static void parallelSort(double[] a0, int a1, int a2);
+    public native static void parallelSort(float[] a0);
+    public native static void parallelSort(float[] a0, int a1, int a2);
+    public native static void parallelSort(int[] a0);
+    public native static void parallelSort(int[] a0, int a1, int a2);
+    public native static void parallelSort(long[] a0);
+    public native static void parallelSort(long[] a0, int a1, int a2);
+    public native static void parallelSort(short[] a0);
+    public native static void parallelSort(short[] a0, int a1, int a2);
+    public native static <T extends java.lang.Comparable<T>> void parallelSort(T[] a0);
+    public native static <T extends java.lang.Comparable<T>> void parallelSort(T[] a0, int a1, int a2);
+    public native static <T> void parallelSort(T[] a0, int a1, int a2, java.util.Comparator<T> a3);
+    public native static <T> void parallelSort(T[] a0, java.util.Comparator<T> a1);
+    public native static void setAll(double[] a0, java.util.function.IntToDoubleFunction a1);
+    public native static void setAll(int[] a0, java.util.function.IntUnaryOperator a1);
+    public native static void setAll(long[] a0, java.util.function.IntToLongFunction a1);
+    public native static <T> void setAll(T[] a0, java.util.function.IntFunction<T> a1);
+    public native static void sort(byte[] a0, int a1, int a2);
+    public native static void sort(char[] a0, int a1, int a2);
+    public native static void sort(double[] a0, int a1, int a2);
+    public native static void sort(float[] a0);
+    public native static void sort(float[] a0, int a1, int a2);
+    public native static void sort(int[] a0, int a1, int a2);
+    public native static void sort(java.lang.Object[] a0, int a1, int a2);
+    public native static void sort(long[] a0, int a1, int a2);
+    public native static void sort(short[] a0);
+    public native static void sort(short[] a0, int a1, int a2);
+    public native static <T> void sort(T[] a0, int a1, int a2, java.util.Comparator<T> a3);
+    public native static java.util.Spliterator.OfDouble spliterator(double[] a0);
+    public native static java.util.Spliterator.OfDouble spliterator(double[] a0, int a1, int a2);
+    public native static java.util.Spliterator.OfInt spliterator(int[] a0);
+    public native static java.util.Spliterator.OfInt spliterator(int[] a0, int a1, int a2);
+    public native static java.util.Spliterator.OfLong spliterator(long[] a0);
+    public native static java.util.Spliterator.OfLong spliterator(long[] a0, int a1, int a2);
+    public native static <T> java.util.Spliterator<T> spliterator(T[] a0);
+    public native static <T> java.util.Spliterator<T> spliterator(T[] a0, int a1, int a2);
+    public native static java.util.stream.DoubleStream stream(double[] a0);
+    public native static java.util.stream.DoubleStream stream(double[] a0, int a1, int a2);
+    public native static java.util.stream.IntStream stream(int[] a0, int a1, int a2);
+    public native static java.util.stream.LongStream stream(long[] a0);
+    public native static java.util.stream.LongStream stream(long[] a0, int a1, int a2);
+    public native static <T> java.util.stream.Stream<T> stream(T[] a0, int a1, int a2);
+}
+
+public class BitSet {
+    public native void and(java.util.BitSet a0);
+    public native void andNot(java.util.BitSet a0);
+    public native void clear();
+    public native void clear(int a0, int a1);
+    public native java.lang.Object clone();
+    public native void flip(int a0);
+    public native void flip(int a0, int a1);
+    public native java.util.BitSet get(int a0, int a1);
+    public native boolean intersects(java.util.BitSet a0);
+    public native boolean isEmpty();
+    public native int nextClearBit(int a0);
+    public native void or(java.util.BitSet a0);
+    public native int previousClearBit(int a0);
+    public native int previousSetBit(int a0);
+    public native void set(int a0, int a1);
+    public native void set(int a0, int a1, boolean a2);
+    public native int size();
+    public native java.util.stream.IntStream stream();
+    public native byte[] toByteArray();
+    public native long[] toLongArray();
+    public native static java.util.BitSet valueOf(byte[] a0);
+    public native static java.util.BitSet valueOf(java.nio.ByteBuffer a0);
+    public native static java.util.BitSet valueOf(java.nio.LongBuffer a0);
+    public native static java.util.BitSet valueOf(long[] a0);
+    public native void xor(java.util.BitSet a0);
+}
+
+public abstract class Calendar {
+    public static final int ALL_STYLES = 0;
+    public static final int AM = 0;
+    public static final int AM_PM = 9;
+    public static final int APRIL = 3;
+    public static final int AUGUST = 7;
+    public static final int DATE = 5;
+    public static final int DAY_OF_WEEK = 7;
+    public static final int DAY_OF_WEEK_IN_MONTH = 8;
+    public static final int DAY_OF_YEAR = 6;
+    public static final int DECEMBER = 11;
+    public static final int DST_OFFSET = 16;
+    public static final int ERA = 0;
+    public static final int FEBRUARY = 1;
+    public static final int FIELD_COUNT = 17;
+    public static final int FRIDAY = 6;
+    public static final int HOUR = 10;
+    public static final int JANUARY = 0;
+    public static final int JULY = 6;
+    public static final int JUNE = 5;
+    public static final int LONG = 2;
+    public static final int LONG_FORMAT = 2;
+    public static final int LONG_STANDALONE = 32770;
+    public static final int MARCH = 2;
+    public static final int MAY = 4;
+    public static final int MILLISECOND = 14;
+    public static final int MONDAY = 2;
+    public static final int NARROW_FORMAT = 4;
+    public static final int NARROW_STANDALONE = 32772;
+    public static final int NOVEMBER = 10;
+    public static final int OCTOBER = 9;
+    public static final int PM = 1;
+    public static final int SATURDAY = 7;
+    public static final int SEPTEMBER = 8;
+    public static final int SHORT = 1;
+    public static final int SHORT_FORMAT = 1;
+    public static final int SHORT_STANDALONE = 32769;
+    public static final int SUNDAY = 1;
+    public static final int THURSDAY = 5;
+    public static final int TUESDAY = 3;
+    public static final int UNDECIMBER = 12;
+    public static final int WEDNESDAY = 4;
+    public static final int WEEK_OF_MONTH = 4;
+    public static final int WEEK_OF_YEAR = 3;
+    public static final int ZONE_OFFSET = 15;
+    protected boolean areFieldsSet;
+    protected int[] fields;
+    protected boolean[] isSet;
+    protected boolean isTimeSet;
+    protected long time;
+    protected native Calendar(java.util.TimeZone a0, java.util.Locale a1);
+    public native boolean after(java.lang.Object a0);
+    public native boolean before(java.lang.Object a0);
+    public native void clear();
+    public native void clear(int a0);
+    public native java.lang.Object clone();
+    public native int compareTo(java.util.Calendar a0);
+    protected native void complete();
+    protected abstract void computeFields();
+    protected abstract void computeTime();
+    public native int getActualMaximum(int a0);
+    public native int getActualMinimum(int a0);
+    public native static java.util.Set<java.lang.String> getAvailableCalendarTypes();
+    public native static java.util.Locale[] getAvailableLocales();
+    public native java.lang.String getCalendarType();
+    public native java.lang.String getDisplayName(int a0, int a1, java.util.Locale a2);
+    public native java.util.Map<java.lang.String, java.lang.Integer> getDisplayNames(int a0, int a1, java.util.Locale a2);
+    public native int getFirstDayOfWeek();
+    public abstract int getGreatestMinimum(int a0);
+    public native static java.util.Calendar getInstance(java.util.Locale a0);
+    public native static java.util.Calendar getInstance(java.util.TimeZone a0);
+    public native static java.util.Calendar getInstance(java.util.TimeZone a0, java.util.Locale a1);
+    public abstract int getLeastMaximum(int a0);
+    public abstract int getMaximum(int a0);
+    public native int getMinimalDaysInFirstWeek();
+    public abstract int getMinimum(int a0);
+    public native java.util.TimeZone getTimeZone();
+    public native int getWeekYear();
+    public native int getWeeksInWeekYear();
+    protected native int internalGet(int a0);
+    public native boolean isLenient();
+    public native boolean isSet(int a0);
+    public native boolean isWeekDateSupported();
+    public abstract void roll(int a0, boolean a1);
+    public native void roll(int a0, int a1);
+    public native void set(int a0, int a1, int a2);
+    public native void set(int a0, int a1, int a2, int a3, int a4);
+    public native void set(int a0, int a1, int a2, int a3, int a4, int a5);
+    public native void setFirstDayOfWeek(int a0);
+    public native void setLenient(boolean a0);
+    public native void setMinimalDaysInFirstWeek(int a0);
+    public native void setTimeInMillis(long a0);
+    public native void setTimeZone(java.util.TimeZone a0);
+    public native void setWeekDate(int a0, int a1, int a2);
+    public native java.time.Instant toInstant();
+    public static class Builder {
+        public native Builder();
+        public native java.util.Calendar build();
+        public native java.util.Calendar.Builder set(int a0, int a1);
+        public native java.util.Calendar.Builder setCalendarType(java.lang.String a0);
+        public native java.util.Calendar.Builder setDate(int a0, int a1, int a2);
+        public native java.util.Calendar.Builder setFields(int... a0);
+        public native java.util.Calendar.Builder setInstant(java.util.Date a0);
+        public native java.util.Calendar.Builder setInstant(long a0);
+        public native java.util.Calendar.Builder setLenient(boolean a0);
+        public native java.util.Calendar.Builder setLocale(java.util.Locale a0);
+        public native java.util.Calendar.Builder setTimeOfDay(int a0, int a1, int a2);
+        public native java.util.Calendar.Builder setTimeOfDay(int a0, int a1, int a2, int a3);
+        public native java.util.Calendar.Builder setTimeZone(java.util.TimeZone a0);
+        public native java.util.Calendar.Builder setWeekDate(int a0, int a1, int a2);
+        public native java.util.Calendar.Builder setWeekDefinition(int a0, int a1);
+    }
+}
+
+public interface Collection<E> {
+    default java.util.stream.Stream<E> parallelStream() { return null; }
+    default java.util.Spliterator<E> spliterator() { return null; }
+    default <T> T[] toArray(java.util.function.IntFunction<T[]> a0) { return null; }
+}
+
+public class Collections {
+    public static final java.util.List EMPTY_LIST;
+    public static final java.util.Map EMPTY_MAP;
+    public static final java.util.Set EMPTY_SET;
+    public native static <T> java.util.Queue<T> asLifoQueue(java.util.Deque<T> a0);
+    public native static <T> int binarySearch(java.util.List<java.lang.Comparable<T>> a0, T a1);
+    public native static <T> int binarySearch(java.util.List<T> a0, T a1, java.util.Comparator<T> a2);
+    public native static <E> java.util.Collection<E> checkedCollection(java.util.Collection<E> a0, java.lang.Class<E> a1);
+    public native static <E> java.util.List<E> checkedList(java.util.List<E> a0, java.lang.Class<E> a1);
+    public native static <K, V> java.util.Map<K, V> checkedMap(java.util.Map<K, V> a0, java.lang.Class<K> a1, java.lang.Class<V> a2);
+    public native static <K, V> java.util.NavigableMap<K, V> checkedNavigableMap(java.util.NavigableMap<K, V> a0, java.lang.Class<K> a1, java.lang.Class<V> a2);
+    public native static <E> java.util.NavigableSet<E> checkedNavigableSet(java.util.NavigableSet<E> a0, java.lang.Class<E> a1);
+    public native static <E> java.util.Queue<E> checkedQueue(java.util.Queue<E> a0, java.lang.Class<E> a1);
+    public native static <E> java.util.Set<E> checkedSet(java.util.Set<E> a0, java.lang.Class<E> a1);
+    public native static <K, V> java.util.SortedMap<K, V> checkedSortedMap(java.util.SortedMap<K, V> a0, java.lang.Class<K> a1, java.lang.Class<V> a2);
+    public native static <E> java.util.SortedSet<E> checkedSortedSet(java.util.SortedSet<E> a0, java.lang.Class<E> a1);
+    public native static <T> void copy(java.util.List<T> a0, java.util.List<T> a1);
+    public native static boolean disjoint(java.util.Collection<java.lang.Object> a0, java.util.Collection<java.lang.Object> a1);
+    public native static <T> java.util.Enumeration<T> emptyEnumeration();
+    public native static <T> java.util.Iterator<T> emptyIterator();
+    public native static <T> java.util.ListIterator<T> emptyListIterator();
+    public native static <K, V> java.util.NavigableMap<K, V> emptyNavigableMap();
+    public native static <E> java.util.NavigableSet<E> emptyNavigableSet();
+    public native static <K, V> java.util.SortedMap<K, V> emptySortedMap();
+    public native static <E> java.util.SortedSet<E> emptySortedSet();
+    public native static <T> java.util.Enumeration<T> enumeration(java.util.Collection<T> a0);
+    public native static <T> void fill(java.util.List<T> a0, T a1);
+    public native static int indexOfSubList(java.util.List<java.lang.Object> a0, java.util.List<java.lang.Object> a1);
+    public native static int lastIndexOfSubList(java.util.List<java.lang.Object> a0, java.util.List<java.lang.Object> a1);
+    public native static <T> java.util.ArrayList<T> list(java.util.Enumeration<T> a0);
+    public native static <E> java.util.SequencedSet<E> newSequencedSetFromMap(java.util.SequencedMap<E, java.lang.Boolean> a0);
+    public native static <E> java.util.Set<E> newSetFromMap(java.util.Map<E, java.lang.Boolean> a0);
+    public native static <T> boolean replaceAll(java.util.List<T> a0, T a1, T a2);
+    public native static <T> java.util.Comparator<T> reverseOrder();
+    public native static <T> java.util.Comparator<T> reverseOrder(java.util.Comparator<T> a0);
+    public native static void rotate(java.util.List<java.lang.Object> a0, int a1);
+    public native static void shuffle(java.util.List<java.lang.Object> a0, java.util.Random a1);
+    public native static void shuffle(java.util.List<java.lang.Object> a0, java.util.random.RandomGenerator a1);
+    public native static <K, V> java.util.Map<K, V> singletonMap(K a0, V a1);
+    public native static <T> java.util.Collection<T> synchronizedCollection(java.util.Collection<T> a0);
+    public native static <K, V> java.util.NavigableMap<K, V> synchronizedNavigableMap(java.util.NavigableMap<K, V> a0);
+    public native static <T> java.util.NavigableSet<T> synchronizedNavigableSet(java.util.NavigableSet<T> a0);
+    public native static <T> java.util.Set<T> synchronizedSet(java.util.Set<T> a0);
+    public native static <K, V> java.util.SortedMap<K, V> synchronizedSortedMap(java.util.SortedMap<K, V> a0);
+    public native static <T> java.util.SortedSet<T> synchronizedSortedSet(java.util.SortedSet<T> a0);
+    public native static <T> java.util.Collection<T> unmodifiableCollection(java.util.Collection<T> a0);
+    public native static <K, V> java.util.NavigableMap<K, V> unmodifiableNavigableMap(java.util.NavigableMap<K, V> a0);
+    public native static <T> java.util.NavigableSet<T> unmodifiableNavigableSet(java.util.NavigableSet<T> a0);
+    public native static <T> java.util.SequencedCollection<T> unmodifiableSequencedCollection(java.util.SequencedCollection<T> a0);
+    public native static <K, V> java.util.SequencedMap<K, V> unmodifiableSequencedMap(java.util.SequencedMap<K, V> a0);
+    public native static <T> java.util.SequencedSet<T> unmodifiableSequencedSet(java.util.SequencedSet<T> a0);
+    public native static <K, V> java.util.SortedMap<K, V> unmodifiableSortedMap(java.util.SortedMap<K, V> a0);
+    public native static <T> java.util.SortedSet<T> unmodifiableSortedSet(java.util.SortedSet<T> a0);
+}
+
+public interface Comparator<T> {
+    default <U> java.util.Comparator<T> thenComparing(java.util.function.Function<T, U> a0, java.util.Comparator<U> a1) { return null; }
+}
+
+public class Date {
+    public native Date(int a0, int a1, int a2);
+    public native Date(int a0, int a1, int a2, int a3, int a4);
+    public native Date(int a0, int a1, int a2, int a3, int a4, int a5);
+    public native Date(java.lang.String a0);
+    public native static long UTC(int a0, int a1, int a2, int a3, int a4, int a5);
+    public native java.lang.Object clone();
+    public native static java.util.Date from(java.time.Instant a0);
+    public native int getDate();
+    public native int getDay();
+    public native int getHours();
+    public native int getMinutes();
+    public native int getMonth();
+    public native int getSeconds();
+    public native int getTimezoneOffset();
+    public native int getYear();
+    public native static long parse(java.lang.String a0);
+    public native void setDate(int a0);
+    public native void setHours(int a0);
+    public native void setMinutes(int a0);
+    public native void setMonth(int a0);
+    public native void setSeconds(int a0);
+    public native void setYear(int a0);
+    public native java.lang.String toGMTString();
+    public native java.time.Instant toInstant();
+    public native java.lang.String toLocaleString();
+}
+
+public interface Deque<E> {
+    E getFirst();
+    E getLast();
+    boolean offerFirst(E a0);
+    boolean offerLast(E a0);
+    E remove();
+    boolean removeFirstOccurrence(java.lang.Object a0);
+    boolean removeLastOccurrence(java.lang.Object a0);
+    default java.util.Deque<E> reversed() { return null; }
+}
+
+public class EnumMap<K extends java.lang.Enum<K>, V> {
+    public native java.util.EnumMap<K, V> clone();
+}
+
+public abstract class EnumSet<E extends java.lang.Enum<E>> {
+    public native java.util.EnumSet<E> clone();
+    public native static <E extends java.lang.Enum<E>> java.util.EnumSet<E> of(E a0, E... a1);
+}
+
+public class GregorianCalendar {
+    public static final int AD = 1;
+    public static final int BC = 0;
+    public native GregorianCalendar(int a0, int a1, int a2);
+    public native GregorianCalendar(int a0, int a1, int a2, int a3, int a4);
+    public native GregorianCalendar(int a0, int a1, int a2, int a3, int a4, int a5);
+    public native GregorianCalendar(java.util.Locale a0);
+    public native GregorianCalendar(java.util.TimeZone a0);
+    public native GregorianCalendar(java.util.TimeZone a0, java.util.Locale a1);
+    public native java.lang.Object clone();
+    protected native void computeFields();
+    protected native void computeTime();
+    public native static java.util.GregorianCalendar from(java.time.ZonedDateTime a0);
+    public native int getActualMaximum(int a0);
+    public native int getActualMinimum(int a0);
+    public native java.lang.String getCalendarType();
+    public native int getGreatestMinimum(int a0);
+    public native java.util.Date getGregorianChange();
+    public native int getLeastMaximum(int a0);
+    public native int getMaximum(int a0);
+    public native int getMinimum(int a0);
+    public native java.util.TimeZone getTimeZone();
+    public native int getWeekYear();
+    public native int getWeeksInWeekYear();
+    public native boolean isLeapYear(int a0);
+    public native boolean isWeekDateSupported();
+    public native void roll(int a0, boolean a1);
+    public native void roll(int a0, int a1);
+    public native void setGregorianChange(java.util.Date a0);
+    public native void setTimeZone(java.util.TimeZone a0);
+    public native void setWeekDate(int a0, int a1, int a2);
+    public native java.time.ZonedDateTime toZonedDateTime();
+}
+
+public class HashMap<K, V> {
+    public native HashMap(int a0, float a1);
+    public native java.lang.Object clone();
+    public native static <K, V> java.util.HashMap<K, V> newHashMap(int a0);
+    public native boolean remove(java.lang.Object a0, java.lang.Object a1);
+    public native V replace(K a0, V a1);
+    public native boolean replace(K a0, V a1, V a2);
+    public native void replaceAll(java.util.function.BiFunction<K, V, V> a0);
+}
+
+public class HashSet<E> {
+    public native HashSet(int a0, float a1);
+    public native java.lang.Object clone();
+    public native static <T> java.util.HashSet<T> newHashSet(int a0);
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public class LinkedHashMap<K, V> {
+    public native LinkedHashMap(int a0, float a1);
+    public native LinkedHashMap(int a0, float a1, boolean a2);
+    public native static <K, V> java.util.LinkedHashMap<K, V> newLinkedHashMap(int a0);
+    public native V putFirst(K a0, V a1);
+    public native V putLast(K a0, V a1);
+    protected native boolean removeEldestEntry(java.util.Map.Entry<K, V> a0);
+    public native void replaceAll(java.util.function.BiFunction<K, V, V> a0);
+    public native java.util.SequencedMap<K, V> reversed();
+    public native java.util.SequencedSet<java.util.Map.Entry<K, V>> sequencedEntrySet();
+    public native java.util.SequencedSet<K> sequencedKeySet();
+    public native java.util.SequencedCollection<V> sequencedValues();
+}
+
+public class LinkedHashSet<E> {
+    public native LinkedHashSet(int a0, float a1);
+    public native void addFirst(E a0);
+    public native void addLast(E a0);
+    public native E getFirst();
+    public native E getLast();
+    public native static <T> java.util.LinkedHashSet<T> newLinkedHashSet(int a0);
+    public native E removeFirst();
+    public native E removeLast();
+    public native java.util.SequencedSet<E> reversed();
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public class LinkedList<E> {
+    public native boolean addAll(int a0, java.util.Collection<E> a1);
+    public native java.lang.Object clone();
+    public native java.util.ListIterator<E> listIterator(int a0);
+    public native boolean offerFirst(E a0);
+    public native boolean offerLast(E a0);
+    public native E remove();
+    public native boolean removeFirstOccurrence(java.lang.Object a0);
+    public native boolean removeLastOccurrence(java.lang.Object a0);
+    public native java.util.LinkedList<E> reversed();
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public interface List<E> {
+    boolean addAll(int a0, java.util.Collection<E> a1);
+    default void addFirst(E a0) { }
+    default void addLast(E a0) { }
+    default E getFirst() { return null; }
+    default E getLast() { return null; }
+    java.util.ListIterator<E> listIterator(int a0);
+    default E removeFirst() { return null; }
+    default E removeLast() { return null; }
+    default java.util.List<E> reversed() { return null; }
+    default java.util.Spliterator<E> spliterator() { return null; }
+}
+
+public class Locale {
+    public static final java.util.Locale CANADA;
+    public static final java.util.Locale CANADA_FRENCH;
+    public static final java.util.Locale CHINA;
+    public static final java.util.Locale CHINESE;
+    public static final java.util.Locale FRENCH;
+    public static final java.util.Locale GERMAN;
+    public static final java.util.Locale ITALIAN;
+    public static final java.util.Locale ITALY;
+    public static final java.util.Locale JAPAN;
+    public static final java.util.Locale JAPANESE;
+    public static final java.util.Locale KOREA;
+    public static final java.util.Locale KOREAN;
+    public static final java.util.Locale PRC;
+    public static final char PRIVATE_USE_EXTENSION = '\u0078';
+    public static final java.util.Locale SIMPLIFIED_CHINESE;
+    public static final java.util.Locale TAIWAN;
+    public static final java.util.Locale TRADITIONAL_CHINESE;
+    public static final char UNICODE_LOCALE_EXTENSION = '\u0075';
+    public native Locale(java.lang.String a0, java.lang.String a1, java.lang.String a2);
+    public native static java.util.stream.Stream<java.util.Locale> availableLocales();
+    public native java.lang.Object clone();
+    public native static java.util.List<java.util.Locale> filter(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Collection<java.util.Locale> a1);
+    public native static java.util.List<java.util.Locale> filter(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Collection<java.util.Locale> a1, java.util.Locale.FilteringMode a2);
+    public native static java.util.List<java.lang.String> filterTags(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Collection<java.lang.String> a1);
+    public native static java.util.List<java.lang.String> filterTags(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Collection<java.lang.String> a1, java.util.Locale.FilteringMode a2);
+    public native static java.util.Locale forLanguageTag(java.lang.String a0);
+    public native static java.util.Locale[] getAvailableLocales();
+    public native static java.util.Locale getDefault(java.util.Locale.Category a0);
+    public native java.lang.String getDisplayCountry();
+    public native java.lang.String getDisplayCountry(java.util.Locale a0);
+    public native java.lang.String getDisplayLanguage();
+    public native java.lang.String getDisplayLanguage(java.util.Locale a0);
+    public native java.lang.String getDisplayName();
+    public native java.lang.String getDisplayName(java.util.Locale a0);
+    public native java.lang.String getDisplayScript();
+    public native java.lang.String getDisplayScript(java.util.Locale a0);
+    public native java.lang.String getDisplayVariant();
+    public native java.lang.String getDisplayVariant(java.util.Locale a0);
+    public native java.lang.String getExtension(char a0);
+    public native java.util.Set<java.lang.Character> getExtensionKeys();
+    public native java.lang.String getISO3Country() throws java.util.MissingResourceException;
+    public native java.lang.String getISO3Language() throws java.util.MissingResourceException;
+    public native static java.lang.String[] getISOCountries();
+    public native static java.util.Set<java.lang.String> getISOCountries(java.util.Locale.IsoCountryCode a0);
+    public native static java.lang.String[] getISOLanguages();
+    public native java.lang.String getScript();
+    public native java.util.Set<java.lang.String> getUnicodeLocaleAttributes();
+    public native java.util.Set<java.lang.String> getUnicodeLocaleKeys();
+    public native java.lang.String getUnicodeLocaleType(java.lang.String a0);
+    public native java.lang.String getVariant();
+    public native boolean hasExtensions();
+    public native static java.util.Locale lookup(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Collection<java.util.Locale> a1);
+    public native static java.lang.String lookupTag(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Collection<java.lang.String> a1);
+    public native static java.util.Locale of(java.lang.String a0);
+    public native static java.util.Locale of(java.lang.String a0, java.lang.String a1);
+    public native static java.util.Locale of(java.lang.String a0, java.lang.String a1, java.lang.String a2);
+    public native static void setDefault(java.util.Locale a0);
+    public native static void setDefault(java.util.Locale.Category a0, java.util.Locale a1);
+    public native java.util.Locale stripExtensions();
+    public native java.lang.String toLanguageTag();
+    public static class Builder {
+        public native Builder();
+        public native java.util.Locale.Builder addUnicodeLocaleAttribute(java.lang.String a0);
+        public native java.util.Locale build();
+        public native java.util.Locale.Builder clear();
+        public native java.util.Locale.Builder clearExtensions();
+        public native java.util.Locale.Builder removeUnicodeLocaleAttribute(java.lang.String a0);
+        public native java.util.Locale.Builder setExtension(char a0, java.lang.String a1);
+        public native java.util.Locale.Builder setLanguage(java.lang.String a0);
+        public native java.util.Locale.Builder setLanguageTag(java.lang.String a0);
+        public native java.util.Locale.Builder setLocale(java.util.Locale a0);
+        public native java.util.Locale.Builder setRegion(java.lang.String a0);
+        public native java.util.Locale.Builder setScript(java.lang.String a0);
+        public native java.util.Locale.Builder setUnicodeLocaleKeyword(java.lang.String a0, java.lang.String a1);
+        public native java.util.Locale.Builder setVariant(java.lang.String a0);
+    }
+    public static class Category extends java.lang.Enum {
+        public static final java.util.Locale.Category DISPLAY;
+        public static final java.util.Locale.Category FORMAT;
+        public native static java.util.Locale.Category[] values();
+        public native static java.util.Locale.Category valueOf(java.lang.String a0);
+    }
+    public static class FilteringMode extends java.lang.Enum {
+        public static final java.util.Locale.FilteringMode AUTOSELECT_FILTERING;
+        public static final java.util.Locale.FilteringMode EXTENDED_FILTERING;
+        public static final java.util.Locale.FilteringMode IGNORE_EXTENDED_RANGES;
+        public static final java.util.Locale.FilteringMode MAP_EXTENDED_RANGES;
+        public static final java.util.Locale.FilteringMode REJECT_EXTENDED_RANGES;
+        public native static java.util.Locale.FilteringMode[] values();
+        public native static java.util.Locale.FilteringMode valueOf(java.lang.String a0);
+    }
+    public static class IsoCountryCode extends java.lang.Enum {
+        public static final java.util.Locale.IsoCountryCode PART1_ALPHA2;
+        public static final java.util.Locale.IsoCountryCode PART1_ALPHA3;
+        public static final java.util.Locale.IsoCountryCode PART3;
+        public native static java.util.Locale.IsoCountryCode[] values();
+        public native static java.util.Locale.IsoCountryCode valueOf(java.lang.String a0);
+    }
+    public static class LanguageRange {
+        public static final double MAX_WEIGHT;
+        public static final double MIN_WEIGHT;
+        public native LanguageRange(java.lang.String a0);
+        public native LanguageRange(java.lang.String a0, double a1);
+        public native boolean equals(java.lang.Object a0);
+        public native java.lang.String getRange();
+        public native double getWeight();
+        public native int hashCode();
+        public native static java.util.List<java.util.Locale.LanguageRange> mapEquivalents(java.util.List<java.util.Locale.LanguageRange> a0, java.util.Map<java.lang.String, java.util.List<java.lang.String>> a1);
+        public native static java.util.List<java.util.Locale.LanguageRange> parse(java.lang.String a0);
+        public native static java.util.List<java.util.Locale.LanguageRange> parse(java.lang.String a0, java.util.Map<java.lang.String, java.util.List<java.lang.String>> a1);
+        public native java.lang.String toString();
+    }
+}
+
+public interface Map<K, V> {
+    default boolean remove(java.lang.Object a0, java.lang.Object a1) { return false; }
+    default V replace(K a0, V a1) { return null; }
+    default boolean replace(K a0, V a1, V a2) { return false; }
+    default void replaceAll(java.util.function.BiFunction<K, V, V> a0) { }
+    public static interface Entry<K, V> {
+        static <K extends java.lang.Comparable<K>, V> java.util.Comparator<java.util.Map.Entry<K, V>> comparingByKey();
+        static <K, V> java.util.Comparator<java.util.Map.Entry<K, V>> comparingByKey(java.util.Comparator<K> a0);
+        static <K, V extends java.lang.Comparable<V>> java.util.Comparator<java.util.Map.Entry<K, V>> comparingByValue();
+        static <K, V> java.util.Comparator<java.util.Map.Entry<K, V>> comparingByValue(java.util.Comparator<V> a0);
+        static <K, V> java.util.Map.Entry<K, V> copyOf(java.util.Map.Entry<K, V> a0);
+    }
+}
+
+public interface NavigableMap<K, V> {
+    java.util.Map.Entry<K, V> ceilingEntry(K a0);
+    java.util.NavigableSet<K> descendingKeySet();
+    java.util.Map.Entry<K, V> floorEntry(K a0);
+    java.util.NavigableMap<K, V> headMap(K a0, boolean a1);
+    java.util.Map.Entry<K, V> higherEntry(K a0);
+    java.util.Map.Entry<K, V> lowerEntry(K a0);
+    java.util.NavigableSet<K> navigableKeySet();
+    default java.util.NavigableMap<K, V> reversed() { return null; }
+    java.util.NavigableMap<K, V> subMap(K a0, boolean a1, K a2, boolean a3);
+    java.util.SortedMap<K, V> subMap(K a0, K a1);
+    java.util.NavigableMap<K, V> tailMap(K a0, boolean a1);
+}
+
+public interface NavigableSet<E> {
+    java.util.Iterator<E> descendingIterator();
+    java.util.NavigableSet<E> headSet(E a0, boolean a1);
+    default E removeFirst() { return null; }
+    default E removeLast() { return null; }
+    default java.util.NavigableSet<E> reversed() { return null; }
+    java.util.NavigableSet<E> subSet(E a0, boolean a1, E a2, boolean a3);
+    java.util.NavigableSet<E> tailSet(E a0, boolean a1);
+}
+
+public class Objects {
+    public native static int checkFromIndexSize(int a0, int a1, int a2);
+    public native static long checkFromIndexSize(long a0, long a1, long a2);
+    public native static int checkFromToIndex(int a0, int a1, int a2);
+    public native static long checkFromToIndex(long a0, long a1, long a2);
+    public native static long checkIndex(long a0, long a1);
+    public native static java.lang.String toIdentityString(java.lang.Object a0);
+}
+
+public class Optional<T> {
+    public native <X extends java.lang.Throwable> T orElseThrow(java.util.function.Supplier<X> a0) throws X;
+}
+
+public class OptionalDouble {
+    public native static java.util.OptionalDouble empty();
+    public native void ifPresent(java.util.function.DoubleConsumer a0);
+    public native void ifPresentOrElse(java.util.function.DoubleConsumer a0, java.lang.Runnable a1);
+    public native boolean isEmpty();
+    public native static java.util.OptionalDouble of(double a0);
+    public native double orElseGet(java.util.function.DoubleSupplier a0);
+    public native double orElseThrow();
+    public native <X extends java.lang.Throwable> double orElseThrow(java.util.function.Supplier<X> a0) throws X;
+    public native java.util.stream.DoubleStream stream();
+}
+
+public class OptionalInt {
+    public native static java.util.OptionalInt empty();
+    public native void ifPresent(java.util.function.IntConsumer a0);
+    public native void ifPresentOrElse(java.util.function.IntConsumer a0, java.lang.Runnable a1);
+    public native static java.util.OptionalInt of(int a0);
+    public native int orElseGet(java.util.function.IntSupplier a0);
+    public native int orElseThrow();
+    public native <X extends java.lang.Throwable> int orElseThrow(java.util.function.Supplier<X> a0) throws X;
+    public native java.util.stream.IntStream stream();
+}
+
+public class OptionalLong {
+    public native static java.util.OptionalLong empty();
+    public native void ifPresent(java.util.function.LongConsumer a0);
+    public native void ifPresentOrElse(java.util.function.LongConsumer a0, java.lang.Runnable a1);
+    public native boolean isEmpty();
+    public native static java.util.OptionalLong of(long a0);
+    public native long orElseGet(java.util.function.LongSupplier a0);
+    public native long orElseThrow();
+    public native <X extends java.lang.Throwable> long orElseThrow(java.util.function.Supplier<X> a0) throws X;
+    public native java.util.stream.LongStream stream();
+}
+
+public interface Queue<E> {
+    E remove();
+}
+
+public class Random {
+    public native java.util.stream.DoubleStream doubles();
+    public native java.util.stream.DoubleStream doubles(double a0, double a1);
+    public native java.util.stream.DoubleStream doubles(long a0);
+    public native java.util.stream.DoubleStream doubles(long a0, double a1, double a2);
+    public native static java.util.Random from(java.util.random.RandomGenerator a0);
+    public native java.util.stream.IntStream ints();
+    public native java.util.stream.IntStream ints(int a0, int a1);
+    public native java.util.stream.IntStream ints(long a0, int a1, int a2);
+    public native java.util.stream.LongStream longs();
+    public native java.util.stream.LongStream longs(long a0);
+    public native java.util.stream.LongStream longs(long a0, long a1);
+    public native java.util.stream.LongStream longs(long a0, long a1, long a2);
+    protected native int next(int a0);
+    public native void nextBytes(byte[] a0);
+}
+
+public class Scanner {
+    public native Scanner(java.io.File a0, java.lang.String a1) throws java.io.FileNotFoundException;
+    public native Scanner(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native Scanner(java.io.InputStream a0, java.lang.String a1);
+    public native Scanner(java.io.InputStream a0, java.nio.charset.Charset a1);
+    public native Scanner(java.nio.channels.ReadableByteChannel a0, java.lang.String a1);
+    public native Scanner(java.nio.channels.ReadableByteChannel a0, java.nio.charset.Charset a1);
+    public native Scanner(java.nio.file.Path a0, java.lang.String a1) throws java.io.IOException;
+    public native Scanner(java.nio.file.Path a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native java.util.regex.Pattern delimiter();
+    public native java.util.stream.Stream<java.util.regex.MatchResult> findAll(java.lang.String a0);
+    public native java.util.stream.Stream<java.util.regex.MatchResult> findAll(java.util.regex.Pattern a0);
+    public native java.lang.String findInLine(java.lang.String a0);
+    public native java.lang.String findInLine(java.util.regex.Pattern a0);
+    public native java.lang.String findWithinHorizon(java.lang.String a0, int a1);
+    public native java.lang.String findWithinHorizon(java.util.regex.Pattern a0, int a1);
+    public native boolean hasNext(java.lang.String a0);
+    public native boolean hasNext(java.util.regex.Pattern a0);
+    public native boolean hasNextBigDecimal();
+    public native boolean hasNextBigInteger();
+    public native boolean hasNextBigInteger(int a0);
+    public native boolean hasNextBoolean();
+    public native boolean hasNextByte();
+    public native boolean hasNextByte(int a0);
+    public native boolean hasNextDouble();
+    public native boolean hasNextFloat();
+    public native boolean hasNextInt(int a0);
+    public native boolean hasNextLong();
+    public native boolean hasNextLong(int a0);
+    public native boolean hasNextShort();
+    public native boolean hasNextShort(int a0);
+    public native java.io.IOException ioException();
+    public native java.util.Locale locale();
+    public native java.util.regex.MatchResult match();
+    public native java.lang.String next(java.lang.String a0);
+    public native java.lang.String next(java.util.regex.Pattern a0);
+    public native java.math.BigDecimal nextBigDecimal();
+    public native java.math.BigInteger nextBigInteger();
+    public native java.math.BigInteger nextBigInteger(int a0);
+    public native boolean nextBoolean();
+    public native byte nextByte();
+    public native byte nextByte(int a0);
+    public native float nextFloat();
+    public native int nextInt(int a0);
+    public native long nextLong(int a0);
+    public native short nextShort();
+    public native short nextShort(int a0);
+    public native int radix();
+    public native void remove();
+    public native java.util.Scanner reset();
+    public native java.util.Scanner skip(java.lang.String a0);
+    public native java.util.Scanner skip(java.util.regex.Pattern a0);
+    public native java.util.stream.Stream<java.lang.String> tokens();
+    public native java.util.Scanner useDelimiter(java.lang.String a0);
+    public native java.util.Scanner useDelimiter(java.util.regex.Pattern a0);
+    public native java.util.Scanner useLocale(java.util.Locale a0);
+    public native java.util.Scanner useRadix(int a0);
+}
+
+public interface Set<E> {
+    default java.util.Spliterator<E> spliterator() { return null; }
+}
+
+public interface SortedMap<K, V> {
+    default V putFirst(K a0, V a1) { return null; }
+    default V putLast(K a0, V a1) { return null; }
+    default java.util.SortedMap<K, V> reversed() { return null; }
+    java.util.SortedMap<K, V> subMap(K a0, K a1);
+}
+
+public interface SortedSet<E> {
+    default void addFirst(E a0) { }
+    default void addLast(E a0) { }
+    default E getFirst() { return null; }
+    default E getLast() { return null; }
+    default E removeFirst() { return null; }
+    default E removeLast() { return null; }
+    default java.util.SortedSet<E> reversed() { return null; }
+    default java.util.Spliterator<E> spliterator() { return null; }
+}
+
+public class StringJoiner {
+    public native java.util.StringJoiner merge(java.util.StringJoiner a0);
+    public native java.util.StringJoiner setEmptyValue(java.lang.CharSequence a0);
+}
+
+public abstract class TimeZone {
+    public static final int LONG = 1;
+    public static final int SHORT = 0;
+    public native java.lang.Object clone();
+    public native static java.lang.String[] getAvailableIDs();
+    public native static java.lang.String[] getAvailableIDs(int a0);
+    public native int getDSTSavings();
+    public native java.lang.String getDisplayName();
+    public native java.lang.String getDisplayName(boolean a0, int a1);
+    public native java.lang.String getDisplayName(boolean a0, int a1, java.util.Locale a2);
+    public native java.lang.String getDisplayName(java.util.Locale a0);
+    public abstract int getOffset(int a0, int a1, int a2, int a3, int a4, int a5);
+    public native int getOffset(long a0);
+    public native boolean hasSameRules(java.util.TimeZone a0);
+    public abstract boolean inDaylightTime(java.util.Date a0);
+    public native boolean observesDaylightTime();
+    public native static void setDefault(java.util.TimeZone a0);
+    public native void setID(java.lang.String a0);
+    public abstract void setRawOffset(int a0);
+    public native java.time.ZoneId toZoneId();
+    public abstract boolean useDaylightTime();
+}
+
+public class TreeMap<K, V> {
+    public native java.util.Map.Entry<K, V> ceilingEntry(K a0);
+    public native java.lang.Object clone();
+    public native java.util.NavigableSet<K> descendingKeySet();
+    public native java.util.Map.Entry<K, V> floorEntry(K a0);
+    public native java.util.NavigableMap<K, V> headMap(K a0, boolean a1);
+    public native java.util.Map.Entry<K, V> higherEntry(K a0);
+    public native java.util.Map.Entry<K, V> lowerEntry(K a0);
+    public native java.util.NavigableSet<K> navigableKeySet();
+    public native V putFirst(K a0, V a1);
+    public native V putLast(K a0, V a1);
+    public native V replace(K a0, V a1);
+    public native boolean replace(K a0, V a1, V a2);
+    public native void replaceAll(java.util.function.BiFunction<K, V, V> a0);
+    public native java.util.NavigableMap<K, V> subMap(K a0, boolean a1, K a2, boolean a3);
+    public native java.util.SortedMap<K, V> subMap(K a0, K a1);
+    public native java.util.NavigableMap<K, V> tailMap(K a0, boolean a1);
+}
+
+public class TreeSet<E> {
+    public native void addFirst(E a0);
+    public native void addLast(E a0);
+    public native java.lang.Object clone();
+    public native java.util.Iterator<E> descendingIterator();
+    public native java.util.NavigableSet<E> headSet(E a0, boolean a1);
+    public native java.util.Spliterator<E> spliterator();
+    public native java.util.NavigableSet<E> subSet(E a0, boolean a1, E a2, boolean a3);
+    public native java.util.NavigableSet<E> tailSet(E a0, boolean a1);
+}
+
+public class UUID {
+    public native UUID(long a0, long a1);
+    public native int clockSequence();
+    public native int compareTo(java.util.UUID a0);
+    public native static java.util.UUID nameUUIDFromBytes(byte[] a0);
+    public native long node();
+    public native long timestamp();
+    public native int variant();
+    public native int version();
+}
+
+public class Vector<E> {
+    protected int capacityIncrement;
+    protected int elementCount;
+    protected java.lang.Object[] elementData;
+    public native Vector(int a0);
+    public native Vector(int a0, int a1);
+    public native Vector(java.util.Collection<E> a0);
+    public native boolean addAll(int a0, java.util.Collection<E> a1);
+    public native void addElement(E a0);
+    public native int capacity();
+    public native java.lang.Object clone();
+    public native void copyInto(java.lang.Object[] a0);
+    public native E elementAt(int a0);
+    public native java.util.Enumeration<E> elements();
+    public native void ensureCapacity(int a0);
+    public native E firstElement();
+    public native int indexOf(java.lang.Object a0, int a1);
+    public native void insertElementAt(E a0, int a1);
+    public native E lastElement();
+    public native int lastIndexOf(java.lang.Object a0, int a1);
+    public native java.util.ListIterator<E> listIterator(int a0);
+    public native void removeAllElements();
+    public native boolean removeElement(java.lang.Object a0);
+    public native void removeElementAt(int a0);
+    protected native void removeRange(int a0, int a1);
+    public native void setElementAt(E a0, int a1);
+    public native void setSize(int a0);
+    public native java.util.Spliterator<E> spliterator();
+    public native void trimToSize();
+}
+"####,
+    ),
+    (
+        "java.util.concurrent",
+        r####"
+package java.util.concurrent;
+
+public class ConcurrentHashMap<K, V> {
+    public native ConcurrentHashMap(int a0, float a1);
+    public native ConcurrentHashMap(int a0, float a1, int a2);
+    public native ConcurrentHashMap(java.util.Map<K, V> a0);
+    public native boolean contains(java.lang.Object a0);
+    public native java.util.Enumeration<V> elements();
+    public native void forEach(long a0, java.util.function.BiConsumer<K, V> a1);
+    public native <U> void forEach(long a0, java.util.function.BiFunction<K, V, U> a1, java.util.function.Consumer<U> a2);
+    public native void forEachEntry(long a0, java.util.function.Consumer<java.util.Map.Entry<K, V>> a1);
+    public native <U> void forEachEntry(long a0, java.util.function.Function<java.util.Map.Entry<K, V>, U> a1, java.util.function.Consumer<U> a2);
+    public native void forEachKey(long a0, java.util.function.Consumer<K> a1);
+    public native <U> void forEachKey(long a0, java.util.function.Function<K, U> a1, java.util.function.Consumer<U> a2);
+    public native void forEachValue(long a0, java.util.function.Consumer<V> a1);
+    public native <U> void forEachValue(long a0, java.util.function.Function<V, U> a1, java.util.function.Consumer<U> a2);
+    public native java.util.concurrent.ConcurrentHashMap.KeySetView<K, V> keySet(V a0);
+    public native java.util.Enumeration<K> keys();
+    public native long mappingCount();
+    public native static <K> java.util.concurrent.ConcurrentHashMap.KeySetView<K, java.lang.Boolean> newKeySet();
+    public native static <K> java.util.concurrent.ConcurrentHashMap.KeySetView<K, java.lang.Boolean> newKeySet(int a0);
+    public native <U> U reduce(long a0, java.util.function.BiFunction<K, V, U> a1, java.util.function.BiFunction<U, U, U> a2);
+    public native java.util.Map.Entry<K, V> reduceEntries(long a0, java.util.function.BiFunction<java.util.Map.Entry<K, V>, java.util.Map.Entry<K, V>, java.util.Map.Entry<K, V>> a1);
+    public native <U> U reduceEntries(long a0, java.util.function.Function<java.util.Map.Entry<K, V>, U> a1, java.util.function.BiFunction<U, U, U> a2);
+    public native double reduceEntriesToDouble(long a0, java.util.function.ToDoubleFunction<java.util.Map.Entry<K, V>> a1, double a2, java.util.function.DoubleBinaryOperator a3);
+    public native int reduceEntriesToInt(long a0, java.util.function.ToIntFunction<java.util.Map.Entry<K, V>> a1, int a2, java.util.function.IntBinaryOperator a3);
+    public native long reduceEntriesToLong(long a0, java.util.function.ToLongFunction<java.util.Map.Entry<K, V>> a1, long a2, java.util.function.LongBinaryOperator a3);
+    public native K reduceKeys(long a0, java.util.function.BiFunction<K, K, K> a1);
+    public native <U> U reduceKeys(long a0, java.util.function.Function<K, U> a1, java.util.function.BiFunction<U, U, U> a2);
+    public native double reduceKeysToDouble(long a0, java.util.function.ToDoubleFunction<K> a1, double a2, java.util.function.DoubleBinaryOperator a3);
+    public native int reduceKeysToInt(long a0, java.util.function.ToIntFunction<K> a1, int a2, java.util.function.IntBinaryOperator a3);
+    public native long reduceKeysToLong(long a0, java.util.function.ToLongFunction<K> a1, long a2, java.util.function.LongBinaryOperator a3);
+    public native double reduceToDouble(long a0, java.util.function.ToDoubleBiFunction<K, V> a1, double a2, java.util.function.DoubleBinaryOperator a3);
+    public native int reduceToInt(long a0, java.util.function.ToIntBiFunction<K, V> a1, int a2, java.util.function.IntBinaryOperator a3);
+    public native long reduceToLong(long a0, java.util.function.ToLongBiFunction<K, V> a1, long a2, java.util.function.LongBinaryOperator a3);
+    public native V reduceValues(long a0, java.util.function.BiFunction<V, V, V> a1);
+    public native <U> U reduceValues(long a0, java.util.function.Function<V, U> a1, java.util.function.BiFunction<U, U, U> a2);
+    public native double reduceValuesToDouble(long a0, java.util.function.ToDoubleFunction<V> a1, double a2, java.util.function.DoubleBinaryOperator a3);
+    public native int reduceValuesToInt(long a0, java.util.function.ToIntFunction<V> a1, int a2, java.util.function.IntBinaryOperator a3);
+    public native long reduceValuesToLong(long a0, java.util.function.ToLongFunction<V> a1, long a2, java.util.function.LongBinaryOperator a3);
+    public native boolean remove(java.lang.Object a0, java.lang.Object a1);
+    public native V replace(K a0, V a1);
+    public native boolean replace(K a0, V a1, V a2);
+    public native void replaceAll(java.util.function.BiFunction<K, V, V> a0);
+    public native <U> U search(long a0, java.util.function.BiFunction<K, V, U> a1);
+    public native <U> U searchEntries(long a0, java.util.function.Function<java.util.Map.Entry<K, V>, U> a1);
+    public native <U> U searchKeys(long a0, java.util.function.Function<K, U> a1);
+    public native <U> U searchValues(long a0, java.util.function.Function<V, U> a1);
+    public static class KeySetView<K, V> implements java.util.Collection<K>, java.io.Serializable, java.util.Set<K> {
+        public native boolean add(K a0);
+        public native boolean addAll(java.util.Collection<K> a0);
+        public native void clear();
+        public native boolean contains(java.lang.Object a0);
+        public native boolean containsAll(java.util.Collection<java.lang.Object> a0);
+        public native boolean equals(java.lang.Object a0);
+        public native void forEach(java.util.function.Consumer<K> a0);
+        public native java.util.concurrent.ConcurrentHashMap<K, V> getMap();
+        public native V getMappedValue();
+        public native int hashCode();
+        public native boolean isEmpty();
+        public native java.util.Iterator<K> iterator();
+        public native boolean remove(java.lang.Object a0);
+        public native boolean removeAll(java.util.Collection<java.lang.Object> a0);
+        public native boolean retainAll(java.util.Collection<java.lang.Object> a0);
+        public native int size();
+        public native java.util.Spliterator<K> spliterator();
+        public native java.lang.Object[] toArray();
+        public native <T> T[] toArray(T[] a0);
+        public native java.lang.String toString();
+    }
+}
+
+public class ConcurrentLinkedQueue<E> {
+    public native ConcurrentLinkedQueue(java.util.Collection<E> a0);
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public class CopyOnWriteArrayList<E> {
+    public native CopyOnWriteArrayList(E[] a0);
+    public native CopyOnWriteArrayList(java.util.Collection<E> a0);
+    public native boolean addAll(int a0, java.util.Collection<E> a1);
+    public native int addAllAbsent(java.util.Collection<E> a0);
+    public native void addFirst(E a0);
+    public native boolean addIfAbsent(E a0);
+    public native void addLast(E a0);
+    public native java.lang.Object clone();
+    public native E getFirst();
+    public native E getLast();
+    public native int indexOf(E a0, int a1);
+    public native int lastIndexOf(E a0, int a1);
+    public native java.util.ListIterator<E> listIterator(int a0);
+    public native E removeFirst();
+    public native E removeLast();
+    public native java.util.List<E> reversed();
+    public native java.util.Spliterator<E> spliterator();
+}
+
+public interface ExecutorService {
+    default void close() { }
+    <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<java.util.concurrent.Callable<T>> a0) throws java.lang.InterruptedException;
+    <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<java.util.concurrent.Callable<T>> a0, long a1, java.util.concurrent.TimeUnit a2) throws java.lang.InterruptedException;
+    <T> T invokeAny(java.util.Collection<java.util.concurrent.Callable<T>> a0) throws java.util.concurrent.ExecutionException, java.lang.InterruptedException;
+    <T> T invokeAny(java.util.Collection<java.util.concurrent.Callable<T>> a0, long a1, java.util.concurrent.TimeUnit a2) throws java.util.concurrent.ExecutionException, java.lang.InterruptedException, java.util.concurrent.TimeoutException;
+    <T> java.util.concurrent.Future<T> submit(java.lang.Runnable a0, T a1);
+}
+
+public class Executors {
+    public native static java.util.concurrent.Callable<java.lang.Object> callable(java.lang.Runnable a0);
+    public native static <T> java.util.concurrent.Callable<T> callable(java.lang.Runnable a0, T a1);
+    public native static java.util.concurrent.Callable<java.lang.Object> callable(java.security.PrivilegedAction<java.lang.Object> a0);
+    public native static java.util.concurrent.Callable<java.lang.Object> callable(java.security.PrivilegedExceptionAction<java.lang.Object> a0);
+    public native static java.util.concurrent.ThreadFactory defaultThreadFactory();
+    public native static java.util.concurrent.ExecutorService newCachedThreadPool(java.util.concurrent.ThreadFactory a0);
+    public native static java.util.concurrent.ExecutorService newFixedThreadPool(int a0, java.util.concurrent.ThreadFactory a1);
+    public native static java.util.concurrent.ScheduledExecutorService newScheduledThreadPool(int a0);
+    public native static java.util.concurrent.ScheduledExecutorService newScheduledThreadPool(int a0, java.util.concurrent.ThreadFactory a1);
+    public native static java.util.concurrent.ExecutorService newSingleThreadExecutor(java.util.concurrent.ThreadFactory a0);
+    public native static java.util.concurrent.ScheduledExecutorService newSingleThreadScheduledExecutor();
+    public native static java.util.concurrent.ScheduledExecutorService newSingleThreadScheduledExecutor(java.util.concurrent.ThreadFactory a0);
+    public native static java.util.concurrent.ExecutorService newWorkStealingPool();
+    public native static java.util.concurrent.ExecutorService newWorkStealingPool(int a0);
+    public native static <T> java.util.concurrent.Callable<T> privilegedCallable(java.util.concurrent.Callable<T> a0);
+    public native static <T> java.util.concurrent.Callable<T> privilegedCallableUsingCurrentClassLoader(java.util.concurrent.Callable<T> a0);
+    public native static java.util.concurrent.ThreadFactory privilegedThreadFactory();
+    public native static java.util.concurrent.ExecutorService unconfigurableExecutorService(java.util.concurrent.ExecutorService a0);
+    public native static java.util.concurrent.ScheduledExecutorService unconfigurableScheduledExecutorService(java.util.concurrent.ScheduledExecutorService a0);
+}
+
+public interface Future<V> {
+    default java.lang.Throwable exceptionNow() { return null; }
+    V get(long a0, java.util.concurrent.TimeUnit a1) throws java.util.concurrent.ExecutionException, java.lang.InterruptedException, java.util.concurrent.TimeoutException;
+    default V resultNow() { return null; }
+    default java.util.concurrent.Future.State state() { return null; }
+    public static class State extends java.lang.Enum {
+        public static final java.util.concurrent.Future.State CANCELLED;
+        public static final java.util.concurrent.Future.State FAILED;
+        public static final java.util.concurrent.Future.State RUNNING;
+        public static final java.util.concurrent.Future.State SUCCESS;
+        public native static java.util.concurrent.Future.State[] values();
+        public native static java.util.concurrent.Future.State valueOf(java.lang.String a0);
+    }
+}
+
+public class TimeUnit {
+    public native long convert(java.time.Duration a0);
+    public native long convert(long a0, java.util.concurrent.TimeUnit a1);
+    public native static java.util.concurrent.TimeUnit of(java.time.temporal.ChronoUnit a0);
+    public native void timedJoin(java.lang.Thread a0, long a1) throws java.lang.InterruptedException;
+    public native void timedWait(java.lang.Object a0, long a1) throws java.lang.InterruptedException;
+    public native java.time.temporal.ChronoUnit toChronoUnit();
+    public native long toDays(long a0);
+    public native long toHours(long a0);
+    public native long toMicros(long a0);
+    public native long toMinutes(long a0);
+    public native long toNanos(long a0);
+}
+"####,
+    ),
+    (
+        "java.util.concurrent.atomic",
+        r####"
+package java.util.concurrent.atomic;
+
+public class AtomicBoolean {
+    public native boolean compareAndExchange(boolean a0, boolean a1);
+    public native boolean compareAndExchangeAcquire(boolean a0, boolean a1);
+    public native boolean compareAndExchangeRelease(boolean a0, boolean a1);
+    public native boolean getAcquire();
+    public native boolean getOpaque();
+    public native boolean getPlain();
+    public native void lazySet(boolean a0);
+    public native void setOpaque(boolean a0);
+    public native void setPlain(boolean a0);
+    public native void setRelease(boolean a0);
+    public native boolean weakCompareAndSet(boolean a0, boolean a1);
+    public native boolean weakCompareAndSetAcquire(boolean a0, boolean a1);
+    public native boolean weakCompareAndSetPlain(boolean a0, boolean a1);
+    public native boolean weakCompareAndSetRelease(boolean a0, boolean a1);
+    public native boolean weakCompareAndSetVolatile(boolean a0, boolean a1);
+}
+
+public class AtomicInteger {
+    public native int accumulateAndGet(int a0, java.util.function.IntBinaryOperator a1);
+    public native int compareAndExchange(int a0, int a1);
+    public native int compareAndExchangeAcquire(int a0, int a1);
+    public native int compareAndExchangeRelease(int a0, int a1);
+    public native int getAcquire();
+    public native int getAndAccumulate(int a0, java.util.function.IntBinaryOperator a1);
+    public native int getAndUpdate(java.util.function.IntUnaryOperator a0);
+    public native int getOpaque();
+    public native int getPlain();
+    public native void lazySet(int a0);
+    public native void setOpaque(int a0);
+    public native void setPlain(int a0);
+    public native void setRelease(int a0);
+    public native int updateAndGet(java.util.function.IntUnaryOperator a0);
+    public native boolean weakCompareAndSet(int a0, int a1);
+    public native boolean weakCompareAndSetAcquire(int a0, int a1);
+    public native boolean weakCompareAndSetPlain(int a0, int a1);
+    public native boolean weakCompareAndSetRelease(int a0, int a1);
+    public native boolean weakCompareAndSetVolatile(int a0, int a1);
+}
+
+public class AtomicLong {
+    public native long accumulateAndGet(long a0, java.util.function.LongBinaryOperator a1);
+    public native long compareAndExchange(long a0, long a1);
+    public native long compareAndExchangeAcquire(long a0, long a1);
+    public native long compareAndExchangeRelease(long a0, long a1);
+    public native long getAcquire();
+    public native long getAndAccumulate(long a0, java.util.function.LongBinaryOperator a1);
+    public native long getAndAdd(long a0);
+    public native long getAndDecrement();
+    public native long getAndSet(long a0);
+    public native long getAndUpdate(java.util.function.LongUnaryOperator a0);
+    public native long getOpaque();
+    public native long getPlain();
+    public native void lazySet(long a0);
+    public native void setOpaque(long a0);
+    public native void setPlain(long a0);
+    public native void setRelease(long a0);
+    public native long updateAndGet(java.util.function.LongUnaryOperator a0);
+    public native boolean weakCompareAndSet(long a0, long a1);
+    public native boolean weakCompareAndSetAcquire(long a0, long a1);
+    public native boolean weakCompareAndSetPlain(long a0, long a1);
+    public native boolean weakCompareAndSetRelease(long a0, long a1);
+    public native boolean weakCompareAndSetVolatile(long a0, long a1);
+}
+
+public class AtomicReference<V> {
+    public native V accumulateAndGet(V a0, java.util.function.BinaryOperator<V> a1);
+    public native V compareAndExchange(V a0, V a1);
+    public native V compareAndExchangeAcquire(V a0, V a1);
+    public native V compareAndExchangeRelease(V a0, V a1);
+    public native V getAcquire();
+    public native V getAndAccumulate(V a0, java.util.function.BinaryOperator<V> a1);
+    public native V getAndUpdate(java.util.function.UnaryOperator<V> a0);
+    public native V getOpaque();
+    public native V getPlain();
+    public native void lazySet(V a0);
+    public native void setOpaque(V a0);
+    public native void setPlain(V a0);
+    public native void setRelease(V a0);
+    public native boolean weakCompareAndSet(V a0, V a1);
+    public native boolean weakCompareAndSetAcquire(V a0, V a1);
+    public native boolean weakCompareAndSetPlain(V a0, V a1);
+    public native boolean weakCompareAndSetRelease(V a0, V a1);
+    public native boolean weakCompareAndSetVolatile(V a0, V a1);
+}
+"####,
+    ),
+    (
+        "java.util.function",
+        r####"
+package java.util.function;
+
+public interface BiConsumer<T, U> {
+    default java.util.function.BiConsumer<T, U> andThen(java.util.function.BiConsumer<T, U> a0) { return null; }
+}
+
+public interface BiFunction<T, U, R> {
+    default <V> java.util.function.BiFunction<T, U, V> andThen(java.util.function.Function<R, V> a0) { return null; }
+}
+
+public interface BiPredicate<T, U> {
+    default java.util.function.BiPredicate<T, U> and(java.util.function.BiPredicate<T, U> a0) { return null; }
+    default java.util.function.BiPredicate<T, U> negate() { return null; }
+    default java.util.function.BiPredicate<T, U> or(java.util.function.BiPredicate<T, U> a0) { return null; }
+}
+
+public interface DoubleConsumer {
+    default java.util.function.DoubleConsumer andThen(java.util.function.DoubleConsumer a0) { return null; }
+}
+
+public interface DoubleUnaryOperator {
+    default java.util.function.DoubleUnaryOperator andThen(java.util.function.DoubleUnaryOperator a0) { return null; }
+    default java.util.function.DoubleUnaryOperator compose(java.util.function.DoubleUnaryOperator a0) { return null; }
+    static java.util.function.DoubleUnaryOperator identity();
+}
+
+public interface IntConsumer {
+    default java.util.function.IntConsumer andThen(java.util.function.IntConsumer a0) { return null; }
+}
+
+public interface IntPredicate {
+    default java.util.function.IntPredicate and(java.util.function.IntPredicate a0) { return null; }
+    default java.util.function.IntPredicate negate() { return null; }
+    default java.util.function.IntPredicate or(java.util.function.IntPredicate a0) { return null; }
+}
+
+public interface IntUnaryOperator {
+    default java.util.function.IntUnaryOperator andThen(java.util.function.IntUnaryOperator a0) { return null; }
+    default java.util.function.IntUnaryOperator compose(java.util.function.IntUnaryOperator a0) { return null; }
+    static java.util.function.IntUnaryOperator identity();
+}
+
+public interface LongConsumer {
+    default java.util.function.LongConsumer andThen(java.util.function.LongConsumer a0) { return null; }
+}
+
+public interface LongUnaryOperator {
+    default java.util.function.LongUnaryOperator andThen(java.util.function.LongUnaryOperator a0) { return null; }
+    default java.util.function.LongUnaryOperator compose(java.util.function.LongUnaryOperator a0) { return null; }
+    static java.util.function.LongUnaryOperator identity();
+}
+"####,
+    ),
+    (
+        "java.util.regex",
+        r####"
+package java.util.regex;
+
+public class Matcher {
+    public native java.util.regex.Matcher appendReplacement(java.lang.StringBuffer a0, java.lang.String a1);
+    public native java.util.regex.Matcher appendReplacement(java.lang.StringBuilder a0, java.lang.String a1);
+    public native java.lang.StringBuffer appendTail(java.lang.StringBuffer a0);
+    public native java.lang.StringBuilder appendTail(java.lang.StringBuilder a0);
+    public native int end(java.lang.String a0);
+    public native boolean find(int a0);
+    public native boolean hasAnchoringBounds();
+    public native boolean hasTransparentBounds();
+    public native boolean hitEnd();
+    public native java.util.regex.Pattern pattern();
+    public native static java.lang.String quoteReplacement(java.lang.String a0);
+    public native java.util.regex.Matcher region(int a0, int a1);
+    public native int regionEnd();
+    public native int regionStart();
+    public native boolean requireEnd();
+    public native java.util.regex.Matcher reset(java.lang.CharSequence a0);
+    public native java.util.stream.Stream<java.util.regex.MatchResult> results();
+    public native int start(java.lang.String a0);
+    public native java.util.regex.MatchResult toMatchResult();
+    public native java.util.regex.Matcher useAnchoringBounds(boolean a0);
+    public native java.util.regex.Matcher usePattern(java.util.regex.Pattern a0);
+    public native java.util.regex.Matcher useTransparentBounds(boolean a0);
+}
+
+public class Pattern {
+    public static final int CANON_EQ = 128;
+    public static final int COMMENTS = 4;
+    public static final int LITERAL = 16;
+    public static final int UNICODE_CASE = 64;
+    public static final int UNICODE_CHARACTER_CLASS = 256;
+    public static final int UNIX_LINES = 1;
+    public native java.util.function.Predicate<java.lang.String> asMatchPredicate();
+    public native java.util.function.Predicate<java.lang.String> asPredicate();
+    public native int flags();
+    public native java.lang.String[] split(java.lang.CharSequence a0, int a1);
+}
+
+public class PatternSyntaxException {
+    public native PatternSyntaxException(java.lang.String a0, java.lang.String a1, int a2);
+}
+"####,
+    ),
+    (
+        "java.util.stream",
+        r####"
+package java.util.stream;
+
+public interface BaseStream<T, S extends java.util.stream.BaseStream<T, S>> {
+    boolean isParallel();
+    S onClose(java.lang.Runnable a0);
+    java.util.Spliterator<T> spliterator();
+    S unordered();
+}
+
+public interface Collector<T, A, R> {
+    java.util.function.BiConsumer<A, T> accumulator();
+    java.util.Set<java.util.stream.Collector.Characteristics> characteristics();
+    java.util.function.BinaryOperator<A> combiner();
+    java.util.function.Function<A, R> finisher();
+    static <T, A, R> java.util.stream.Collector<T, A, R> of(java.util.function.Supplier<A> a0, java.util.function.BiConsumer<A, T> a1, java.util.function.BinaryOperator<A> a2, java.util.function.Function<A, R> a3, java.util.stream.Collector.Characteristics... a4);
+    static <T, R> java.util.stream.Collector<T, R, R> of(java.util.function.Supplier<R> a0, java.util.function.BiConsumer<R, T> a1, java.util.function.BinaryOperator<R> a2, java.util.stream.Collector.Characteristics... a3);
+    java.util.function.Supplier<A> supplier();
+    public static class Characteristics extends java.lang.Enum {
+        public static final java.util.stream.Collector.Characteristics CONCURRENT;
+        public static final java.util.stream.Collector.Characteristics IDENTITY_FINISH;
+        public static final java.util.stream.Collector.Characteristics UNORDERED;
+        public native static java.util.stream.Collector.Characteristics[] values();
+        public native static java.util.stream.Collector.Characteristics valueOf(java.lang.String a0);
+    }
+}
+
+public class Collectors {
+    public native static <T, K, D, A, M extends java.util.Map<K, D>> java.util.stream.Collector<T, java.lang.Object, M> groupingBy(java.util.function.Function<T, K> a0, java.util.function.Supplier<M> a1, java.util.stream.Collector<T, A, D> a2);
+    public native static <T, K> java.util.stream.Collector<T, java.lang.Object, java.util.concurrent.ConcurrentMap<K, java.util.List<T>>> groupingByConcurrent(java.util.function.Function<T, K> a0);
+    public native static <T, K, A, D, M extends java.util.concurrent.ConcurrentMap<K, D>> java.util.stream.Collector<T, java.lang.Object, M> groupingByConcurrent(java.util.function.Function<T, K> a0, java.util.function.Supplier<M> a1, java.util.stream.Collector<T, A, D> a2);
+    public native static <T, K, A, D> java.util.stream.Collector<T, java.lang.Object, java.util.concurrent.ConcurrentMap<K, D>> groupingByConcurrent(java.util.function.Function<T, K> a0, java.util.stream.Collector<T, A, D> a1);
+    public native static <T> java.util.stream.Collector<T, java.lang.Object, java.util.Optional<T>> reducing(java.util.function.BinaryOperator<T> a0);
+    public native static <T, U> java.util.stream.Collector<T, java.lang.Object, U> reducing(U a0, java.util.function.Function<T, U> a1, java.util.function.BinaryOperator<U> a2);
+    public native static <T> java.util.stream.Collector<T, java.lang.Object, java.util.DoubleSummaryStatistics> summarizingDouble(java.util.function.ToDoubleFunction<T> a0);
+    public native static <T> java.util.stream.Collector<T, java.lang.Object, java.util.IntSummaryStatistics> summarizingInt(java.util.function.ToIntFunction<T> a0);
+    public native static <T> java.util.stream.Collector<T, java.lang.Object, java.util.LongSummaryStatistics> summarizingLong(java.util.function.ToLongFunction<T> a0);
+    public native static <T, R1, R2, R> java.util.stream.Collector<T, java.lang.Object, R> teeing(java.util.stream.Collector<T, java.lang.Object, R1> a0, java.util.stream.Collector<T, java.lang.Object, R2> a1, java.util.function.BiFunction<R1, R2, R> a2);
+    public native static <T, C extends java.util.Collection<T>> java.util.stream.Collector<T, java.lang.Object, C> toCollection(java.util.function.Supplier<C> a0);
+    public native static <T, K, U> java.util.stream.Collector<T, java.lang.Object, java.util.concurrent.ConcurrentMap<K, U>> toConcurrentMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1);
+    public native static <T, K, U> java.util.stream.Collector<T, java.lang.Object, java.util.concurrent.ConcurrentMap<K, U>> toConcurrentMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1, java.util.function.BinaryOperator<U> a2);
+    public native static <T, K, U, M extends java.util.concurrent.ConcurrentMap<K, U>> java.util.stream.Collector<T, java.lang.Object, M> toConcurrentMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1, java.util.function.BinaryOperator<U> a2, java.util.function.Supplier<M> a3);
+    public native static <T, K, U, M extends java.util.Map<K, U>> java.util.stream.Collector<T, java.lang.Object, M> toMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1, java.util.function.BinaryOperator<U> a2, java.util.function.Supplier<M> a3);
+    public native static <T, K, U> java.util.stream.Collector<T, java.lang.Object, java.util.Map<K, U>> toUnmodifiableMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1);
+    public native static <T, K, U> java.util.stream.Collector<T, java.lang.Object, java.util.Map<K, U>> toUnmodifiableMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1, java.util.function.BinaryOperator<U> a2);
+}
+
+public interface DoubleStream {
+    boolean allMatch(java.util.function.DoublePredicate a0);
+    boolean anyMatch(java.util.function.DoublePredicate a0);
+    static java.util.stream.DoubleStream.Builder builder();
+    <R> R collect(java.util.function.Supplier<R> a0, java.util.function.ObjDoubleConsumer<R> a1, java.util.function.BiConsumer<R, R> a2);
+    static java.util.stream.DoubleStream concat(java.util.stream.DoubleStream a0, java.util.stream.DoubleStream a1);
+    java.util.stream.DoubleStream distinct();
+    default java.util.stream.DoubleStream dropWhile(java.util.function.DoublePredicate a0) { return null; }
+    static java.util.stream.DoubleStream empty();
+    java.util.stream.DoubleStream filter(java.util.function.DoublePredicate a0);
+    java.util.OptionalDouble findAny();
+    java.util.OptionalDouble findFirst();
+    java.util.stream.DoubleStream flatMap(java.util.function.DoubleFunction<java.util.stream.DoubleStream> a0);
+    void forEach(java.util.function.DoubleConsumer a0);
+    void forEachOrdered(java.util.function.DoubleConsumer a0);
+    static java.util.stream.DoubleStream generate(java.util.function.DoubleSupplier a0);
+    static java.util.stream.DoubleStream iterate(double a0, java.util.function.DoublePredicate a1, java.util.function.DoubleUnaryOperator a2);
+    static java.util.stream.DoubleStream iterate(double a0, java.util.function.DoubleUnaryOperator a1);
+    java.util.stream.DoubleStream limit(long a0);
+    default java.util.stream.DoubleStream mapMulti(java.util.stream.DoubleStream.DoubleMapMultiConsumer a0) { return null; }
+    java.util.stream.IntStream mapToInt(java.util.function.DoubleToIntFunction a0);
+    java.util.stream.LongStream mapToLong(java.util.function.DoubleToLongFunction a0);
+    <U> java.util.stream.Stream<U> mapToObj(java.util.function.DoubleFunction<U> a0);
+    java.util.OptionalDouble max();
+    java.util.OptionalDouble min();
+    boolean noneMatch(java.util.function.DoublePredicate a0);
+    static java.util.stream.DoubleStream of(double a0);
+    java.util.stream.DoubleStream peek(java.util.function.DoubleConsumer a0);
+    double reduce(double a0, java.util.function.DoubleBinaryOperator a1);
+    java.util.OptionalDouble reduce(java.util.function.DoubleBinaryOperator a0);
+    java.util.stream.DoubleStream skip(long a0);
+    java.util.stream.DoubleStream sorted();
+    java.util.Spliterator.OfDouble spliterator();
+    java.util.DoubleSummaryStatistics summaryStatistics();
+    default java.util.stream.DoubleStream takeWhile(java.util.function.DoublePredicate a0) { return null; }
+    public static interface Builder extends java.util.function.DoubleConsumer {
+        void accept(double a0);
+        default java.util.stream.DoubleStream.Builder add(double a0) { return null; }
+        java.util.stream.DoubleStream build();
+    }
+    public static interface DoubleMapMultiConsumer {
+        void accept(double a0, java.util.function.DoubleConsumer a1);
+    }
+}
+
+public interface IntStream {
+    java.util.stream.LongStream asLongStream();
+    static java.util.stream.IntStream.Builder builder();
+    <R> R collect(java.util.function.Supplier<R> a0, java.util.function.ObjIntConsumer<R> a1, java.util.function.BiConsumer<R, R> a2);
+    static java.util.stream.IntStream concat(java.util.stream.IntStream a0, java.util.stream.IntStream a1);
+    default java.util.stream.IntStream dropWhile(java.util.function.IntPredicate a0) { return null; }
+    static java.util.stream.IntStream empty();
+    java.util.OptionalInt findAny();
+    java.util.OptionalInt findFirst();
+    java.util.stream.IntStream flatMap(java.util.function.IntFunction<java.util.stream.IntStream> a0);
+    void forEachOrdered(java.util.function.IntConsumer a0);
+    static java.util.stream.IntStream generate(java.util.function.IntSupplier a0);
+    static java.util.stream.IntStream iterate(int a0, java.util.function.IntPredicate a1, java.util.function.IntUnaryOperator a2);
+    static java.util.stream.IntStream iterate(int a0, java.util.function.IntUnaryOperator a1);
+    default java.util.stream.IntStream mapMulti(java.util.stream.IntStream.IntMapMultiConsumer a0) { return null; }
+    java.util.stream.DoubleStream mapToDouble(java.util.function.IntToDoubleFunction a0);
+    boolean noneMatch(java.util.function.IntPredicate a0);
+    static java.util.stream.IntStream of(int a0);
+    java.util.stream.IntStream peek(java.util.function.IntConsumer a0);
+    java.util.OptionalInt reduce(java.util.function.IntBinaryOperator a0);
+    java.util.Spliterator.OfInt spliterator();
+    java.util.IntSummaryStatistics summaryStatistics();
+    default java.util.stream.IntStream takeWhile(java.util.function.IntPredicate a0) { return null; }
+    public static interface Builder extends java.util.function.IntConsumer {
+        void accept(int a0);
+        default java.util.stream.IntStream.Builder add(int a0) { return null; }
+        java.util.stream.IntStream build();
+    }
+    public static interface IntMapMultiConsumer {
+        void accept(int a0, java.util.function.IntConsumer a1);
+    }
+}
+
+public interface LongStream {
+    boolean allMatch(java.util.function.LongPredicate a0);
+    boolean anyMatch(java.util.function.LongPredicate a0);
+    java.util.stream.DoubleStream asDoubleStream();
+    java.util.OptionalDouble average();
+    static java.util.stream.LongStream.Builder builder();
+    <R> R collect(java.util.function.Supplier<R> a0, java.util.function.ObjLongConsumer<R> a1, java.util.function.BiConsumer<R, R> a2);
+    static java.util.stream.LongStream concat(java.util.stream.LongStream a0, java.util.stream.LongStream a1);
+    java.util.stream.LongStream distinct();
+    default java.util.stream.LongStream dropWhile(java.util.function.LongPredicate a0) { return null; }
+    static java.util.stream.LongStream empty();
+    java.util.stream.LongStream filter(java.util.function.LongPredicate a0);
+    java.util.OptionalLong findAny();
+    java.util.OptionalLong findFirst();
+    java.util.stream.LongStream flatMap(java.util.function.LongFunction<java.util.stream.LongStream> a0);
+    void forEach(java.util.function.LongConsumer a0);
+    void forEachOrdered(java.util.function.LongConsumer a0);
+    static java.util.stream.LongStream generate(java.util.function.LongSupplier a0);
+    static java.util.stream.LongStream iterate(long a0, java.util.function.LongPredicate a1, java.util.function.LongUnaryOperator a2);
+    static java.util.stream.LongStream iterate(long a0, java.util.function.LongUnaryOperator a1);
+    java.util.stream.LongStream limit(long a0);
+    default java.util.stream.LongStream mapMulti(java.util.stream.LongStream.LongMapMultiConsumer a0) { return null; }
+    java.util.stream.DoubleStream mapToDouble(java.util.function.LongToDoubleFunction a0);
+    java.util.stream.IntStream mapToInt(java.util.function.LongToIntFunction a0);
+    <U> java.util.stream.Stream<U> mapToObj(java.util.function.LongFunction<U> a0);
+    java.util.OptionalLong max();
+    java.util.OptionalLong min();
+    boolean noneMatch(java.util.function.LongPredicate a0);
+    static java.util.stream.LongStream of(long a0);
+    java.util.stream.LongStream peek(java.util.function.LongConsumer a0);
+    static java.util.stream.LongStream rangeClosed(long a0, long a1);
+    java.util.OptionalLong reduce(java.util.function.LongBinaryOperator a0);
+    long reduce(long a0, java.util.function.LongBinaryOperator a1);
+    java.util.stream.LongStream skip(long a0);
+    java.util.stream.LongStream sorted();
+    java.util.Spliterator.OfLong spliterator();
+    java.util.LongSummaryStatistics summaryStatistics();
+    default java.util.stream.LongStream takeWhile(java.util.function.LongPredicate a0) { return null; }
+    public static interface Builder extends java.util.function.LongConsumer {
+        void accept(long a0);
+        default java.util.stream.LongStream.Builder add(long a0) { return null; }
+        java.util.stream.LongStream build();
+    }
+    public static interface LongMapMultiConsumer {
+        void accept(long a0, java.util.function.LongConsumer a1);
+    }
+}
+
+public interface Stream<T> {
+    static <T> java.util.stream.Stream.Builder<T> builder();
+    <R> R collect(java.util.function.Supplier<R> a0, java.util.function.BiConsumer<R, T> a1, java.util.function.BiConsumer<R, R> a2);
+    java.util.stream.DoubleStream flatMapToDouble(java.util.function.Function<T, java.util.stream.DoubleStream> a0);
+    java.util.stream.IntStream flatMapToInt(java.util.function.Function<T, java.util.stream.IntStream> a0);
+    java.util.stream.LongStream flatMapToLong(java.util.function.Function<T, java.util.stream.LongStream> a0);
+    default <R> java.util.stream.Stream<R> gather(java.util.stream.Gatherer<T, java.lang.Object, R> a0) { return null; }
+    static <T> java.util.stream.Stream<T> iterate(T a0, java.util.function.Predicate<T> a1, java.util.function.UnaryOperator<T> a2);
+    default <R> java.util.stream.Stream<R> mapMulti(java.util.function.BiConsumer<T, java.util.function.Consumer<R>> a0) { return null; }
+    default java.util.stream.DoubleStream mapMultiToDouble(java.util.function.BiConsumer<T, java.util.function.DoubleConsumer> a0) { return null; }
+    default java.util.stream.IntStream mapMultiToInt(java.util.function.BiConsumer<T, java.util.function.IntConsumer> a0) { return null; }
+    default java.util.stream.LongStream mapMultiToLong(java.util.function.BiConsumer<T, java.util.function.LongConsumer> a0) { return null; }
+    static <T> java.util.stream.Stream<T> of(T a0);
+    static <T> java.util.stream.Stream<T> ofNullable(T a0);
+    <U> U reduce(U a0, java.util.function.BiFunction<U, T, U> a1, java.util.function.BinaryOperator<U> a2);
+    <A> A[] toArray(java.util.function.IntFunction<A[]> a0);
+    public static interface Builder<T> extends java.util.function.Consumer<T> {
+        void accept(T a0);
+        default java.util.stream.Stream.Builder<T> add(T a0) { return null; }
+        java.util.stream.Stream<T> build();
+    }
+}
+"####,
+    ),
+];

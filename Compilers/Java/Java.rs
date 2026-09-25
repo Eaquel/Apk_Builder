@@ -2432,6 +2432,8 @@ pub struct Parser {
     imports: Vec<String>,
 
     type_variables: Vec<TypeFrame>,
+
+    implicit_name: Option<String>,
 }
 
 impl Parser {
@@ -2444,7 +2446,39 @@ impl Parser {
             package: None,
             imports: Vec::new(),
             type_variables: Vec::new(),
+            implicit_name: None,
         }
+    }
+
+    fn wrap_in_an_implicit_class(&mut self, name: &str) {
+        let (line, column) = (self.line(), self.column());
+        let opening = [
+            Token::Keyword("final"),
+            Token::Keyword("class"),
+            Token::Identifier(name.to_string()),
+            Token::Punctuation("{"),
+        ];
+        let at = self.at;
+        for (offset, token) in opening.into_iter().enumerate() {
+            self.tokens.insert(
+                at + offset,
+                Spelled {
+                    token,
+                    line,
+                    column,
+                },
+            );
+        }
+        let last = self.tokens.len() - 1;
+        let end_line = self.tokens[last].line;
+        self.tokens.insert(
+            last,
+            Spelled {
+                token: Token::Punctuation("}"),
+                line: end_line,
+                column: 1,
+            },
+        );
     }
 
     fn erased(&self, name: &str) -> Option<Written> {
@@ -2928,8 +2962,37 @@ impl Parser {
 
         let mut imports = Vec::new();
         let mut static_imports = Vec::new();
+        let mut through_modules = Vec::new();
         while self.is_word("import") {
             self.take();
+            if matches!(&self.here().token, Token::Identifier(word) if word == "module")
+                && matches!(self.ahead(1), Token::Identifier(_))
+            {
+                self.take();
+                let (line, column) = (self.line(), self.column());
+                let module = self.qualified()?;
+                self.want_mark(";")?;
+                let Some(packages) = packages_of_the_module(&module) else {
+                    return Err(at(
+                        "EJ259",
+                        line,
+                        column,
+                        format!("There is no module `{module}` that Android carries."),
+                    )
+                    .with_context(format!("Module: {module}"))
+                    .with_suggestion(
+                        "Android carries java.base, java.sql, java.xml, java.logging and \
+                         java.prefs; import a package of one of those instead.",
+                    ));
+                };
+                for package in packages {
+                    let held = format!("{package}.*");
+                    if !through_modules.contains(&held) {
+                        through_modules.push(held);
+                    }
+                }
+                continue;
+            }
             let is_static = self.eat_word("static");
             let mut name = self.qualified()?;
             if self.eat_mark(".") {
@@ -2944,8 +3007,41 @@ impl Parser {
             }
         }
 
+        for held in through_modules {
+            if !imports.contains(&held) {
+                imports.push(held);
+            }
+        }
+
+        let start = self.at;
+        match self.declarations_in_the_file(&package, &imports, &static_imports) {
+            Ok(declared) => Ok(declared),
+            Err(error) if error.code == "EJ104" && package.is_none() => {
+                let Some(name) = self.implicit_name.clone() else {
+                    return Err(error);
+                };
+                self.at = start;
+                self.wrap_in_an_implicit_class(&name);
+                for package in packages_of_the_module("java.base").unwrap_or_default() {
+                    let held = format!("{package}.*");
+                    if !imports.contains(&held) {
+                        imports.push(held);
+                    }
+                }
+                self.declarations_in_the_file(&package, &imports, &static_imports)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn declarations_in_the_file(
+        &mut self,
+        package: &Option<String>,
+        imports: &[String],
+        static_imports: &[String],
+    ) -> Result<Vec<Unit>, Diagnostic> {
         self.package = package.clone();
-        self.imports = imports.clone();
+        self.imports = imports.to_vec();
 
         let mut declared = Vec::new();
         while !matches!(self.here().token, Token::End) {
@@ -2953,12 +3049,12 @@ impl Parser {
                 continue;
             }
             let mut beside = Vec::new();
-            let one = self.declaration_of_a_type(&package, &imports, None, false, &mut beside)?;
+            let one = self.declaration_of_a_type(package, imports, None, false, &mut beside)?;
             declared.push(one);
             declared.append(&mut beside);
             for unit in &mut declared {
                 if unit.static_imports.is_empty() {
-                    unit.static_imports = static_imports.clone();
+                    unit.static_imports = static_imports.to_vec();
                 }
             }
         }
@@ -4034,6 +4130,8 @@ impl Parser {
             self.here().token,
             Token::Int(_)
                 | Token::Long(_)
+                | Token::Float(_)
+                | Token::Double(_)
                 | Token::Char(_)
                 | Token::Str(_)
                 | Token::True
@@ -5003,9 +5101,220 @@ impl Parser {
 
 pub const NESTED_ANNOTATION: &str = "@";
 
+const ONLY_ON_THE_DESKTOP: &[&str] = &[
+    "java.lang.IO",
+    "java.lang.ScopedValue",
+    "java.lang.StableValue",
+    "java.lang.Thread.Builder",
+    "java.util.concurrent.StructuredTaskScope",
+    "javax.crypto.KDF",
+    "javax.crypto.KDFParameters",
+    "javax.crypto.spec.HKDFParameterSpec",
+    "java.security.DEREncodable",
+    "java.security.PEMDecoder",
+    "java.security.PEMEncoder",
+    "java.security.PEMRecord",
+    "java.applet.",
+    "java.awt.",
+    "java.lang.classfile.",
+    "java.lang.foreign.",
+    "java.lang.instrument.",
+    "java.lang.management.",
+    "java.net.http.",
+    "java.rmi.",
+    "javax.imageio.",
+    "javax.management.",
+    "javax.naming.",
+    "javax.print.",
+    "javax.script.",
+    "javax.sound.",
+    "javax.swing.",
+    "javax.tools.",
+    "jdk.",
+];
+
+const ONLY_ON_THE_DESKTOP_METHODS: &[(&str, &str)] = &[
+    ("java/lang/Thread", "ofPlatform"),
+    ("java/lang/Thread", "ofVirtual"),
+    ("java/lang/Thread", "startVirtualThread"),
+    ("java/util/concurrent/Executors", "newThreadPerTaskExecutor"),
+    (
+        "java/util/concurrent/Executors",
+        "newVirtualThreadPerTaskExecutor",
+    ),
+];
+
+fn desktop_only(whole: &str) -> bool {
+    ONLY_ON_THE_DESKTOP.iter().any(|one| {
+        if one.ends_with('.') {
+            whole.starts_with(one)
+        } else {
+            whole == *one || whole.starts_with(&format!("{one}."))
+        }
+    })
+}
+
+fn only_on_the_desktop(unit: &Unit, name: &str) -> Option<String> {
+    if name.contains('.') {
+        let first = name.split('.').next().unwrap_or_default();
+        let through = unit
+            .imports
+            .iter()
+            .find(|one| one.rsplit('.').next() == Some(first))
+            .map(|one| format!("{}{}", one.strip_suffix(first).unwrap_or(one), name));
+        let whole = through.unwrap_or_else(|| name.to_string());
+        return desktop_only(&whole).then_some(whole);
+    }
+    for one in &unit.imports {
+        if let Some(package) = one.strip_suffix(".*") {
+            let whole = format!("{package}.{name}");
+            if desktop_only(&whole) {
+                return Some(whole);
+            }
+        } else if one.rsplit('.').next() == Some(name) && desktop_only(one) {
+            return Some(one.clone());
+        }
+    }
+    let whole = format!("java.lang.{name}");
+    desktop_only(&whole).then_some(whole)
+}
+
+fn only_on_the_desktop_diagnostic(whole: &str, line: u32) -> Diagnostic {
+    at(
+        "EJ260",
+        line,
+        1,
+        format!("`{whole}` belongs to the desktop JDK, and Android does not have it."),
+    )
+    .with_context(format!("Name: {whole}"))
+    .with_suggestion(
+        "Android runs apps on its own runtime, which carries most of java.base but not the \
+         JDK's desktop, preview and incubator APIs. Write it with what Android has, or leave \
+         this part out of the app.",
+    )
+}
+
+const MODULES: &[(&str, &[&str], &[&str])] = &[
+    (
+        "java.base",
+        &[
+            "java.io",
+            "java.lang",
+            "java.lang.annotation",
+            "java.lang.invoke",
+            "java.lang.ref",
+            "java.lang.reflect",
+            "java.lang.runtime",
+            "java.math",
+            "java.net",
+            "java.nio",
+            "java.nio.channels",
+            "java.nio.channels.spi",
+            "java.nio.charset",
+            "java.nio.charset.spi",
+            "java.nio.file",
+            "java.nio.file.attribute",
+            "java.nio.file.spi",
+            "java.security",
+            "java.security.cert",
+            "java.security.interfaces",
+            "java.security.spec",
+            "java.text",
+            "java.time",
+            "java.time.chrono",
+            "java.time.format",
+            "java.time.temporal",
+            "java.time.zone",
+            "java.util",
+            "java.util.concurrent",
+            "java.util.concurrent.atomic",
+            "java.util.concurrent.locks",
+            "java.util.function",
+            "java.util.jar",
+            "java.util.random",
+            "java.util.regex",
+            "java.util.stream",
+            "java.util.zip",
+            "javax.crypto",
+            "javax.crypto.interfaces",
+            "javax.crypto.spec",
+            "javax.net",
+            "javax.net.ssl",
+            "javax.security.auth",
+            "javax.security.auth.callback",
+            "javax.security.auth.login",
+            "javax.security.auth.x500",
+            "javax.security.cert",
+        ],
+        &[],
+    ),
+    ("java.logging", &["java.util.logging"], &[]),
+    ("java.prefs", &["java.util.prefs"], &[]),
+    (
+        "java.se",
+        &[],
+        &[
+            "java.base",
+            "java.logging",
+            "java.prefs",
+            "java.sql",
+            "java.xml",
+        ],
+    ),
+    (
+        "java.sql",
+        &["java.sql", "javax.sql"],
+        &["java.logging", "java.xml"],
+    ),
+    (
+        "java.xml",
+        &[
+            "javax.xml",
+            "javax.xml.datatype",
+            "javax.xml.namespace",
+            "javax.xml.parsers",
+            "javax.xml.transform",
+            "javax.xml.transform.dom",
+            "javax.xml.transform.sax",
+            "javax.xml.transform.stream",
+            "javax.xml.validation",
+            "javax.xml.xpath",
+            "org.w3c.dom",
+            "org.w3c.dom.ls",
+            "org.xml.sax",
+            "org.xml.sax.ext",
+            "org.xml.sax.helpers",
+        ],
+        &[],
+    ),
+];
+
+fn packages_of_the_module(module: &str) -> Option<Vec<&'static str>> {
+    let mut found = Vec::new();
+    let mut waiting = vec![module.to_string()];
+    let mut seen = Vec::new();
+    while let Some(named) = waiting.pop() {
+        if seen.contains(&named) {
+            continue;
+        }
+        let (_, packages, requires) = MODULES.iter().find(|(one, _, _)| *one == named)?;
+        seen.push(named);
+        found.extend_from_slice(packages);
+        for one in *requires {
+            waiting.push(one.to_string());
+        }
+    }
+    Some(found)
+}
+
 pub fn parse(source: &str) -> Result<Vec<Unit>, Diagnostic> {
+    parse_as(source, None)
+}
+
+pub fn parse_as(source: &str, implicit_name: Option<&str>) -> Result<Vec<Unit>, Diagnostic> {
     let tokens = Lexer::new(source).tokens()?;
     let mut parser = Parser::new(tokens);
+    parser.implicit_name = implicit_name.map(str::to_string);
     let declared = parser.file()?;
     if !matches!(parser.here().token, Token::End) {
         return Err(at(
@@ -5244,11 +5553,30 @@ impl Classpath {
                 }
             }
 
+            let mut beside = Vec::new();
+            for (_, text) in crate::compilers::android::THE_LIBRARY_BESIDE {
+                if let Ok(held) = parse(text) {
+                    beside.extend(held);
+                }
+            }
+
             for unit in &units {
+                found.shell(unit);
+            }
+            let (filling, fresh): (Vec<&Unit>, Vec<&Unit>) = beside
+                .iter()
+                .partition(|unit| found.known.contains_key(&unit.internal_name()));
+            for unit in &fresh {
                 found.shell(unit);
             }
             for unit in &units {
                 found.declare(unit);
+            }
+            for unit in &fresh {
+                found.declare(unit);
+            }
+            for unit in &filling {
+                found.fill_in(unit);
             }
 
             if let Some(held) = found.known.get_mut("java/lang/Object") {
@@ -5274,6 +5602,23 @@ impl Classpath {
                 ..KnownClass::default()
             },
         );
+    }
+
+    pub fn fill_in(&mut self, unit: &Unit) {
+        let internal = unit.internal_name();
+        let Some(before) = self.known.get(&internal).cloned() else {
+            return self.declare(unit);
+        };
+        self.declare(unit);
+        if let Some(after) = self.known.get_mut(&internal) {
+            after.superclass = before.superclass;
+            after.interfaces = before.interfaces;
+            after.interface = before.interface;
+            after.outer = before.outer;
+            after.kept_at_runtime = before.kept_at_runtime;
+            after.permits = before.permits;
+            after.above = before.above;
+        }
     }
 
     pub fn declare(&mut self, unit: &Unit) {
@@ -5449,6 +5794,11 @@ impl Classpath {
     pub fn learn(&mut self, class: &crate::jvm::Class) -> Result<(), Diagnostic> {
         let interface = class.access_flags & 0x0200 != 0;
         let internal = class.name.replace('.', "/");
+        if self.known.contains_key(&internal)
+            && Classpath::the_library().known.contains_key(&internal)
+        {
+            return Ok(());
+        }
         let mut known = KnownClass {
             name: internal.clone(),
             superclass: class.superclass.as_ref().map(|name| name.replace('.', "/")),
@@ -6062,6 +6412,10 @@ struct Emitter<'a> {
     frames: Vec<Frame>,
 
     stack: Vec<Verified>,
+
+    early: bool,
+
+    too_early: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -6103,6 +6457,8 @@ impl<'a> Emitter<'a> {
             slots: Vec::new(),
             frames: Vec::new(),
             stack: Vec::new(),
+            early: false,
+            too_early: false,
             reachable: true,
             lines: Vec::new(),
             caught: Vec::new(),
@@ -6202,6 +6558,23 @@ impl<'a> Emitter<'a> {
             }
             self.pops(i32::from(held.is_wide()) + 1);
         }
+    }
+
+    fn too_early_at(&mut self, line: u32) -> Result<(), Diagnostic> {
+        if !self.too_early {
+            return Ok(());
+        }
+        self.too_early = false;
+        Err(at(
+            "EJ258",
+            line,
+            1,
+            "`this` is used before the superclass constructor has run.",
+        )
+        .with_suggestion(
+            "Before `super(...)` or `this(...)`, only the arguments, locals and fields of this \
+             class that have no initializer may be touched.",
+        ))
     }
 
     fn slot_holds(&mut self, slot: u16, what: &Type) {
@@ -6403,6 +6776,9 @@ impl<'a> Emitter<'a> {
             return Ok(held.internal.clone());
         }
         resolve_named(self.classpath, self.unit, name).ok_or_else(|| {
+            if let Some(whole) = only_on_the_desktop(self.unit, name) {
+                return only_on_the_desktop_diagnostic(&whole, line);
+            }
             at(
                 "EJ200",
                 line,
@@ -10823,6 +11199,9 @@ impl Emitter<'_> {
     }
 
     fn load(&mut self, slot: u16, what: &Type) {
+        if slot == 0 && self.early && !self.static_ {
+            self.too_early = true;
+        }
         let base = match what {
             Type::Long => 0x16u8,
             Type::Float => 0x17,
@@ -10846,6 +11225,11 @@ impl Emitter<'_> {
             self.op2(base, slot);
         }
         self.pushes(what);
+        if slot == 0 && !self.static_ && self.slots.first() == Some(&Verified::UninitializedThis) {
+            if let Some(top) = self.stack.last_mut() {
+                *top = Verified::UninitializedThis;
+            }
+        }
     }
 
     fn store(&mut self, slot: u16, what: &Type) {
@@ -11408,29 +11792,23 @@ impl Emitter<'_> {
                 let (what, binds) = (&pattern.what, &pattern.name);
                 let binds = (!binds.is_empty()).then_some(binds);
                 let found = self.value(of, line)?;
-                if !found.is_reference() {
-                    return Err(at(
-                        "EJ208",
-                        line,
-                        1,
-                        format!(
-                            "`instanceof` wants an object and was given a {}.",
-                            found.readable()
-                        ),
-                    ));
-                }
                 let target = self.resolve(what, line)?;
+                if !found.is_reference() {
+                    return self.a_primitive_tested(&found, &target, binds, line);
+                }
                 let named = match &target {
                     Type::Object(name, _) => name.clone(),
-                    other => other.descriptor(),
+                    other => match boxed_name(other) {
+                        Some(boxed) => boxed.to_string(),
+                        None => other.descriptor(),
+                    },
                 };
                 if let Some(binding) = binds {
                     let object = Type::Object("java/lang/Object".to_string(), Vec::new());
                     let held = self.declare("$tested", object.clone());
                     self.store(held, &object);
 
-                    self.op(0x01);
-                    self.pushes_raw(Verified::Null);
+                    self.zero_of(&target);
                     let slot = self.declare(binding, target.clone());
                     self.store(slot, &target);
 
@@ -11448,7 +11826,13 @@ impl Emitter<'_> {
                     let index = self.pool.class(&named);
                     self.op2(0xc0, index);
                     self.pops(1);
-                    self.pushes(&target);
+                    let wrapper = Type::Object(named.clone(), Vec::new());
+                    if target.is_reference() {
+                        self.pushes(&target);
+                    } else {
+                        self.pushes(&wrapper);
+                        self.box_or_unbox(&wrapper, &target);
+                    }
                     self.store(slot, &target);
 
                     self.land(over);
@@ -14033,6 +14417,12 @@ impl Emitter<'_> {
     }
 
     fn no_such_method(&self, owner: &str, name: &str, arity: usize, line: u32) -> Diagnostic {
+        if ONLY_ON_THE_DESKTOP_METHODS.contains(&(owner, name)) {
+            return only_on_the_desktop_diagnostic(
+                &format!("{}.{name}", owner.replace(['/', '$'], ".")),
+                line,
+            );
+        }
         at(
             "EJ227",
             line,
@@ -14071,7 +14461,11 @@ impl Emitter<'_> {
                     format!("`{name}` belongs to an instance and this method is static."),
                 ));
             }
+            let before = self.too_early;
             self.load(0, &Type::Object(owner.clone(), Vec::new()));
+            if operator.is_none() && field.value.is_none() {
+                self.too_early = before;
+            }
         }
         let found = match operator {
             None => self.value_for(value, &what, line)?,
@@ -15673,6 +16067,38 @@ impl Emitter<'_> {
     }
 
     fn covers_everything(&mut self, over: &Chooser, found: &Type, arms: &[Arm]) -> bool {
+        if let Chooser::Primitive(kind) = over {
+            let total = arms.iter().any(|arm| {
+                if arm.guard.is_some() {
+                    return false;
+                }
+                let Some(pattern) = &arm.pattern else {
+                    return false;
+                };
+                let Ok(target) = self.resolve(&pattern.what, arm.line) else {
+                    return false;
+                };
+                if target.is_reference() {
+                    return true;
+                }
+                matches!(exactness(kind, &target, PATTERN_SUBJECT), Some(None))
+            });
+            if total {
+                return true;
+            }
+            if *kind == Type::Boolean {
+                let said: Vec<bool> = arms
+                    .iter()
+                    .flat_map(|arm| arm.labels.iter())
+                    .filter_map(|label| match label {
+                        Expression::Boolean(held) => Some(*held),
+                        _ => None,
+                    })
+                    .collect();
+                return said.contains(&true) && said.contains(&false);
+            }
+            return false;
+        }
         match over {
             Chooser::Constant(class) => {
                 let Some(known) = self.classpath.get(class) else {
@@ -15756,18 +16182,17 @@ impl Emitter<'_> {
         arms: &[Arm],
         line: u32,
     ) -> Result<Chooser, Diagnostic> {
-        if arms.iter().any(|arm| arm.pattern.is_some()) {
-            if !found.is_reference() {
-                return Err(at(
-                    "EJ238",
-                    line,
-                    1,
-                    format!(
-                        "A `switch` with a pattern in it takes an object, and was given a {}.",
-                        found.readable()
-                    ),
-                ));
+        let patterned = arms.iter().any(|arm| arm.pattern.is_some());
+        if !found.is_reference() && *found != Type::Void {
+            let wide = matches!(
+                found,
+                Type::Long | Type::Float | Type::Double | Type::Boolean
+            );
+            if patterned || wide {
+                return Ok(Chooser::Primitive(found.clone()));
             }
+        }
+        if patterned {
             return Ok(Chooser::Shape);
         }
         if found.is_int_like() {
@@ -15814,7 +16239,302 @@ impl Emitter<'_> {
             Chooser::Text => self.text_dispatch(arms, line),
             Chooser::Constant(class) => self.constant_dispatch(&class, arms, line),
             Chooser::Shape => self.shape_dispatch(arms, line),
+            Chooser::Primitive(kind) => self.primitive_dispatch(&kind, arms, line),
         }
+    }
+
+    fn primitive_dispatch(
+        &mut self,
+        kind: &Type,
+        arms: &[Arm],
+        line: u32,
+    ) -> Result<Dispatch, Diagnostic> {
+        let held = self.declare(PATTERN_SUBJECT, kind.clone());
+        self.store(held, kind);
+
+        let mut waiting: Vec<(Pending, usize)> = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            for label in &arm.labels {
+                if matches!(label, Expression::Null) {
+                    return Err(at(
+                        "EJ239",
+                        arm.line,
+                        arm.column,
+                        format!("A `case null` cannot match a {}.", kind.readable()),
+                    ));
+                }
+                self.load(held, kind);
+                let constant = self.value(label, arm.line)?;
+                if constant.is_reference()
+                    || (*kind == Type::Boolean) != (constant == Type::Boolean)
+                {
+                    return Err(at(
+                        "EJ239",
+                        arm.line,
+                        arm.column,
+                        format!(
+                            "A `case` over a {} answers to a constant of that kind, and a {} \
+                             was found.",
+                            kind.readable(),
+                            constant.readable()
+                        ),
+                    ));
+                }
+                self.convert(&constant, kind, arm.line)?;
+                let (compare, branch) = match kind {
+                    Type::Long => (Some((0x94u8, None)), 0x99u8),
+                    Type::Float => (Some((0xb8, Some(("java/lang/Float", "(FF)I")))), 0x99),
+                    Type::Double => (Some((0xb8, Some(("java/lang/Double", "(DD)I")))), 0x99),
+                    _ => (None, 0x9f),
+                };
+                if let Some((opcode, through)) = compare {
+                    match through {
+                        Some((owner, descriptor)) => {
+                            let index = self.pool.method(owner, "compare", descriptor, false);
+                            self.op2(opcode, index);
+                        }
+                        None => self.op(opcode),
+                    }
+                    self.pops(2 * i32::from(kind.width()));
+                    self.pushes(&Type::Int);
+                    self.pops(1);
+                } else {
+                    self.pops(2);
+                }
+                waiting.push((self.jump(branch), index));
+            }
+            let Some(pattern) = arm.pattern.clone() else {
+                continue;
+            };
+            if pattern.taken {
+                return Err(at(
+                    "EJ208",
+                    arm.line,
+                    arm.column,
+                    format!("A {} has no components to take apart.", kind.readable()),
+                ));
+            }
+            let target = self.resolve(&pattern.what, arm.line)?;
+            let test = self.how_a_primitive_is_tested(kind, &target, arm.line)?;
+
+            self.open();
+            let past = match test {
+                Some(test) => {
+                    let found = self.value(&test, arm.line)?;
+                    if found != Type::Boolean {
+                        return Err(at(
+                            "EJ206",
+                            arm.line,
+                            arm.column,
+                            "A `when` on a `case` wants a boolean.",
+                        ));
+                    }
+                    self.pops(1);
+                    Some(self.jump(0x99))
+                }
+                None => None,
+            };
+            match &arm.guard {
+                None => {
+                    self.push_int(1);
+                    self.pops(1);
+                    waiting.push((self.jump(0x9a), index));
+                    self.close();
+                }
+                Some(guard) => {
+                    self.bind_the_pattern(arm, held)?;
+                    let found = self.value(guard, arm.line)?;
+                    if found != Type::Boolean {
+                        return Err(at(
+                            "EJ206",
+                            arm.line,
+                            arm.column,
+                            "A `when` on a `case` wants a boolean.",
+                        ));
+                    }
+                    self.pops(1);
+                    waiting.push((self.jump(0x9a), index));
+                    self.close();
+                }
+            }
+            if let Some(past) = past {
+                self.land(past);
+                self.a_branch_lands_here();
+            } else if arm.guard.is_some() {
+                self.a_branch_lands_here();
+            }
+        }
+        let _ = line;
+        let fallthrough = self.jump(0xa7);
+        Ok(Dispatch::Chain {
+            waiting,
+            fallthrough,
+        })
+    }
+
+    fn zero_of(&mut self, what: &Type) {
+        match what {
+            Type::Long => {
+                self.op(0x09);
+            }
+            Type::Float => {
+                self.op(0x0b);
+            }
+            Type::Double => {
+                self.op(0x0e);
+            }
+            other if other.is_reference() => {
+                self.op(0x01);
+                self.pushes_raw(Verified::Null);
+                return;
+            }
+            _ => {
+                self.op(0x03);
+            }
+        }
+        self.pushes(what);
+    }
+
+    fn a_primitive_tested(
+        &mut self,
+        found: &Type,
+        target: &Type,
+        binds: Option<&String>,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let named = format!("$exact{}", self.taken_apart);
+        self.taken_apart += 1;
+        let held = self.declare(&named, found.clone());
+        self.store(held, found);
+        let test = self.how_a_named_primitive_is_tested(found, target, &named, line)?;
+        let slot = match binds {
+            Some(binding) => {
+                self.zero_of(target);
+                let slot = self.declare(binding, target.clone());
+                self.store(slot, target);
+                Some(slot)
+            }
+            None => None,
+        };
+        let bind = |emitter: &mut Emitter<'_>, slot: u16| -> Result<(), Diagnostic> {
+            emitter.load(held, found);
+            if target.is_reference() {
+                emitter.box_or_unbox(found, target);
+            } else {
+                emitter.converted_for_a_pattern(found, target, line)?;
+            }
+            emitter.store(slot, target);
+            Ok(())
+        };
+        match test {
+            None => {
+                if let Some(slot) = slot {
+                    bind(self, slot)?;
+                }
+                self.push_int(1);
+            }
+            Some(test) => {
+                let said = self.value(&test, line)?;
+                if said != Type::Boolean {
+                    return Err(at("EJ206", line, 1, "A test here wants a boolean."));
+                }
+                if let Some(slot) = slot {
+                    self.duplicates();
+                    self.pops(1);
+                    let over = self.jump(0x99);
+                    bind(self, slot)?;
+                    self.land(over);
+                    self.a_branch_lands_here();
+                }
+            }
+        }
+        Ok(Type::Boolean)
+    }
+
+    fn how_a_primitive_is_tested(
+        &mut self,
+        kind: &Type,
+        target: &Type,
+        line: u32,
+    ) -> Result<Option<Expression>, Diagnostic> {
+        if target.is_reference() {
+            let boxed = boxed_name(kind).unwrap_or("java/lang/Object");
+            let fits = match target {
+                Type::Object(named, _) => {
+                    named == boxed
+                        || named == "java/lang/Object"
+                        || (named == "java/lang/Number"
+                            && !matches!(kind, Type::Boolean | Type::Char))
+                        || named == "java/lang/Comparable"
+                        || named == "java/io/Serializable"
+                }
+                _ => false,
+            };
+            if !fits {
+                return Err(at(
+                    "EJ238",
+                    line,
+                    1,
+                    format!(
+                        "A {} can never be a {}, so this `case` could never match.",
+                        kind.readable(),
+                        target.readable()
+                    ),
+                ));
+            }
+            return Ok(None);
+        }
+        self.how_a_named_primitive_is_tested(kind, target, PATTERN_SUBJECT, line)
+    }
+
+    fn how_a_named_primitive_is_tested(
+        &mut self,
+        kind: &Type,
+        target: &Type,
+        name: &str,
+        line: u32,
+    ) -> Result<Option<Expression>, Diagnostic> {
+        if target.is_reference() {
+            return self.how_a_primitive_is_tested(kind, target, line);
+        }
+        match exactness(kind, target, name) {
+            Some(test) => Ok(test),
+            None => Err(at(
+                "EJ238",
+                line,
+                1,
+                format!(
+                    "A {} can never be a {}, so this `case` could never match.",
+                    kind.readable(),
+                    target.readable()
+                ),
+            )),
+        }
+    }
+
+    fn converted_for_a_pattern(
+        &mut self,
+        from: &Type,
+        to: &Type,
+        line: u32,
+    ) -> Result<(), Diagnostic> {
+        if from == to {
+            return Ok(());
+        }
+        if matches!(to, Type::Byte | Type::Char | Type::Short) {
+            if !from.is_int_like() {
+                self.convert(from, &Type::Int, line)?;
+            }
+            self.op(match to {
+                Type::Byte => 0x91,
+                Type::Char => 0x92,
+                _ => 0x93,
+            });
+            self.pops(1);
+            self.pushes(to);
+            return Ok(());
+        }
+        self.convert(from, to, line)
     }
 
     fn shape_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
@@ -15833,17 +16553,20 @@ impl Emitter<'_> {
             let Some(pattern) = arm.pattern.clone() else {
                 continue;
             };
-            let target = self.resolve(&pattern.what, arm.line)?;
+            let mut target = self.resolve(&pattern.what, arm.line)?;
             if !target.is_reference() {
-                return Err(at(
-                    "EJ238",
-                    arm.line,
-                    arm.column,
-                    format!(
-                        "A `case` pattern names a class or an array, and a {} is neither.",
-                        target.readable()
-                    ),
-                ));
+                let Some(boxed) = boxed_name(&target) else {
+                    return Err(at(
+                        "EJ238",
+                        arm.line,
+                        arm.column,
+                        format!(
+                            "A `case` pattern names a class or an array, and a {} is neither.",
+                            target.readable()
+                        ),
+                    ));
+                };
+                target = Type::Object(boxed.to_string(), Vec::new());
             }
 
             self.open();
@@ -15916,10 +16639,16 @@ impl Emitter<'_> {
         let Some(pattern) = &arm.pattern else {
             return Ok(());
         };
-        let object = Type::Object("java/lang/Object".to_string(), Vec::new());
-        self.load(subject, &object);
+        let held = self
+            .locals
+            .iter()
+            .rev()
+            .find(|one| one.slot == subject)
+            .map(|one| one.what.clone())
+            .unwrap_or_else(|| Type::Object("java/lang/Object".to_string(), Vec::new()));
+        self.load(subject, &held);
         let pattern = pattern.clone();
-        self.bind_every_part(&pattern, &object, arm.line)
+        self.bind_every_part(&pattern, &held, arm.line)
     }
 
     fn bind_every_part(
@@ -15932,7 +16661,20 @@ impl Emitter<'_> {
             Written::Inferred => from.clone(),
             ref other => self.resolve(other, line)?,
         };
-        if target.is_reference() && target != *from {
+        if !from.is_reference() && target.is_reference() {
+            self.box_or_unbox(from, &target);
+        } else if from.is_reference() && !target.is_reference() {
+            if let Some(boxed) = boxed_name(&target) {
+                let index = self.pool.class(boxed);
+                self.op2(0xc0, index);
+                self.pops(1);
+                let wrapper = Type::Object(boxed.to_string(), Vec::new());
+                self.pushes(&wrapper);
+                self.box_or_unbox(&wrapper, &target);
+            }
+        } else if !from.is_reference() && !target.is_reference() {
+            self.converted_for_a_pattern(from, &target, line)?;
+        } else if target.is_reference() && target != *from {
             let named = match &target {
                 Type::Object(named, _) => named.clone(),
                 other => other.descriptor(),
@@ -16517,7 +17259,7 @@ impl Emitter<'_> {
         }
 
         let call = if name == "<init>" {
-            let Expression::Name(class) = on else {
+            let Some(class) = written_as_a_path(on) else {
                 return Err(at(
                     "EJ251",
                     line,
@@ -16567,13 +17309,7 @@ impl Emitter<'_> {
         if handed == 0 {
             return false;
         }
-        let Expression::Name(maybe) = on else {
-            return false;
-        };
-        if !self.meant_as_a_class(maybe) {
-            return false;
-        }
-        let Ok(owner) = self.resolve_class(maybe, 1) else {
+        let Some(owner) = self.class_a_reference_names(on) else {
             return false;
         };
         if self
@@ -16586,6 +17322,20 @@ impl Emitter<'_> {
         self.candidates(&owner, name, handed - 1)
             .iter()
             .any(|one| !one.static_)
+    }
+
+    fn class_a_reference_names(&mut self, on: &Expression) -> Option<String> {
+        match on {
+            Expression::Name(maybe) => {
+                if !self.meant_as_a_class(maybe) {
+                    return None;
+                }
+                self.resolve_class(maybe, 1).ok()
+            }
+            other => written_as_a_path(other)
+                .filter(|path| self.meant_as_a_class(path.split('.').next().unwrap_or_default()))
+                .and_then(|path| resolve_named(self.classpath, self.unit, &path)),
+        }
     }
 
     fn how_loosely_here(&self, arguments: &[Expression]) -> Vec<Loosely> {
@@ -17524,7 +18274,9 @@ impl Emitter<'_> {
             }
         };
 
+        let before = self.too_early;
         self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
+        self.too_early = before;
         self.arguments_for_signature(&signature, arguments, line)?;
         let descriptor = signature.descriptor();
         let index = self.pool.method(owner, "<init>", &descriptor, false);
@@ -17935,6 +18687,8 @@ enum Chooser {
     Constant(String),
 
     Shape,
+
+    Primitive(Type),
 }
 
 enum Dispatch {
@@ -18544,6 +19298,199 @@ fn primitive_inside(what: &Type) -> Option<Type> {
         "java/lang/Double" => Type::Double,
         _ => return None,
     })
+}
+
+fn exactness(from: &Type, to: &Type, name: &str) -> Option<Option<Expression>> {
+    use Type::{Boolean, Byte, Char, Double, Float, Int, Long, Short};
+    if from == to {
+        return Some(None);
+    }
+    let held = || Expression::Name(name.to_string());
+    let cast = |to: Written, of: Expression| Expression::Cast {
+        to,
+        of: Box::new(of),
+    };
+    let both = |operator: Binary, left: Expression, right: Expression| Expression::Binary {
+        operator,
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+    let raw_bits = |owner: &str, method: &str| Expression::Call {
+        on: Some(Box::new(Expression::Field {
+            of: Box::new(Expression::Field {
+                of: Box::new(Expression::Name("java".to_string())),
+                name: "lang".to_string(),
+            }),
+            name: owner.to_string(),
+        })),
+        super_call: false,
+        name: method.to_string(),
+        arguments: vec![Expression::Name(name.to_string())],
+        held: Vec::new(),
+    };
+    let narrow = |to: &Type| written_for(to).unwrap_or(Written::Int);
+    match (from, to) {
+        (Boolean, _) | (_, Boolean) => return None,
+        (Byte, Short | Int | Long | Float | Double)
+        | (Short, Int | Long | Float | Double)
+        | (Char, Int | Long | Float | Double)
+        | (Int, Long | Double)
+        | (Float, Double) => return Some(None),
+        _ => {}
+    }
+    let to_int_from_float = || {
+        both(
+            Binary::AndAlso,
+            both(
+                Binary::AndAlso,
+                both(
+                    Binary::Equal,
+                    cast(Written::Float, cast(Written::Int, held())),
+                    held(),
+                ),
+                both(
+                    Binary::NotEqual,
+                    cast(Written::Int, held()),
+                    Expression::Int(i64::from(i32::MAX)),
+                ),
+            ),
+            both(
+                Binary::NotEqual,
+                raw_bits("Float", "floatToRawIntBits"),
+                Expression::Int(i64::from(i32::MIN)),
+            ),
+        )
+    };
+    let to_int_from_double = || {
+        both(
+            Binary::AndAlso,
+            both(
+                Binary::Equal,
+                cast(Written::Double, cast(Written::Int, held())),
+                held(),
+            ),
+            both(
+                Binary::NotEqual,
+                raw_bits("Double", "doubleToRawLongBits"),
+                Expression::Long(i64::MIN),
+            ),
+        )
+    };
+    let test = match from {
+        Byte | Short | Char | Int => match to {
+            Byte | Short | Char => both(Binary::Equal, cast(narrow(to), held()), held()),
+            Float => both(
+                Binary::AndAlso,
+                both(
+                    Binary::Equal,
+                    held(),
+                    cast(Written::Int, cast(Written::Float, held())),
+                ),
+                both(
+                    Binary::NotEqual,
+                    held(),
+                    Expression::Int(i64::from(i32::MAX)),
+                ),
+            ),
+            _ => return None,
+        },
+        Long => match to {
+            Byte | Short | Char | Int => both(
+                Binary::Equal,
+                cast(Written::Long, cast(narrow(to), cast(Written::Int, held()))),
+                held(),
+            ),
+            Float | Double => both(
+                Binary::AndAlso,
+                both(
+                    Binary::Equal,
+                    held(),
+                    cast(Written::Long, cast(narrow(to), held())),
+                ),
+                both(Binary::NotEqual, held(), Expression::Long(i64::MAX)),
+            ),
+            _ => return None,
+        },
+        Float => match to {
+            Int => to_int_from_float(),
+            Long => both(
+                Binary::AndAlso,
+                both(
+                    Binary::AndAlso,
+                    both(
+                        Binary::Equal,
+                        cast(Written::Float, cast(Written::Long, held())),
+                        held(),
+                    ),
+                    both(
+                        Binary::NotEqual,
+                        cast(Written::Long, held()),
+                        Expression::Long(i64::MAX),
+                    ),
+                ),
+                both(
+                    Binary::NotEqual,
+                    raw_bits("Float", "floatToRawIntBits"),
+                    Expression::Int(i64::from(i32::MIN)),
+                ),
+            ),
+            Byte | Short | Char => both(
+                Binary::AndAlso,
+                to_int_from_float(),
+                both(
+                    Binary::Equal,
+                    cast(narrow(to), cast(Written::Int, held())),
+                    cast(Written::Int, held()),
+                ),
+            ),
+            _ => return None,
+        },
+        Double => match to {
+            Int => to_int_from_double(),
+            Long => both(
+                Binary::AndAlso,
+                both(
+                    Binary::AndAlso,
+                    both(
+                        Binary::Equal,
+                        cast(Written::Double, cast(Written::Long, held())),
+                        held(),
+                    ),
+                    both(
+                        Binary::NotEqual,
+                        cast(Written::Long, held()),
+                        Expression::Long(i64::MAX),
+                    ),
+                ),
+                both(
+                    Binary::NotEqual,
+                    raw_bits("Double", "doubleToRawLongBits"),
+                    Expression::Long(i64::MIN),
+                ),
+            ),
+            Float => both(
+                Binary::OrElse,
+                both(
+                    Binary::Equal,
+                    cast(Written::Double, cast(Written::Float, held())),
+                    held(),
+                ),
+                both(Binary::NotEqual, held(), held()),
+            ),
+            Byte | Short | Char => both(
+                Binary::AndAlso,
+                to_int_from_double(),
+                both(
+                    Binary::Equal,
+                    cast(narrow(to), cast(Written::Int, held())),
+                    cast(Written::Int, held()),
+                ),
+            ),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(Some(test))
 }
 
 fn boxed_name(what: &Type) -> Option<&'static str> {
@@ -19614,6 +20561,18 @@ pub fn compile_unit_in_nest(
 
         let mut body: &[Positioned<Statement>] = body;
         if method.constructor {
+            let split = body
+                .iter()
+                .position(|one| matches!(one.node, Statement::Chain { .. }))
+                .unwrap_or(0);
+            let (prologue, rest) = body.split_at(split);
+            body = rest;
+            emitter.slots[0] = Verified::UninitializedThis;
+            emitter.early = true;
+            for statement in prologue {
+                emitter.statement(statement)?;
+                emitter.too_early_at(statement.line)?;
+            }
             let chained = match body.first().map(|one| &one.node) {
                 Some(Statement::Chain {
                     to_super,
@@ -19626,10 +20585,12 @@ pub fn compile_unit_in_nest(
                         this_class.clone()
                     };
                     emitter.chain_to(&owner, arguments, line)?;
+                    emitter.too_early_at(line)?;
                     body = &body[1..];
                     Some(*to_super)
                 }
                 _ => {
+                    emitter.early = false;
                     emitter.load(0, &Type::Object(this_class.clone(), Vec::new()));
                     let up = emitter.pool.method(&superclass, "<init>", "()V", false);
                     emitter.op2(0xb7, up);
@@ -19637,6 +20598,8 @@ pub fn compile_unit_in_nest(
                     Some(true)
                 }
             };
+            emitter.early = false;
+            emitter.slot_holds(0, &Type::Object(this_class.clone(), Vec::new()));
 
             if chained == Some(true) {
                 for statement in &instance_setup {
@@ -19964,7 +20927,19 @@ pub fn compile_together(
 ) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
     let mut declared = Vec::new();
     for (label, text) in sources {
-        let units = parse(text).map_err(|error| named_file(error, label))?;
+        let stem = label
+            .rsplit(['/', '\\'])
+            .next()
+            .and_then(|held| held.strip_suffix(".java"))
+            .filter(|held| {
+                held.chars()
+                    .next()
+                    .is_some_and(|first| first.is_alphabetic() || first == '_')
+                    && held
+                        .chars()
+                        .all(|one| one.is_alphanumeric() || one == '_' || one == '$')
+            });
+        let units = parse_as(text, stem).map_err(|error| named_file(error, label))?;
 
         let source = label
             .rsplit(['/', '\\'])

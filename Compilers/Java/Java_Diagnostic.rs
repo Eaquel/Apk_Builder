@@ -211,7 +211,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EJ241", "A catch wants a class."),
     (
         "EJ242",
-        "A call to super or this may only be the first statement of a constructor.",
+        "A call to super or this may stand only once, directly in a constructor's body.",
     ),
     (
         "EJ243",
@@ -272,6 +272,18 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     (
         "EJ257",
         "A class that is not abstract does not implement a method its supertypes leave abstract.",
+    ),
+    (
+        "EJ258",
+        "`this` is used before the superclass constructor has run.",
+    ),
+    (
+        "EJ259",
+        "There is no module by that name that Android carries.",
+    ),
+    (
+        "EJ260",
+        "That belongs to the desktop JDK, and Android does not have it.",
     ),
     (
         "EJ262",
