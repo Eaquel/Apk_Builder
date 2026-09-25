@@ -25103,7 +25103,7 @@ Viewbinding   = false
                      targetSdk 34\n\
                      manifestPlaceholders = [scheme: \"demoapp\", host: 'example.com']\n\
                  }\n\
-                 buildFeatures { viewBinding true }\n\
+                 buildFeatures { viewBinding true; dataBinding true }\n\
                  flavorDimensions 'tier'\n\
                  productFlavors {\n\
                      free { dimension 'tier'; applicationIdSuffix '.free'; versionNameSuffix '-free' }\n\
@@ -25151,9 +25151,13 @@ Viewbinding   = false
             adopted
                 .unread
                 .iter()
-                .any(|one| one == "buildFeatures { viewBinding true }"),
+                .any(|one| one == "buildFeatures { dataBinding true }"),
             "a feature this does not carry is said out loud: {:?}",
             adopted.unread
+        );
+        assert!(
+            !adopted.unread.iter().any(|one| one.contains("viewBinding")),
+            "view binding is carried, so it is not listed as left behind"
         );
         let tier = std::fs::read_to_string(directory.join("Java/com/demo/app/Tier.java")).unwrap();
         assert!(
@@ -25173,11 +25177,183 @@ Viewbinding   = false
         let settings = crate::settings::held(&root).unwrap().unwrap();
         assert_eq!(settings.application_id, "com.demo.app.free");
         assert!(
+            settings.view_binding,
+            "view binding is switched on as Gradle had it"
+        );
+        assert!(
             settings.version_name.ends_with("-free"),
             "{}",
             settings.version_name
         );
         std::fs::remove_dir_all(&directory).ok();
+    }
+    #[test]
+    fn view_binding_classes_are_written_as_agp_writes_them() {
+        let layout = |folder: &str, name: &str, text: &str| {
+            (folder.to_string(), name.to_string(), text.to_string())
+        };
+        let layouts = vec![
+            layout(
+                "layout",
+                "activity_main.xml",
+                "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\" android:id=\"@+id/root_box\">\
+                 <TextView android:id=\"@+id/title_text\" />\
+                 <include android:id=\"@+id/footer\" layout=\"@layout/footer_bar\" />\
+                 <include android:id=\"@+id/card\" layout=\"@layout/card\" />\
+                 <FrameLayout><com.demo.app.Dial android:id=\"@+id/dial\" /></FrameLayout>\
+                 <fragment android:id=\"@+id/pane\" />\
+                 </LinearLayout>",
+            ),
+            layout(
+                "layout-land",
+                "activity_main.xml",
+                "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\" android:id=\"@+id/root_box\">\
+                 <TextView android:id=\"@+id/title_text\" />\
+                 <include android:id=\"@+id/footer\" layout=\"@layout/footer_bar\" />\
+                 <include android:id=\"@+id/card\" layout=\"@layout/card\" />\
+                 <com.demo.app.Dial android:id=\"@+id/dial\" />\
+                 <ImageView android:id=\"@+id/wide_only\" />\
+                 </LinearLayout>",
+            ),
+            layout(
+                "layout",
+                "footer_bar.xml",
+                "<merge xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+                 <TextView android:id=\"@+id/footer_label\" /></merge>",
+            ),
+            layout(
+                "layout",
+                "card.xml",
+                "<FrameLayout xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+                 <Button android:id=\"@+id/go\" /></FrameLayout>",
+            ),
+            layout(
+                "layout",
+                "ignored.xml",
+                "<FrameLayout xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+                 xmlns:tools=\"http://schemas.android.com/tools\" tools:viewBindingIgnore=\"true\" />",
+            ),
+        ];
+        let made = crate::bindings::sources("com.demo.app", &layouts);
+        let names: Vec<&str> = made.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "com/demo/app/databinding/ActivityMainBinding.java",
+                "com/demo/app/databinding/CardBinding.java",
+                "com/demo/app/databinding/FooterBarBinding.java",
+            ]
+        );
+        let main = &made[0].1;
+        assert!(
+            main.contains("public final android.widget.LinearLayout rootBox;"),
+            "{main}"
+        );
+        assert!(
+            main.contains("public final android.widget.TextView titleText;"),
+            "{main}"
+        );
+        assert!(
+            main.contains("public final com.demo.app.Dial dial;"),
+            "{main}"
+        );
+        assert!(
+            main.contains("FooterBarBinding footer = com.demo.app.databinding.FooterBarBinding.bind(rootView);"),
+            "{main}"
+        );
+        assert!(main.contains("CardBinding.bind(cardFound)"), "{main}");
+        assert!(!main.contains("pane"), "a fragment is not a view to bind");
+        assert!(
+            !main.contains("if (wideOnly == null)"),
+            "a view in one configuration may be missing"
+        );
+        assert!(
+            main.contains("if (titleText == null)"),
+            "a view in every configuration is required"
+        );
+
+        let mut sources: Vec<(String, String)> = made.clone();
+        sources.push((
+            "androidx/viewbinding/ViewBinding.java".to_string(),
+            crate::bindings::INTERFACE.to_string(),
+        ));
+        sources.push((
+            "com/demo/app/R.java".to_string(),
+            "package com.demo.app;\n\
+             public final class R {\n\
+             public static final class layout { public static final int activity_main = 1; public static final int card = 2; public static final int footer_bar = 3; }\n\
+             public static final class id { public static final int root_box = 1; public static final int title_text = 2; public static final int footer = 3; \
+             public static final int card = 4; public static final int dial = 5; public static final int wide_only = 6; public static final int footer_label = 7; public static final int go = 8; }\n\
+             }\n"
+                .to_string(),
+        ));
+        sources.push((
+            "com/demo/app/Dial.java".to_string(),
+            "package com.demo.app;\npublic class Dial extends android.view.View {\n\
+             public Dial(android.content.Context context) { super(context); }\n}\n"
+                .to_string(),
+        ));
+        crate::compilers::java::compile_together(
+            &sources,
+            &crate::compilers::java::Classpath::new(),
+        )
+        .expect("the bindings compile against the platform");
+    }
+
+    #[test]
+    fn an_aidl_interface_becomes_a_stub_and_a_proxy() {
+        let source = "// A calculator in another process.\n\
+            package com.demo.app;\n\
+            import android.os.Bundle;\n\
+            interface IRemote {\n\
+                const int VERSION = 3;\n\
+                int add(int a, int b);\n\
+                String greet(String who);\n\
+                void fill(out int[] data);\n\
+                List<String> names();\n\
+                oneway void ping(int n);\n\
+                long sum(in long[] values);\n\
+                boolean flip(boolean b);\n\
+                Bundle echo(in Bundle b);\n\
+                IRemote self();\n\
+                void swap(inout Bundle held) = 20;\n\
+            }\n";
+        let made = crate::aidl::sources(&[(
+            "Aidl/com/demo/app/IRemote.aidl".to_string(),
+            source.to_string(),
+        )])
+        .expect("the AIDL reads");
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].0, "com/demo/app/IRemote.java");
+        let java = &made[0].1;
+        assert!(java.contains("private static final String DESCRIPTOR = \"com.demo.app.IRemote\";"));
+        assert!(
+            java.contains("android.os.IBinder.FLAG_ONEWAY"),
+            "oneway does not wait for a reply"
+        );
+        assert!(java.contains("TRANSACTION_swap = android.os.IBinder.FIRST_CALL_TRANSACTION + 20;"));
+        assert!(java.contains("public static final int VERSION = 3;"));
+        let compiled = crate::compilers::java::compile_together(
+            &made,
+            &crate::compilers::java::Classpath::new(),
+        )
+        .expect("the generated Java compiles");
+        let names: Vec<&str> = compiled.iter().map(|(name, _)| name.as_str()).collect();
+        for wanted in [
+            "com/demo/app/IRemote.class",
+            "com/demo/app/IRemote$Stub.class",
+            "com/demo/app/IRemote$Stub$Proxy.class",
+            "com/demo/app/IRemote$Default.class",
+        ] {
+            assert!(names.contains(&wanted), "{wanted} in {names:?}");
+        }
+
+        let broken = crate::aidl::sources(&[(
+            "Aidl/Broken.aidl".to_string(),
+            "package a; interface Broken { int f(int a) }".to_string(),
+        )])
+        .expect_err("a missing semicolon is refused");
+        assert_eq!(broken.code, "EL001", "{}", broken.message);
     }
 }
 

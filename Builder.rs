@@ -28075,6 +28075,1157 @@ pub mod verity {
     }
 }
 
+pub mod aidl {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Kind {
+        pub name: String,
+        pub arguments: Vec<Kind>,
+        pub array: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Parameter {
+        pub direction: String,
+        pub kind: Kind,
+        pub name: String,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Method {
+        pub oneway: bool,
+        pub returns: Kind,
+        pub name: String,
+        pub parameters: Vec<Parameter>,
+        pub code: Option<u32>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Interface {
+        pub package: String,
+        pub imports: Vec<String>,
+        pub name: String,
+        pub oneway: bool,
+        pub methods: Vec<Method>,
+        pub constants: Vec<(Kind, String, String)>,
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.aidl",
+            message,
+        )
+    }
+
+    fn tokens(text: &str) -> Vec<String> {
+        let held: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < held.len() {
+            let here = held[at];
+            if here == '/' && held.get(at + 1) == Some(&'/') {
+                while at < held.len() && held[at] != '\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            if here == '/' && held.get(at + 1) == Some(&'*') {
+                at += 2;
+                while at + 1 < held.len() && !(held[at] == '*' && held[at + 1] == '/') {
+                    at += 1;
+                }
+                at += 2;
+                continue;
+            }
+            if here.is_whitespace() {
+                at += 1;
+                continue;
+            }
+            if here == '"' {
+                let start = at;
+                at += 1;
+                while at < held.len() && held[at] != '"' {
+                    if held[at] == '\\' {
+                        at += 1;
+                    }
+                    at += 1;
+                }
+                at += 1;
+                out.push(held[start..at.min(held.len())].iter().collect());
+                continue;
+            }
+            if here.is_alphanumeric()
+                || here == '_'
+                || here == '.'
+                || here == '-' && held.get(at + 1).is_some_and(|one| one.is_ascii_digit())
+            {
+                let start = at;
+                at += 1;
+                while at < held.len()
+                    && (held[at].is_alphanumeric() || held[at] == '_' || held[at] == '.')
+                {
+                    at += 1;
+                }
+                out.push(held[start..at].iter().collect());
+                continue;
+            }
+            out.push(here.to_string());
+            at += 1;
+        }
+        out
+    }
+
+    struct Reader {
+        held: Vec<String>,
+        at: usize,
+    }
+
+    impl Reader {
+        fn peek(&self) -> &str {
+            self.held.get(self.at).map(String::as_str).unwrap_or("")
+        }
+
+        fn take(&mut self) -> String {
+            let one = self.peek().to_string();
+            self.at += 1;
+            one
+        }
+
+        fn eat(&mut self, said: &str) -> bool {
+            if self.peek() == said {
+                self.at += 1;
+                return true;
+            }
+            false
+        }
+
+        fn want(&mut self, said: &str) -> Result<(), Diagnostic> {
+            if self.eat(said) {
+                return Ok(());
+            }
+            Err(
+                fail("EL001", "The AIDL file is not written the way AIDL is.")
+                    .with_context(format!("Expected: {said}"))
+                    .with_context(format!("Found: {}", self.peek())),
+            )
+        }
+
+        fn annotations(&mut self) {
+            while self.peek().starts_with('@') || self.peek() == "@" {
+                if self.take() == "@" {
+                    self.take();
+                }
+                if self.peek() == "(" {
+                    let mut depth = 0usize;
+                    loop {
+                        let one = self.take();
+                        if one == "(" {
+                            depth += 1;
+                        } else if one == ")" {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        } else if one.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        fn kind(&mut self) -> Result<Kind, Diagnostic> {
+            self.annotations();
+            let name = self.take();
+            if name.is_empty() {
+                return Err(fail(
+                    "EL001",
+                    "The AIDL file is not written the way AIDL is.",
+                ));
+            }
+            let mut arguments = Vec::new();
+            if self.eat("<") {
+                loop {
+                    arguments.push(self.kind()?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.want(">")?;
+            }
+            let mut array = false;
+            if self.eat("[") {
+                self.want("]")?;
+                array = true;
+            }
+            Ok(Kind {
+                name,
+                arguments,
+                array,
+            })
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Vec<Interface>, Diagnostic> {
+        let mut reader = Reader {
+            held: tokens(text),
+            at: 0,
+        };
+        let mut package = String::new();
+        let mut imports = Vec::new();
+        let mut out = Vec::new();
+        while !reader.peek().is_empty() {
+            reader.annotations();
+            match reader.peek() {
+                "package" => {
+                    reader.take();
+                    package = reader.take();
+                    reader.want(";")?;
+                }
+                "import" => {
+                    reader.take();
+                    imports.push(reader.take());
+                    reader.want(";")?;
+                }
+                "parcelable" | "enum" | "union" => {
+                    let mut depth = 0usize;
+                    loop {
+                        let one = reader.take();
+                        if one == "{" {
+                            depth += 1;
+                        } else if one == "}" {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        } else if (one == ";" && depth == 0) || one.is_empty() {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    let oneway = reader.eat("oneway");
+                    reader.want("interface")?;
+                    let name = reader.take();
+                    reader.want("{")?;
+                    let mut interface = Interface {
+                        package: package.clone(),
+                        imports: imports.clone(),
+                        name,
+                        oneway,
+                        ..Interface::default()
+                    };
+                    while !reader.eat("}") {
+                        if reader.peek().is_empty() {
+                            return Err(fail(
+                                "EL001",
+                                "The AIDL file is not written the way AIDL is.",
+                            ));
+                        }
+                        reader.annotations();
+                        if reader.eat("const") {
+                            let kind = reader.kind()?;
+                            let name = reader.take();
+                            reader.want("=")?;
+                            let mut value = String::new();
+                            while reader.peek() != ";" && !reader.peek().is_empty() {
+                                value.push_str(&reader.take());
+                            }
+                            reader.want(";")?;
+                            interface.constants.push((kind, name, value));
+                            continue;
+                        }
+                        let oneway = reader.eat("oneway") || interface.oneway;
+                        let returns = reader.kind()?;
+                        let name = reader.take();
+                        reader.want("(")?;
+                        let mut parameters = Vec::new();
+                        while !reader.eat(")") {
+                            reader.annotations();
+                            let direction = match reader.peek() {
+                                "in" | "out" | "inout" => reader.take(),
+                                _ => "in".to_string(),
+                            };
+                            let kind = reader.kind()?;
+                            let named = reader.take();
+                            parameters.push(Parameter {
+                                direction,
+                                kind,
+                                name: named,
+                            });
+                            reader.eat(",");
+                        }
+                        let mut code = None;
+                        if reader.eat("=") {
+                            code = reader.take().parse::<u32>().ok();
+                        }
+                        reader.want(";")?;
+                        interface.methods.push(Method {
+                            oneway,
+                            returns,
+                            name,
+                            parameters,
+                            code,
+                        });
+                    }
+                    out.push(interface);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    const PRIMITIVES: &[(&str, &str)] = &[
+        ("int", "Int"),
+        ("long", "Long"),
+        ("boolean", "Boolean"),
+        ("float", "Float"),
+        ("double", "Double"),
+        ("byte", "Byte"),
+        ("char", "Char"),
+        ("String", "String"),
+    ];
+
+    fn java_type(kind: &Kind) -> String {
+        let mut out = match kind.name.as_str() {
+            "List" => "java.util.List".to_string(),
+            "Map" => "java.util.Map".to_string(),
+            "IBinder" => "android.os.IBinder".to_string(),
+            "CharSequence" => "java.lang.CharSequence".to_string(),
+            other => other.to_string(),
+        };
+        if !kind.arguments.is_empty() {
+            out.push('<');
+            out.push_str(
+                &kind
+                    .arguments
+                    .iter()
+                    .map(java_type)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            out.push('>');
+        }
+        if kind.array {
+            out.push_str("[]");
+        }
+        out
+    }
+
+    fn primitive(kind: &Kind) -> Option<&'static str> {
+        PRIMITIVES
+            .iter()
+            .find(|(name, _)| *name == kind.name)
+            .map(|(_, suffix)| *suffix)
+    }
+
+    fn is_interface(kind: &Kind, known: &[String]) -> bool {
+        let simple = kind.name.rsplit('.').next().unwrap_or_default();
+        !kind.array && known.iter().any(|one| one == simple)
+    }
+
+    fn write(kind: &Kind, value: &str, parcel: &str, known: &[String]) -> String {
+        if kind.name == "void" {
+            return String::new();
+        }
+        if let Some(suffix) = primitive(kind) {
+            if kind.array {
+                return format!("{parcel}.write{suffix}Array({value});");
+            }
+            if suffix == "Boolean" {
+                return format!("{parcel}.writeInt({value} ? 1 : 0);");
+            }
+            if suffix == "Char" {
+                return format!("{parcel}.writeInt((int) {value});");
+            }
+            if suffix == "Byte" {
+                return format!("{parcel}.writeByte({value});");
+            }
+            return format!("{parcel}.write{suffix}({value});");
+        }
+        match kind.name.as_str() {
+            "List" => format!("{parcel}.writeList({value});"),
+            "Map" => format!("{parcel}.writeMap({value});"),
+            "IBinder" => format!("{parcel}.writeStrongBinder({value});"),
+            "CharSequence" => format!(
+                "if ({value} != null) {{ {parcel}.writeInt(1); android.text.TextUtils.writeToParcel({value}, {parcel}, 0); }} else {{ {parcel}.writeInt(0); }}"
+            ),
+            _ if is_interface(kind, known) => format!(
+                "{parcel}.writeStrongBinder({value} != null ? {value}.asBinder() : null);"
+            ),
+            _ if kind.array => format!("{parcel}.writeTypedArray({value}, 0);"),
+            _ => format!(
+                "if ({value} != null) {{ {parcel}.writeInt(1); {value}.writeToParcel({parcel}, 0); }} else {{ {parcel}.writeInt(0); }}"
+            ),
+        }
+    }
+
+    fn read(kind: &Kind, parcel: &str, known: &[String]) -> String {
+        let java = java_type(kind);
+        if let Some(suffix) = primitive(kind) {
+            if kind.array {
+                return format!("{parcel}.create{suffix}Array()");
+            }
+            if suffix == "Boolean" {
+                return format!("(0 != {parcel}.readInt())");
+            }
+            if suffix == "Char" {
+                return format!("(char) {parcel}.readInt()");
+            }
+            return format!("{parcel}.read{suffix}()");
+        }
+        match kind.name.as_str() {
+            "List" => format!("{parcel}.readArrayList(getClass().getClassLoader())"),
+            "Map" => format!("{parcel}.readHashMap(getClass().getClassLoader())"),
+            "IBinder" => format!("{parcel}.readStrongBinder()"),
+            "CharSequence" => format!(
+                "(0 != {parcel}.readInt() ? android.text.TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel({parcel}) : null)"
+            ),
+            _ if is_interface(kind, known) => {
+                format!("{java}.Stub.asInterface({parcel}.readStrongBinder())")
+            }
+            _ if kind.array => {
+                let element = java.trim_end_matches("[]");
+                format!("{parcel}.createTypedArray({element}.CREATOR)")
+            }
+            _ => format!("(0 != {parcel}.readInt() ? {java}.CREATOR.createFromParcel({parcel}) : null)"),
+        }
+    }
+
+    fn read_into(kind: &Kind, value: &str, parcel: &str) -> Option<String> {
+        if let Some(suffix) = primitive(kind) {
+            if kind.array {
+                return Some(format!("{parcel}.read{suffix}Array({value});"));
+            }
+            return None;
+        }
+        if kind.name == "List" {
+            return Some(format!(
+                "{parcel}.readList({value}, getClass().getClassLoader());"
+            ));
+        }
+        if kind.array {
+            let element = java_type(kind);
+            let element = element.trim_end_matches("[]").to_string();
+            return Some(format!(
+                "{parcel}.readTypedArray({value}, {element}.CREATOR);"
+            ));
+        }
+        Some(format!(
+            "if (0 != {parcel}.readInt()) {{ {value}.readFromParcel({parcel}); }}"
+        ))
+    }
+
+    fn fresh(kind: &Kind, length: &str) -> String {
+        let java = java_type(kind);
+        if kind.array {
+            return format!("new {}[{length}]", java.trim_end_matches("[]"));
+        }
+        match kind.name.as_str() {
+            "List" => "new java.util.ArrayList()".to_string(),
+            "Map" => "new java.util.HashMap()".to_string(),
+            _ => format!("new {java}()"),
+        }
+    }
+
+    fn zero(kind: &Kind) -> &'static str {
+        if kind.array {
+            return "null";
+        }
+        match kind.name.as_str() {
+            "void" => "",
+            "boolean" => "false",
+            "int" | "long" | "float" | "double" | "byte" | "char" => "0",
+            _ => "null",
+        }
+    }
+
+    pub fn java(interface: &Interface, known: &[String]) -> String {
+        let name = &interface.name;
+        let mut out = String::new();
+        if !interface.package.is_empty() {
+            out.push_str(&format!("package {};\n\n", interface.package));
+        }
+        for one in &interface.imports {
+            out.push_str(&format!("import {one};\n"));
+        }
+        out.push_str(&format!(
+            "\npublic interface {name} extends android.os.IInterface {{\n"
+        ));
+        for (kind, constant, value) in &interface.constants {
+            out.push_str(&format!(
+                "    public static final {} {constant} = {value};\n",
+                java_type(kind)
+            ));
+        }
+        let signature = |method: &Method| -> String {
+            let parameters: Vec<String> = method
+                .parameters
+                .iter()
+                .map(|one| format!("{} {}", java_type(&one.kind), one.name))
+                .collect();
+            format!(
+                "{} {}({})",
+                java_type(&method.returns),
+                method.name,
+                parameters.join(", ")
+            )
+        };
+
+        out.push_str(&format!(
+            "\n    public static class Default implements {name} {{\n"
+        ));
+        for method in &interface.methods {
+            out.push_str(&format!(
+                "        @Override\n        public {} throws android.os.RemoteException {{\n",
+                signature(method)
+            ));
+            let zero = zero(&method.returns);
+            if method.returns.name != "void" {
+                out.push_str(&format!("            return {zero};\n"));
+            }
+            out.push_str("        }\n\n");
+        }
+        out.push_str(
+            "        @Override\n        public android.os.IBinder asBinder() {\n            return null;\n        }\n    }\n\n",
+        );
+
+        let descriptor = if interface.package.is_empty() {
+            name.clone()
+        } else {
+            format!("{}.{name}", interface.package)
+        };
+        out.push_str(&format!(
+            "    public static abstract class Stub extends android.os.Binder implements {name} {{\n\
+             \x20       private static final String DESCRIPTOR = \"{descriptor}\";\n\n\
+             \x20       public Stub() {{\n\
+             \x20           this.attachInterface(this, DESCRIPTOR);\n\
+             \x20       }}\n\n\
+             \x20       public static {name} asInterface(android.os.IBinder obj) {{\n\
+             \x20           if (obj == null) {{\n\
+             \x20               return null;\n\
+             \x20           }}\n\
+             \x20           android.os.IInterface iin = obj.queryLocalInterface(DESCRIPTOR);\n\
+             \x20           if (iin != null && iin instanceof {name}) {{\n\
+             \x20               return ({name}) iin;\n\
+             \x20           }}\n\
+             \x20           return new Proxy(obj);\n\
+             \x20       }}\n\n\
+             \x20       @Override\n\
+             \x20       public android.os.IBinder asBinder() {{\n\
+             \x20           return this;\n\
+             \x20       }}\n\n\
+             \x20       @Override\n\
+             \x20       public boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) throws android.os.RemoteException {{\n\
+             \x20           if (code == INTERFACE_TRANSACTION) {{\n\
+             \x20               reply.writeString(DESCRIPTOR);\n\
+             \x20               return true;\n\
+             \x20           }}\n"
+        ));
+        let mut numbered = Vec::new();
+        let mut next = 0u32;
+        for method in &interface.methods {
+            let code = method.code.unwrap_or(next);
+            next = code + 1;
+            numbered.push((method, code));
+        }
+        for (method, _) in &numbered {
+            let transaction = format!("TRANSACTION_{}", method.name);
+            out.push_str(&format!("            if (code == {transaction}) {{\n"));
+            out.push_str("                data.enforceInterface(DESCRIPTOR);\n");
+            let mut arguments = Vec::new();
+            for (at, one) in method.parameters.iter().enumerate() {
+                let local = format!("_arg{at}");
+                let java = java_type(&one.kind);
+                match one.direction.as_str() {
+                    "out" => {
+                        if one.kind.array {
+                            out.push_str(&format!(
+                                "                int _length{at} = data.readInt();\n                {java} {local} = _length{at} < 0 ? null : {};\n",
+                                fresh(&one.kind, &format!("_length{at}"))
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "                {java} {local} = {};\n",
+                                fresh(&one.kind, "0")
+                            ));
+                        }
+                    }
+                    _ => out.push_str(&format!(
+                        "                {java} {local} = {};\n",
+                        read(&one.kind, "data", known)
+                    )),
+                }
+                arguments.push(local);
+            }
+            let call = format!("this.{}({})", method.name, arguments.join(", "));
+            if method.returns.name == "void" {
+                out.push_str(&format!("                {call};\n"));
+            } else {
+                out.push_str(&format!(
+                    "                {} _result = {call};\n",
+                    java_type(&method.returns)
+                ));
+            }
+            if !method.oneway {
+                out.push_str("                reply.writeNoException();\n");
+                if method.returns.name != "void" {
+                    out.push_str(&format!(
+                        "                {}\n",
+                        write(&method.returns, "_result", "reply", known)
+                    ));
+                }
+                for (at, one) in method.parameters.iter().enumerate() {
+                    if one.direction != "in" {
+                        out.push_str(&format!(
+                            "                {}\n",
+                            write(&one.kind, &format!("_arg{at}"), "reply", known)
+                        ));
+                    }
+                }
+            }
+            out.push_str("                return true;\n            }\n");
+        }
+        out.push_str(
+            "            return super.onTransact(code, data, reply, flags);\n        }\n\n",
+        );
+
+        out.push_str(&format!(
+            "        private static class Proxy implements {name} {{\n\
+             \x20           private android.os.IBinder mRemote;\n\n\
+             \x20           Proxy(android.os.IBinder remote) {{\n\
+             \x20               mRemote = remote;\n\
+             \x20           }}\n\n\
+             \x20           @Override\n\
+             \x20           public android.os.IBinder asBinder() {{\n\
+             \x20               return mRemote;\n\
+             \x20           }}\n\n\
+             \x20           public String getInterfaceDescriptor() {{\n\
+             \x20               return DESCRIPTOR;\n\
+             \x20           }}\n\n"
+        ));
+        for (method, _) in &numbered {
+            out.push_str(&format!(
+                "            @Override\n            public {} throws android.os.RemoteException {{\n",
+                signature(method)
+            ));
+            out.push_str("                android.os.Parcel _data = android.os.Parcel.obtain();\n");
+            if !method.oneway {
+                out.push_str(
+                    "                android.os.Parcel _reply = android.os.Parcel.obtain();\n",
+                );
+            }
+            if method.returns.name != "void" {
+                out.push_str(&format!(
+                    "                {} _result = {};\n",
+                    java_type(&method.returns),
+                    zero(&method.returns)
+                ));
+            }
+            out.push_str("                try {\n                    _data.writeInterfaceToken(DESCRIPTOR);\n");
+            for one in &method.parameters {
+                if one.direction == "out" {
+                    if one.kind.array {
+                        out.push_str(&format!(
+                            "                    _data.writeInt({0} == null ? -1 : {0}.length);\n",
+                            one.name
+                        ));
+                    }
+                    continue;
+                }
+                out.push_str(&format!(
+                    "                    {}\n",
+                    write(&one.kind, &one.name, "_data", known)
+                ));
+            }
+            let flag = if method.oneway {
+                "android.os.IBinder.FLAG_ONEWAY"
+            } else {
+                "0"
+            };
+            let reply = if method.oneway { "null" } else { "_reply" };
+            out.push_str(&format!(
+                "                    mRemote.transact(Stub.TRANSACTION_{}, _data, {reply}, {flag});\n",
+                method.name
+            ));
+            if !method.oneway {
+                out.push_str("                    _reply.readException();\n");
+                if method.returns.name != "void" {
+                    out.push_str(&format!(
+                        "                    _result = {};\n",
+                        read(&method.returns, "_reply", known)
+                    ));
+                }
+                for one in &method.parameters {
+                    if one.direction != "in" {
+                        if let Some(line) = read_into(&one.kind, &one.name, "_reply") {
+                            out.push_str(&format!("                    {line}\n"));
+                        }
+                    }
+                }
+            }
+            out.push_str("                } finally {\n");
+            if !method.oneway {
+                out.push_str("                    _reply.recycle();\n");
+            }
+            out.push_str("                    _data.recycle();\n                }\n");
+            if method.returns.name != "void" {
+                out.push_str("                return _result;\n");
+            }
+            out.push_str("            }\n\n");
+        }
+        out.push_str("        }\n\n");
+        for (method, code) in &numbered {
+            out.push_str(&format!(
+                "        static final int TRANSACTION_{} = android.os.IBinder.FIRST_CALL_TRANSACTION + {code};\n",
+                method.name
+            ));
+        }
+        out.push_str("    }\n\n");
+        for method in &interface.methods {
+            out.push_str(&format!(
+                "    public {} throws android.os.RemoteException;\n",
+                signature(method)
+            ));
+        }
+        out.push_str("}\n");
+        out
+    }
+
+    pub fn sources(files: &[(String, String)]) -> Result<Vec<(String, String)>, Diagnostic> {
+        let mut parsed = Vec::new();
+        for (name, text) in files {
+            let held = parse(text).map_err(|error| error.with_context(format!("File: {name}")))?;
+            parsed.extend(held);
+        }
+        let known: Vec<String> = parsed.iter().map(|one| one.name.clone()).collect();
+        Ok(parsed
+            .iter()
+            .map(|one| {
+                let path = if one.package.is_empty() {
+                    format!("{}.java", one.name)
+                } else {
+                    format!("{}/{}.java", one.package.replace('.', "/"), one.name)
+                };
+                (path, java(one, &known))
+            })
+            .collect())
+    }
+}
+
+pub mod bindings {
+    pub const PACKAGE_SUFFIX: &str = ".databinding";
+
+    pub const INTERFACE: &str = "package androidx.viewbinding;
+
+public interface ViewBinding {
+    android.view.View getRoot();
+}
+";
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Found {
+        id: String,
+        kind: String,
+        included: Option<String>,
+        everywhere: bool,
+        merged: bool,
+    }
+
+    const KEYWORDS: &[&str] = &[
+        "abstract",
+        "assert",
+        "boolean",
+        "break",
+        "byte",
+        "case",
+        "catch",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extends",
+        "final",
+        "finally",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "instanceof",
+        "int",
+        "interface",
+        "long",
+        "native",
+        "new",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "short",
+        "static",
+        "strictfp",
+        "super",
+        "switch",
+        "synchronized",
+        "this",
+        "throw",
+        "throws",
+        "transient",
+        "try",
+        "void",
+        "volatile",
+        "while",
+        "true",
+        "false",
+        "null",
+    ];
+
+    pub fn class_name(layout: &str) -> String {
+        let mut out = String::new();
+        for part in layout.split('_').filter(|one| !one.is_empty()) {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                out.extend(first.to_uppercase());
+                out.push_str(chars.as_str());
+            }
+        }
+        out.push_str("Binding");
+        out
+    }
+
+    pub fn field_name(id: &str) -> String {
+        let mut out = String::new();
+        for (at, part) in id.split('_').filter(|one| !one.is_empty()).enumerate() {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                if at == 0 {
+                    out.extend(first.to_lowercase());
+                } else {
+                    out.extend(first.to_uppercase());
+                }
+                out.push_str(chars.as_str());
+            }
+        }
+        if KEYWORDS.contains(&out.as_str()) {
+            out.push('_');
+        }
+        out
+    }
+
+    fn view_class(tag: &str, element: &crate::xml::Element) -> Option<String> {
+        if tag == "view" {
+            return element.attribute("class").map(str::to_string);
+        }
+        if tag.contains('.') {
+            return Some(tag.to_string());
+        }
+        Some(match tag {
+            "View" | "ViewStub" | "SurfaceView" | "TextureView" | "ViewGroup" => {
+                format!("android.view.{tag}")
+            }
+            "WebView" => "android.webkit.WebView".to_string(),
+            "fragment" | "requestFocus" | "tag" | "merge" | "include" | "layout" | "data" => {
+                return None
+            }
+            _ => format!("android.widget.{tag}"),
+        })
+    }
+
+    fn id_of(element: &crate::xml::Element) -> Option<String> {
+        let said = element.attribute("android:id")?;
+        said.strip_prefix("@+id/")
+            .or_else(|| said.strip_prefix("@id/"))
+            .map(str::to_string)
+    }
+
+    fn gather(element: &crate::xml::Element, into: &mut Vec<Found>, top: bool) {
+        for child in &element.children {
+            let tag = child.name.as_str();
+            if let Some(id) = id_of(child) {
+                if tag == "include" {
+                    if let Some(layout) = child
+                        .attribute("layout")
+                        .and_then(|held| held.strip_prefix("@layout/"))
+                    {
+                        into.push(Found {
+                            id,
+                            kind: class_name(layout),
+                            included: Some(layout.to_string()),
+                            everywhere: true,
+                            merged: false,
+                        });
+                    }
+                } else if let Some(kind) = view_class(tag, child) {
+                    into.push(Found {
+                        id,
+                        kind,
+                        included: None,
+                        everywhere: true,
+                        merged: false,
+                    });
+                }
+            }
+            gather(child, into, false);
+        }
+        let _ = top;
+    }
+
+    pub fn sources(package: &str, layouts: &[(String, String, String)]) -> Vec<(String, String)> {
+        let mut named: Vec<String> = layouts
+            .iter()
+            .filter(|(folder, _, _)| folder == "layout" || folder.starts_with("layout-"))
+            .map(|(_, name, _)| name.trim_end_matches(".xml").to_string())
+            .collect();
+        named.sort();
+        named.dedup();
+        let merging: Vec<String> = layouts
+            .iter()
+            .filter(|(folder, _, text)| {
+                (folder == "layout" || folder.starts_with("layout-")) && {
+                    let mut quiet = crate::diag::Sink::new();
+                    crate::xml::parse(text, "layout", &mut quiet)
+                        .is_some_and(|root| root.name == "merge")
+                }
+            })
+            .map(|(_, name, _)| name.trim_end_matches(".xml").to_string())
+            .collect();
+
+        let mut out = Vec::new();
+        for layout in &named {
+            let mut roots: Vec<crate::xml::Element> = Vec::new();
+            for (folder, name, text) in layouts {
+                if !(folder == "layout" || folder.starts_with("layout-"))
+                    || name.trim_end_matches(".xml") != layout
+                {
+                    continue;
+                }
+                let mut quiet = crate::diag::Sink::new();
+                if let Some(root) = crate::xml::parse(text, name, &mut quiet) {
+                    roots.push(root);
+                }
+            }
+            let Some(first) = roots.first() else {
+                continue;
+            };
+            if roots.iter().any(|root| {
+                root.name == "layout" || root.attribute("tools:viewBindingIgnore") == Some("true")
+            }) {
+                continue;
+            }
+            let merged = first.name == "merge";
+            let root_kind = if merged {
+                "android.view.View".to_string()
+            } else {
+                let kinds: Vec<String> = roots
+                    .iter()
+                    .filter_map(|root| view_class(&root.name, root))
+                    .collect();
+                match kinds.first() {
+                    Some(one) if kinds.iter().all(|held| held == one) => one.clone(),
+                    _ => "android.view.View".to_string(),
+                }
+            };
+
+            let mut fields: Vec<Found> = Vec::new();
+            let mut root_field: Option<String> = None;
+            for (at, root) in roots.iter().enumerate() {
+                let mut seen = Vec::new();
+                if !merged {
+                    if let Some(id) = id_of(root) {
+                        root_field = Some(id);
+                    }
+                }
+                gather(root, &mut seen, true);
+                for one in &fields.clone() {
+                    if !seen.iter().any(|held| held.id == one.id) {
+                        if let Some(kept) = fields.iter_mut().find(|held| held.id == one.id) {
+                            kept.everywhere = false;
+                        }
+                    }
+                }
+                for one in seen {
+                    match fields.iter_mut().find(|held| held.id == one.id) {
+                        Some(kept) => {
+                            if kept.kind != one.kind {
+                                kept.kind = "android.view.View".to_string();
+                                kept.included = None;
+                            }
+                        }
+                        None => {
+                            let mut one = one;
+                            if at > 0 {
+                                one.everywhere = false;
+                            }
+                            fields.push(one);
+                        }
+                    }
+                }
+            }
+            if let Some(id) = &root_field {
+                fields.retain(|one| one.id != *id);
+            }
+            for one in &mut fields {
+                if one
+                    .included
+                    .as_ref()
+                    .is_some_and(|held| merging.contains(held))
+                {
+                    one.merged = true;
+                }
+            }
+
+            let class = class_name(layout);
+            let mut text = String::new();
+            text.push_str(&format!("package {package}{PACKAGE_SUFFIX};\n\n"));
+            text.push_str(&format!(
+                "public final class {class} implements androidx.viewbinding.ViewBinding {{\n"
+            ));
+            text.push_str(&format!("    private final {root_kind} rootView;\n"));
+            if let Some(id) = &root_field {
+                text.push_str(&format!(
+                    "    public final {root_kind} {};\n",
+                    field_name(id)
+                ));
+            }
+            for one in &fields {
+                text.push_str(&format!(
+                    "    public final {} {};\n",
+                    qualified(package, &one.kind, one.included.is_some()),
+                    field_name(&one.id)
+                ));
+            }
+            let mut parameters = vec![format!("{root_kind} rootView")];
+            for one in &fields {
+                parameters.push(format!(
+                    "{} {}",
+                    qualified(package, &one.kind, one.included.is_some()),
+                    field_name(&one.id)
+                ));
+            }
+            text.push_str(&format!(
+                "\n    private {class}({}) {{\n",
+                parameters.join(", ")
+            ));
+            text.push_str("        this.rootView = rootView;\n");
+            if let Some(id) = &root_field {
+                text.push_str(&format!("        this.{} = rootView;\n", field_name(id)));
+            }
+            for one in &fields {
+                let named = field_name(&one.id);
+                text.push_str(&format!("        this.{named} = {named};\n"));
+            }
+            text.push_str("    }\n\n");
+            text.push_str(&format!(
+                "    @Override\n    public {root_kind} getRoot() {{\n        return rootView;\n    }}\n\n"
+            ));
+            if merged {
+                text.push_str(&format!(
+                    "    public static {class} inflate(android.view.LayoutInflater inflater, android.view.ViewGroup parent) {{\n\
+                     \x20       if (parent == null) {{\n\
+                     \x20           throw new NullPointerException(\"parent\");\n\
+                     \x20       }}\n\
+                     \x20       inflater.inflate({package}.R.layout.{layout}, parent);\n\
+                     \x20       return bind(parent);\n\
+                     \x20   }}\n\n"
+                ));
+            } else {
+                text.push_str(&format!(
+                    "    public static {class} inflate(android.view.LayoutInflater inflater) {{\n\
+                     \x20       return inflate(inflater, null, false);\n\
+                     \x20   }}\n\n\
+                     \x20   public static {class} inflate(android.view.LayoutInflater inflater, android.view.ViewGroup parent, boolean attachToParent) {{\n\
+                     \x20       android.view.View root = inflater.inflate({package}.R.layout.{layout}, parent, false);\n\
+                     \x20       if (attachToParent) {{\n\
+                     \x20           parent.addView(root);\n\
+                     \x20       }}\n\
+                     \x20       return bind(root);\n\
+                     \x20   }}\n\n"
+                ));
+            }
+            text.push_str(&format!(
+                "    public static {class} bind(android.view.View rootView) {{\n"
+            ));
+            let mut arguments = vec![format!("({root_kind}) rootView")];
+            for one in &fields {
+                let named = field_name(&one.id);
+                let kind = qualified(package, &one.kind, one.included.is_some());
+                let found = format!("rootView.findViewById({package}.R.id.{})", one.id);
+                if one.merged {
+                    text.push_str(&format!(
+                        "        {kind} {named} = {kind}.bind(rootView);\n"
+                    ));
+                } else if one.included.is_some() {
+                    text.push_str(&format!(
+                        "        android.view.View {named}Found = {found};\n"
+                    ));
+                    if one.everywhere {
+                        text.push_str(&format!(
+                            "        if ({named}Found == null) {{\n            throw missing(rootView, {package}.R.id.{});\n        }}\n",
+                            one.id
+                        ));
+                        text.push_str(&format!(
+                            "        {kind} {named} = {kind}.bind({named}Found);\n"
+                        ));
+                    } else {
+                        text.push_str(&format!(
+                            "        {kind} {named} = {named}Found == null ? null : {kind}.bind({named}Found);\n"
+                        ));
+                    }
+                } else {
+                    text.push_str(&format!("        {kind} {named} = ({kind}) {found};\n"));
+                    if one.everywhere {
+                        text.push_str(&format!(
+                            "        if ({named} == null) {{\n            throw missing(rootView, {package}.R.id.{});\n        }}\n",
+                            one.id
+                        ));
+                    }
+                }
+                arguments.push(named);
+            }
+            text.push_str(&format!(
+                "        return new {class}({});\n    }}\n\n",
+                arguments.join(", ")
+            ));
+            text.push_str(
+                "    private static NullPointerException missing(android.view.View rootView, int id) {\n\
+                 \x20       String named = rootView.getResources().getResourceName(id);\n\
+                 \x20       return new NullPointerException(\"Missing required view with ID: \" + named);\n\
+                 \x20   }\n}\n",
+            );
+            out.push((
+                format!(
+                    "{}{}/{class}.java",
+                    package.replace('.', "/"),
+                    PACKAGE_SUFFIX.replace('.', "/")
+                ),
+                text,
+            ));
+        }
+        out
+    }
+
+    fn qualified(package: &str, kind: &str, included: bool) -> String {
+        if included {
+            format!("{package}{PACKAGE_SUFFIX}.{kind}")
+        } else {
+            kind.to_string()
+        }
+    }
+}
+
 pub mod desugar {
     use crate::diag::{Diagnostic, Severity};
     use crate::FailureClass;
@@ -30383,6 +31534,7 @@ pub mod settings {
         pub res_values: Vec<Declared>,
         pub shrink: bool,
         pub seal_resources: bool,
+        pub view_binding: bool,
         pub key_alias: String,
         pub java: Java,
         pub variants: Vec<Variant>,
@@ -30415,6 +31567,7 @@ pub mod settings {
                 res_values: Vec::new(),
                 shrink: true,
                 seal_resources: false,
+                view_binding: false,
                 key_alias: String::new(),
                 java: Java::default(),
                 variants: vec![Variant::debug(), Variant::release()],
@@ -30598,6 +31751,7 @@ pub mod settings {
             w.begin_object(Some("build"));
             w.field_bool("shrink", self.shrink);
             w.field_bool("sealResources", self.seal_resources);
+            w.field_bool("viewBinding", self.view_binding);
             w.end_object();
 
             w.blank();
@@ -30864,6 +32018,9 @@ pub mod settings {
                 }
                 if let Some(found) = build.get("sealResources").and_then(|one| one.boolean()) {
                     out.seal_resources = found;
+                }
+                if let Some(found) = build.get("viewBinding").and_then(|one| one.boolean()) {
+                    out.view_binding = found;
                 }
             }
             if let Some(found) = word(&held, "namespace") {
@@ -32311,14 +33468,14 @@ pub mod gradle {
         }
         found.settings.package = found.settings.namespace.clone();
         let features = block(&android, "buildFeatures").unwrap_or_default();
-        for feature in [
-            "viewBinding",
-            "dataBinding",
-            "aidl",
-            "compose",
-            "renderScript",
-            "mlModelBinding",
-        ] {
+        let old_style = block(&android, "viewBinding").unwrap_or_default();
+        if flag(&features, &["viewBinding"]) == Some(true)
+            || flag(&android, &["viewBinding.enabled", "viewBinding.isEnabled"]) == Some(true)
+            || flag(&old_style, &["enabled", "isEnabled"]) == Some(true)
+        {
+            found.settings.view_binding = true;
+        }
+        for feature in ["dataBinding", "compose", "renderScript", "mlModelBinding"] {
             if flag(&features, &[feature]) == Some(true)
                 || flag(&android, &[&format!("{feature}.enabled")]) == Some(true)
             {
@@ -32525,6 +33682,7 @@ pub mod gradle {
         ("src/main/res", crate::scaffold::RES_FOLDER),
         ("src/main/assets", crate::scaffold::ASSETS_FOLDER),
         ("src/main/resources", crate::scaffold::JAVA_RESOURCES_FOLDER),
+        ("src/main/aidl", crate::scaffold::AIDL_FOLDER),
         ("src/main/jniLibs", crate::scaffold::LIBRARY_FOLDER),
         ("libs", crate::scaffold::LIBRARY_FOLDER),
     ];
@@ -33950,6 +35108,8 @@ pub mod scaffold {
     pub const JAVA_RESOURCES_FOLDER: &str = "Java_Resources";
 
     pub const MODULES_FOLDER: &str = "Modules";
+
+    pub const AIDL_FOLDER: &str = "Aidl";
 
     pub const LIBRARY_FOLDER: &str = "Libraries";
 
@@ -45901,6 +47061,88 @@ pub mod builder {
                     build_config_source(&namespace, &identity, settings),
                 ));
             }
+        }
+
+        let interfaces: Vec<(String, String)> = {
+            let base = std::path::Path::new(root).join(crate::scaffold::AIDL_FOLDER);
+            let mut found = Vec::new();
+            let mut waiting = vec![base.clone()];
+            while let Some(folder) = waiting.pop() {
+                for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        waiting.push(path);
+                    } else if path.extension().is_some_and(|held| held == "aidl") {
+                        if let Ok(text) = std::fs::read_to_string(&path) {
+                            let named = path
+                                .strip_prefix(root)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string();
+                            found.push((named, text));
+                        }
+                    }
+                }
+            }
+            found.sort();
+            found
+        };
+        if !interfaces.is_empty() {
+            sources.extend(crate::aidl::sources(&interfaces)?);
+        }
+
+        if held.as_ref().is_some_and(|one| one.view_binding) {
+            let namespace = package_of(&project.manifest).unwrap_or_default();
+            let layouts: Vec<(String, String, String)> = project
+                .resources
+                .iter()
+                .map(|one| {
+                    (
+                        one.folder.clone(),
+                        one.name.clone(),
+                        String::from_utf8_lossy(&one.bytes).to_string(),
+                    )
+                })
+                .collect();
+            let made = crate::bindings::sources(&namespace, &layouts);
+            for (folder, manifest) in local_modules(root) {
+                let Some(package) = manifest.as_deref().and_then(package_of) else {
+                    continue;
+                };
+                let mut theirs = Vec::new();
+                for kind in std::fs::read_dir(folder.join("res"))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let folder_name = kind.file_name().to_string_lossy().to_string();
+                    for file in std::fs::read_dir(kind.path())
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        if let Ok(text) = std::fs::read_to_string(file.path()) {
+                            theirs.push((
+                                folder_name.clone(),
+                                file.file_name().to_string_lossy().to_string(),
+                                text,
+                            ));
+                        }
+                    }
+                }
+                sources.extend(crate::bindings::sources(&package, &theirs));
+            }
+            if !made.is_empty()
+                || sources
+                    .iter()
+                    .any(|(name, _)| name.contains("/databinding/"))
+            {
+                sources.push((
+                    "androidx/viewbinding/ViewBinding.java".to_string(),
+                    crate::bindings::INTERFACE.to_string(),
+                ));
+            }
+            sources.extend(made);
         }
 
         if let Some(made_by) = fingerprint {
