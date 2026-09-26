@@ -2,7 +2,7 @@ plugins {
     id("com.android.application") version "9.3.0" apply false
 }
 
-val omniPinnedVersions = mapOf(
+val builderPinnedVersions = mapOf(
     "agp" to "9.3.0",
     "gradle" to "9.7.0",
     "ndk" to "29.0.14206865",
@@ -20,7 +20,7 @@ tasks.register("verifyToolchainLock") {
     description = "Checks that the Gradle pins match the toolchain lock in Builder.rs."
 
     val coreSource = layout.projectDirectory.file("Builder.rs").asFile
-    val pinned = omniPinnedVersions
+    val pinned = builderPinnedVersions
     inputs.file(coreSource)
 
     doLast {

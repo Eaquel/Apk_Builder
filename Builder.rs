@@ -82,7 +82,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
     Subsystem {
         name: "Project model",
         directive_section: 44,
-        summary: "Omni.toml parsed, validated and reduced to a configuration digest over a canonical encoding: every part length-prefixed so no value can be read as a separator, and every unordered part sorted so the same facts always come to the same bytes. What the encoding writes can be read back to what went in, which is the same claim as no two projects sharing a digest, said in a way a test can check.",
+        summary: "Project.toml parsed, validated and reduced to a configuration digest over a canonical encoding: every part length-prefixed so no value can be read as a separator, and every unordered part sorted so the same facts always come to the same bytes. What the encoding writes can be read back to what went in, which is the same claim as no two projects sharing a digest, said in a way a test can check.",
     },
     Subsystem {
         name: "Artifact lifecycle",
@@ -146,7 +146,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "A project is a manifest at the root, one folder per chosen language with a starter file in each, and a resource folder holding a launcher-icon folder per density and a values folder per locale. The application's name lives in those values folders and the manifest points at it, so it is translated rather than fixed. Package name, application name, architectures, platform range, languages and locales are validated before anything is written.",
     },
     Subsystem {
-        name: "Omni_Guard policy",
+        name: "Guard policy",
         directive_section: 29,
         summary: "Eleven rules every project must pass before a package is produced: no debuggable build, no cleartext by default, backup off, no unguarded exported component, no exported provider handing out URI grants, a platform floor of API 28, no high-risk permission, no shared user identity, no opting out of scoped storage, no census of every installed application, and no exported activity in a task another application can take over.",
     },
@@ -464,7 +464,7 @@ pub mod json {
         pub fn finish(self) -> String {
             assert!(
                 self.needs_comma.is_empty(),
-                "omni_core::json::Writer::finish called with {} unclosed container(s)",
+                "apk_builder_core::json::Writer::finish called with {} unclosed container(s)",
                 self.needs_comma.len()
             );
             self.buf
@@ -2001,11 +2001,8 @@ pub mod compiler {
         let contract = compiler.contract();
         let mut wrong = Vec::new();
 
-        if contract.id.is_empty() || !contract.id.starts_with("omni.plugin.") {
-            wrong.push(format!(
-                "{}: an id must be omni.plugin.something",
-                contract.id
-            ));
+        if contract.id.is_empty() || !contract.id.starts_with("plugin.") {
+            wrong.push(format!("{}: an id must be plugin.something", contract.id));
         }
         for required in contract.required_capabilities {
             if contract.forbidden_capabilities.contains(required) {
@@ -3601,9 +3598,9 @@ pub mod vfs {
         pub refusals: u64,
     }
 
-    pub const PARTIAL_MARK: &str = "omni-partial";
+    pub const PARTIAL_MARK: &str = "builder-partial";
 
-    pub const LOCK_MARK: &str = "omni-lock";
+    pub const LOCK_MARK: &str = "builder-lock";
 
     pub const LOCK_STALE_SECONDS: u64 = 15 * 60;
 
@@ -4246,7 +4243,7 @@ pub mod project {
 
     pub const MAX_ENTRIES: usize = 256;
 
-    pub const MANIFEST_NAME: &str = "Omni.toml";
+    pub const MANIFEST_NAME: &str = "Project.toml";
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Profile {
@@ -6808,7 +6805,7 @@ pub mod graph {
             &mut graph,
             MANIFEST_NODE,
             Kind::Manifest,
-            "omni.manifest",
+            "build.manifest",
             &["manifest.binary"],
             &[],
         )?;
@@ -6816,7 +6813,7 @@ pub mod graph {
             &mut graph,
             RESOURCES_NODE,
             Kind::Resources,
-            "omni.resources",
+            "build.resources",
             &["resources.table", "resources.files"],
             &[MANIFEST_NODE],
         )?;
@@ -6824,7 +6821,7 @@ pub mod graph {
             &mut graph,
             ANALYSIS_NODE,
             Kind::SourceAnalysis,
-            "omni.analysis",
+            "build.analysis",
             &["analysis.symbols"],
             &[],
         )?;
@@ -6832,7 +6829,7 @@ pub mod graph {
             &mut graph,
             COMPILE_NODE,
             Kind::CompilerIr,
-            "omni.java",
+            "build.java",
             &["compile.classes"],
             &[ANALYSIS_NODE, RESOURCES_NODE],
         )?;
@@ -6840,7 +6837,7 @@ pub mod graph {
             &mut graph,
             DEX_NODE,
             Kind::Dex,
-            "omni.dex",
+            "build.dex",
             &["dex.classes"],
             &[COMPILE_NODE],
         )?;
@@ -6851,7 +6848,7 @@ pub mod graph {
                 &mut graph,
                 NATIVE_NODE,
                 Kind::Native,
-                "omni.native",
+                "build.native",
                 &["native.libraries"],
                 &[ANALYSIS_NODE],
             )?;
@@ -6862,7 +6859,7 @@ pub mod graph {
             &mut graph,
             LAYOUT_NODE,
             Kind::ApkLayout,
-            "omni.layout",
+            "build.layout",
             &["layout.tree"],
             &before_layout,
         )?;
@@ -6870,7 +6867,7 @@ pub mod graph {
             &mut graph,
             PACKAGE_NODE,
             Kind::Package,
-            "omni.archive",
+            "build.archive",
             &["package.unsigned"],
             &[LAYOUT_NODE],
         )?;
@@ -6878,7 +6875,7 @@ pub mod graph {
             &mut graph,
             SIGN_NODE,
             Kind::Sign,
-            "omni.signing",
+            "build.signing",
             &["package.signed"],
             &[PACKAGE_NODE],
         )?;
@@ -6887,7 +6884,7 @@ pub mod graph {
                 &mut graph,
                 VERIFY_NODE,
                 Kind::Verify,
-                "omni.verify",
+                "build.verify",
                 &["verify.report"],
                 &[SIGN_NODE],
             )?;
@@ -12221,7 +12218,7 @@ pub mod resources {
                     )
                     .with_context(format!("Found: {trimmed}"))
                     .with_suggestion(
-                        "A reference is written @type/name, for example @color/omni_accent.",
+                        "A reference is written @type/name, for example @color/apk_builder_accent.",
                     ),
                 );
                 return None;
@@ -27931,9 +27928,9 @@ pub mod integrity {
 
 pub mod seal {
 
-    pub const CLASS: &str = "OmniSeal";
+    pub const CLASS: &str = "Seal";
 
-    pub const AUTHORITY_SUFFIX: &str = ".omniseal";
+    pub const AUTHORITY_SUFFIX: &str = ".seal";
 
     pub fn class_name(package: &str) -> String {
         format!("{package}.{CLASS}")
@@ -29441,7 +29438,7 @@ pub mod desugar {
     use crate::diag::{Diagnostic, Severity};
     use crate::FailureClass;
 
-    pub const HOME: &str = "omni/desugar/Backports";
+    pub const HOME: &str = "com/apk/builder/desugar/Backports";
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Called {
@@ -29568,20 +29565,20 @@ pub mod desugar {
         (
             "java/lang/MatchException",
             36,
-            "omni/desugar/MatchException",
+            "com/apk/builder/desugar/MatchException",
         ),
-        ("java/lang/Record", 34, "omni/desugar/RecordTag"),
+        ("java/lang/Record", 34, "com/apk/builder/desugar/RecordTag"),
         (
             "java/util/ServiceLoader$Provider",
             35,
-            "omni/desugar/ServiceProvider",
+            "com/apk/builder/desugar/ServiceProvider",
         ),
     ];
 
     pub const SOURCES: &[(&str, &str)] = &[
         (
-            "omni/desugar/Backports.java",
-            r####"package omni.desugar;
+            "com/apk/builder/desugar/Backports.java",
+            r####"package com.apk.builder.desugar;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -30446,8 +30443,8 @@ public final class Backports {
 "####,
         ),
         (
-            "omni/desugar/MatchException.java",
-            r####"package omni.desugar;
+            "com/apk/builder/desugar/MatchException.java",
+            r####"package com.apk.builder.desugar;
 
 public final class MatchException extends RuntimeException {
     public MatchException(String message, Throwable cause) {
@@ -30457,8 +30454,8 @@ public final class MatchException extends RuntimeException {
 "####,
         ),
         (
-            "omni/desugar/ServiceProvider.java",
-            r####"package omni.desugar;
+            "com/apk/builder/desugar/ServiceProvider.java",
+            r####"package com.apk.builder.desugar;
 
 import java.util.function.Supplier;
 
@@ -30486,8 +30483,8 @@ public interface ServiceProvider extends Supplier<Object> {
 "####,
         ),
         (
-            "omni/desugar/RecordTag.java",
-            r####"package omni.desugar;
+            "com/apk/builder/desugar/RecordTag.java",
+            r####"package com.apk.builder.desugar;
 
 public abstract class RecordTag {
     protected RecordTag() {
@@ -34163,7 +34160,7 @@ pub mod gradle {
         }
         let here = std::path::Path::new(root);
         let mut moved = 0;
-        for (classic_folder, omni_folder) in CLASSIC_MAP {
+        for (classic_folder, apk_builder_folder) in CLASSIC_MAP {
             let from = here.join(classic_folder);
             if !from.is_dir() {
                 continue;
@@ -34171,10 +34168,10 @@ pub mod gradle {
             let mut held = Vec::new();
             walk(&from, "", &mut held);
             for (named, path) in held {
-                let folder = if *omni_folder == crate::scaffold::JAVA_FOLDER {
+                let folder = if *apk_builder_folder == crate::scaffold::JAVA_FOLDER {
                     language_folder(&named)
                 } else {
-                    omni_folder
+                    apk_builder_folder
                 };
                 if carry(&path, &here.join(folder).join(&named))? {
                     moved += 1;
@@ -34260,7 +34257,7 @@ pub mod gradle {
                 out.moved += 1;
             }
         }
-        for (gradle_folder, omni_folder) in SOURCE_MAP {
+        for (gradle_folder, apk_builder_folder) in SOURCE_MAP {
             let from = here.join(gradle_folder);
             if !from.is_dir() {
                 continue;
@@ -34268,10 +34265,10 @@ pub mod gradle {
             let mut held = Vec::new();
             walk(&from, "", &mut held);
             for (named, path) in held {
-                let folder = if *omni_folder == crate::scaffold::JAVA_FOLDER {
+                let folder = if *apk_builder_folder == crate::scaffold::JAVA_FOLDER {
                     language_folder(&named)
                 } else {
-                    omni_folder
+                    apk_builder_folder
                 };
                 if carry(&path, &root.join(folder).join(&named))? {
                     out.moved += 1;
@@ -34301,7 +34298,7 @@ pub mod gradle {
         if !base.is_dir() {
             return Ok(());
         }
-        for (gradle_folder, omni_folder) in SOURCE_MAP {
+        for (gradle_folder, apk_builder_folder) in SOURCE_MAP {
             let Some(inside) = gradle_folder.strip_prefix("src/main/") else {
                 continue;
             };
@@ -34312,10 +34309,10 @@ pub mod gradle {
             let mut held = Vec::new();
             walk(&from, "", &mut held);
             for (named, path) in held {
-                let folder = if *omni_folder == crate::scaffold::JAVA_FOLDER {
+                let folder = if *apk_builder_folder == crate::scaffold::JAVA_FOLDER {
                     language_folder(&named)
                 } else {
-                    omni_folder
+                    apk_builder_folder
                 };
                 if carry(&path, &root.join(folder).join(&named))? {
                     out.moved += 1;
@@ -36435,7 +36432,7 @@ pub mod scaffold {
             "rust" => (
                 format!("{ENTRY_CLASS}.rs"),
                 format!(
-                    "#![no_std]\n\n#[panic_handler]\nfn panic(_: &core::panic::PanicInfo) -> ! {{\n    loop {{}}\n}}\n\n#[no_mangle]\npub extern \"C\" fn omni_entry() -> i32 {{\n    0\n}}\n\n// {class}\n"
+                    "#![no_std]\n\n#[panic_handler]\nfn panic(_: &core::panic::PanicInfo) -> ! {{\n    loop {{}}\n}}\n\n#[no_mangle]\npub extern \"C\" fn apk_builder_entry() -> i32 {{\n    0\n}}\n\n// {class}\n"
                 ),
             ),
             _ => (String::new(), String::new()),
@@ -42820,13 +42817,38 @@ pub mod keystore {
     use crate::rsa;
     use crate::FailureClass;
 
-    pub const MAGIC: &[u8; 8] = b"OMNIKEY1";
+    pub const MAGIC: &[u8; 8] = b"APKBKEY1";
 
     pub const CONTAINER_VERSION: u32 = 2;
     pub const OLDEST_CONTAINER_VERSION: u32 = 1;
     pub const TAG_BYTES: usize = 32;
     pub const CHECKSUM_BYTES: usize = 32;
-    pub const EXTENSION: &str = "omnikey";
+    pub const EXTENSION: &str = "apkkey";
+
+    const EARLIER_MAGIC: [u8; 8] = [0x4f, 0x4d, 0x4e, 0x49, 0x4b, 0x45, 0x59, 0x31];
+
+    const EARLIER_EXTENSION: [u8; 7] = [0x6f, 0x6d, 0x6e, 0x69, 0x6b, 0x65, 0x79];
+
+    pub fn adopt_earlier_files(directory: &str) {
+        let earlier = String::from_utf8_lossy(&EARLIER_EXTENSION).to_string();
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let named_earlier = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension == earlier);
+            if !named_earlier {
+                continue;
+            }
+            let renamed = path.with_extension(EXTENSION);
+            if !renamed.exists() {
+                std::fs::rename(&path, &renamed).ok();
+            }
+        }
+    }
     pub const SHORTEST_PASSWORD: usize = 8;
     pub const SMALLEST_KEY_BITS: u32 = 2048;
     pub const LARGEST_KEY_BITS: u32 = 4096;
@@ -43197,9 +43219,9 @@ pub mod keystore {
     }
 
     pub fn parts(data: &[u8]) -> Result<Container<'_>, Diagnostic> {
-        if data.len() < 12 || &data[..8] != MAGIC {
+        if data.len() < 12 || (&data[..8] != MAGIC && data[..8] != EARLIER_MAGIC) {
             return Err(fail("EY032", "The file is not an Apk Builder signing key.")
-                .with_suggestion("A key file made by this build starts with OMNIKEY1."));
+                .with_suggestion("A key file made by this build starts with APKBKEY1."));
         }
         let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         if !(OLDEST_CONTAINER_VERSION..=CONTAINER_VERSION).contains(&version) {
@@ -43367,6 +43389,7 @@ pub mod keystore {
     }
 
     pub fn ensure_default(directory: &str, now_seconds: i64) -> Result<(Record, bool), Diagnostic> {
+        adopt_earlier_files(directory);
         let path = path_for(directory, DEFAULT_ALIAS);
         if let Ok(held) = describe(&path) {
             return Ok((held, false));
@@ -43393,6 +43416,7 @@ pub mod keystore {
     }
 
     pub fn list(directory: &str) -> Vec<Record> {
+        adopt_earlier_files(directory);
         let mut found = Vec::new();
         let Ok(entries) = std::fs::read_dir(directory) else {
             return found;
@@ -47888,7 +47912,7 @@ pub mod builder {
     pub fn mendable(root: &str) -> Mended {
         let mut out = Mended::default();
         let scratch = std::env::temp_dir().join(format!(
-            "omni-mend-{}-{}",
+            "builder-mend-{}-{}",
             std::process::id(),
             &crate::hash::sha256(root.as_bytes()).to_hex()[..12]
         ));
@@ -50531,7 +50555,7 @@ pub fn state_report(observed_environment: &str) -> String {
     w.begin_object(Some("core"));
     w.field_str("name", "Apk_Builder Core");
     w.field_str("version", CORE_VERSION);
-    w.field_u64("abiVersion", ffi::OMNI_ABI_VERSION as u64);
+    w.field_u64("abiVersion", ffi::APK_BUILDER_ABI_VERSION as u64);
     w.field_bool("selfHosted", false);
     w.field_str(
         "selfHostingNote",
@@ -53097,21 +53121,23 @@ pub mod ffi {
     use std::ffi::{c_char, CStr, CString};
     use std::panic::catch_unwind;
 
-    pub const OMNI_ABI_VERSION: u32 = 1;
+    pub const APK_BUILDER_ABI_VERSION: u32 = 1;
 
     #[no_mangle]
-    pub extern "C" fn omni_abi_version() -> u32 {
-        OMNI_ABI_VERSION
+    pub extern "C" fn apk_builder_abi_version() -> u32 {
+        APK_BUILDER_ABI_VERSION
     }
 
     #[no_mangle]
-    pub extern "C" fn omni_core_version() -> *const c_char {
+    pub extern "C" fn apk_builder_core_version() -> *const c_char {
         const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
         VERSION.as_ptr() as *const c_char
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_state_report(observed_environment: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_state_report(
+        observed_environment: *const c_char,
+    ) -> *mut c_char {
         let result = catch_unwind(|| {
             let observed = if observed_environment.is_null() {
                 String::new()
@@ -53229,7 +53255,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub extern "C" fn omni_build_progress() -> *mut c_char {
+    pub extern "C" fn apk_builder_build_progress() -> *mut c_char {
         let result = catch_unwind(|| match CString::new(crate::progress::report()) {
             Ok(report) => report.into_raw(),
             Err(_) => std::ptr::null_mut(),
@@ -53238,12 +53264,12 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub extern "C" fn omni_build_stop() {
+    pub extern "C" fn apk_builder_build_stop() {
         let _ = catch_unwind(crate::progress::stop);
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_speak(tag: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_speak(tag: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let asked = text_from(tag).unwrap_or_default();
             let spoken = crate::speech::choose(&asked);
@@ -53265,7 +53291,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_terminal_docs(tag: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_terminal_docs(tag: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let asked = text_from(tag).unwrap_or_default();
             match CString::new(crate::terminal::docs_json(&asked)) {
@@ -53277,7 +53303,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_vibe(request: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_vibe(request: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let asked = text_from(request).unwrap_or_default();
             match CString::new(crate::vibe_coding::answer(&asked)) {
@@ -53289,7 +53315,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_build_expect(timings: *const c_char) {
+    pub unsafe extern "C" fn apk_builder_build_expect(timings: *const c_char) {
         let _ = catch_unwind(|| {
             if let Some(held) = text_from(timings) {
                 crate::progress::learn(&held);
@@ -53298,7 +53324,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_create_project(
+    pub unsafe extern "C" fn apk_builder_create_project(
         root: *const c_char,
         spec: *const c_char,
     ) -> *mut c_char {
@@ -53328,7 +53354,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_build_project(
+    pub unsafe extern "C" fn apk_builder_build_project(
         root: *const c_char,
         output_path: *const c_char,
         key_path: *const c_char,
@@ -53389,7 +53415,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_bundle_project(
+    pub unsafe extern "C" fn apk_builder_bundle_project(
         root: *const c_char,
         output_path: *const c_char,
     ) -> *mut c_char {
@@ -53426,7 +53452,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_verify_self(
+    pub unsafe extern "C" fn apk_builder_verify_self(
         package_path: *const c_char,
         expected_certificate: *const c_char,
     ) -> *mut c_char {
@@ -53451,7 +53477,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_create_key(
+    pub unsafe extern "C" fn apk_builder_create_key(
         directory: *const c_char,
         spec: *const c_char,
         password: *const c_char,
@@ -53482,7 +53508,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_bind_device(secret: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_bind_device(secret: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(secret) = text_from(secret) else {
                 return std::ptr::null_mut();
@@ -53498,7 +53524,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_default_key(directory: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_default_key(directory: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(directory) = text_from(directory) else {
                 return std::ptr::null_mut();
@@ -53520,7 +53546,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_build_all(
+    pub unsafe extern "C" fn apk_builder_build_all(
         root: *const c_char,
         package_path: *const c_char,
         bundle_path: *const c_char,
@@ -53609,7 +53635,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_list_keys(directory: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_list_keys(directory: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(directory) = text_from(directory) else {
                 return std::ptr::null_mut();
@@ -53629,7 +53655,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_delete_key(path: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_delete_key(path: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(path) = text_from(path) else {
                 return std::ptr::null_mut();
@@ -53650,7 +53676,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_check_key(
+    pub unsafe extern "C" fn apk_builder_check_key(
         path: *const c_char,
         password: *const c_char,
     ) -> *mut c_char {
@@ -53674,7 +53700,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_list_projects(directory: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_list_projects(directory: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(directory) = text_from(directory) else {
                 return std::ptr::null_mut();
@@ -53694,7 +53720,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_project_tree(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_project_tree(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -53726,7 +53752,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_project_health(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_project_health(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -53747,7 +53773,10 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_lay_out(name: *const c_char, text: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_lay_out(
+        name: *const c_char,
+        text: *const c_char,
+    ) -> *mut c_char {
         let result = catch_unwind(|| {
             let (Some(name), Some(text)) = (text_from(name), text_from(text)) else {
                 return std::ptr::null_mut();
@@ -53777,7 +53806,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_dependencies(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_dependencies(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -53798,7 +53827,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_dependency_remove(
+    pub unsafe extern "C" fn apk_builder_dependency_remove(
         root: *const c_char,
         name: *const c_char,
     ) -> *mut c_char {
@@ -53822,7 +53851,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_manifest_facts(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_manifest_facts(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -53843,7 +53872,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_manifest_set(
+    pub unsafe extern "C" fn apk_builder_manifest_set(
         root: *const c_char,
         field: *const c_char,
         value: *const c_char,
@@ -53870,7 +53899,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_manifest_permission(
+    pub unsafe extern "C" fn apk_builder_manifest_permission(
         root: *const c_char,
         name: *const c_char,
         wanted: bool,
@@ -53895,7 +53924,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_symbols(
+    pub unsafe extern "C" fn apk_builder_symbols(
         root: *const c_char,
         needle: *const c_char,
     ) -> *mut c_char {
@@ -53926,7 +53955,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_where_written(
+    pub unsafe extern "C" fn apk_builder_where_written(
         root: *const c_char,
         qualified: *const c_char,
     ) -> *mut c_char {
@@ -53954,7 +53983,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_inspect_package(path: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_inspect_package(path: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(path) = text_from(path) else {
                 return std::ptr::null_mut();
@@ -53976,7 +54005,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_check_project(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_check_project(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -53994,7 +54023,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_maven_plan(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_maven_plan(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -54015,7 +54044,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_project_repairs(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_project_repairs(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -54042,7 +54071,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_apply_repairs(
+    pub unsafe extern "C" fn apk_builder_apply_repairs(
         root: *const c_char,
         repairs: *const c_char,
     ) -> *mut c_char {
@@ -54094,7 +54123,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_search_project(
+    pub unsafe extern "C" fn apk_builder_search_project(
         root: *const c_char,
         needle: *const c_char,
         sensitive: bool,
@@ -54121,7 +54150,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_read_file(
+    pub unsafe extern "C" fn apk_builder_read_file(
         root: *const c_char,
         relative: *const c_char,
     ) -> *mut c_char {
@@ -54147,7 +54176,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_write_file(
+    pub unsafe extern "C" fn apk_builder_write_file(
         root: *const c_char,
         relative: *const c_char,
         contents: *const c_char,
@@ -54175,7 +54204,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_git_checkout(
+    pub unsafe extern "C" fn apk_builder_git_checkout(
         pack_path: *const c_char,
         head: *const c_char,
         into: *const c_char,
@@ -54229,7 +54258,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_digest_file(path: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_digest_file(path: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(path) = text_from(path) else {
                 return std::ptr::null_mut();
@@ -54255,7 +54284,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_pack_archive(
+    pub unsafe extern "C" fn apk_builder_pack_archive(
         root: *const c_char,
         names: *const c_char,
         into: *const c_char,
@@ -54298,7 +54327,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_open_archive(
+    pub unsafe extern "C" fn apk_builder_open_archive(
         archive_path: *const c_char,
         into: *const c_char,
         password: *const c_char,
@@ -54337,7 +54366,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_adopt_project(root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_adopt_project(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(root) = text_from(root) else {
                 return std::ptr::null_mut();
@@ -54371,7 +54400,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_new_folder(
+    pub unsafe extern "C" fn apk_builder_new_folder(
         root: *const c_char,
         relative: *const c_char,
     ) -> *mut c_char {
@@ -54395,7 +54424,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_remove_path(
+    pub unsafe extern "C" fn apk_builder_remove_path(
         root: *const c_char,
         relative: *const c_char,
         trash_root: *const c_char,
@@ -54426,7 +54455,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_rename_path(
+    pub unsafe extern "C" fn apk_builder_rename_path(
         root: *const c_char,
         from: *const c_char,
         to: *const c_char,
@@ -54454,7 +54483,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_build_unsigned(
+    pub unsafe extern "C" fn apk_builder_build_unsigned(
         root: *const c_char,
         package_path: *const c_char,
         certificate: *const c_char,
@@ -54541,7 +54570,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_seal_package(
+    pub unsafe extern "C" fn apk_builder_seal_package(
         package_path: *const c_char,
         sealed_path: *const c_char,
         certificate: *const c_char,
@@ -54713,7 +54742,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_copy_path(
+    pub unsafe extern "C" fn apk_builder_copy_path(
         root: *const c_char,
         from: *const c_char,
         to: *const c_char,
@@ -54741,7 +54770,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_list_built(directory: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_list_built(directory: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(directory) = text_from(directory) else {
                 return std::ptr::null_mut();
@@ -54761,7 +54790,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_trash_send(
+    pub unsafe extern "C" fn apk_builder_trash_send(
         trash_root: *const c_char,
         path: *const c_char,
     ) -> *mut c_char {
@@ -54788,7 +54817,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_trash_list(trash_root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_trash_list(trash_root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(trash_root) = text_from(trash_root) else {
                 return std::ptr::null_mut();
@@ -54812,7 +54841,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_trash_restore(
+    pub unsafe extern "C" fn apk_builder_trash_restore(
         trash_root: *const c_char,
         id: *const c_char,
     ) -> *mut c_char {
@@ -54838,7 +54867,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_trash_purge(
+    pub unsafe extern "C" fn apk_builder_trash_purge(
         trash_root: *const c_char,
         id: *const c_char,
     ) -> *mut c_char {
@@ -54862,7 +54891,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_trash_empty(trash_root: *const c_char) -> *mut c_char {
+    pub unsafe extern "C" fn apk_builder_trash_empty(trash_root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let Some(trash_root) = text_from(trash_root) else {
                 return std::ptr::null_mut();
@@ -54878,7 +54907,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_set_icon(
+    pub unsafe extern "C" fn apk_builder_set_icon(
         root: *const c_char,
         source: *const c_char,
     ) -> *mut c_char {
@@ -54910,7 +54939,7 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_string_free(value: *mut c_char) {
+    pub unsafe extern "C" fn apk_builder_string_free(value: *mut c_char) {
         if value.is_null() {
             return;
         }

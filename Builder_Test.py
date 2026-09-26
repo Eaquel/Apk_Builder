@@ -42,10 +42,10 @@ COMPILERS = ROOT / "Compilers"
 ANDROID = ROOT / "Android.rs"
 
 CONFORMANCE = {
-    "OMNI_REQUIRE_APKSIGNER": "1",
-    "OMNI_REQUIRE_AXML_CONFORMANCE": "1",
-    "OMNI_REQUIRE_IMAGE_CONFORMANCE": "1",
-    "OMNI_REQUIRE_INFLATE_CONFORMANCE": "1",
+    "APK_BUILDER_REQUIRE_APKSIGNER": "1",
+    "APK_BUILDER_REQUIRE_AXML_CONFORMANCE": "1",
+    "APK_BUILDER_REQUIRE_IMAGE_CONFORMANCE": "1",
+    "APK_BUILDER_REQUIRE_INFLATE_CONFORMANCE": "1",
 }
 
 def interface() -> str:
@@ -161,8 +161,8 @@ def check_layout() -> str:
     if (ROOT / "Examples").exists():
         raise AssertionError("Examples is gone from this tree")
 
-    if (ROOT / "Omni.rs").exists() or (ROOT / "Plugins").exists():
-        raise AssertionError("the old Omni.rs / Plugins layout is still here")
+    if (ROOT / "Old_Layout.rs").exists() or (ROOT / "Plugins").exists():
+        raise AssertionError("the old Old_Layout.rs / Plugins layout is still here")
 
     stray = sorted(
         path.name for path in ROOT.glob("*.py") if path.name != "Builder_Test.py"
@@ -350,15 +350,15 @@ def sign_a_copy(package: Path) -> Path:
     if not store.is_file():
         run([
             "keytool", "-genkeypair", "-keystore", str(store),
-            "-storepass", "omnilocal", "-keypass", "omnilocal", "-alias", "local",
+            "-storepass", "apklocal", "-keypass", "apklocal", "-alias", "local",
             "-keyalg", "RSA", "-keysize", "2048", "-validity", "3650",
-            "-dname", "CN=Omni Local, O=Omni, C=TR",
+            "-dname", "CN=Apk Builder Local, O=Apk Builder, C=TR",
         ])
     shutil.copyfile(package, copy)
     run([
         str(apksigner), "sign",
-        "--ks", str(store), "--ks-pass", "pass:omnilocal",
-        "--key-pass", "pass:omnilocal", "--ks-key-alias", "local",
+        "--ks", str(store), "--ks-pass", "pass:apklocal",
+        "--key-pass", "pass:apklocal", "--ks-key-alias", "local",
         "--min-sdk-version", "30", str(copy),
     ])
     return copy
@@ -376,24 +376,24 @@ def check_core() -> str:
     env = dict(CONFORMANCE)
     demanded = list(CONFORMANCE)
     for flag, present in (
-        ("OMNI_REQUIRE_AXML_CONFORMANCE", tool_present(build_tool, "aapt2")),
-        ("OMNI_REQUIRE_RSA_CONFORMANCE", shutil.which("openssl") is not None),
-        ("OMNI_REQUIRE_DEX_CONFORMANCE",
+        ("APK_BUILDER_REQUIRE_AXML_CONFORMANCE", tool_present(build_tool, "aapt2")),
+        ("APK_BUILDER_REQUIRE_RSA_CONFORMANCE", shutil.which("openssl") is not None),
+        ("APK_BUILDER_REQUIRE_DEX_CONFORMANCE",
          tool_present(build_tool, "dexdump") and bool(built)),
-        ("OMNI_REQUIRE_CLASS_CONFORMANCE",
+        ("APK_BUILDER_REQUIRE_CLASS_CONFORMANCE",
          shutil.which("javap") is not None and bool(built)),
-        ("OMNI_REQUIRE_BUNDLETOOL",
+        ("APK_BUILDER_REQUIRE_BUNDLETOOL",
          shutil.which("bundletool") is not None
          and bool(sorted(ROOT.glob("Builder/build/outputs/bundle/*/*.aab")))),
-        ("OMNI_REQUIRE_SELF_BUILT_APK",
+        ("APK_BUILDER_REQUIRE_SELF_BUILT_APK",
          tool_present(build_tool, "apksigner") and shutil.which("openssl") is not None),
-        ("OMNI_REQUIRE_SELF_POLICY", bool(built)),
+        ("APK_BUILDER_REQUIRE_SELF_POLICY", bool(built)),
     ):
         if present and flag not in env:
             env[flag] = "1"
             demanded.append(flag)
     if under_test:
-        env["OMNI_PACKAGE_UNDER_TEST"] = str(under_test[0])
+        env["APK_BUILDER_PACKAGE_UNDER_TEST"] = str(under_test[0])
 
     done = run(["cargo", "test", "--locked"], env=env)
     passed = sum(
@@ -437,8 +437,8 @@ def check_strings() -> str:
     used = set(
         re.findall(r"(?<!android\.)\bR\.string\.([a-z_0-9]+)", interface())
     )
-    generated = {"omni_expected_certificate"}
-    fromXml = {"omni_app_name"}
+    generated = {"apk_builder_expected_certificate"}
+    fromXml = {"app_name"}
     unresolved = sorted(used - set(base) - generated)
     if unresolved:
         raise AssertionError(f"the interface asks for strings nobody declares: {unresolved}")
@@ -520,7 +520,7 @@ def check_bridge() -> str:
                 f"{abi} exports {sorted(set(exported) - set(declared))} extra, "
                 f"{sorted(set(declared) - set(exported))} missing"
             )
-        if any("omni_state_report" in name for name in exported):
+        if any("apk_builder_state_report" in name for name in exported):
             raise AssertionError(f"{abi} leaks the Core's own symbols")
         checked += 1
     return f"{len(declared)} symbols agree across {checked} ABIs"
@@ -532,7 +532,7 @@ def check_reproducible() -> str:
     it leaves behind is what gets published, and a run that rebuilt only the
     package would quietly drop the bundle.
     """
-    if os.environ.get("OMNI_SKIP_REPRODUCIBLE"):
+    if os.environ.get("APK_BUILDER_SKIP_REPRODUCIBLE"):
         raise Skip("asked to skip the rebuild")
     import hashlib
 

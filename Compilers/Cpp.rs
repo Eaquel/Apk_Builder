@@ -3,7 +3,7 @@ use crate::diag::Diagnostic;
 use crate::plugin::{unimplemented_diagnostic, Context, Contract, Outcome, Plugin, Version};
 
 pub static CONTRACT: Contract = Contract {
-    id: "omni.plugin.cpp",
+    id: "plugin.cpp",
     display_name: "C/C++",
     version: Version::new(0, 1, 0),
     produces_artifacts: false,

@@ -11,26 +11,26 @@ plugins {
     id("com.android.application")
 }
 
-val omniNdkVersion = "29.0.14206865"
-val omniBuildToolsVersion = "37.0.0"
-val omniCmakeVersion = "4.4.2"
-val omniCompileSdk = 37
-val omniMinSdk = 30
-val omniTargetSdk = 37
+val builderNdkVersion = "29.0.14206865"
+val builderBuildToolsVersion = "37.0.0"
+val builderCmakeVersion = "4.4.2"
+val builderCompileSdk = 37
+val builderMinSdk = 30
+val builderTargetSdk = 37
 
-val omniAbis = mapOf(
+val builderAbis = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
 )
 
-val omniClangPrefix = mapOf(
+val builderClangPrefix = mapOf(
     "aarch64-linux-android" to "aarch64-linux-android",
 )
 
-val omniRustProfile = "release"
-val omniCoreDirectory = rootProject.layout.projectDirectory
-val omniRustArtifactDirectory = omniCoreDirectory.dir("target").asFile.absolutePath
+val builderRustProfile = "release"
+val builderCoreDirectory = rootProject.layout.projectDirectory
+val builderRustArtifactDirectory = builderCoreDirectory.dir("target").asFile.absolutePath
 
-val omniSdkDirectory: String = run {
+val builderSdkDirectory: String = run {
     val fromEnvironment = providers.environmentVariable("ANDROID_HOME")
         .orElse(providers.environmentVariable("ANDROID_SDK_ROOT"))
         .orNull
@@ -53,31 +53,31 @@ val omniSdkDirectory: String = run {
     }
 }
 
-val omniLocalProperties: Properties = Properties().apply {
+val builderLocalProperties: Properties = Properties().apply {
     rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use(::load)
 }
 
-fun omniSetting(propertyName: String, environmentName: String): String? =
-    omniLocalProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+fun builderSetting(propertyName: String, environmentName: String): String? =
+    builderLocalProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
         ?: providers.environmentVariable(environmentName).orNull?.takeIf { it.isNotBlank() }
 
-val omniCmakeDirectory: String? = omniSetting("cmake.dir", "OMNI_CMAKE_DIR")
+val builderCmakeDirectory: String? = builderSetting("cmake.dir", "APK_BUILDER_CMAKE_DIR")
 
-val omniSigningStoreFile = omniSetting("omni.signing.storeFile", "OMNI_SIGNING_STORE_FILE")
-val omniSigningStorePassword =
-    omniSetting("omni.signing.storePassword", "OMNI_SIGNING_STORE_PASSWORD")
-val omniSigningKeyAlias = omniSetting("omni.signing.keyAlias", "OMNI_SIGNING_KEY_ALIAS")
-val omniSigningKeyPasswordEarly =
-    omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")
+val builderSigningStoreFile = builderSetting("apkbuilder.signing.storeFile", "APK_BUILDER_SIGNING_STORE_FILE")
+val builderSigningStorePassword =
+    builderSetting("apkbuilder.signing.storePassword", "APK_BUILDER_SIGNING_STORE_PASSWORD")
+val builderSigningKeyAlias = builderSetting("apkbuilder.signing.keyAlias", "APK_BUILDER_SIGNING_KEY_ALIAS")
+val builderSigningKeyPasswordEarly =
+    builderSetting("apkbuilder.signing.keyPassword", "APK_BUILDER_SIGNING_KEY_PASSWORD")
 
-val omniExpectedCertificate: String = run {
-    val given = omniSetting("omni.signing.certificateSha256", "OMNI_SIGNING_CERT_SHA256")
+val builderExpectedCertificate: String = run {
+    val given = builderSetting("apkbuilder.signing.certificateSha256", "APK_BUILDER_SIGNING_CERT_SHA256")
     if (given != null) {
         return@run given
     }
-    val store = omniSigningStoreFile ?: return@run ""
-    val alias = omniSigningKeyAlias ?: return@run ""
-    val password = omniSigningStorePassword ?: return@run ""
+    val store = builderSigningStoreFile ?: return@run ""
+    val alias = builderSigningKeyAlias ?: return@run ""
+    val password = builderSigningStorePassword ?: return@run ""
     runCatching<String> {
         val keystore = KeyStore.getInstance(File(store), password.toCharArray())
         val certificate = keystore.getCertificate(alias)
@@ -94,43 +94,43 @@ val omniExpectedCertificate: String = run {
     }
 }
 
-val omniSigningKeyPassword =
-    omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")
+val builderSigningKeyPassword =
+    builderSetting("apkbuilder.signing.keyPassword", "APK_BUILDER_SIGNING_KEY_PASSWORD")
 
-val omniSigningSettings = mapOf(
-    "omni.signing.storeFile" to omniSigningStoreFile,
-    "omni.signing.storePassword" to omniSigningStorePassword,
-    "omni.signing.keyAlias" to omniSigningKeyAlias,
-    "omni.signing.keyPassword" to omniSigningKeyPassword,
+val builderSigningSettings = mapOf(
+    "apkbuilder.signing.storeFile" to builderSigningStoreFile,
+    "apkbuilder.signing.storePassword" to builderSigningStorePassword,
+    "apkbuilder.signing.keyAlias" to builderSigningKeyAlias,
+    "apkbuilder.signing.keyPassword" to builderSigningKeyPassword,
 )
 
-val omniSigningConfigured: Boolean = when (omniSigningSettings.count { it.value != null }) {
+val builderSigningConfigured: Boolean = when (builderSigningSettings.count { it.value != null }) {
     0 -> false
-    omniSigningSettings.size -> true
+    builderSigningSettings.size -> true
     else -> throw GradleException(
         "Release signing is only partly configured. Missing: " +
-            omniSigningSettings.filterValues { it == null }.keys.joinToString(", ") +
+            builderSigningSettings.filterValues { it == null }.keys.joinToString(", ") +
             "\nSet all four, or none of them. Run `./gradlew :Builder:signingHelp` " +
             "for the exact commands."
     )
 }
 
-val omniHostTag: String = when {
+val builderHostTag: String = when {
     org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "darwin-x86_64"
     org.gradle.internal.os.OperatingSystem.current().isWindows -> "windows-x86_64"
     else -> "linux-x86_64"
 }
 
-val omniNdkToolchainBin =
-    "$omniSdkDirectory/ndk/$omniNdkVersion/toolchains/llvm/prebuilt/$omniHostTag/bin"
+val builderNdkToolchainBin =
+    "$builderSdkDirectory/ndk/$builderNdkVersion/toolchains/llvm/prebuilt/$builderHostTag/bin"
 
-val cargoTasks = omniAbis.map { (abi, triple) ->
-    val clangDriver = "$omniNdkToolchainBin/${omniClangPrefix.getValue(triple)}$omniMinSdk-clang"
+val cargoTasks = builderAbis.map { (abi, triple) ->
+    val clangDriver = "$builderNdkToolchainBin/${builderClangPrefix.getValue(triple)}$builderMinSdk-clang"
     val linkerVariable = "CARGO_TARGET_${triple.uppercase().replace('-', '_')}_LINKER"
-    val archivePath = "$omniRustArtifactDirectory/$triple/$omniRustProfile/libomni_core.a"
-    val coreDirectory = omniCoreDirectory.asFile
+    val archivePath = "$builderRustArtifactDirectory/$triple/$builderRustProfile/libapk_builder_core.a"
+    val coreDirectory = builderCoreDirectory.asFile
     val abiName = abi
-    val ndkVersion = omniNdkVersion
+    val ndkVersion = builderNdkVersion
 
     tasks.register<Exec>("cargoBuild${abi.replace("-", "").replaceFirstChar(Char::uppercase)}") {
         group = "build"
@@ -138,7 +138,7 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
 
         workingDir = coreDirectory
 
-        commandLine("cargo", "build", "--locked", "--$omniRustProfile", "--target", triple)
+        commandLine("cargo", "build", "--locked", "--$builderRustProfile", "--target", triple)
 
         environment(linkerVariable, clangDriver)
         environment("TARGET_CC", clangDriver)
@@ -168,26 +168,26 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
 
 android {
     namespace = "com.apk.builder"
-    compileSdk = omniCompileSdk
-    buildToolsVersion = omniBuildToolsVersion
-    ndkVersion = omniNdkVersion
+    compileSdk = builderCompileSdk
+    buildToolsVersion = builderBuildToolsVersion
+    ndkVersion = builderNdkVersion
 
     defaultConfig {
         applicationId = "com.apk.builder"
-        minSdk = omniMinSdk
-        targetSdk = omniTargetSdk
+        minSdk = builderMinSdk
+        targetSdk = builderTargetSdk
         versionCode = 1
         versionName = "1.0.0"
 
         ndk {
-            abiFilters += omniAbis.keys
+            abiFilters += builderAbis.keys
         }
 
         externalNativeBuild {
             cmake {
                 arguments += listOf(
-                    "-DOMNI_RUST_ARTIFACT_DIR=$omniRustArtifactDirectory",
-                    "-DOMNI_RUST_PROFILE=$omniRustProfile",
+                    "-DAPK_BUILDER_RUST_ARTIFACT_DIR=$builderRustArtifactDirectory",
+                    "-DAPK_BUILDER_RUST_PROFILE=$builderRustProfile",
                     "-DANDROID_STL=c++_static",
                 )
                 cppFlags += listOf("-fno-exceptions", "-fno-rtti")
@@ -209,17 +209,17 @@ android {
     externalNativeBuild {
         cmake {
             path = file("Source/Main/Native/CMakeLists.txt")
-            version = omniCmakeVersion
+            version = builderCmakeVersion
         }
     }
 
     signingConfigs {
-        if (omniSigningConfigured) {
-            create("omniRelease") {
-                storeFile = file(omniSigningStoreFile!!)
-                storePassword = omniSigningStorePassword
-                keyAlias = omniSigningKeyAlias
-                keyPassword = omniSigningKeyPassword
+        if (builderSigningConfigured) {
+            create("builderRelease") {
+                storeFile = file(builderSigningStoreFile!!)
+                storePassword = builderSigningStorePassword
+                keyAlias = builderSigningKeyAlias
+                keyPassword = builderSigningKeyPassword
 
                 enableV1Signing = false
                 enableV2Signing = true
@@ -229,7 +229,7 @@ android {
     }
 
     defaultConfig {
-        resValue("string", "omni_expected_certificate", omniExpectedCertificate)
+        resValue("string", "apk_builder_expected_certificate", builderExpectedCertificate)
     }
 
     buildTypes {
@@ -240,7 +240,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.findByName("omniRelease")
+            signingConfig = signingConfigs.findByName("builderRelease")
         }
     }
 
@@ -279,7 +279,7 @@ androidComponents {
 }
 
 kotlin {
-    compilerVersion.set(omniKotlinPin)
+    compilerVersion.set(builderKotlinPin)
 
     compilerOptions {
         allWarningsAsErrors.set(true)
@@ -290,8 +290,8 @@ tasks.register("verifyCmakeToolchain") {
     group = "verification"
     description = "Checks that the pinned CMake is provisioned and reachable."
 
-    val cmakeDirectory = omniCmakeDirectory
-    val pinned = omniCmakeVersion
+    val cmakeDirectory = builderCmakeDirectory
+    val pinned = builderCmakeVersion
 
     doLast {
         val instructions =
@@ -346,13 +346,13 @@ tasks.register("verifyCmakeToolchain") {
     }
 }
 
-val omniKotlinPin = "2.4.10"
+val builderKotlinPin = "2.4.10"
 
 configurations.configureEach {
     resolutionStrategy.eachDependency {
         if (requested.group == "org.jetbrains.kotlin") {
-            useVersion(omniKotlinPin)
-            because("Directive section 14 pins Kotlin $omniKotlinPin.")
+            useVersion(builderKotlinPin)
+            because("Directive section 14 pins Kotlin $builderKotlinPin.")
         }
     }
 }
@@ -372,7 +372,7 @@ androidComponents {
             group = "verification"
             description = "Reports how far AGP's built-in Kotlin has drifted from the pin."
 
-            val pinned = omniKotlinPin
+            val pinned = builderKotlinPin
 
             doLast {
                 val actual = resolved.get()
@@ -417,9 +417,9 @@ tasks.register("verifyApkInstallability") {
     description = "Checks that every built APK can actually be installed."
 
     val apkDirectory = layout.buildDirectory.dir("outputs/apk")
-    val buildTools = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion"
-    val minSdk = omniMinSdk
-    val targetSdk = omniTargetSdk
+    val buildTools = "$builderSdkDirectory/build-tools/$builderBuildToolsVersion"
+    val minSdk = builderMinSdk
+    val targetSdk = builderTargetSdk
 
     doLast {
         val directory = apkDirectory.get().asFile
@@ -513,7 +513,7 @@ tasks.register("verifyApkClasses") {
     val apkDirectory = layout.buildDirectory.dir("outputs/apk")
     val manifestFile = file("Source/Main/AndroidManifest.xml")
     val namespace = "com.apk.builder"
-    val dexdump = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion/dexdump"
+    val dexdump = "$builderSdkDirectory/build-tools/$builderBuildToolsVersion/dexdump"
     val scratch = layout.buildDirectory.dir("tmp/verifyApkClasses")
 
     val alsoRequired = listOf("$namespace.Builder")
@@ -628,10 +628,10 @@ tasks.register("signingHelp") {
     group = "help"
     description = "Explains how to sign the release APK without breaking it."
 
-    val configured = omniSigningConfigured
-    val buildTools = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion"
-    val minSdk = omniMinSdk
-    val targetSdk = omniTargetSdk
+    val configured = builderSigningConfigured
+    val buildTools = "$builderSdkDirectory/build-tools/$builderBuildToolsVersion"
+    val minSdk = builderMinSdk
+    val targetSdk = builderTargetSdk
 
     doLast {
         if (configured) {
@@ -659,25 +659,25 @@ tasks.register("signingHelp") {
             |  Create a key once, outside the repository:
             |
             |    keytool -genkeypair -v \
-            |      -keystore ~/omni-release.jks \
-            |      -alias omni -keyalg RSA -keysize 4096 -validity 10000
+            |      -keystore ~/builder-release.jks \
+            |      -alias builder -keyalg RSA -keysize 4096 -validity 10000
             |
             |  Then add to local.properties, which is never committed:
             |
-            |    omni.signing.storeFile=/absolute/path/to/omni-release.jks
-            |    omni.signing.storePassword=...
-            |    omni.signing.keyAlias=omni
-            |    omni.signing.keyPassword=...
+            |    apkbuilder.signing.storeFile=/absolute/path/to/builder-release.jks
+            |    apkbuilder.signing.storePassword=...
+            |    apkbuilder.signing.keyAlias=builder
+            |    apkbuilder.signing.keyPassword=...
             |
             |  The same four values are also read from the environment as
-            |  OMNI_SIGNING_STORE_FILE, OMNI_SIGNING_STORE_PASSWORD,
-            |  OMNI_SIGNING_KEY_ALIAS and OMNI_SIGNING_KEY_PASSWORD.
+            |  APK_BUILDER_SIGNING_STORE_FILE, APK_BUILDER_SIGNING_STORE_PASSWORD,
+            |  APK_BUILDER_SIGNING_KEY_ALIAS and APK_BUILDER_SIGNING_KEY_PASSWORD.
             |
             |Option 2 - sign the finished APK by hand. apksigner rewrites only the
             |signature and leaves the archive layout intact:
             |
             |    $buildTools/apksigner sign \
-            |      --ks ~/omni-release.jks --ks-key-alias omni \
+            |      --ks ~/builder-release.jks --ks-key-alias builder \
             |      --v1-signing-enabled false \
             |      --v2-signing-enabled true \
             |      --v3-signing-enabled true \

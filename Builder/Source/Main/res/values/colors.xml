@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="omni_background">#FF05111A</color>
-    <color name="omni_foreground">#FFE8F3FB</color>
+    <color name="background">#FF05111A</color>
+    <color name="foreground">#FFE8F3FB</color>
 </resources>

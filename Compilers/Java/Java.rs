@@ -6,7 +6,7 @@ use crate::diag::{Diagnostic, Severity};
 use crate::plugin::{Contract, Version};
 use crate::FailureClass;
 
-pub const ORIGIN: &str = "omni.plugin.java";
+pub const ORIGIN: &str = "plugin.java";
 
 pub const CLASS_MAJOR: u16 = 69;
 pub const CLASS_MINOR: u16 = 0;
@@ -22916,7 +22916,7 @@ fn named_file(mut error: Diagnostic, label: &str) -> Diagnostic {
 }
 
 pub static CONTRACT: Contract = Contract {
-    id: "omni.plugin.java",
+    id: "plugin.java",
     display_name: "Java",
     version: Version::new(0, 2, 0),
     produces_artifacts: true,
@@ -22995,7 +22995,7 @@ impl Compiler for JavaCompiler {
 
     fn probe(&self) -> Probe {
         Probe::usable(
-            Identity::new("java", "omni.java", env!("CARGO_PKG_VERSION"), "jvm")
+            Identity::new("java", "build.java", env!("CARGO_PKG_VERSION"), "jvm")
                 .with("languageRelease", LANGUAGE_RELEASE)
                 .with("classFileMajor", CLASS_MAJOR.to_string())
                 .with("stackMapFrames", "none"),

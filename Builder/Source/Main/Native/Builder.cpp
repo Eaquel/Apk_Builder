@@ -190,17 +190,17 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * ) {
     return JNI_ERR;
   }
 
-  const uint32_t core_abi = omni_abi_version();
-  if (core_abi != kOmniExpectedAbiVersion) {
+  const uint32_t core_abi = apk_builder_abi_version();
+  if (core_abi != kExpectedAbiVersion) {
     __android_log_print(
         ANDROID_LOG_ERROR, kLogTag,
         "ABI mismatch: bridge expects %u, Core provides %u. Refusing to load.",
-        kOmniExpectedAbiVersion, core_abi);
+        kExpectedAbiVersion, core_abi);
     return JNI_ERR;
   }
 
   __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                      "Apk Builder Core %s loaded (ABI %u).", omni_core_version(),
+                      "Apk Builder Core %s loaded (ABI %u).", apk_builder_core_version(),
                       core_abi);
   return JNI_VERSION_1_6;
 }
@@ -213,7 +213,7 @@ jstring HandBack(JNIEnv *env, char *report) {
     return nullptr;
   }
   jstring result = env->NewStringUTF(report);
-  omni_string_free(report);
+  apk_builder_string_free(report);
   if (result == nullptr) {
     ThrowJava(env, kOutOfMemory,
               "A Core report could not be converted to a Java string.");
@@ -231,7 +231,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCreateProject(
     ThrowJava(env, kIllegalState, "A project needs a folder and a specification.");
     return nullptr;
   }
-  return HandBack(env, omni_create_project(root_text.c_str(), spec_text.c_str()));
+  return HandBack(env, apk_builder_create_project(root_text.c_str(), spec_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildAll(
@@ -257,7 +257,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildAll(
     return nullptr;
   }
 
-  return HandBack(env, omni_build_all(root_text.c_str(), package_text.c_str(),
+  return HandBack(env, apk_builder_build_all(root_text.c_str(), package_text.c_str(),
                                       bundle_text.c_str(), key_text.c_str(),
                                       key_password == nullptr
                                           ? nullptr
@@ -271,7 +271,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBindDevice(
     ThrowJava(env, kIllegalState, "Binding the shared key needs something to bind it to.");
     return nullptr;
   }
-  jstring answer = HandBack(env, omni_bind_device(secret_text.c_str()));
+  jstring answer = HandBack(env, apk_builder_bind_device(secret_text.c_str()));
 
   Wipe(&secret_text);
   return answer;
@@ -284,7 +284,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDefaultKey(
     ThrowJava(env, kIllegalState, "The shared signing key needs a folder.");
     return nullptr;
   }
-  return HandBack(env, omni_default_key(directory_text.c_str()));
+  return HandBack(env, apk_builder_default_key(directory_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCreateKey(
@@ -305,7 +305,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCreateKey(
     return nullptr;
   }
 
-  return HandBack(env, omni_create_key(directory_text.c_str(), spec_text.c_str(),
+  return HandBack(env, apk_builder_create_key(directory_text.c_str(), spec_text.c_str(),
                                        password.c_str()));
 }
 
@@ -316,7 +316,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeListKeys(
     ThrowJava(env, kIllegalState, "Listing signing keys needs a folder.");
     return nullptr;
   }
-  return HandBack(env, omni_list_keys(directory_text.c_str()));
+  return HandBack(env, apk_builder_list_keys(directory_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDeleteKey(
@@ -326,7 +326,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDeleteKey(
     ThrowJava(env, kIllegalState, "Removing a signing key needs its path.");
     return nullptr;
   }
-  return HandBack(env, omni_delete_key(path_text.c_str()));
+  return HandBack(env, apk_builder_delete_key(path_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCheckKey(
@@ -343,7 +343,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCheckKey(
     return nullptr;
   }
 
-  return HandBack(env, omni_check_key(path_text.c_str(), password.c_str()));
+  return HandBack(env, apk_builder_check_key(path_text.c_str(), password.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVerifySelf(
@@ -357,7 +357,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVerifySelf(
   if (expected != nullptr && !JavaStringToUtf8(env, expected, &expected_text)) {
     return nullptr;
   }
-  return HandBack(env, omni_verify_self(path_text.c_str(),
+  return HandBack(env, apk_builder_verify_self(path_text.c_str(),
                                         expected == nullptr ? nullptr
                                                             : expected_text.c_str()));
 }
@@ -380,7 +380,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeListProjects(
     ThrowJava(env, kIllegalState, "Listing projects needs a folder.");
     return nullptr;
   }
-  return HandBack(env, omni_list_projects(directory_text.c_str()));
+  return HandBack(env, apk_builder_list_projects(directory_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeProjectTree(
@@ -390,7 +390,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeProjectTree(
     ThrowJava(env, kIllegalState, "Reading a project needs its folder.");
     return nullptr;
   }
-  return HandBack(env, omni_project_tree(root_text.c_str()));
+  return HandBack(env, apk_builder_project_tree(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeLayOut(
@@ -402,7 +402,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeLayOut(
     ThrowJava(env, kIllegalState, "Laying out needs a name and the text.");
     return nullptr;
   }
-  return HandBack(env, omni_lay_out(name_text.c_str(), body_text.c_str()));
+  return HandBack(env, apk_builder_lay_out(name_text.c_str(), body_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDependencies(
@@ -412,7 +412,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDependencies(
     ThrowJava(env, kIllegalState, "Listing dependencies needs a project.");
     return nullptr;
   }
-  return HandBack(env, omni_dependencies(root_text.c_str()));
+  return HandBack(env, apk_builder_dependencies(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDependencyRemove(
@@ -424,7 +424,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDependencyRemove(
     ThrowJava(env, kIllegalState, "Removing a dependency needs a project and a name.");
     return nullptr;
   }
-  return HandBack(env, omni_dependency_remove(root_text.c_str(), name_text.c_str()));
+  return HandBack(env, apk_builder_dependency_remove(root_text.c_str(), name_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestFacts(
@@ -434,7 +434,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestFacts(
     ThrowJava(env, kIllegalState, "Reading a manifest needs its project.");
     return nullptr;
   }
-  return HandBack(env, omni_manifest_facts(root_text.c_str()));
+  return HandBack(env, apk_builder_manifest_facts(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestSet(
@@ -448,7 +448,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestSet(
     ThrowJava(env, kIllegalState, "Changing a manifest needs a project, a field and a value.");
     return nullptr;
   }
-  return HandBack(env, omni_manifest_set(root_text.c_str(), field_text.c_str(),
+  return HandBack(env, apk_builder_manifest_set(root_text.c_str(), field_text.c_str(),
                                          value_text.c_str()));
 }
 
@@ -461,7 +461,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeManifestPermission(
     ThrowJava(env, kIllegalState, "Changing a permission needs a project and a name.");
     return nullptr;
   }
-  return HandBack(env, omni_manifest_permission(root_text.c_str(), name_text.c_str(),
+  return HandBack(env, apk_builder_manifest_permission(root_text.c_str(), name_text.c_str(),
                                                 wanted == JNI_TRUE));
 }
 
@@ -474,7 +474,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSymbols(
     ThrowJava(env, kIllegalState, "Looking for a name needs a project and a name.");
     return nullptr;
   }
-  return HandBack(env, omni_symbols(root_text.c_str(), needle_text.c_str()));
+  return HandBack(env, apk_builder_symbols(root_text.c_str(), needle_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeWhereWritten(
@@ -486,7 +486,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeWhereWritten(
     ThrowJava(env, kIllegalState, "Finding where a type is written needs a project and a type.");
     return nullptr;
   }
-  return HandBack(env, omni_where_written(root_text.c_str(), qualified_text.c_str()));
+  return HandBack(env, apk_builder_where_written(root_text.c_str(), qualified_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeInspectPackage(
@@ -496,7 +496,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeInspectPackage(
     ThrowJava(env, kIllegalState, "Opening a package needs its path.");
     return nullptr;
   }
-  return HandBack(env, omni_inspect_package(path_text.c_str()));
+  return HandBack(env, apk_builder_inspect_package(path_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCheckProject(
@@ -506,7 +506,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCheckProject(
     ThrowJava(env, kIllegalState, "Checking a project needs its folder.");
     return nullptr;
   }
-  return HandBack(env, omni_check_project(root_text.c_str()));
+  return HandBack(env, apk_builder_check_project(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSearchProject(
@@ -519,7 +519,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSearchProject(
     ThrowJava(env, kIllegalState, "Searching needs a project and something to look for.");
     return nullptr;
   }
-  return HandBack(env, omni_search_project(root_text.c_str(), needle_text.c_str(),
+  return HandBack(env, apk_builder_search_project(root_text.c_str(), needle_text.c_str(),
                                            sensitive == JNI_TRUE,
                                            whole_word == JNI_TRUE));
 }
@@ -532,7 +532,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeReadFile(
                 "Reading a file needs a project and a path.")) {
     return nullptr;
   }
-  return HandBack(env, omni_read_file(root_text.c_str(), relative_text.c_str()));
+  return HandBack(env, apk_builder_read_file(root_text.c_str(), relative_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeWriteFile(
@@ -547,7 +547,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeWriteFile(
   if (contents != nullptr && !JavaStringToUtf8(env, contents, &contents_text)) {
     return nullptr;
   }
-  return HandBack(env, omni_write_file(root_text.c_str(), relative_text.c_str(),
+  return HandBack(env, apk_builder_write_file(root_text.c_str(), relative_text.c_str(),
                                        contents_text.c_str()));
 }
 
@@ -564,7 +564,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeGitCheckout(
               "A clone needs a pack, a commit and a folder to write into.");
     return nullptr;
   }
-  return HandBack(env, omni_git_checkout(pack_text.c_str(), head_text.c_str(),
+  return HandBack(env, apk_builder_git_checkout(pack_text.c_str(), head_text.c_str(),
                                          into_text.c_str()));
 }
 
@@ -575,7 +575,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeMavenPlan(
     ThrowJava(env, kIllegalState, "Planning the libraries needs a project.");
     return nullptr;
   }
-  return HandBack(env, omni_maven_plan(root_text.c_str()));
+  return HandBack(env, apk_builder_maven_plan(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeProjectRepairs(
@@ -585,7 +585,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeProjectRepairs(
     ThrowJava(env, kIllegalState, "Looking for repairs needs a project.");
     return nullptr;
   }
-  return HandBack(env, omni_project_repairs(root_text.c_str()));
+  return HandBack(env, apk_builder_project_repairs(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeApplyRepairs(
@@ -600,7 +600,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeApplyRepairs(
     return nullptr;
   }
   return HandBack(env,
-                  omni_apply_repairs(root_text.c_str(), repairs_text.c_str()));
+                  apk_builder_apply_repairs(root_text.c_str(), repairs_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDigestFile(
@@ -610,7 +610,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDigestFile(
     ThrowJava(env, kIllegalState, "Summing a file needs a path.");
     return nullptr;
   }
-  return HandBack(env, omni_digest_file(path_text.c_str()));
+  return HandBack(env, apk_builder_digest_file(path_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativePackArchive(
@@ -634,7 +634,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativePackArchive(
     return nullptr;
   }
   jstring answer = HandBack(
-      env, omni_pack_archive(root_text.c_str(), names_text.c_str(),
+      env, apk_builder_pack_archive(root_text.c_str(), names_text.c_str(),
                              into_text.c_str(), format_text.c_str(),
                              password_text.c_str()));
   Wipe(&password_text);
@@ -656,7 +656,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeOpenArchive(
     return nullptr;
   }
   jstring answer = HandBack(
-      env, omni_open_archive(archive_text.c_str(), into_text.c_str(),
+      env, apk_builder_open_archive(archive_text.c_str(), into_text.c_str(),
                              password_text.c_str()));
   Wipe(&password_text);
   return answer;
@@ -669,7 +669,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeAdoptProject(
     ThrowJava(env, kIllegalState, "Opening a project needs its folder.");
     return nullptr;
   }
-  return HandBack(env, omni_adopt_project(root_text.c_str()));
+  return HandBack(env, apk_builder_adopt_project(root_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeNewFolder(
@@ -680,7 +680,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeNewFolder(
                 "Making a folder needs a project and a path.")) {
     return nullptr;
   }
-  return HandBack(env, omni_new_folder(root_text.c_str(), relative_text.c_str()));
+  return HandBack(env, apk_builder_new_folder(root_text.c_str(), relative_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeRemovePath(
@@ -697,7 +697,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeRemovePath(
               "Removing something needs a project, a path and a trash.");
     return nullptr;
   }
-  return HandBack(env, omni_remove_path(root_text.c_str(), relative_text.c_str(),
+  return HandBack(env, apk_builder_remove_path(root_text.c_str(), relative_text.c_str(),
                                         trash_text.c_str()));
 }
 
@@ -715,7 +715,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeRenamePath(
               "Moving something needs a project and two paths.");
     return nullptr;
   }
-  return HandBack(env, omni_rename_path(root_text.c_str(), from_text.c_str(),
+  return HandBack(env, apk_builder_rename_path(root_text.c_str(), from_text.c_str(),
                                         to_text.c_str()));
 }
 
@@ -733,7 +733,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeCopyPath(
               "Moving something needs a project and two paths.");
     return nullptr;
   }
-  return HandBack(env, omni_copy_path(root_text.c_str(), from_text.c_str(),
+  return HandBack(env, apk_builder_copy_path(root_text.c_str(), from_text.c_str(),
                                         to_text.c_str()));
 }
 
@@ -748,7 +748,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildUnsigned(
       !JavaStringToUtf8(env, certificate, &certificateHeld)) {
     return nullptr;
   }
-  return HandBack(env, omni_build_unsigned(rootHeld.c_str(), pathHeld.c_str(),
+  return HandBack(env, apk_builder_build_unsigned(rootHeld.c_str(), pathHeld.c_str(),
                                            certificateHeld.c_str()));
 }
 
@@ -770,7 +770,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSealPackage(
       !JavaStringToUtf8(env, signatureV31, &thirdHeld)) {
     return nullptr;
   }
-  return HandBack(env, omni_seal_package(
+  return HandBack(env, apk_builder_seal_package(
                            pathHeld.c_str(), sealedHeld.c_str(),
                            certificateHeld.c_str(), firstHeld.c_str(),
                            secondHeld.c_str(), thirdHeld.c_str(),
@@ -785,7 +785,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeListBuilt(
     ThrowJava(env, kIllegalState, "Listing what was built needs a folder.");
     return nullptr;
   }
-  return HandBack(env, omni_list_built(directory_text.c_str()));
+  return HandBack(env, apk_builder_list_built(directory_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashSend(
@@ -796,7 +796,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashSend(
                 "Deleting something needs a trash and a path.")) {
     return nullptr;
   }
-  return HandBack(env, omni_trash_send(trash_text.c_str(), path_text.c_str()));
+  return HandBack(env, apk_builder_trash_send(trash_text.c_str(), path_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashList(
@@ -806,7 +806,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashList(
     ThrowJava(env, kIllegalState, "Listing the trash needs its folder.");
     return nullptr;
   }
-  return HandBack(env, omni_trash_list(trash_text.c_str()));
+  return HandBack(env, apk_builder_trash_list(trash_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashRestore(
@@ -817,7 +817,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashRestore(
                 "Putting something back needs a trash and a name.")) {
     return nullptr;
   }
-  return HandBack(env, omni_trash_restore(trash_text.c_str(), id_text.c_str()));
+  return HandBack(env, apk_builder_trash_restore(trash_text.c_str(), id_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashPurge(
@@ -828,7 +828,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashPurge(
                 "Removing something for good needs a trash and a name.")) {
     return nullptr;
   }
-  return HandBack(env, omni_trash_purge(trash_text.c_str(), id_text.c_str()));
+  return HandBack(env, apk_builder_trash_purge(trash_text.c_str(), id_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashEmpty(
@@ -838,7 +838,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTrashEmpty(
     ThrowJava(env, kIllegalState, "Emptying the trash needs its folder.");
     return nullptr;
   }
-  return HandBack(env, omni_trash_empty(trash_text.c_str()));
+  return HandBack(env, apk_builder_trash_empty(trash_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSetIcon(
@@ -849,17 +849,17 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSetIcon(
                 "An application image needs a project and a file.")) {
     return nullptr;
   }
-  return HandBack(env, omni_set_icon(root_text.c_str(), source_text.c_str()));
+  return HandBack(env, apk_builder_set_icon(root_text.c_str(), source_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildProgress(
     JNIEnv *env, jobject ) {
-  return HandBack(env, omni_build_progress());
+  return HandBack(env, apk_builder_build_progress());
 }
 
 JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeBuildStop(
     JNIEnv *, jobject ) {
-  omni_build_stop();
+  apk_builder_build_stop();
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSpeak(
@@ -869,7 +869,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSpeak(
     ThrowJava(env, kIllegalState, "A language has to be named as text.");
     return nullptr;
   }
-  return HandBack(env, omni_speak(held.c_str()));
+  return HandBack(env, apk_builder_speak(held.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTerminalDocs(
@@ -879,7 +879,7 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeTerminalDocs(
     ThrowJava(env, kIllegalState, "A language has to be named as text.");
     return nullptr;
   }
-  return HandBack(env, omni_terminal_docs(held.c_str()));
+  return HandBack(env, apk_builder_terminal_docs(held.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVibe(
@@ -889,20 +889,20 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVibe(
     ThrowJava(env, kIllegalState, "A request has to be given as text.");
     return nullptr;
   }
-  return HandBack(env, omni_vibe(held.c_str()));
+  return HandBack(env, apk_builder_vibe(held.c_str()));
 }
 
 JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeBuildExpect(
     JNIEnv *env, jobject , jstring timings) {
   if (timings == nullptr) {
-    omni_build_expect(nullptr);
+    apk_builder_build_expect(nullptr);
     return;
   }
   std::string held;
   if (!JavaStringToUtf8(env, timings, &held)) {
     return;
   }
-  omni_build_expect(held.c_str());
+  apk_builder_build_expect(held.c_str());
 }
 
 JNIEXPORT jint JNICALL Java_com_apk_builder_Builder_nativeShellOpen(
@@ -930,7 +930,7 @@ JNIEXPORT jint JNICALL Java_com_apk_builder_Builder_nativeShellOpen(
     setenv("TERM", "xterm-256color", 1);
     setenv("LANG", "C.UTF-8", 1);
     setenv("PS1", "\033[1;32mBuilder@Host\033[0m :\033[1;34m~\033[0m$ ", 1);
-    const std::string rc_path = home_text + "/.omni_shell_rc";
+    const std::string rc_path = home_text + "/.apk_builder_shell_rc";
     FILE *rc = fopen(rc_path.c_str(), "w");
     if (rc != nullptr) {
       fputs("PS1='\033[1;32mBuilder@Host\033[0m :\033[1;34m~\033[0m$ '\n", rc);

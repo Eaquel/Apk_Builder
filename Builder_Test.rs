@@ -263,12 +263,7 @@ mod core {
         let registry = Registry::builtin();
         assert_eq!(registry.len(), 4);
 
-        let expected = [
-            "omni.plugin.kotlin",
-            "omni.plugin.java",
-            "omni.plugin.cpp",
-            "omni.plugin.rust",
-        ];
+        let expected = ["plugin.kotlin", "plugin.java", "plugin.cpp", "plugin.rust"];
         let actual: Vec<&str> = registry.all().iter().map(|p| p.contract().id).collect();
         assert_eq!(actual, expected, "registry order must be stable");
     }
@@ -286,7 +281,7 @@ mod core {
     #[test]
     fn a_plugin_that_claims_to_be_implemented_is() {
         let implemented: &[(&str, &dyn crate::compiler::Compiler)] =
-            &[("omni.plugin.java", &crate::compilers::java::COMPILER)];
+            &[("plugin.java", &crate::compilers::java::COMPILER)];
 
         for plugin in Registry::builtin().all() {
             let contract = plugin.contract();
@@ -384,8 +379,8 @@ mod core {
     #[test]
     fn registry_lookup_finds_declared_plugins_only() {
         let registry = Registry::builtin();
-        assert!(registry.find("omni.plugin.kotlin").is_some());
-        assert!(registry.find("omni.plugin.does-not-exist").is_none());
+        assert!(registry.find("plugin.kotlin").is_some());
+        assert!(registry.find("plugin.does-not-exist").is_none());
     }
 
     #[test]
@@ -793,8 +788,8 @@ mod core {
 
     #[test]
     fn a_string_without_a_terminator_is_refused() {
-        let mut r = reader(b"omni\0rest");
-        assert_eq!(r.cstring().unwrap(), b"omni");
+        let mut r = reader(b"builder\0rest");
+        assert_eq!(r.cstring().unwrap(), b"builder");
         assert_eq!(r.position(), 5);
         assert_eq!(
             reader(b"no terminator").cstring().unwrap_err().code,
@@ -1563,8 +1558,8 @@ mod core {
     fn a_reference_to_something_undeclared_is_refused_with_a_suggestion() {
         let (table, _) = values(
             r#"<resources>
-    <color name="omni_accent">#123456</color>
-    <color name="other">@color/omni_accen</color>
+    <color name="apk_builder_accent">#123456</color>
+    <color name="other">@color/apk_builder_accen</color>
 </resources>"#,
         );
         let mut sink = Sink::new();
@@ -1573,7 +1568,7 @@ mod core {
         assert!(error
             .context
             .iter()
-            .any(|line| line.contains("omni_accent")));
+            .any(|line| line.contains("apk_builder_accent")));
     }
 
     #[test]
@@ -1674,7 +1669,7 @@ mod core {
     const THE_WORDS: &str = r####"
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Omni</string>
+    <string name="app_name">Apk Builder</string>
     <string name="hint">say something</string>
     <string name="save">Save</string>
     <string name="clear">Clear</string>
@@ -1745,7 +1740,7 @@ mod core {
     #[test]
     fn a_layout_and_a_menu_become_what_aapt2_makes_of_them() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-layout");
+        let directory = temp_directory("builder-layout");
         let res = directory.join("Res");
         for folder in ["layout", "menu", "values", "drawable", "mipmap-anydpi-v26"] {
             std::fs::create_dir_all(res.join(folder)).unwrap();
@@ -2143,7 +2138,7 @@ mod core {
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <skip />
     <eat-comment />
-    <string name="app_name">Omni</string>
+    <string name="app_name">Apk Builder</string>
     <string name="main_label">Hello <u>th<ignore>e</ignore>re</u>, <i>you</i> <b>Activity</b>!</string>
     <string name="connected">connected to <xliff:g id="device_name">%1$s</xliff:g></string>
     <string name="coloured">Plain <font color="#ff0000">red</font> end</string>
@@ -2165,7 +2160,7 @@ mod core {
     #[test]
     fn styled_words_and_old_units_become_what_aapt2_makes_of_them() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-styled");
+        let directory = temp_directory("builder-styled");
         let res = directory.join("Res");
         std::fs::create_dir_all(res.join("values")).unwrap();
         std::fs::write(res.join("values/strings.xml"), STYLED_WORDS.trim_start()).unwrap();
@@ -2335,7 +2330,7 @@ mod core {
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ink">#ff102030</color>
-    <string name="app_name">Omni</string>
+    <string name="app_name">Apk Builder</string>
     <style name="Theme" parent="android:Theme.Material.Light">
         <item name="android:textSize">16sp</item>
         <item name="android:windowNoTitle">true</item>
@@ -2462,7 +2457,7 @@ mod core {
             "car-night-nokeys-navhidden-v29",
         ];
 
-        let directory = temp_directory("omni-qualifiers");
+        let directory = temp_directory("builder-qualifiers");
         let res = directory.join("Res");
         for one in QUALIFIERS {
             let folder = if one.is_empty() {
@@ -2625,7 +2620,7 @@ mod core {
     #[test]
     fn styles_arrays_and_plurals_are_the_table_aapt2_writes() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-bags");
+        let directory = temp_directory("builder-bags");
         let res = directory.join("Res");
         std::fs::create_dir_all(res.join("values")).unwrap();
         std::fs::write(res.join("values/things.xml"), THE_BAGS.trim_start()).unwrap();
@@ -2792,7 +2787,7 @@ mod core {
     #[test]
     fn attributes_and_styleables_are_what_aapt2_makes_of_them() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-attrs");
+        let directory = temp_directory("builder-attrs");
         let res = directory.join("Res");
         std::fs::create_dir_all(res.join("values")).unwrap();
         std::fs::create_dir_all(res.join("layout")).unwrap();
@@ -3016,7 +3011,7 @@ mod core {
     </declare-styleable>
     <declare-styleable name="Empty" />
     <color name="ink">#ff102030</color>
-    <string name="app_name">Omni</string>
+    <string name="app_name">Apk Builder</string>
     <style name="Custom">
         <item name="withEnum">second</item>
         <item name="localOnly">hi</item>
@@ -3226,7 +3221,7 @@ mod core {
     #[test]
     fn a_build_stops_when_it_is_asked_to_and_leaves_nothing_behind() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-stopped");
+        let directory = temp_directory("builder-stopped");
         let root = directory.join("Stopped");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -3379,7 +3374,7 @@ mod core {
     #[test]
     fn every_stage_a_build_reports_is_one_it_really_went_through() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-progress");
+        let directory = temp_directory("builder-progress");
         let root = directory.join("Watched");
         crate::scaffold::create(
             root.to_str().unwrap(),
@@ -4150,7 +4145,7 @@ package com.my.app;
 @Deprecated
 public class Everything {
     private int count;
-    private static String label = "omni";
+    private static String label = "builder";
     private long[] held;
 
     public Everything(int start) {
@@ -4565,7 +4560,7 @@ public class Written {
 
     #[test]
     fn what_another_compiler_writes_translates_and_holds_up() {
-        let directory = temp_directory("omni-javac");
+        let directory = temp_directory("builder-javac");
         let out = directory.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let source = directory.join("Written.java");
@@ -4579,8 +4574,8 @@ public class Written {
         let Ok(done) = done else {
             std::fs::remove_dir_all(&directory).ok();
             assert!(
-                std::env::var("OMNI_REQUIRE_JAVAC").is_err(),
-                "OMNI_REQUIRE_JAVAC is set but javac is not here"
+                std::env::var("APK_BUILDER_REQUIRE_JAVAC").is_err(),
+                "APK_BUILDER_REQUIRE_JAVAC is set but javac is not here"
             );
             eprintln!("javac conformance: javac is not available here");
             return;
@@ -4833,7 +4828,7 @@ public class Written {
 
     #[test]
     fn a_new_project_is_given_settings_with_every_key_already_there() {
-        let directory = temp_directory("omni-settings-made");
+        let directory = temp_directory("builder-settings-made");
         let root = directory.join("Made");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -4909,7 +4904,7 @@ public class Written {
 
     #[test]
     fn a_zip_of_a_project_opens_into_one_with_its_wrapper_folder_taken_off() {
-        let directory = temp_directory("omni-open-archive");
+        let directory = temp_directory("builder-open-archive");
         std::fs::create_dir_all(&directory).ok();
 
         let manifest = concat!(
@@ -4980,7 +4975,7 @@ public class Written {
 
     #[test]
     fn a_build_that_would_refuse_says_first_what_it_could_mend() {
-        let directory = temp_directory("omni-mendable");
+        let directory = temp_directory("builder-mendable");
         let root = directory.join("Mend");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5050,7 +5045,7 @@ public class Written {
 
     #[test]
     fn a_project_that_brought_no_picture_is_given_one_drawn_for_it() {
-        let directory = temp_directory("omni-drawn-icon");
+        let directory = temp_directory("builder-drawn-icon");
         let root = directory.join("Drawn");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5095,7 +5090,7 @@ public class Written {
 
     #[test]
     fn an_archive_that_holds_no_manifest_is_refused_rather_than_left_half_open() {
-        let directory = temp_directory("omni-open-archive-bare");
+        let directory = temp_directory("builder-open-archive-bare");
         std::fs::create_dir_all(&directory).ok();
 
         let mut packed = crate::archive::Builder::new();
@@ -5254,7 +5249,7 @@ public class Written {
 
     #[test]
     fn the_settings_win_over_what_the_manifest_says() {
-        let directory = temp_directory("omni-settings-win");
+        let directory = temp_directory("builder-settings-win");
         let root = directory.join("Wins");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5315,7 +5310,7 @@ public class Written {
 
     #[test]
     fn settings_that_will_not_read_are_refused_rather_than_ignored() {
-        let directory = temp_directory("omni-settings-bad");
+        let directory = temp_directory("builder-settings-bad");
         let root = directory.join("Bad");
         std::fs::create_dir_all(&root).unwrap();
         let folder = root.to_str().unwrap().to_string();
@@ -5364,7 +5359,7 @@ final class NeverCalled {
 }
 "#;
 
-        let directory = temp_directory("omni-lean");
+        let directory = temp_directory("builder-lean");
         let root = directory.join("Lean");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5435,7 +5430,7 @@ final class NeverCalled {
 
     #[test]
     fn generated_sources_are_compiled_even_when_the_java_folder_is_empty() {
-        let directory = temp_directory("omni-generated");
+        let directory = temp_directory("builder-generated");
         let root = directory.join("Gen");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5508,7 +5503,7 @@ final class NeverCalled {
             static_fields: Vec::new(),
             instance_fields: Vec::new(),
         };
-        let held = vec![bare("Lcom/my/girl/OmniSeal;"), bare("Lcom/my/girl/Other;")];
+        let held = vec![bare("Lcom/my/girl/Seal;"), bare("Lcom/my/girl/Other;")];
         let roots = vec!["Lcom/my/girl/MainActivity;".to_string()];
         let (kept, trimmed) = crate::shrink::apply(held.clone(), &roots);
         assert_eq!(
@@ -5548,7 +5543,7 @@ final class NeverCalled {
 
     #[test]
     fn the_side_signature_is_one_google_s_own_tool_accepts() {
-        let directory = temp_directory("omni-v4");
+        let directory = temp_directory("builder-v4");
         let root = directory.join("Side");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5569,7 +5564,7 @@ final class NeverCalled {
         let certificate = crate::certificate::self_signed(
             &key,
             "Side",
-            "Omni",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -5638,7 +5633,7 @@ final class NeverCalled {
 
     #[test]
     fn sealed_resources_keep_a_package_that_still_resolves() {
-        let directory = temp_directory("omni-sealed-res");
+        let directory = temp_directory("builder-sealed-res");
         let root = directory.join("Sealed");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5677,7 +5672,7 @@ final class NeverCalled {
         let certificate = crate::certificate::self_signed(
             &key,
             "Sealed",
-            "Omni",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -5727,7 +5722,7 @@ final class NeverCalled {
 
     #[test]
     fn a_project_left_alone_keeps_the_names_the_developer_wrote() {
-        let directory = temp_directory("omni-plain-res");
+        let directory = temp_directory("builder-plain-res");
         let root = directory.join("Plain");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5763,7 +5758,7 @@ final class NeverCalled {
         let certificate = crate::certificate::self_signed(
             &key,
             "Plain",
-            "Omni",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -5844,7 +5839,7 @@ final class Doubling extends Counter {
 }
 "#;
 
-        let directory = temp_directory("omni-several");
+        let directory = temp_directory("builder-several");
         let root = directory.join("Several");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -5917,7 +5912,7 @@ final class Doubling extends Counter {
         let certificate = crate::certificate::self_signed(
             &key,
             "Several",
-            "Omni",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -5941,7 +5936,7 @@ final class Doubling extends Counter {
 
     #[test]
     fn a_page_becomes_a_package_that_opens_it() {
-        let directory = temp_directory("omni-page");
+        let directory = temp_directory("builder-page");
         let root = directory.join("Page");
         let folder = root.to_str().unwrap().to_string();
         let spec = crate::scaffold::Spec {
@@ -5991,7 +5986,7 @@ final class Doubling extends Counter {
         let certificate = crate::certificate::self_signed(
             &key,
             "Page",
-            "Omni",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -6041,14 +6036,14 @@ final class Doubling extends Counter {
             eprintln!("rotation block: apksigner or openssl is not available here");
             return;
         };
-        let directory = temp_directory("omni-v31");
+        let directory = temp_directory("builder-v31");
         let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
             eprintln!("rotation block: openssl could not make a certificate");
             return;
         };
         let key = crate::rsa::parse_private_key(&key_bytes).expect("the key must parse");
 
-        let (root, sink) = parse_xml(OMNI_BUILT_MANIFEST);
+        let (root, sink) = parse_xml(APK_BUILDER_BUILT_MANIFEST);
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
         let manifest = axml::encode(&root.expect("the manifest must parse")).unwrap();
         let mut builder = ArchiveBuilder::for_android();
@@ -6077,7 +6072,7 @@ final class Doubling extends Counter {
             "v3.1 is what this test is about"
         );
 
-        let path = directory.join("omni-rotation.apk");
+        let path = directory.join("builder-rotation.apk");
         std::fs::write(&path, &signed).unwrap();
 
         let verified = std::process::Command::new(&apksigner)
@@ -6394,10 +6389,7 @@ public final class Family {
                 said.contains(&fingerprint),
                 "dexdump reads the value back: {said}"
             );
-            assert!(
-                said.contains("OmniSeal"),
-                "dexdump reads the tag back: {said}"
-            );
+            assert!(said.contains("Seal"), "dexdump reads the tag back: {said}");
         }
     }
 
@@ -6685,7 +6677,7 @@ public final class Family {
 
     #[test]
     fn nestmates_and_monitors_come_out_the_way_art_accepts_them() {
-        let directory = temp_directory("omni-nests");
+        let directory = temp_directory("builder-nests");
         let made = directory.join("classes");
         std::fs::create_dir_all(made.join("nest")).unwrap();
         std::fs::write(
@@ -6733,8 +6725,8 @@ public class Outer {
         let Ok(done) = done else {
             std::fs::remove_dir_all(&directory).ok();
             assert!(
-                std::env::var("OMNI_REQUIRE_JAVAC").is_err(),
-                "OMNI_REQUIRE_JAVAC is set but javac is not here"
+                std::env::var("APK_BUILDER_REQUIRE_JAVAC").is_err(),
+                "APK_BUILDER_REQUIRE_JAVAC is set but javac is not here"
             );
             eprintln!("nests: javac is not available here");
             return;
@@ -7049,7 +7041,7 @@ public class Outer {
     }
 
     fn library_corpus() -> Vec<std::path::PathBuf> {
-        let folder = std::env::var("OMNI_LIBRARY_CORPUS")
+        let folder = std::env::var("APK_BUILDER_LIBRARY_CORPUS")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| {
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/library-corpus")
@@ -7107,7 +7099,7 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         List<String> held = new ArrayList<>();
-        held.add("omni");
+        held.add("builder");
         held.add("builder");
         Gson gson = new Gson();
         String written = gson.toJson(held);
@@ -7167,7 +7159,7 @@ public final class MainActivity extends Activity {
             .collect();
         assert!(!held.is_empty(), "the library carries no nine-patch");
 
-        let directory = temp_directory("omni-nine-patch");
+        let directory = temp_directory("builder-nine-patch");
         let inbox = directory.join("drawable");
         let outbox = directory.join("out");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -7274,8 +7266,8 @@ public final class MainActivity extends Activity {
         let corpus = library_corpus();
         if corpus.is_empty() {
             assert!(
-                std::env::var("OMNI_REQUIRE_LIBRARY_CORPUS").is_err(),
-                "OMNI_REQUIRE_LIBRARY_CORPUS is set but no library is here"
+                std::env::var("APK_BUILDER_REQUIRE_LIBRARY_CORPUS").is_err(),
+                "APK_BUILDER_REQUIRE_LIBRARY_CORPUS is set but no library is here"
             );
             eprintln!("libraries: no published library is available here");
             return;
@@ -7287,7 +7279,7 @@ public final class MainActivity extends Activity {
 
         for library in &corpus {
             let named = library.file_name().unwrap().to_string_lossy().to_string();
-            let directory = temp_directory("omni-published");
+            let directory = temp_directory("builder-published");
             let root = directory.join("Uses");
             let folder = root.to_str().unwrap().to_string();
             crate::scaffold::create(
@@ -7398,7 +7390,7 @@ public final class MainActivity extends Activity {
     #[test]
     fn a_library_a_project_depends_on_is_in_the_package() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-library");
+        let directory = temp_directory("builder-library");
         let made = directory.join("made");
         std::fs::create_dir_all(&made).unwrap();
         std::fs::write(
@@ -7459,8 +7451,8 @@ public final class Greeting {
         let Ok(done) = done else {
             std::fs::remove_dir_all(&directory).ok();
             assert!(
-                std::env::var("OMNI_REQUIRE_JAVAC").is_err(),
-                "OMNI_REQUIRE_JAVAC is set but javac is not here"
+                std::env::var("APK_BUILDER_REQUIRE_JAVAC").is_err(),
+                "APK_BUILDER_REQUIRE_JAVAC is set but javac is not here"
             );
             eprintln!("library packaging: javac is not available here");
             return;
@@ -7931,12 +7923,7 @@ public final class MainActivity extends Activity {
         let mut table = ResourceTable::new();
         let mut sink = Sink::new();
 
-        assert!(table.read_file(
-            "drawable",
-            "omni_mark.xml",
-            "res/drawable/omni_mark.xml",
-            &mut sink
-        ));
+        assert!(table.read_file("drawable", "mark.xml", "res/drawable/mark.xml", &mut sink));
         assert!(table.read_file(
             "mipmap-xxhdpi",
             "ic_launcher.png",
@@ -7946,7 +7933,7 @@ public final class MainActivity extends Activity {
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
 
         let compiled = table.compile(&mut Sink::new()).unwrap();
-        assert!(compiled.id(ResourceKind::Drawable, "omni_mark").is_some());
+        assert!(compiled.id(ResourceKind::Drawable, "mark").is_some());
 
         let launcher = compiled
             .entries()
@@ -8149,7 +8136,7 @@ public final class MainActivity extends Activity {
 
         assert_eq!(
             archive.stored_bytes(INFOZIP_SAMPLE, a).unwrap(),
-            b"hello omni"
+            b"hello builder"
         );
         assert_eq!(
             archive.stored_bytes(INFOZIP_SAMPLE, b).unwrap(),
@@ -8232,7 +8219,7 @@ public final class MainActivity extends Activity {
             let mut builder = ArchiveBuilder::for_android();
             builder.add("classes.dex", vec![7; 64]).unwrap();
             builder
-                .add("lib/arm64-v8a/libomni.so", vec![9; 100])
+                .add("lib/arm64-v8a/libapk_builder.so", vec![9; 100])
                 .unwrap();
             builder.finish().unwrap()
         };
@@ -8250,7 +8237,7 @@ public final class MainActivity extends Activity {
             .add("lib/arm64-v8a/libapk_builder.so", vec![0x7f; 5_000])
             .unwrap();
         builder
-            .add("lib/arm64-v8a/libomni_bridge.so", vec![0x7f; 3_000])
+            .add("lib/arm64-v8a/libapk_builder_bridge.so", vec![0x7f; 3_000])
             .unwrap();
         builder.add("classes.dex", vec![1; 200]).unwrap();
         let bytes = builder.finish().unwrap();
@@ -8497,13 +8484,13 @@ public final class MainActivity extends Activity {
     #[test]
     fn an_archive_this_build_writes_satisfies_independent_tools() {
         let directory = temp_directory("conformance");
-        let path = directory.join("omni.apk");
+        let path = directory.join("builder.apk");
 
         let mut builder = ArchiveBuilder::for_android();
         builder
             .add(
                 "AndroidManifest.xml",
-                b"<manifest package=\"com.omni\"/>".to_vec(),
+                b"<manifest package=\"com.example\"/>".to_vec(),
             )
             .unwrap();
         builder.add("classes.dex", vec![0x64; 1_234]).unwrap();
@@ -8744,7 +8731,10 @@ public final class MainActivity extends Activity {
     fn a_certificate_reads_as_the_tools_read_it() {
         let certificate = Certificate::parse(CONFORMANCE_CERTIFICATE).expect("must parse");
 
-        assert_eq!(certificate.subject, "C=TR, O=Omni, CN=Omni Conformance");
+        assert_eq!(
+            certificate.subject,
+            "C=TR, O=Apk Builder, CN=Apk Builder Conformance"
+        );
         assert_eq!(certificate.issuer, certificate.subject, "it is self-signed");
         assert_eq!(certificate.serial, "5D97B82E9226CBB1");
         assert_eq!(certificate.public_key_algorithm.display(), "RSA");
@@ -8830,8 +8820,8 @@ public final class MainActivity extends Activity {
         let key = crate::rsa::generate(2048).expect("a key");
         let mine = crate::certificate::self_signed(
             &key,
-            "Omni Extensions",
-            "Omni",
+            "Apk Builder Extensions",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -8842,7 +8832,10 @@ public final class MainActivity extends Activity {
         assert!(said.self_issued && said.checkable && said.holds);
 
         let read = crate::x509::Certificate::parse(&mine).expect("it parses");
-        assert_eq!(read.subject, "C=TR, O=Omni, CN=Omni Extensions");
+        assert_eq!(
+            read.subject,
+            "C=TR, O=Apk Builder, CN=Apk Builder Extensions"
+        );
         assert_eq!(read.issuer, read.subject);
         assert_eq!(read.public_key_bits, Some(2048));
 
@@ -8860,7 +8853,7 @@ public final class MainActivity extends Activity {
         }
 
         if let Some(tool) = openssl() {
-            let directory = temp_directory("omni-certificate-extensions");
+            let directory = temp_directory("builder-certificate-extensions");
             let der = directory.join("mine.der");
             std::fs::write(&der, &mine).unwrap();
             let shown = std::process::Command::new(&tool)
@@ -9003,8 +8996,8 @@ public final class MainActivity extends Activity {
         }
 
         assert!(
-            std::env::var("OMNI_REQUIRE_APKSIGNER").is_err(),
-            "OMNI_REQUIRE_APKSIGNER is set but no apksigner was found, so the \
+            std::env::var("APK_BUILDER_REQUIRE_APKSIGNER").is_err(),
+            "APK_BUILDER_REQUIRE_APKSIGNER is set but no apksigner was found, so the \
              signing conformance tests would have skipped silently"
         );
         None
@@ -9020,7 +9013,7 @@ public final class MainActivity extends Activity {
             eprintln!("device sealing: openssl is not available here");
             return;
         };
-        let directory = temp_directory("omni-device-sealed");
+        let directory = temp_directory("builder-device-sealed");
         let project = directory.join("Sealed");
         let root = project.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -9081,12 +9074,12 @@ public final class MainActivity extends Activity {
             let held = unsafe { std::ffi::CStr::from_ptr(ptr) }
                 .to_string_lossy()
                 .into_owned();
-            unsafe { crate::ffi::omni_string_free(ptr) };
+            unsafe { crate::ffi::apk_builder_string_free(ptr) };
             held
         };
         let c = |said: &str| std::ffi::CString::new(said).unwrap();
         let prepared = text(unsafe {
-            crate::ffi::omni_build_unsigned(
+            crate::ffi::apk_builder_build_unsigned(
                 c(&root).as_ptr(),
                 c(raw.to_str().unwrap()).as_ptr(),
                 c(&certificate_hex).as_ptr(),
@@ -9135,7 +9128,7 @@ public final class MainActivity extends Activity {
             .and_then(crate::json::Json::integer)
             .unwrap() as u32;
         let sealed = text(unsafe {
-            crate::ffi::omni_seal_package(
+            crate::ffi::apk_builder_seal_package(
                 c(raw.to_str().unwrap()).as_ptr(),
                 c(apk.to_str().unwrap()).as_ptr(),
                 c(&certificate_hex).as_ptr(),
@@ -9183,7 +9176,7 @@ public final class MainActivity extends Activity {
             return;
         };
 
-        let directory = temp_directory("omni-device-signing");
+        let directory = temp_directory("builder-device-signing");
         std::fs::create_dir_all(&directory).unwrap();
         let key = directory.join("key.pem");
         let certificate = directory.join("cert.pem");
@@ -9199,7 +9192,7 @@ public final class MainActivity extends Activity {
                 "-days",
                 "3650",
                 "-subj",
-                "/CN=Omni Device/O=Omni/C=TR",
+                "/CN=Apk Builder Device/O=Apk Builder/C=TR",
                 "-keyout",
                 key.to_str().unwrap(),
                 "-out",
@@ -9362,7 +9355,7 @@ public final class MainActivity extends Activity {
                 out.status.success(),
                 "apksigner refused a package signed by a key this build never saw:\n{said}"
             );
-            assert!(said.contains("CN=Omni Device"), "{said}");
+            assert!(said.contains("CN=Apk Builder Device"), "{said}");
             checked = "apksigner verified it";
         }
 
@@ -9389,7 +9382,7 @@ public final class MainActivity extends Activity {
             .unwrap();
         builder.add("classes.dex", vec![0x2a; 3_000]).unwrap();
         builder
-            .add("lib/arm64-v8a/libomni.so", vec![0x7f; 2_000])
+            .add("lib/arm64-v8a/libapk_builder.so", vec![0x7f; 2_000])
             .unwrap();
         std::fs::write(&apk, builder.finish().unwrap()).unwrap();
 
@@ -9411,7 +9404,7 @@ public final class MainActivity extends Activity {
                 "-validity",
                 "30",
                 "-dname",
-                "CN=Omni Test, O=Omni, C=TR",
+                "CN=Apk Builder Test, O=Apk Builder, C=TR",
             ])
             .output()
             .ok()?;
@@ -9493,7 +9486,10 @@ public final class MainActivity extends Activity {
         assert!(report.everything_checkable_passed());
 
         let certificate = &report.signers[0].certificates[0];
-        assert_eq!(certificate.subject, "C=TR, O=Omni, CN=Omni Test");
+        assert_eq!(
+            certificate.subject,
+            "C=TR, O=Apk Builder, CN=Apk Builder Test"
+        );
         assert_eq!(certificate.public_key_bits, Some(2048));
 
         assert!(
@@ -9531,10 +9527,10 @@ public final class MainActivity extends Activity {
     }
 
     fn package_this_build_produced() -> Option<Vec<u8>> {
-        if let Ok(named) = std::env::var("OMNI_PACKAGE_UNDER_TEST") {
+        if let Ok(named) = std::env::var("APK_BUILDER_PACKAGE_UNDER_TEST") {
             if !named.is_empty() {
                 let bytes = std::fs::read(&named)
-                    .unwrap_or_else(|why| panic!("OMNI_PACKAGE_UNDER_TEST={named}: {why}"));
+                    .unwrap_or_else(|why| panic!("APK_BUILDER_PACKAGE_UNDER_TEST={named}: {why}"));
                 return Some(bytes);
             }
         }
@@ -9548,7 +9544,7 @@ public final class MainActivity extends Activity {
                 "signing conformance: no built package here, so a real Android \
                  Gradle Plugin package was not read. Build one with \
                  `./gradlew :Builder:assembleRelease` or set \
-                 OMNI_PACKAGE_UNDER_TEST."
+                 APK_BUILDER_PACKAGE_UNDER_TEST."
             );
             return;
         };
@@ -9876,7 +9872,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_check_refuses_where_a_build_would_and_says_which_line() {
-        let directory = temp_directory("omni-check");
+        let directory = temp_directory("builder-check");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -9947,7 +9943,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_bridge_checks_a_project_without_building_it() {
-        let directory = temp_directory("omni-check-bridge");
+        let directory = temp_directory("builder-check-bridge");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -9966,11 +9962,11 @@ public final class MainActivity extends Activity {
             let held = unsafe { std::ffi::CStr::from_ptr(ptr) }
                 .to_string_lossy()
                 .into_owned();
-            unsafe { crate::ffi::omni_string_free(ptr) };
+            unsafe { crate::ffi::apk_builder_string_free(ptr) };
             held
         };
 
-        let clear = read(unsafe { crate::ffi::omni_check_project(root_c.as_ptr()) });
+        let clear = read(unsafe { crate::ffi::apk_builder_check_project(root_c.as_ptr()) });
         assert!(is_structurally_valid(&clear), "{clear}");
         assert!(clear.contains("\"clear\":true"), "{clear}");
         assert!(clear.contains("\"package\":\"com.tr.yt\""), "{clear}");
@@ -9982,7 +9978,7 @@ public final class MainActivity extends Activity {
             .expect("the scaffold writes Java");
         crate::workspace::write_text(&root, &source.path, "this is not Java at all\n").unwrap();
 
-        let refused = read(unsafe { crate::ffi::omni_check_project(root_c.as_ptr()) });
+        let refused = read(unsafe { crate::ffi::apk_builder_check_project(root_c.as_ptr()) });
         assert!(is_structurally_valid(&refused), "{refused}");
         assert!(refused.contains("\"clear\":false"), "{refused}");
         assert!(refused.contains("\"location\""), "{refused}");
@@ -9998,7 +9994,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_search_finds_every_place_and_says_what_it_skipped() {
-        let directory = temp_directory("omni-search");
+        let directory = temp_directory("builder-search");
         let root = directory.to_str().unwrap().to_string();
         std::fs::create_dir_all(directory.join("Java/com/example")).unwrap();
         std::fs::write(
@@ -10077,7 +10073,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_search_that_would_never_end_stops_and_says_it_did() {
-        let directory = temp_directory("omni-search-many");
+        let directory = temp_directory("builder-search-many");
         let root = directory.to_str().unwrap().to_string();
         std::fs::write(
             directory.join("AndroidManifest.xml"),
@@ -10099,7 +10095,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_search_only_reads_what_is_inside_the_project() {
-        let directory = temp_directory("omni-search-inside");
+        let directory = temp_directory("builder-search-inside");
         let root = directory.join("project");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
@@ -10121,7 +10117,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_bridge_searches_a_project_and_hands_back_where_it_looked() {
-        let directory = temp_directory("omni-search-bridge");
+        let directory = temp_directory("builder-search-bridge");
         let root = directory.to_str().unwrap().to_string();
         std::fs::write(
             directory.join("AndroidManifest.xml"),
@@ -10133,13 +10129,17 @@ public final class MainActivity extends Activity {
         let root_c = std::ffi::CString::new(root.clone()).unwrap();
         let needle = std::ffi::CString::new("needle").unwrap();
         let answer = unsafe {
-            let handed =
-                crate::ffi::omni_search_project(root_c.as_ptr(), needle.as_ptr(), false, false);
+            let handed = crate::ffi::apk_builder_search_project(
+                root_c.as_ptr(),
+                needle.as_ptr(),
+                false,
+                false,
+            );
             assert!(!handed.is_null());
             let held = std::ffi::CStr::from_ptr(handed)
                 .to_string_lossy()
                 .into_owned();
-            crate::ffi::omni_string_free(handed);
+            crate::ffi::apk_builder_string_free(handed);
             held
         };
 
@@ -10424,7 +10424,7 @@ public final class MainActivity extends Activity {
     }
 
     const WALKS_ITS_OWN_CODE: &str = r#"
-package com.omni.probe;
+package com.example.probe;
 
 public class Walk {
     private int taps;
@@ -10571,7 +10571,7 @@ public class Walk {
         let read = dex::read(&dex, &mut sink).expect("it reads");
 
         let describe = read
-            .body("com.omni.probe.Walk", "describe")
+            .body("com.example.probe.Walk", "describe")
             .expect("the class carries describe");
         let code = describe.code.as_ref().expect("with a body");
         let calls = code.calls();
@@ -10584,7 +10584,7 @@ public class Walk {
         assert!(
             calls
                 .iter()
-                .any(|one| one.contains("com.omni.probe.Walk.counts")),
+                .any(|one| one.contains("com.example.probe.Walk.counts")),
             "and calls the method that makes the array: {calls:?}"
         );
         assert_eq!(describe.return_type, "java.lang.String");
@@ -10598,13 +10598,13 @@ public class Walk {
             .filter_map(|one| one.about.as_deref())
             .collect();
         assert!(
-            held.contains(&"com.omni.probe.Walk.LABEL java.lang.String"),
+            held.contains(&"com.example.probe.Walk.LABEL java.lang.String"),
             "the static it reads: {held:?}"
         );
         assert!(held.contains(&" of "), "and the text it holds: {held:?}");
 
         let counts = read
-            .body("com.omni.probe.Walk", "counts")
+            .body("com.example.probe.Walk", "counts")
             .expect("the class carries counts");
         let code = counts.code.as_ref().expect("with a body");
         assert_eq!(counts.return_type, "int[]");
@@ -10615,7 +10615,7 @@ public class Walk {
             .filter_map(|one| one.about.as_deref())
             .collect();
         assert!(
-            touched.contains(&"com.omni.probe.Walk.taps int"),
+            touched.contains(&"com.example.probe.Walk.taps int"),
             "the field it reads: {touched:?}"
         );
         assert!(
@@ -10625,7 +10625,7 @@ public class Walk {
         );
 
         let classify = read
-            .body("com.omni.probe.Walk", "classify")
+            .body("com.example.probe.Walk", "classify")
             .expect("the class carries classify");
         let code = classify.code.as_ref().expect("with a body");
         assert!(
@@ -10645,7 +10645,7 @@ public class Walk {
         assert_eq!(classify.parameters, ["int"]);
 
         let guarded = read
-            .body("com.omni.probe.Walk", "guarded")
+            .body("com.example.probe.Walk", "guarded")
             .expect("the class carries guarded");
         let code = guarded.code.as_ref().expect("with a body");
         assert!(!code.tries.is_empty(), "a try is a range the file records");
@@ -10873,8 +10873,8 @@ public class Walk {
 
     fn dex_conformance_may_skip(why: &str) {
         assert!(
-            std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
-            "OMNI_REQUIRE_DEX_CONFORMANCE is set but the DEX conformance test \
+            std::env::var("APK_BUILDER_REQUIRE_DEX_CONFORMANCE").is_err(),
+            "APK_BUILDER_REQUIRE_DEX_CONFORMANCE is set but the DEX conformance test \
              would have skipped: {why}"
         );
     }
@@ -11058,9 +11058,9 @@ public class Walk {
 
     const ATTRIBUTE_PROBE_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.omni.probe"
+    package="com.example.probe"
     android:versionCode="1" android:versionName="1.0"
-    android:installLocation="auto" android:sharedUserId="com.omni.probe.shared"
+    android:installLocation="auto" android:sharedUserId="com.example.probe.shared"
     android:compileSdkVersion="36" android:compileSdkVersionCodename="16">
   <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" android:maxSdkVersion="36"/>
   <uses-permission android:name="android.permission.INTERNET"/>
@@ -11089,11 +11089,11 @@ public class Walk {
 "#;
 
     const PROBE_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.probe">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.probe">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <application android:label="Omni" android:allowBackup="false" android:supportsRtl="true" android:extractNativeLibs="false" android:theme="@0x7f060000">
-        <activity android:name="com.omni.probe.Main" android:exported="true" />
+    <application android:label="Apk Builder" android:allowBackup="false" android:supportsRtl="true" android:extractNativeLibs="false" android:theme="@0x7f060000">
+        <activity android:name="com.example.probe.Main" android:exported="true" />
     </application>
 </manifest>"#;
 
@@ -11291,8 +11291,8 @@ public class Walk {
     fn a_signature_this_build_makes_is_accepted_by_an_independent_verifier() {
         let Some(tool) = openssl() else {
             assert!(
-                std::env::var("OMNI_REQUIRE_RSA_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_RSA_CONFORMANCE is set but openssl is not available"
+                std::env::var("APK_BUILDER_REQUIRE_RSA_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_RSA_CONFORMANCE is set but openssl is not available"
             );
             eprintln!("rsa conformance: openssl is not available here");
             return;
@@ -11480,10 +11480,10 @@ public class Walk {
         }
     }
 
-    const OMNI_BUILT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.selfbuilt" android:versionCode="1" android:versionName="1.0">
+    const APK_BUILDER_BUILT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.selfbuilt" android:versionCode="1" android:versionName="1.0">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
-    <application android:label="Omni Self Built" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
+    <application android:label="Apk Builder Self Built" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
 </manifest>"#;
 
     fn certificate_and_key(directory: &std::path::Path) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -11507,7 +11507,7 @@ public class Walk {
                 "-outform",
                 "DER",
                 "-subj",
-                "/CN=Omni Self Built/O=Omni/C=TR",
+                "/CN=Apk Builder Self Built/O=Apk Builder/C=TR",
             ])
             .output()
             .ok()?;
@@ -11538,24 +11538,24 @@ public class Walk {
     }
 
     #[test]
-    fn omni_builds_and_signs_a_package_that_apksigner_accepts() {
+    fn apk_builder_builds_and_signs_a_package_that_apksigner_accepts() {
         let (Some(apksigner), Some(_)) = (find_apksigner(), openssl()) else {
             assert!(
-                std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
-                "OMNI_REQUIRE_SELF_BUILT_APK is set but apksigner or openssl is missing"
+                std::env::var("APK_BUILDER_REQUIRE_SELF_BUILT_APK").is_err(),
+                "APK_BUILDER_REQUIRE_SELF_BUILT_APK is set but apksigner or openssl is missing"
             );
             eprintln!("apk builder: apksigner or openssl is not available here");
             return;
         };
 
-        let directory = temp_directory("omni-apk");
+        let directory = temp_directory("builder-apk");
         let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
             eprintln!("apk builder: openssl could not make a certificate");
             return;
         };
         let key = crate::rsa::parse_private_key(&key_bytes).expect("the key must parse");
 
-        let (root, sink) = parse_xml(OMNI_BUILT_MANIFEST);
+        let (root, sink) = parse_xml(APK_BUILDER_BUILT_MANIFEST);
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
         let manifest = axml::encode(&root.expect("the manifest must parse"))
             .expect("the manifest must encode");
@@ -11563,7 +11563,7 @@ public class Walk {
         let mut builder = ArchiveBuilder::for_android();
         builder.add("AndroidManifest.xml", manifest).unwrap();
         builder
-            .add_aligned("lib/arm64-v8a/libomni.so", vec![0x7f; 4_096], 16_384)
+            .add_aligned("lib/arm64-v8a/libapk_builder.so", vec![0x7f; 4_096], 16_384)
             .unwrap();
         let unsigned = builder.finish().unwrap();
 
@@ -11575,7 +11575,7 @@ public class Walk {
         )
         .expect("signing must work");
 
-        let path = directory.join("omni-built.apk");
+        let path = directory.join("builder-built.apk");
         std::fs::write(&path, &signed).unwrap();
 
         let verified = std::process::Command::new(&apksigner)
@@ -11596,13 +11596,13 @@ public class Walk {
         );
         assert!(
             verified.status.success(),
-            "apksigner rejected a package Omni built and signed:\n{report}"
+            "apksigner rejected a package Apk Builder built and signed:\n{report}"
         );
         assert!(
             report.contains("Verified using v2 scheme (APK Signature Scheme v2): true"),
             "the v2 scheme was not what verified it:\n{report}"
         );
-        assert!(report.contains("CN=Omni Self Built"), "{report}");
+        assert!(report.contains("CN=Apk Builder Self Built"), "{report}");
 
         let mut own_sink = Sink::new();
         let archive = archive::read(&signed, &mut own_sink).expect("the package must read");
@@ -11617,7 +11617,7 @@ public class Walk {
         assert!(own.digests_verified > 0, "{:?}", own_sink.entries());
         assert_eq!(
             own.signers[0].certificates[0].subject,
-            "CN=Omni Self Built, O=Omni, C=TR"
+            "CN=Apk Builder Self Built, O=Apk Builder, C=TR"
         );
 
         std::fs::remove_dir_all(&directory).ok();
@@ -11628,17 +11628,17 @@ public class Walk {
     }
 
     #[test]
-    fn changing_a_package_omni_signed_is_detected() {
+    fn changing_a_package_this_builder_signed_is_detected() {
         let (Some(_), Some(_)) = (find_apksigner(), openssl()) else {
             return;
         };
-        let directory = temp_directory("omni-apk-tamper");
+        let directory = temp_directory("builder-apk-tamper");
         let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
             return;
         };
         let key = crate::rsa::parse_private_key(&key_bytes).unwrap();
 
-        let (root, _) = parse_xml(OMNI_BUILT_MANIFEST);
+        let (root, _) = parse_xml(APK_BUILDER_BUILT_MANIFEST);
         let manifest = axml::encode(&root.unwrap()).unwrap();
         let mut builder = ArchiveBuilder::for_android();
         builder.add("AndroidManifest.xml", manifest).unwrap();
@@ -11690,7 +11690,7 @@ public class Walk {
             eprintln!("keygen conformance: openssl is not available here");
             return;
         };
-        let directory = temp_directory("omni-keygen");
+        let directory = temp_directory("builder-keygen");
         let package = crate::rsa::encode_pkcs8(&key).expect("the key must encode");
         let path = directory.join("generated.pk8");
         std::fs::write(&path, &package).unwrap();
@@ -11762,17 +11762,20 @@ public class Walk {
     }
 
     const SAFE_PROJECT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.made" android:versionCode="1" android:versionName="1.0">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.made" android:versionCode="1" android:versionName="1.0">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
-    <application android:label="Made By Omni" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
+    <application android:label="Made By Apk Builder" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
 </manifest>"#;
 
     fn sample_project() -> crate::builder::Project {
         crate::builder::Project {
             manifest: SAFE_PROJECT_MANIFEST.to_string(),
             files: vec![
-                ("lib/arm64-v8a/libomni.so".to_string(), vec![0x7f; 2_048]),
-                ("assets/notes.txt".to_string(), b"made by omni".to_vec()),
+                (
+                    "lib/arm64-v8a/libapk_builder.so".to_string(),
+                    vec![0x7f; 2_048],
+                ),
+                ("assets/notes.txt".to_string(), b"made by builder".to_vec()),
             ],
             code: Vec::new(),
             references: Vec::new(),
@@ -11799,8 +11802,8 @@ public class Walk {
         let _turn = crate::progress::one_at_a_time();
         let Some(apksigner) = find_apksigner() else {
             assert!(
-                std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
-                "OMNI_REQUIRE_SELF_BUILT_APK is set but apksigner is missing"
+                std::env::var("APK_BUILDER_REQUIRE_SELF_BUILT_APK").is_err(),
+                "APK_BUILDER_REQUIRE_SELF_BUILT_APK is set but apksigner is missing"
             );
             eprintln!("build engine: apksigner is not available here");
             return;
@@ -11808,7 +11811,7 @@ public class Walk {
 
         let key = crate::rsa::generate(2048).expect("the engine must be able to make a key");
         let mut sink = Sink::new();
-        let mut project = crate::builder::starter("com.omni.made", "Made By Omni");
+        let mut project = crate::builder::starter("com.example.made", "Made By Apk Builder");
         project.files = sample_project().files;
         let outcome = crate::builder::build(&project, &key, 1_787_000_000, &mut sink)
             .expect("a compliant project must build");
@@ -11827,8 +11830,8 @@ public class Walk {
             .iter()
             .any(|entry| entry.name == "classes.dex"));
 
-        let directory = temp_directory("omni-engine");
-        let path = directory.join("made-by-omni.apk");
+        let directory = temp_directory("builder-engine");
+        let path = directory.join("made-by-builder.apk");
         std::fs::write(&path, &outcome.package).unwrap();
 
         let verified = std::process::Command::new(&apksigner)
@@ -11901,9 +11904,9 @@ public class Walk {
             .unwrap();
         assert!(extracted.status.success());
         let classes = dex::read(&extracted.stdout, &mut Sink::new()).expect("our dex must read");
-        assert_eq!(classes.class_names(), vec!["com.omni.made.MainActivity"]);
+        assert_eq!(classes.class_names(), vec!["com.example.made.MainActivity"]);
         if let Some((_, descriptors)) = dexdump(&extracted.stdout) {
-            assert_eq!(descriptors, vec!["Lcom/omni/made/MainActivity;"]);
+            assert_eq!(descriptors, vec!["Lcom/example/made/MainActivity;"]);
         }
 
         std::fs::remove_dir_all(&directory).ok();
@@ -11916,12 +11919,12 @@ public class Walk {
 
     #[test]
     fn a_developer_key_is_written_read_and_unlocked_with_their_own_password() {
-        let directory = temp_directory("omni-keys");
+        let directory = temp_directory("builder-keys");
         let folder = directory.to_str().unwrap().to_string();
         let request = crate::keystore::Request {
             alias: "release-2026".to_string(),
             common_name: "Eaquel".to_string(),
-            organisation: "Omni".to_string(),
+            organisation: "Apk Builder".to_string(),
             country: "TR".to_string(),
             validity_days: 9_125,
             bits: 2048,
@@ -11932,7 +11935,7 @@ public class Walk {
             .expect("a developer must be able to make their own key");
         assert_eq!(made.alias, "release-2026");
         assert!(made.subject.contains("CN=Eaquel"), "{}", made.subject);
-        assert!(made.subject.contains("O=Omni"), "{}", made.subject);
+        assert!(made.subject.contains("O=Apk Builder"), "{}", made.subject);
         assert!(made.subject.contains("C=TR"), "{}", made.subject);
         assert_eq!(made.bits, Some(2048));
         assert_eq!(made.issued, "2026-08-16 20:53:20 UTC");
@@ -12015,7 +12018,7 @@ public class Walk {
         let _turn = SHARED_KEY_TURN
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        let directory = temp_directory("omni-keys-bound");
+        let directory = temp_directory("builder-keys-bound");
         let folder = directory.to_str().unwrap().to_string();
 
         crate::keystore::bind_device("a1b2c3d4e5f60718");
@@ -12056,13 +12059,13 @@ public class Walk {
 
     #[test]
     fn a_key_written_before_there_were_tags_still_opens_and_is_given_one() {
-        let directory = temp_directory("omni-keys-upgrade");
+        let directory = temp_directory("builder-keys-upgrade");
         let folder = directory.to_str().unwrap().to_string();
         let password = "a password long enough";
         let request = crate::keystore::Request {
             alias: "older".to_string(),
             common_name: "Older".to_string(),
-            organisation: "Omni".to_string(),
+            organisation: "Apk Builder".to_string(),
             country: "TR".to_string(),
             validity_days: 400,
             bits: 2048,
@@ -12131,13 +12134,13 @@ public class Walk {
 
     #[test]
     fn a_developer_key_file_that_has_been_altered_is_refused() {
-        let directory = temp_directory("omni-keys-altered");
+        let directory = temp_directory("builder-keys-altered");
         let folder = directory.to_str().unwrap().to_string();
         let password = "a password long enough";
         let mine = crate::keystore::Request {
             alias: "mine".to_string(),
             common_name: "Mine".to_string(),
-            organisation: "Omni".to_string(),
+            organisation: "Apk Builder".to_string(),
             country: "TR".to_string(),
             validity_days: 400,
             bits: 2048,
@@ -12232,12 +12235,12 @@ public class Walk {
 
     #[test]
     fn the_keystore_refuses_what_would_produce_an_unusable_key() {
-        let directory = temp_directory("omni-keys-refused");
+        let directory = temp_directory("builder-keys-refused");
         let folder = directory.to_str().unwrap().to_string();
         let sound = crate::keystore::Request {
             alias: "ok".to_string(),
             common_name: "Name".to_string(),
-            organisation: "Omni".to_string(),
+            organisation: "Apk Builder".to_string(),
             country: "TR".to_string(),
             validity_days: 9_125,
             bits: 2048,
@@ -12301,12 +12304,12 @@ public class Walk {
 
     #[test]
     fn a_short_password_does_not_protect_a_key_so_it_is_refused() {
-        let directory = temp_directory("omni-keys-password");
+        let directory = temp_directory("builder-keys-password");
         let folder = directory.to_str().unwrap().to_string();
         let request = crate::keystore::Request {
             alias: "short".to_string(),
             common_name: "Name".to_string(),
-            organisation: "Omni".to_string(),
+            organisation: "Apk Builder".to_string(),
             country: "TR".to_string(),
             validity_days: 400,
             bits: 2048,
@@ -12323,14 +12326,14 @@ public class Walk {
     fn the_developers_own_key_signs_the_package_and_apksigner_reads_their_name() {
         let Some(apksigner) = find_apksigner() else {
             assert!(
-                std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
-                "OMNI_REQUIRE_SELF_BUILT_APK is set but apksigner is missing"
+                std::env::var("APK_BUILDER_REQUIRE_SELF_BUILT_APK").is_err(),
+                "APK_BUILDER_REQUIRE_SELF_BUILT_APK is set but apksigner is missing"
             );
             eprintln!("developer key: apksigner is not available here");
             return;
         };
 
-        let directory = temp_directory("omni-developer");
+        let directory = temp_directory("builder-developer");
         let folder = directory.to_str().unwrap().to_string();
         let password = "the developer's own password";
         let request = crate::keystore::Request {
@@ -12345,7 +12348,7 @@ public class Walk {
         let opened = crate::keystore::unlock(&made.path, password).unwrap();
 
         let mut sink = Sink::new();
-        let project = crate::builder::starter("com.tr.yt", "Omni");
+        let project = crate::builder::starter("com.tr.yt", "Apk Builder");
         let outcome =
             crate::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)
                 .expect("the developer's key must sign the package");
@@ -12437,7 +12440,7 @@ public class Walk {
         for (name, application, code) in cases {
             let manifest = format!(
                 r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.weak">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     {application}
 </manifest>"#
@@ -12482,8 +12485,8 @@ public class Walk {
     #[test]
     fn a_shared_user_identity_and_a_census_of_every_application_are_refused() {
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak"
-    android:sharedUserId="com.omni.shared">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.weak"
+    android:sharedUserId="com.example.shared">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <application android:label="X" android:allowBackup="false" android:hasCode="false"
@@ -12541,7 +12544,7 @@ public class Walk {
     #[test]
     fn a_low_platform_floor_and_a_high_risk_permission_are_refused() {
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.weak">
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application android:label="X" android:allowBackup="false" />
@@ -12557,7 +12560,7 @@ public class Walk {
     #[test]
     fn a_launcher_activity_is_allowed_to_be_exported() {
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.app">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.app">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <application android:label="X" android:allowBackup="false">
         <activity android:name="Main" android:exported="true">
@@ -12620,14 +12623,14 @@ public class Walk {
 
     fn sample_activity_class() -> crate::dexwrite::Class {
         crate::dexwrite::Class {
-            descriptor: "Lcom/omni/made/MainActivity;".to_string(),
+            descriptor: "Lcom/example/made/MainActivity;".to_string(),
             superclass: "Landroid/app/Activity;".to_string(),
             interfaces: Vec::new(),
             access_flags: crate::dexwrite::ACC_PUBLIC,
             source_file: Some("MainActivity.java".to_string()),
             annotations: Vec::new(),
             direct_methods: vec![crate::dexwrite::default_constructor(
-                "Lcom/omni/made/MainActivity;",
+                "Lcom/example/made/MainActivity;",
                 "Landroid/app/Activity;",
             )],
             virtual_methods: Vec::new(),
@@ -12637,7 +12640,7 @@ public class Walk {
     }
 
     fn furnished_activity_class() -> crate::dexwrite::Class {
-        let descriptor = "Lcom/omni/made/MainActivity;";
+        let descriptor = "Lcom/example/made/MainActivity;";
         let mut class = crate::dexwrite::Class::named(
             descriptor,
             "Landroid/app/Activity;",
@@ -12718,18 +12721,18 @@ public class Walk {
         let mut sink = Sink::new();
         let file = dex::read(&bytes, &mut sink).expect("our own reader must read it");
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
-        assert_eq!(file.class_names(), vec!["com.omni.made.MainActivity"]);
+        assert_eq!(file.class_names(), vec!["com.example.made.MainActivity"]);
         assert!(dex::integrity(&bytes).unwrap().self_consistent());
 
         let Some((fields, descriptors)) = dexdump(&bytes) else {
             assert!(
-                std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_DEX_CONFORMANCE is set but dexdump is missing"
+                std::env::var("APK_BUILDER_REQUIRE_DEX_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_DEX_CONFORMANCE is set but dexdump is missing"
             );
             eprintln!("dexwrite conformance: dexdump is not available here");
             return;
         };
-        assert_eq!(descriptors, vec!["Lcom/omni/made/MainActivity;"]);
+        assert_eq!(descriptors, vec!["Lcom/example/made/MainActivity;"]);
         assert_eq!(
             fields.get("field_ids_size").map(|v| v.as_str()),
             Some("3"),
@@ -12749,7 +12752,7 @@ public class Walk {
         let mut sink = Sink::new();
         let file = dex::read(&bytes, &mut sink).expect("our own reader must read it");
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
-        assert_eq!(file.class_names(), vec!["com.omni.made.MainActivity"]);
+        assert_eq!(file.class_names(), vec!["com.example.made.MainActivity"]);
         assert_eq!(
             file.classes[0].superclass.as_deref(),
             Some("android.app.Activity")
@@ -12759,13 +12762,13 @@ public class Walk {
 
         let Some((fields, descriptors)) = dexdump(&bytes) else {
             assert!(
-                std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_DEX_CONFORMANCE is set but dexdump is missing"
+                std::env::var("APK_BUILDER_REQUIRE_DEX_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_DEX_CONFORMANCE is set but dexdump is missing"
             );
             eprintln!("dexwrite conformance: dexdump is not available here");
             return;
         };
-        assert_eq!(descriptors, vec!["Lcom/omni/made/MainActivity;"]);
+        assert_eq!(descriptors, vec!["Lcom/example/made/MainActivity;"]);
         assert_eq!(
             fields.get("class_defs_size").map(|v| v.as_str()),
             Some("1"),
@@ -12782,7 +12785,7 @@ public class Walk {
         for text in [
             "",
             "MainActivity",
-            "Lcom/omni/made/MainActivity;",
+            "Lcom/example/made/MainActivity;",
             "\u{0}",
             "\u{00e7}\u{011f}\u{00fc}",
             "\u{1f480}",
@@ -12815,7 +12818,7 @@ public class Walk {
             let raw = f();
             assert!(!raw.is_null(), "the bridge must always report");
             let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
-            crate::ffi::omni_string_free(raw);
+            crate::ffi::apk_builder_string_free(raw);
             text
         }
     }
@@ -12856,7 +12859,7 @@ public class Walk {
             return;
         };
 
-        let directory = temp_directory("omni-java-platform");
+        let directory = temp_directory("builder-java-platform");
         let root = directory.join("Called");
         let spec =
             "package=com.tr.yt;label=Called;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
@@ -12972,7 +12975,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_java_somebody_wrote_can_name_the_resources_the_project_holds() {
-        let directory = temp_directory("omni-java-resources");
+        let directory = temp_directory("builder-java-resources");
         let root = directory.join("Named");
         let spec =
             "package=com.tr.yt;label=Named;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
@@ -13054,7 +13057,7 @@ public final class MainActivity extends Activity {
     #[test]
     fn the_java_somebody_wrote_is_the_code_the_package_carries() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-java-end-to-end");
+        let directory = temp_directory("builder-java-end-to-end");
         let root = directory.join("Written");
         let spec =
             "package=com.tr.yt;label=Written;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
@@ -13218,7 +13221,7 @@ public final class App extends Activity {
     #[test]
     fn what_this_builds_carries_a_seal_against_the_key_that_signed_it() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-sealed");
+        let directory = temp_directory("builder-sealed");
         let root = directory.join("Sealed");
         let spec =
             "package=com.tr.yt;label=Sealed;abis=arm64-v8a;minSdk=30;targetSdk=37;languages=java";
@@ -13240,12 +13243,12 @@ public final class App extends Activity {
 
         let project =
             crate::builder::sealed_project(root.to_str().unwrap(), Some(&made_by)).expect("reads");
-        assert_eq!(project.sealed.as_deref(), Some("com.tr.yt.OmniSeal"));
+        assert_eq!(project.sealed.as_deref(), Some("com.tr.yt.Seal"));
 
         let sealed = project
             .code
             .iter()
-            .find(|held| held.descriptor == "Lcom/tr/yt/OmniSeal;")
+            .find(|held| held.descriptor == "Lcom/tr/yt/Seal;")
             .expect("the seal is compiled into the package");
         assert_eq!(sealed.superclass, "Landroid/content/ContentProvider;");
         assert!(
@@ -13292,12 +13295,9 @@ public final class App extends Activity {
             .children_named("provider")
             .next()
             .expect("the seal is declared, or nothing would start it");
-        assert_eq!(provider.attribute("name"), Some("com.tr.yt.OmniSeal"));
+        assert_eq!(provider.attribute("name"), Some("com.tr.yt.Seal"));
         assert_eq!(provider.attribute("exported"), Some("false"));
-        assert_eq!(
-            provider.attribute("authorities"),
-            Some("com.tr.yt.omniseal")
-        );
+        assert_eq!(provider.attribute("authorities"), Some("com.tr.yt.seal"));
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -13305,7 +13305,7 @@ public final class App extends Activity {
     #[test]
     fn a_whole_application_written_in_java_25_becomes_a_package_a_device_takes() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-whole-application");
+        let directory = temp_directory("builder-whole-application");
         let root = directory.join("Whole");
         let spec =
             "package=com.tr.yt;label=Whole;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
@@ -13653,14 +13653,14 @@ public final class App extends Activity {
 
     #[test]
     fn a_project_is_a_manifest_and_language_folders_and_nothing_else() {
-        let directory = temp_directory("omni-scaffold");
+        let directory = temp_directory("builder-scaffold");
         let root = directory.join("MyApp");
         let spec = "package=com.tr.yt;label=My App;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=kotlin,rust,cpp,java";
 
         let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
         let spec_c = std::ffi::CString::new(spec).unwrap();
         let report = call_ffi(|| unsafe {
-            crate::ffi::omni_create_project(root_c.as_ptr(), spec_c.as_ptr())
+            crate::ffi::apk_builder_create_project(root_c.as_ptr(), spec_c.as_ptr())
         });
         assert!(is_structurally_valid(&report), "{report}");
         assert!(report.contains("\"created\":true"), "{report}");
@@ -13802,13 +13802,13 @@ public final class App extends Activity {
     fn zip64_reads_what_an_independent_tool_writes() {
         if !python_zip_available() {
             assert!(
-                std::env::var("OMNI_REQUIRE_ZIP64_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_ZIP64_CONFORMANCE is set but no independent tool is here"
+                std::env::var("APK_BUILDER_REQUIRE_ZIP64_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_ZIP64_CONFORMANCE is set but no independent tool is here"
             );
             eprintln!("zip64: no independent archiver is available here");
             return;
         }
-        let directory = temp_directory("omni-zip64-in");
+        let directory = temp_directory("builder-zip64-in");
         let made = directory.join("wide.zip");
         let program = format!(
             "import zipfile\nz = zipfile.ZipFile(r'{}', 'w', zipfile.ZIP_DEFLATED, allowZip64=True)\nfor i in range({}):\n    z.writestr('f%d.txt' % i, b'body %d' % i)\nz.close()\n",
@@ -13846,8 +13846,8 @@ public final class App extends Activity {
     fn what_this_writes_beyond_the_counter_an_independent_tool_reads() {
         if !python_zip_available() {
             assert!(
-                std::env::var("OMNI_REQUIRE_ZIP64_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_ZIP64_CONFORMANCE is set but no independent tool is here"
+                std::env::var("APK_BUILDER_REQUIRE_ZIP64_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_ZIP64_CONFORMANCE is set but no independent tool is here"
             );
             eprintln!("zip64: no independent archiver is available here");
             return;
@@ -13863,7 +13863,7 @@ public final class App extends Activity {
         }
         let bytes = builder.finish().expect("the archive is written");
 
-        let directory = temp_directory("omni-zip64-out");
+        let directory = temp_directory("builder-zip64-out");
         let made = directory.join("wide.zip");
         std::fs::write(&made, &bytes).expect("the archive is written out");
         let program = format!(
@@ -13896,7 +13896,7 @@ public final class App extends Activity {
     }
 
     fn python_compress(data: &[u8], level: u32, raw: bool) -> Option<Vec<u8>> {
-        let directory = temp_directory("omni-zlib-in");
+        let directory = temp_directory("builder-zlib-in");
         let source = directory.join("plain.bin");
         let target = directory.join("packed.bin");
         std::fs::write(&source, data).ok()?;
@@ -13970,7 +13970,7 @@ public final class App extends Activity {
         if python_available() {
             for case in &cases {
                 let packed = crate::deflate::zlib(case);
-                let directory = temp_directory("omni-deflate");
+                let directory = temp_directory("builder-deflate");
                 let source = directory.join("packed.bin");
                 std::fs::write(&source, &packed).unwrap();
                 let program = format!(
@@ -13998,8 +13998,8 @@ public final class App extends Activity {
             }
         } else {
             assert!(
-                std::env::var("OMNI_REQUIRE_INFLATE_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_INFLATE_CONFORMANCE is set but no independent reader is here"
+                std::env::var("APK_BUILDER_REQUIRE_INFLATE_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_INFLATE_CONFORMANCE is set but no independent reader is here"
             );
         }
 
@@ -14135,7 +14135,7 @@ public final class App extends Activity {
         let commit_id = git::identify(git::Kind::Commit, &commit);
         assert_eq!(git::tree_of(&pack, &commit_id), Ok(tree_id));
 
-        let into = std::env::temp_dir().join("omni_git_two_deltas");
+        let into = std::env::temp_dir().join("apk_builder_git_two_deltas");
         let _ = std::fs::remove_dir_all(&into);
         let written = git::checkout(&pack, &commit_id, &into).expect("the tree is written");
         assert_eq!(written.files, 2);
@@ -14176,7 +14176,7 @@ public final class App extends Activity {
             body.extend_from_slice(&crate::deflate::zlib(&tree));
 
             let pack = git::unpack(&pack_around(2, body)).expect("the pack resolves");
-            let into = std::env::temp_dir().join("omni_git_escape");
+            let into = std::env::temp_dir().join("apk_builder_git_escape");
             let _ = std::fs::remove_dir_all(&into);
             assert!(
                 git::checkout(&pack, &tree_id, &into).is_err(),
@@ -14190,14 +14190,14 @@ public final class App extends Activity {
     fn git_reads_what_the_reference_implementation_packs() {
         if !git_available() {
             assert!(
-                std::env::var("OMNI_REQUIRE_GIT_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_GIT_CONFORMANCE is set but no reference git is here"
+                std::env::var("APK_BUILDER_REQUIRE_GIT_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_GIT_CONFORMANCE is set but no reference git is here"
             );
             eprintln!("git: no reference implementation is available here");
             return;
         }
 
-        let work = std::env::temp_dir().join("omni_git_conformance");
+        let work = std::env::temp_dir().join("apk_builder_git_conformance");
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(work.join("deep/deeper")).expect("the work tree is made");
 
@@ -14273,7 +14273,7 @@ public final class App extends Activity {
             "the pack holds objects git does not list"
         );
 
-        let into = std::env::temp_dir().join("omni_git_conformance_out");
+        let into = std::env::temp_dir().join("apk_builder_git_conformance_out");
         let _ = std::fs::remove_dir_all(&into);
         let named = git::of_hex(&head).expect("HEAD is hex");
         let written = git::checkout(&pack, &named, &into).expect("the tree is written");
@@ -14299,8 +14299,8 @@ public final class App extends Activity {
     fn inflate_reads_what_an_independent_compressor_wrote() {
         if !python_available() {
             assert!(
-                std::env::var("OMNI_REQUIRE_INFLATE_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_INFLATE_CONFORMANCE is set but no independent compressor is here"
+                std::env::var("APK_BUILDER_REQUIRE_INFLATE_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_INFLATE_CONFORMANCE is set but no independent compressor is here"
             );
             eprintln!("inflate: no independent compressor is available here");
             return;
@@ -14432,8 +14432,8 @@ public final class App extends Activity {
 
         if files.is_empty() {
             assert!(
-                std::env::var("OMNI_REQUIRE_IMAGE_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_IMAGE_CONFORMANCE is set but no PNG files were found, so the \
+                std::env::var("APK_BUILDER_REQUIRE_IMAGE_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_IMAGE_CONFORMANCE is set but no PNG files were found, so the \
                  image reader was never shown one written by another tool"
             );
             eprintln!("image conformance: no PNG files are available here");
@@ -14494,8 +14494,8 @@ public final class App extends Activity {
         }
         if files.is_empty() {
             assert!(
-                std::env::var("OMNI_REQUIRE_IMAGE_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_IMAGE_CONFORMANCE is set but no PNG files were found"
+                std::env::var("APK_BUILDER_REQUIRE_IMAGE_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_IMAGE_CONFORMANCE is set but no PNG files were found"
             );
             eprintln!("codec: no PNG files are available here");
             return;
@@ -14576,7 +14576,7 @@ public final class App extends Activity {
             return;
         }
 
-        let directory = temp_directory("omni-codec");
+        let directory = temp_directory("builder-codec");
         let source = directory.join("made.png");
         let dump = directory.join("pixels.txt");
         let program = format!(
@@ -14833,7 +14833,7 @@ public final class App extends Activity {
 
     #[test]
     fn the_editor_reads_writes_and_stays_inside_the_project() {
-        let directory = temp_directory("omni-workspace");
+        let directory = temp_directory("builder-workspace");
         let root = directory.join("Edited");
         let text = root.to_str().unwrap().to_string();
 
@@ -14935,7 +14935,7 @@ public final class App extends Activity {
 
     #[test]
     fn copying_carries_a_whole_folder_and_never_over_something() {
-        let directory = temp_directory("omni-copy");
+        let directory = temp_directory("builder-copy");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -14997,7 +14997,7 @@ public final class App extends Activity {
 
     #[test]
     fn a_save_that_cannot_finish_leaves_what_was_there_before() {
-        let directory = temp_directory("omni-atomic-save");
+        let directory = temp_directory("builder-atomic-save");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -15029,7 +15029,7 @@ public final class App extends Activity {
 
     #[test]
     fn what_is_deleted_waits_a_day_in_the_trash_and_can_be_put_back() {
-        let directory = temp_directory("omni-trash");
+        let directory = temp_directory("builder-trash");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -15101,7 +15101,7 @@ public final class App extends Activity {
 
     #[test]
     fn the_trash_keeps_what_it_holds_under_its_own_name() {
-        let directory = temp_directory("omni-trash-named");
+        let directory = temp_directory("builder-trash-named");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -15156,7 +15156,7 @@ public final class App extends Activity {
 
     #[test]
     fn a_cloned_folder_opens_as_a_project_named_the_way_it_names_itself() {
-        let directory = temp_directory("omni-adopt-clone");
+        let directory = temp_directory("builder-adopt-clone");
         let root = directory.join("repository");
         std::fs::create_dir_all(root.join("Res/values")).unwrap();
         std::fs::write(
@@ -15212,7 +15212,7 @@ public final class App extends Activity {
 
     #[test]
     fn the_manifest_is_a_file_like_any_other() {
-        let directory = temp_directory("omni-manifest-free");
+        let directory = temp_directory("builder-manifest-free");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -15239,7 +15239,7 @@ public final class App extends Activity {
 
     #[test]
     fn a_gradle_project_is_read_the_way_gradle_reads_it() {
-        let directory = temp_directory("omni-gradle-read");
+        let directory = temp_directory("builder-gradle-read");
         std::fs::create_dir_all(directory.join("app/src/main/cpp")).unwrap();
         std::fs::create_dir_all(directory.join("gradle")).unwrap();
 
@@ -15395,7 +15395,7 @@ public final class App extends Activity {
 
     #[test]
     fn a_standard_gradle_project_opens_as_one_this_builds() {
-        let directory = temp_directory("omni-gradle-adopt");
+        let directory = temp_directory("builder-gradle-adopt");
         let from = directory.join("Sent");
         std::fs::create_dir_all(from.join("app/src/main/java/com/tr/yt")).unwrap();
         std::fs::create_dir_all(from.join("app/src/main/res/values")).unwrap();
@@ -15556,7 +15556,7 @@ public final class App extends Activity {
 
     #[test]
     fn libraries_resolve_the_way_gradle_resolves_them() {
-        let directory = temp_directory("omni-resolve");
+        let directory = temp_directory("builder-resolve");
         let root = directory.to_str().unwrap().to_string();
         let place = |coordinate: &str, kind: &str, text: &str| {
             let one = crate::maven::Coordinate::parse(coordinate).unwrap();
@@ -15800,13 +15800,13 @@ public final class App extends Activity {
         assert!(sealed.contains("\"com.example.renamed\".equals(context.getPackageName())"));
         assert_eq!(
             crate::seal::authority("com.example.renamed"),
-            "com.example.renamed.omniseal"
+            "com.example.renamed.seal"
         );
     }
 
     #[test]
     fn an_old_groovy_build_reads_the_way_gradle_reads_it() {
-        let directory = temp_directory("omni-old-gradle");
+        let directory = temp_directory("builder-old-gradle");
         let root = directory.join("Old");
         std::fs::create_dir_all(root.join("app/src/main")).unwrap();
         std::fs::write(root.join("settings.gradle"), "include ':app', ':lib'\n").unwrap();
@@ -16150,7 +16150,7 @@ dependencies {
 
     #[test]
     fn what_a_project_names_comes_down_from_maven_with_all_it_leans_on() {
-        let directory = temp_directory("omni-maven");
+        let directory = temp_directory("builder-maven");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -16242,7 +16242,7 @@ dependencies {
 
     #[test]
     fn a_project_keeps_what_it_deletes_in_folders_named_by_the_day() {
-        let directory = temp_directory("omni-trash-project");
+        let directory = temp_directory("builder-trash-project");
         let root = directory.join("Held");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -16346,7 +16346,7 @@ dependencies {
             return;
         };
 
-        let directory = temp_directory("omni-icon");
+        let directory = temp_directory("builder-icon");
         let root = directory.join("Pictured");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -16388,7 +16388,7 @@ dependencies {
     }
 
     fn find_bundletool() -> Option<Vec<String>> {
-        if let Ok(command) = std::env::var("OMNI_BUNDLETOOL") {
+        if let Ok(command) = std::env::var("APK_BUILDER_BUNDLETOOL") {
             let parts: Vec<String> = command
                 .split_whitespace()
                 .map(|part| part.to_string())
@@ -16443,8 +16443,8 @@ dependencies {
     fn the_bundle_writer_produces_a_bundle_bundletool_accepts() {
         let Some(bundletool) = find_bundletool() else {
             assert!(
-                std::env::var("OMNI_REQUIRE_BUNDLETOOL").is_err(),
-                "OMNI_REQUIRE_BUNDLETOOL is set but bundletool was not found, so the bundle \
+                std::env::var("APK_BUILDER_REQUIRE_BUNDLETOOL").is_err(),
+                "APK_BUILDER_REQUIRE_BUNDLETOOL is set but bundletool was not found, so the bundle \
                  this build writes was never handed to the tool that judges one"
             );
             eprintln!("bundle conformance: bundletool is not available here");
@@ -16452,8 +16452,8 @@ dependencies {
         };
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
-                std::env::var("OMNI_REQUIRE_BUNDLETOOL").is_err(),
-                "OMNI_REQUIRE_BUNDLETOOL is set but aapt2 is missing, and bundletool needs it"
+                std::env::var("APK_BUILDER_REQUIRE_BUNDLETOOL").is_err(),
+                "APK_BUILDER_REQUIRE_BUNDLETOOL is set but aapt2 is missing, and bundletool needs it"
             );
             eprintln!("bundle conformance: aapt2 is not available here");
             return;
@@ -16487,7 +16487,7 @@ dependencies {
         project.icon = picture.as_ref().map(|path| std::fs::read(path).unwrap());
         project.files = vec![
             (
-                "lib/arm64-v8a/libomni_core.so".to_string(),
+                "lib/arm64-v8a/libapk_builder_core.so".to_string(),
                 b"\x7fELF not a real object, only a path to place".to_vec(),
             ),
             (
@@ -16506,8 +16506,8 @@ dependencies {
              the resource table and {images} launcher files"
         );
 
-        let directory = temp_directory("omni-bundle");
-        let path = directory.join("omni.aab");
+        let directory = temp_directory("builder-bundle");
+        let path = directory.join("builder.aab");
         std::fs::write(&path, &outcome.bundle).unwrap();
 
         let store = directory.join("bundle.jks");
@@ -16521,7 +16521,7 @@ dependencies {
                 "-keypass",
                 "password",
                 "-alias",
-                "omni",
+                "builder",
                 "-keyalg",
                 "RSA",
                 "-keysize",
@@ -16529,7 +16529,7 @@ dependencies {
                 "-validity",
                 "3650",
                 "-dname",
-                "CN=Omni",
+                "CN=Apk Builder",
             ])
             .output()
             .expect("keytool must run");
@@ -16539,7 +16539,7 @@ dependencies {
             String::from_utf8_lossy(&keytool.stderr)
         );
 
-        let apks = directory.join("omni.apks");
+        let apks = directory.join("builder.apks");
         let mut command = std::process::Command::new(&bundletool[0]);
         command.args(&bundletool[1..]);
         command.args([
@@ -16550,7 +16550,7 @@ dependencies {
             &format!("--aapt2={}", aapt2.to_str().unwrap()),
             &format!("--ks={}", store.to_str().unwrap()),
             "--ks-pass=pass:password",
-            "--ks-key-alias=omni",
+            "--ks-key-alias=builder",
             "--key-pass=pass:password",
             "--overwrite",
         ]);
@@ -16627,7 +16627,10 @@ dependencies {
             .output()
             .unwrap();
         let names = String::from_utf8_lossy(&listed.stdout).to_string();
-        assert!(names.contains("lib/arm64-v8a/libomni_core.so"), "{names}");
+        assert!(
+            names.contains("lib/arm64-v8a/libapk_builder_core.so"),
+            "{names}"
+        );
         assert!(names.contains("notes.txt"), "{names}");
 
         if outcome.carries_image {
@@ -16786,7 +16789,7 @@ dependencies {
         assert!(table.read_values(
             concat!(
                 "<resources>",
-                "<string name=\"app_name\">Omni Made</string>",
+                "<string name=\"app_name\">Apk Builder Made</string>",
                 "<string name=\"greeting\">Hello</string>",
                 "<color name=\"accent\">#ff6cb6ff</color>",
                 "<dimen name=\"gap\">12dp</dimen>",
@@ -16827,8 +16830,8 @@ dependencies {
 
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing, so the resource \
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing, so the resource \
                  table this build wrote was never read by anything but itself"
             );
             eprintln!("resource table: aapt2 is not available here");
@@ -16862,7 +16865,7 @@ dependencies {
             .unwrap();
         let apk = builder.finish().unwrap();
 
-        let directory = temp_directory("omni-arsc");
+        let directory = temp_directory("builder-arsc");
         let path = directory.join("table.apk");
         std::fs::write(&path, &apk).unwrap();
 
@@ -16895,7 +16898,7 @@ dependencies {
             "resource 0x7f050000 mipmap/ic_launcher",
             "resource 0x7f060000 string/app_name",
             "resource 0x7f060001 string/greeting",
-            "Omni Made",
+            "Apk Builder Made",
             "Hello",
             "res/mipmap/ic_launcher.png",
             "res/mipmap-xxhdpi/ic_launcher.png",
@@ -16924,7 +16927,7 @@ dependencies {
     #[test]
     fn the_name_a_project_carries_is_translated_in_every_language_it_chose() {
         let _turn = crate::progress::one_at_a_time();
-        let directory = temp_directory("omni-locales");
+        let directory = temp_directory("builder-locales");
         let root = directory.join("Spoken");
         let text = root.to_str().unwrap().to_string();
         let spec = crate::scaffold::Spec {
@@ -16969,8 +16972,8 @@ dependencies {
 
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
             );
             eprintln!("locales: aapt2 is not available here");
             std::fs::remove_dir_all(&directory).ok();
@@ -17036,7 +17039,7 @@ dependencies {
             return;
         };
 
-        let directory = temp_directory("omni-icon-package");
+        let directory = temp_directory("builder-icon-package");
         let root = directory.join("Pictured");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -17083,8 +17086,8 @@ dependencies {
 
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
             );
             eprintln!("icon: aapt2 is not available here");
             std::fs::remove_dir_all(&directory).ok();
@@ -17209,7 +17212,7 @@ dependencies {
         project.icon = picture.as_ref().map(|path| std::fs::read(path).unwrap());
         project.files = vec![
             (
-                "lib/arm64-v8a/libomni.so".to_string(),
+                "lib/arm64-v8a/libapk_builder.so".to_string(),
                 b"\x7fELF".iter().copied().cycle().take(64_000).collect(),
             ),
             (
@@ -17237,7 +17240,7 @@ dependencies {
         }
 
         let library = archive
-            .entry("lib/arm64-v8a/libomni.so")
+            .entry("lib/arm64-v8a/libapk_builder.so")
             .expect("the library must be there");
         assert_eq!(
             library.compression,
@@ -17268,7 +17271,7 @@ dependencies {
             assert_eq!(read.len() as u64, entry.uncompressed_size, "{}", entry.name);
         }
 
-        let directory = temp_directory("omni-packed");
+        let directory = temp_directory("builder-packed");
         let path = directory.join("packed.apk");
         std::fs::write(&path, &outcome.package).unwrap();
 
@@ -17338,7 +17341,7 @@ dependencies {
             return;
         };
 
-        let directory = temp_directory("omni-arsc-align");
+        let directory = temp_directory("builder-arsc-align");
         let root = directory.join("Aligned");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -17429,8 +17432,8 @@ dependencies {
 
         if candidates.is_empty() {
             assert!(
-                std::env::var("OMNI_REQUIRE_SELF_POLICY").is_err(),
-                "OMNI_REQUIRE_SELF_POLICY is set but no merged manifest was found, so this \
+                std::env::var("APK_BUILDER_REQUIRE_SELF_POLICY").is_err(),
+                "APK_BUILDER_REQUIRE_SELF_POLICY is set but no merged manifest was found, so this \
                  application was never held to the policy it enforces on what it builds"
             );
             eprintln!("self policy: no merged manifest has been produced here");
@@ -17560,14 +17563,14 @@ dependencies {
 
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
             );
             eprintln!("version: aapt2 is not available here");
             return;
         };
 
-        let directory = temp_directory("omni-version");
+        let directory = temp_directory("builder-version");
         let path = directory.join("versioned.apk");
         std::fs::write(&path, &outcome.package).unwrap();
         let dumped = std::process::Command::new(&aapt2)
@@ -17595,7 +17598,7 @@ dependencies {
 
     #[test]
     fn a_new_project_keeps_its_resources_in_one_folder() {
-        let directory = temp_directory("omni-res");
+        let directory = temp_directory("builder-res");
         let root = directory.join("Shaped");
         let text = root.to_str().unwrap().to_string();
         let made = crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -17637,7 +17640,7 @@ dependencies {
 
     #[test]
     fn an_older_project_loses_the_starters_nobody_wrote_in() {
-        let directory = temp_directory("omni-scaffold-idle");
+        let directory = temp_directory("builder-scaffold-idle");
         let root = directory.join("Older");
         let text = root.to_str().unwrap().to_string();
         crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
@@ -17668,7 +17671,7 @@ dependencies {
 
     #[test]
     fn only_java_gets_a_folder_because_only_java_is_built() {
-        let directory = temp_directory("omni-scaffold-one");
+        let directory = temp_directory("builder-scaffold-one");
         let root = directory.join("OnlyRust");
         let spec = crate::scaffold::Spec {
             package: "com.tr.yt".to_string(),
@@ -17833,7 +17836,7 @@ dependencies {
 
     #[test]
     fn a_project_created_here_builds_into_a_package() {
-        let directory = temp_directory("omni-scaffold-build");
+        let directory = temp_directory("builder-scaffold-build");
         let root = directory.join("Buildable");
         let spec = crate::scaffold::Spec::default();
         crate::scaffold::create(root.to_str().unwrap(), &spec).unwrap();
@@ -17845,7 +17848,7 @@ dependencies {
         let key_c = std::ffi::CString::new(key.to_str().unwrap()).unwrap();
 
         let report = call_ffi(|| unsafe {
-            crate::ffi::omni_build_project(
+            crate::ffi::apk_builder_build_project(
                 root_c.as_ptr(),
                 out_c.as_ptr(),
                 key_c.as_ptr(),
@@ -17869,40 +17872,45 @@ dependencies {
 
     #[test]
     fn the_bridge_makes_a_developer_key_lists_it_and_signs_a_project_with_it() {
-        let directory = temp_directory("omni-ffi-keys");
+        let directory = temp_directory("builder-ffi-keys");
         let keys = directory.join("Keys");
         let root = directory.join("Signed");
         crate::scaffold::create(root.to_str().unwrap(), &crate::scaffold::Spec::default()).unwrap();
 
         let keys_c = std::ffi::CString::new(keys.to_str().unwrap()).unwrap();
         let spec_c = std::ffi::CString::new(
-            "alias=studio;commonName=Studio Name;organisation=Omni;country=TR;\
+            "alias=studio;commonName=Studio Name;organisation=Apk Builder;country=TR;\
              validityDays=10950;bits=2048",
         )
         .unwrap();
         let password_c = std::ffi::CString::new("a password worth having").unwrap();
 
         let made = call_ffi(|| unsafe {
-            crate::ffi::omni_create_key(keys_c.as_ptr(), spec_c.as_ptr(), password_c.as_ptr())
+            crate::ffi::apk_builder_create_key(
+                keys_c.as_ptr(),
+                spec_c.as_ptr(),
+                password_c.as_ptr(),
+            )
         });
         assert!(is_structurally_valid(&made), "{made}");
         assert!(made.contains("\"created\":true"), "{made}");
         assert!(made.contains("CN=Studio Name"), "{made}");
 
-        let listed = call_ffi(|| unsafe { crate::ffi::omni_list_keys(keys_c.as_ptr()) });
+        let listed = call_ffi(|| unsafe { crate::ffi::apk_builder_list_keys(keys_c.as_ptr()) });
         assert!(is_structurally_valid(&listed), "{listed}");
         assert!(listed.contains("\"alias\":\"studio\""), "{listed}");
 
         let path = crate::keystore::path_for(keys.to_str().unwrap(), "studio");
         let path_c = std::ffi::CString::new(path.clone()).unwrap();
         let opened = call_ffi(|| unsafe {
-            crate::ffi::omni_check_key(path_c.as_ptr(), password_c.as_ptr())
+            crate::ffi::apk_builder_check_key(path_c.as_ptr(), password_c.as_ptr())
         });
         assert!(opened.contains("\"opened\":true"), "{opened}");
 
         let wrong_c = std::ffi::CString::new("not the password").unwrap();
-        let refused =
-            call_ffi(|| unsafe { crate::ffi::omni_check_key(path_c.as_ptr(), wrong_c.as_ptr()) });
+        let refused = call_ffi(|| unsafe {
+            crate::ffi::apk_builder_check_key(path_c.as_ptr(), wrong_c.as_ptr())
+        });
         assert!(refused.contains("\"opened\":false"), "{refused}");
         assert!(refused.contains("EY021"), "{refused}");
         assert!(
@@ -17914,7 +17922,7 @@ dependencies {
         let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
         let out_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
         let built = call_ffi(|| unsafe {
-            crate::ffi::omni_build_project(
+            crate::ffi::apk_builder_build_project(
                 root_c.as_ptr(),
                 out_c.as_ptr(),
                 path_c.as_ptr(),
@@ -17945,7 +17953,7 @@ dependencies {
             .subject
             .contains("CN=Studio Name"));
 
-        let removed = call_ffi(|| unsafe { crate::ffi::omni_delete_key(path_c.as_ptr()) });
+        let removed = call_ffi(|| unsafe { crate::ffi::apk_builder_delete_key(path_c.as_ptr()) });
         assert!(removed.contains("\"removed\":true"), "{removed}");
         assert!(crate::keystore::list(keys.to_str().unwrap()).is_empty());
 
@@ -18142,7 +18150,7 @@ dependencies {
 
     #[test]
     fn a_second_project_is_never_written_over_the_first() {
-        let directory = temp_directory("omni-two-projects");
+        let directory = temp_directory("builder-two-projects");
         let root = directory.join("Same Name");
         let text = root.to_str().unwrap().to_string();
 
@@ -18188,7 +18196,7 @@ dependencies {
         let _turn = SHARED_KEY_TURN
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        let directory = temp_directory("omni-key-kept");
+        let directory = temp_directory("builder-key-kept");
         let keys = directory.join("Keys");
         let path =
             crate::keystore::path_for(keys.to_str().unwrap(), crate::keystore::DEFAULT_ALIAS);
@@ -18220,7 +18228,7 @@ dependencies {
         let path_c = std::ffi::CString::new(path.clone()).unwrap();
 
         let refused = call_ffi(|| unsafe {
-            crate::ffi::omni_build_all(
+            crate::ffi::apk_builder_build_all(
                 root_c.as_ptr(),
                 package_c.as_ptr(),
                 bundle_c.as_ptr(),
@@ -18246,13 +18254,13 @@ dependencies {
         let _turn = SHARED_KEY_TURN
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        let directory = temp_directory("omni-shared-key");
+        let directory = temp_directory("builder-shared-key");
         let keys = directory.join("Keys");
         let root = directory.join("Together");
         crate::scaffold::create(root.to_str().unwrap(), &crate::scaffold::Spec::default()).unwrap();
 
         let keys_c = std::ffi::CString::new(keys.to_str().unwrap()).unwrap();
-        let first = call_ffi(|| unsafe { crate::ffi::omni_default_key(keys_c.as_ptr()) });
+        let first = call_ffi(|| unsafe { crate::ffi::apk_builder_default_key(keys_c.as_ptr()) });
         assert!(is_structurally_valid(&first), "{first}");
         assert!(first.contains("\"ready\":true"), "{first}");
         assert!(first.contains("\"created\":true"), "{first}");
@@ -18277,7 +18285,7 @@ dependencies {
             "an answer must never echo a password: {first}"
         );
 
-        let again = call_ffi(|| unsafe { crate::ffi::omni_default_key(keys_c.as_ptr()) });
+        let again = call_ffi(|| unsafe { crate::ffi::apk_builder_default_key(keys_c.as_ptr()) });
         assert!(again.contains("\"ready\":true"), "{again}");
         assert!(
             again.contains("\"created\":false"),
@@ -18298,7 +18306,7 @@ dependencies {
         let password_c = std::ffi::CString::new(crate::keystore::DEFAULT_PASSWORD).unwrap();
 
         let built = call_ffi(|| unsafe {
-            crate::ffi::omni_build_all(
+            crate::ffi::apk_builder_build_all(
                 root_c.as_ptr(),
                 package_c.as_ptr(),
                 bundle_c.as_ptr(),
@@ -18349,7 +18357,7 @@ dependencies {
 
     #[test]
     fn what_was_built_is_found_in_the_dated_folders_it_was_written_to() {
-        let directory = temp_directory("omni-outputs");
+        let directory = temp_directory("builder-outputs");
         let outputs = directory.join(crate::workspace::OUTPUT_FOLDER);
         let first = outputs.join("2026-09-19_10-00-00");
         let second = outputs.join("2026-09-19_11-30-00");
@@ -18390,7 +18398,7 @@ dependencies {
 
     #[test]
     fn a_package_checks_itself_and_says_what_it_found() {
-        let directory = temp_directory("omni-integrity");
+        let directory = temp_directory("builder-integrity");
         let root = directory.join("Checked");
         crate::scaffold::create(root.to_str().unwrap(), &crate::scaffold::Spec::default()).unwrap();
 
@@ -18400,7 +18408,7 @@ dependencies {
         let out_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
         let key_c = std::ffi::CString::new(key.to_str().unwrap()).unwrap();
         call_ffi(|| unsafe {
-            crate::ffi::omni_build_project(
+            crate::ffi::apk_builder_build_project(
                 root_c.as_ptr(),
                 out_c.as_ptr(),
                 key_c.as_ptr(),
@@ -18423,8 +18431,9 @@ dependencies {
 
         let path_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
         let good = std::ffi::CString::new(fingerprint.clone()).unwrap();
-        let report =
-            call_ffi(|| unsafe { crate::ffi::omni_verify_self(path_c.as_ptr(), good.as_ptr()) });
+        let report = call_ffi(|| unsafe {
+            crate::ffi::apk_builder_verify_self(path_c.as_ptr(), good.as_ptr())
+        });
         assert!(report.contains("\"standing\":\"TRUSTED\""), "{report}");
         assert!(
             report.contains("cannot detect an attacker who patched the check out"),
@@ -18432,8 +18441,9 @@ dependencies {
         );
 
         let other = std::ffi::CString::new("0".repeat(64)).unwrap();
-        let report =
-            call_ffi(|| unsafe { crate::ffi::omni_verify_self(path_c.as_ptr(), other.as_ptr()) });
+        let report = call_ffi(|| unsafe {
+            crate::ffi::apk_builder_verify_self(path_c.as_ptr(), other.as_ptr())
+        });
         assert!(report.contains("\"standing\":\"TAMPERED\""), "{report}");
         assert!(report.contains("signed by a different key"), "{report}");
 
@@ -18443,8 +18453,9 @@ dependencies {
         let damaged_path = directory.join("damaged.apk");
         std::fs::write(&damaged_path, &damaged).unwrap();
         let damaged_c = std::ffi::CString::new(damaged_path.to_str().unwrap()).unwrap();
-        let report =
-            call_ffi(|| unsafe { crate::ffi::omni_verify_self(damaged_c.as_ptr(), good.as_ptr()) });
+        let report = call_ffi(|| unsafe {
+            crate::ffi::apk_builder_verify_self(damaged_c.as_ptr(), good.as_ptr())
+        });
         assert!(report.contains("\"standing\":\"TAMPERED\""), "{report}");
 
         std::fs::remove_dir_all(&directory).ok();
@@ -18471,7 +18482,7 @@ dependencies {
     }
 
     static PRETEND_CONTRACT: crate::plugin::Contract = crate::plugin::Contract {
-        id: "omni.plugin.pretend",
+        id: "plugin.pretend",
         display_name: "Pretend",
         version: crate::plugin::Version::new(0, 1, 0),
         produces_artifacts: true,
@@ -18551,7 +18562,7 @@ dependencies {
     fn nothing_a_compiler_made_is_published_unless_all_of_it_was() {
         use crate::compiler::{Budget, Compiler, Kind, Request, Session};
 
-        let directory = temp_directory("omni-compiler-contract");
+        let directory = temp_directory("builder-compiler-contract");
         let store = crate::store::Store::at(directory.to_str().unwrap());
         let request = Request::new(crate::compiler::Abi::Arm64V8a, 28)
             .with_source(crate::compiler::Source::of("A.java", b"class A {}"));
@@ -18561,7 +18572,7 @@ dependencies {
                 Box::leak(Box::new(crate::caps::Policy::new("test")));
             let sink: &'static mut crate::diag::Sink =
                 Box::leak(Box::new(crate::diag::Sink::new()));
-            Session::new("omni.plugin.pretend", &store, policy, sink, budget)
+            Session::new("plugin.pretend", &store, policy, sink, budget)
         };
 
         let good = pretend(vec![
@@ -18678,7 +18689,7 @@ dependencies {
     fn the_same_everything_plans_to_the_same_key_and_anything_else_does_not() {
         use crate::compiler::{Abi, Identity, Plan, Request, Source};
 
-        let identity = Identity::new("kotlin", "omni.kotlin", "2.4.10", "aarch64-linux-android");
+        let identity = Identity::new("kotlin", "build.kotlin", "2.4.10", "aarch64-linux-android");
         let base = Request::new(Abi::Arm64V8a, 30)
             .with_source(Source::of("A.kt", b"fun main() {}"))
             .with_source(Source::of("B.kt", b"fun other() {}"));
@@ -18762,10 +18773,15 @@ dependencies {
         );
 
         for moved in [
-            Identity::new("kotlin", "omni.kotlin", "2.4.11", "aarch64-linux-android"),
+            Identity::new("kotlin", "build.kotlin", "2.4.11", "aarch64-linux-android"),
             Identity::new("kotlin", "other.kotlin", "2.4.10", "aarch64-linux-android"),
-            Identity::new("java", "omni.kotlin", "2.4.10", "aarch64-linux-android"),
-            Identity::new("kotlin", "omni.kotlin", "2.4.10", "aarch64-linux-android30"),
+            Identity::new("java", "build.kotlin", "2.4.10", "aarch64-linux-android"),
+            Identity::new(
+                "kotlin",
+                "build.kotlin",
+                "2.4.10",
+                "aarch64-linux-android30",
+            ),
             identity.clone().with("stdlib", "2.4.10"),
         ] {
             assert!(
@@ -18782,7 +18798,7 @@ dependencies {
 
     #[test]
     fn what_a_build_made_is_kept_checked_and_found_again_after_a_restart() {
-        let directory = temp_directory("omni-store");
+        let directory = temp_directory("builder-store");
         let root = directory.join("Objects");
         let root_text = root.to_str().unwrap().to_string();
         let store = crate::store::Store::at(&root_text);
@@ -19057,7 +19073,7 @@ dependencies {
 
     #[test]
     fn a_zip_this_writes_is_one_unzip_reads_back() {
-        let directory = temp_directory("omni-pack-zip");
+        let directory = temp_directory("builder-pack-zip");
         a_small_tree(&directory);
         let into = directory.join("Held.zip");
 
@@ -19107,7 +19123,7 @@ dependencies {
 
     #[test]
     fn a_tar_this_writes_is_one_tar_reads_back() {
-        let directory = temp_directory("omni-pack-tar");
+        let directory = temp_directory("builder-pack-tar");
         a_small_tree(&directory);
         let into = directory.join("Held.tar");
 
@@ -19165,7 +19181,7 @@ dependencies {
 
     #[test]
     fn a_locked_zip_opens_with_its_password_and_with_nothing_else() {
-        let directory = temp_directory("omni-pack-locked");
+        let directory = temp_directory("builder-pack-locked");
         a_small_tree(&directory);
         let into = directory.join("Held.zip");
 
@@ -19234,7 +19250,7 @@ dependencies {
 
     #[test]
     fn a_zip_locked_the_old_way_by_somebody_else_still_opens() {
-        let directory = temp_directory("omni-pack-legacy");
+        let directory = temp_directory("builder-pack-legacy");
         std::fs::create_dir_all(&directory).expect("the folder is made");
         let short = "a line, and then another\n";
         let long = "x".repeat(4_000);
@@ -19591,7 +19607,7 @@ dependencies {
             eprintln!("keystore conformance: openssl is not available here");
             return;
         };
-        let directory = temp_directory("omni-keystore");
+        let directory = temp_directory("builder-keystore");
         let path = directory.join("developer.pk8");
         std::fs::write(&path, &sealed).unwrap();
 
@@ -19657,7 +19673,7 @@ dependencies {
 
     #[test]
     fn a_name_being_typed_finds_the_types_it_could_be() {
-        let directory = temp_directory("omni-symbols");
+        let directory = temp_directory("builder-symbols");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -19751,7 +19767,7 @@ dependencies {
 
     #[test]
     fn a_type_this_offers_is_one_an_import_of_it_compiles() {
-        let directory = temp_directory("omni-symbols-compile");
+        let directory = temp_directory("builder-symbols-compile");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -19790,7 +19806,7 @@ dependencies {
 
     #[test]
     fn the_bridge_offers_names_and_says_where_one_is_written() {
-        let directory = temp_directory("omni-symbols-bridge");
+        let directory = temp_directory("builder-symbols-bridge");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -19814,13 +19830,14 @@ dependencies {
             let held = unsafe { std::ffi::CStr::from_ptr(ptr) }
                 .to_string_lossy()
                 .into_owned();
-            unsafe { crate::ffi::omni_string_free(ptr) };
+            unsafe { crate::ffi::apk_builder_string_free(ptr) };
             held
         };
         let root_c = std::ffi::CString::new(root.clone()).unwrap();
 
         let needle = std::ffi::CString::new("Ledger").unwrap();
-        let answer = read(unsafe { crate::ffi::omni_symbols(root_c.as_ptr(), needle.as_ptr()) });
+        let answer =
+            read(unsafe { crate::ffi::apk_builder_symbols(root_c.as_ptr(), needle.as_ptr()) });
         assert!(is_structurally_valid(&answer), "{answer}");
         assert!(answer.contains("\"found\":true"), "{answer}");
         assert!(
@@ -19832,14 +19849,15 @@ dependencies {
 
         let named = std::ffi::CString::new("com.tr.yt.Ledger").unwrap();
         let where_it_is =
-            read(unsafe { crate::ffi::omni_where_written(root_c.as_ptr(), named.as_ptr()) });
+            read(unsafe { crate::ffi::apk_builder_where_written(root_c.as_ptr(), named.as_ptr()) });
         assert!(is_structurally_valid(&where_it_is), "{where_it_is}");
         assert!(where_it_is.contains("\"written\":true"), "{where_it_is}");
         assert!(where_it_is.contains("\"line\":3"), "{where_it_is}");
 
         let platform = std::ffi::CString::new("android.widget.TextView").unwrap();
-        let nowhere =
-            read(unsafe { crate::ffi::omni_where_written(root_c.as_ptr(), platform.as_ptr()) });
+        let nowhere = read(unsafe {
+            crate::ffi::apk_builder_where_written(root_c.as_ptr(), platform.as_ptr())
+        });
         assert!(nowhere.contains("\"written\":false"), "{nowhere}");
 
         std::fs::remove_dir_all(&directory).ok();
@@ -19847,7 +19865,7 @@ dependencies {
 
     #[test]
     fn a_check_refuses_a_manifest_that_names_a_missing_theme_as_the_build_would() {
-        let directory = temp_directory("omni-missing-theme");
+        let directory = temp_directory("builder-missing-theme");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -19887,7 +19905,7 @@ dependencies {
 
     #[test]
     fn source_this_build_cannot_compile_stops_it_rather_than_being_dropped() {
-        let directory = temp_directory("omni-uncompiled");
+        let directory = temp_directory("builder-uncompiled");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -19971,7 +19989,7 @@ class Screen
             assert!(suffix.starts_with('.'), "{suffix}");
         }
 
-        let directory = temp_directory("omni-languages");
+        let directory = temp_directory("builder-languages");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(&root, &crate::scaffold::Spec::default()).unwrap();
         assert!(
@@ -20054,7 +20072,7 @@ class Screen
 
     #[test]
     fn a_check_says_what_the_policy_would_refuse() {
-        let directory = temp_directory("omni-check-policy");
+        let directory = temp_directory("builder-check-policy");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20097,7 +20115,7 @@ class Screen
         assert_eq!(crate::builder::r_field("plain_name"), "plain_name");
         assert_eq!(crate::builder::r_field("app_name"), "app_name");
 
-        let directory = temp_directory("omni-r-field");
+        let directory = temp_directory("builder-r-field");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20147,14 +20165,14 @@ class Screen
     fn the_resources_a_real_application_ships_come_out_as_aapt2_makes_them() {
         let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 or android.jar is missing"
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 or android.jar is missing"
             );
             eprintln!("resources: aapt2 or android.jar is not available here");
             return;
         };
 
-        let directory = temp_directory("omni-real-resources");
+        let directory = temp_directory("builder-real-resources");
         let root = directory.join("project");
         let folder = root.to_str().unwrap().to_string();
         crate::scaffold::create(
@@ -20214,7 +20232,7 @@ class Screen
                  \x20 <style name=\"Plain.Loud\" parent=\"Plain\">\n\
                  \x20   <item name=\"android:textStyle\">bold</item>\n\
                  \x20 </style>\n\
-                 \x20 <style name=\"OmniTheme\" parent=\"android:Theme.Material.NoActionBar\">\n\
+                 \x20 <style name=\"AppTheme\" parent=\"android:Theme.Material.NoActionBar\">\n\
                  \x20   <item name=\"android:windowBackground\">@color/ground</item>\n\
                  \x20   <item name=\"android:colorAccent\">@color/accent</item>\n\
                  \x20 </style>\n\
@@ -20274,7 +20292,7 @@ class Screen
             "wide",
             "Plain",
             "Plain.Loud",
-            "OmniTheme",
+            "AppTheme",
             "screen",
             "heading",
         ] {
@@ -20376,7 +20394,7 @@ class Screen
 
     #[test]
     fn a_projects_health_is_counted_off_its_own_files() {
-        let directory = temp_directory("omni-health");
+        let directory = temp_directory("builder-health");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20608,7 +20626,7 @@ class Screen
 
     #[test]
     fn a_projects_dependencies_are_read_out_of_the_files_themselves() {
-        let directory = temp_directory("omni-depends");
+        let directory = temp_directory("builder-depends");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20756,7 +20774,7 @@ class Screen
 
     #[test]
     fn a_manifest_edit_changes_what_it_was_asked_to_and_leaves_the_rest() {
-        let directory = temp_directory("omni-manifest");
+        let directory = temp_directory("builder-manifest");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20828,7 +20846,7 @@ class Screen
 
     #[test]
     fn a_permission_can_be_added_and_taken_away_again() {
-        let directory = temp_directory("omni-permissions");
+        let directory = temp_directory("builder-permissions");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20893,7 +20911,7 @@ class Screen
 
     #[test]
     fn an_edit_that_would_break_the_manifest_leaves_it_alone() {
-        let directory = temp_directory("omni-manifest-safe");
+        let directory = temp_directory("builder-manifest-safe");
         let root = directory.to_str().unwrap().to_string();
         crate::scaffold::create(
             &root,
@@ -20927,7 +20945,7 @@ class Screen
 
     #[test]
     fn a_package_this_wrote_opens_and_says_what_is_in_it() {
-        let directory = temp_directory("omni-inspect");
+        let directory = temp_directory("builder-inspect");
         let root = directory.join("project");
         std::fs::create_dir_all(&root).unwrap();
         let folder = root.to_str().unwrap().to_string();
@@ -20949,8 +20967,8 @@ class Screen
         let key = crate::rsa::generate(2048).expect("a key");
         let certificate = crate::certificate::self_signed(
             &key,
-            "Omni Inspect",
-            "Omni",
+            "Apk Builder Inspect",
+            "Apk Builder",
             "TR",
             crate::certificate::moment_from_epoch(1_700_000_000),
             crate::certificate::moment_from_epoch(2_000_000_000),
@@ -21009,7 +21027,7 @@ class Screen
             found
                 .signed_by
                 .iter()
-                .any(|held| held.contains("Omni Inspect")),
+                .any(|held| held.contains("Apk Builder Inspect")),
             "signed by {:?}",
             found.signed_by
         );
@@ -21036,7 +21054,7 @@ class Screen
 
     #[test]
     fn opening_something_that_is_not_a_package_is_refused() {
-        let directory = temp_directory("omni-inspect-not");
+        let directory = temp_directory("builder-inspect-not");
         let path = directory.join("not-a-package.apk");
         std::fs::write(&path, b"this is not a zip and never was").unwrap();
 
@@ -21060,7 +21078,7 @@ class Screen
              package=\"com.tr.yt\" android:versionCode=\"7\" android:versionName=\"1.2.3\">\n\
              \x20 <uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\"/>\n\
              \x20 <uses-permission android:name=\"android.permission.INTERNET\"/>\n\
-             \x20 <application android:label=\"Omni\" android:debuggable=\"false\" \
+             \x20 <application android:label=\"Apk Builder\" android:debuggable=\"false\" \
              android:hardwareAccelerated=\"true\">\n\
              \x20   <activity android:name=\".Main\" android:exported=\"true\"/>\n\
              \x20 </application>\n\
@@ -21099,7 +21117,7 @@ class Screen
             .children_named("application")
             .next()
             .expect("an application");
-        assert_eq!(application.attribute("label"), Some("Omni"));
+        assert_eq!(application.attribute("label"), Some("Apk Builder"));
 
         assert_eq!(application.attribute("debuggable"), Some("false"));
         assert_eq!(application.attribute("hardwareAccelerated"), Some("true"));
@@ -21144,7 +21162,7 @@ class Screen
     #[test]
     fn the_binary_xml_reader_survives_arbitrary_input() {
         let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
-             package=\"com.tr.yt\"><application android:label=\"Omni\"/></manifest>";
+             package=\"com.tr.yt\"><application android:label=\"Apk Builder\"/></manifest>";
         let mut sink = Sink::new();
         let parsed =
             crate::xml::parse(source, "AndroidManifest.xml", &mut sink).expect("it must parse");
@@ -21170,20 +21188,20 @@ class Screen
     fn what_aapt2_wrote_reads_back_the_same_as_what_this_wrote() {
         let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 or android.jar is missing"
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 or android.jar is missing"
             );
             eprintln!("binary xml: aapt2 or android.jar is not available here");
             return;
         };
 
-        let directory = temp_directory("omni-axml-read");
+        let directory = temp_directory("builder-axml-read");
         let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n\
              \x20   package=\"com.tr.yt\"\n\
              \x20   android:versionCode=\"7\"\n\
              \x20   android:versionName=\"1.2.3\">\n\
              \x20 <uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\"/>\n\
-             \x20 <application android:label=\"Omni\" android:hardwareAccelerated=\"true\">\n\
+             \x20 <application android:label=\"Apk Builder\" android:hardwareAccelerated=\"true\">\n\
              \x20   <activity android:name=\".Main\" android:exported=\"true\"/>\n\
              \x20 </application>\n\
              </manifest>\n";
@@ -21232,7 +21250,7 @@ class Screen
             .children_named("application")
             .next()
             .expect("an application");
-        assert_eq!(application.attribute("label"), Some("Omni"));
+        assert_eq!(application.attribute("label"), Some("Apk Builder"));
         assert_eq!(application.attribute("hardwareAccelerated"), Some("true"));
         let activity = application
             .children_named("activity")
@@ -21310,8 +21328,8 @@ class Screen
 
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
-                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing, so the \
+                std::env::var("APK_BUILDER_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing, so the \
                  manifest this build writes was never checked against it"
             );
             eprintln!("axml conformance: aapt2 is not available here");
@@ -21346,20 +21364,20 @@ class Screen
         let expected = [
             "N: android=http://schemas.android.com/apk/res/android",
             "E: manifest",
-            "A: package=\"com.omni.probe\"",
+            "A: package=\"com.example.probe\"",
             "E: uses-sdk",
             "android:minSdkVersion(0x0101020c)=30",
             "android:targetSdkVersion(0x01010270)=36",
             "E: uses-permission",
             "android:name(0x01010003)=\"android.permission.INTERNET\"",
             "E: application",
-            "android:label(0x01010001)=\"Omni\"",
+            "android:label(0x01010001)=\"Apk Builder\"",
             "android:allowBackup(0x01010280)=false",
             "android:supportsRtl(0x010103af)=true",
             "android:extractNativeLibs(0x010104ea)=false",
             "android:theme(0x01010000)=@0x7f060000",
             "E: activity",
-            "android:name(0x01010003)=\"com.omni.probe.Main\"",
+            "android:name(0x01010003)=\"com.example.probe.Main\"",
             "android:exported(0x01010010)=true",
         ];
         for line in expected {
@@ -21461,7 +21479,7 @@ class Screen
 
     #[test]
     fn a_reference_by_name_is_refused_rather_than_guessed() {
-        let text = PROBE_MANIFEST.replace("@0x7f060000", "@style/OmniTheme");
+        let text = PROBE_MANIFEST.replace("@0x7f060000", "@style/AppTheme");
         let (root, _) = parse_xml(&text);
         let root = root.expect("the manifest must parse");
         let error = axml::encode(&root).expect_err("a name reference cannot be resolved yet");
@@ -21479,7 +21497,7 @@ class Screen
             ("-1", Value::Decimal(-1)),
             ("0x20000", Value::Hex(0x20000)),
             ("@0x7f060000", Value::Reference(0x7f06_0000)),
-            ("Omni", Value::Text),
+            ("Apk Builder", Value::Text),
             ("com.apk.builder.Main", Value::Text),
             ("1.0.0", Value::Text),
         ];
@@ -21696,8 +21714,8 @@ class Screen
         let classes = classes_this_build_produced();
         if classes.is_empty() {
             assert!(
-                std::env::var("OMNI_REQUIRE_CLASS_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_CLASS_CONFORMANCE is set but no class files were found"
+                std::env::var("APK_BUILDER_REQUIRE_CLASS_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_CLASS_CONFORMANCE is set but no class files were found"
             );
             eprintln!(
                 "class conformance: nothing compiled here, so nothing was read. \
@@ -21717,8 +21735,8 @@ class Screen
 
             let Some(facts) = javap(path) else {
                 assert!(
-                    std::env::var("OMNI_REQUIRE_CLASS_CONFORMANCE").is_err(),
-                    "OMNI_REQUIRE_CLASS_CONFORMANCE is set but javap is not available"
+                    std::env::var("APK_BUILDER_REQUIRE_CLASS_CONFORMANCE").is_err(),
+                    "APK_BUILDER_REQUIRE_CLASS_CONFORMANCE is set but javap is not available"
                 );
                 eprintln!("class conformance: javap is not available here");
                 return;
@@ -22028,7 +22046,7 @@ class Screen
                 ..cache_inputs(&source, &dependencies)
             },
             CacheInputs {
-                relevant_environment: &[("OMNI_X", "1")],
+                relevant_environment: &[("APK_BUILDER_X", "1")],
                 ..cache_inputs(&source, &dependencies)
             },
             CacheInputs {
@@ -22102,12 +22120,7 @@ class Screen
     }
 
     fn node(id: &str, kind: NodeKind) -> Node {
-        Node::new(
-            NodeId::new(id).unwrap(),
-            kind,
-            "omni.plugin.kotlin",
-            digests(),
-        )
+        Node::new(NodeId::new(id).unwrap(), kind, "plugin.kotlin", digests())
     }
 
     #[test]
@@ -22451,7 +22464,7 @@ class Screen
             .add(Node::new(
                 NodeId::new("dex").unwrap(),
                 NodeKind::Dex,
-                "omni.plugin.kotlin",
+                "plugin.kotlin",
                 digests(),
             ))
             .unwrap();
@@ -22484,7 +22497,7 @@ class Screen
             .add(Node::new(
                 NodeId::new("mystery").unwrap(),
                 NodeKind::Dex,
-                "omni.plugin.nonexistent",
+                "plugin.nonexistent",
                 digests(),
             ))
             .unwrap();
@@ -22879,15 +22892,15 @@ class Screen
             (report, taken)
         };
 
-        let (report, taken) = run("omni.plugin.kotlin");
+        let (report, taken) = run("plugin.kotlin");
         assert_eq!(report.succeeded, 1);
         assert_eq!(taken.len(), NODE_STEPS.len());
 
-        let (report, taken) = run("omni.plugin.kotlin");
+        let (report, taken) = run("plugin.kotlin");
         assert_eq!(report.resumed, 1);
         assert!(taken.is_empty());
 
-        let (report, taken) = run("omni.plugin.java");
+        let (report, taken) = run("plugin.java");
         assert_eq!(report.resumed, 0);
         assert_eq!(report.succeeded, 1);
         assert_eq!(
@@ -23116,11 +23129,15 @@ Viewbinding   = false
     #[test]
     fn a_minimal_manifest_gets_safe_defaults() {
         let mut sink = Sink::new();
-        let project =
-            parse_manifest("[ Project ]\nName = \"Tiny\"\n", "com.omni.tiny", &mut sink).unwrap();
+        let project = parse_manifest(
+            "[ Project ]\nName = \"Tiny\"\n",
+            "com.example.tiny",
+            &mut sink,
+        )
+        .unwrap();
 
         assert_eq!(project.name, "Tiny");
-        assert_eq!(project.id, "com.omni.tiny");
+        assert_eq!(project.id, "com.example.tiny");
         assert_eq!(project.min_sdk, 30);
         assert_eq!(project.target_sdk, crate::compiler::NEWEST_DESCRIBED_API);
         assert_eq!(project.compile_sdk, crate::compiler::NEWEST_DESCRIBED_API);
@@ -23191,7 +23208,7 @@ Viewbinding   = false
                 .find(|d| d.code == code)
                 .unwrap_or_else(|| panic!("{manifest:?} -> {:?}", sink.entries()));
             assert_eq!(error.location.as_ref().unwrap().line, line, "{manifest:?}");
-            assert_eq!(error.location.as_ref().unwrap().file, "Omni.toml");
+            assert_eq!(error.location.as_ref().unwrap().file, "Project.toml");
         }
     }
 
@@ -23433,8 +23450,10 @@ Viewbinding   = false
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("omni-vfs-{label}-{}-{unique}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "builder-vfs-{label}-{}-{unique}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("temporary directory");
         path
@@ -23570,12 +23589,12 @@ Viewbinding   = false
 
         let path = VirtualPath::parse("nested/deep/file.txt").unwrap();
         let written = vfs
-            .write_atomic(&mut ctx, "plugin.test", "output", &path, b"omni")
+            .write_atomic(&mut ctx, "plugin.test", "output", &path, b"builder")
             .unwrap();
-        assert_eq!(written, crate::hash::sha256(b"omni"));
+        assert_eq!(written, crate::hash::sha256(b"builder"));
 
         let (bytes, digest) = vfs.read(&mut ctx, "plugin.test", "output", &path).unwrap();
-        assert_eq!(bytes, b"omni");
+        assert_eq!(bytes, b"builder");
         assert_eq!(digest, written);
 
         assert!(vfs
@@ -23618,7 +23637,7 @@ Viewbinding   = false
             .unwrap()
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains("omni-partial"))
+            .filter(|name| name.contains("builder-partial"))
             .collect();
         assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
         assert_eq!(std::fs::read(root.join("artifact.bin")).unwrap(), b"second");
@@ -23945,8 +23964,8 @@ Viewbinding   = false
 
         if !python_available() {
             assert!(
-                std::env::var("OMNI_REQUIRE_POW_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_POW_CONFORMANCE is set but no independent arithmetic is here"
+                std::env::var("APK_BUILDER_REQUIRE_POW_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_POW_CONFORMANCE is set but no independent arithmetic is here"
             );
             eprintln!("bignum: no independent arithmetic is available here");
             return;
@@ -24148,8 +24167,8 @@ Viewbinding   = false
     fn gcm_agrees_with_an_independent_implementation() {
         if !python_gcm_available() {
             assert!(
-                std::env::var("OMNI_REQUIRE_GCM_CONFORMANCE").is_err(),
-                "OMNI_REQUIRE_GCM_CONFORMANCE is set but no independent cipher is here"
+                std::env::var("APK_BUILDER_REQUIRE_GCM_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_GCM_CONFORMANCE is set but no independent cipher is here"
             );
             eprintln!("gcm: no independent implementation is available here");
             return;
@@ -24289,7 +24308,7 @@ Viewbinding   = false
         assert_eq!(shape.len(), graph.len());
         assert_eq!(crate::graph::Shape::decode(&shape.encode()), shape);
 
-        let folder = temp_directory("omni-graph-shape");
+        let folder = temp_directory("builder-graph-shape");
         let at = folder.join("deep/shape.tsv");
         let path = at.to_str().unwrap();
         shape.write(path).expect("the shape is written");
@@ -24434,7 +24453,7 @@ Viewbinding   = false
 
     #[test]
     fn a_lock_is_held_by_one_holder_at_a_time() {
-        let root = temp_directory("omni-vfs-lock");
+        let root = temp_directory("builder-vfs-lock");
         let first = crate::vfs::Lock::take(&root, "build").expect("the lock is taken");
         assert!(first.path().is_some_and(|at| at.is_file()));
 
@@ -24448,13 +24467,13 @@ Viewbinding   = false
         let again = crate::vfs::Lock::take(&root, "build").expect("the lock is free again");
         assert!(again.path().is_some_and(|at| at.is_file()));
         drop(again);
-        assert!(!root.join("build.omni-lock").exists());
+        assert!(!root.join("build.builder-lock").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn a_lock_a_dead_build_left_behind_is_taken_over() {
-        let root = temp_directory("omni-vfs-stale");
+        let root = temp_directory("builder-vfs-stale");
         let held = crate::vfs::Lock::take(&root, "build").expect("the lock is taken");
         std::mem::forget(held);
 
@@ -24472,7 +24491,7 @@ Viewbinding   = false
 
     #[test]
     fn a_rollback_puts_back_what_a_build_changed() {
-        let root = temp_directory("omni-vfs-rollback");
+        let root = temp_directory("builder-vfs-rollback");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("kept.txt"), b"first").unwrap();
 
@@ -24508,7 +24527,7 @@ Viewbinding   = false
 
     #[test]
     fn a_commit_keeps_what_a_build_changed() {
-        let root = temp_directory("omni-vfs-commit");
+        let root = temp_directory("builder-vfs-commit");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("kept.txt"), b"first").unwrap();
 
@@ -24537,7 +24556,7 @@ Viewbinding   = false
 
     #[test]
     fn what_a_rollback_would_need_is_bounded_by_the_quota() {
-        let root = temp_directory("omni-vfs-journal-quota");
+        let root = temp_directory("builder-vfs-journal-quota");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("big.bin"), vec![7u8; 4096]).unwrap();
 
@@ -24569,10 +24588,10 @@ Viewbinding   = false
 
     #[test]
     fn a_partial_file_a_dead_write_left_behind_is_swept() {
-        let root = temp_directory("omni-vfs-sweep");
+        let root = temp_directory("builder-vfs-sweep");
         std::fs::create_dir_all(root.join("deep")).unwrap();
-        std::fs::write(root.join("a.txt.omni-partial"), b"half").unwrap();
-        std::fs::write(root.join("deep/b.bin.omni-partial"), b"half").unwrap();
+        std::fs::write(root.join("a.txt.builder-partial"), b"half").unwrap();
+        std::fs::write(root.join("deep/b.bin.builder-partial"), b"half").unwrap();
         std::fs::write(root.join("deep/keep.txt"), b"whole").unwrap();
 
         assert_eq!(
@@ -24584,8 +24603,8 @@ Viewbinding   = false
             crate::vfs::sweep_partials(&root, 0).expect("the sweep runs"),
             2
         );
-        assert!(!root.join("a.txt.omni-partial").exists());
-        assert!(!root.join("deep/b.bin.omni-partial").exists());
+        assert!(!root.join("a.txt.builder-partial").exists());
+        assert!(!root.join("deep/b.bin.builder-partial").exists());
         assert_eq!(std::fs::read(root.join("deep/keep.txt")).unwrap(), b"whole");
         assert_eq!(
             crate::vfs::sweep_partials(&root.join("nowhere"), 0).expect("a missing tree is empty"),
@@ -24865,12 +24884,15 @@ Viewbinding   = false
 
     #[test]
     fn the_abi_reports_its_version() {
-        assert_eq!(crate::ffi::omni_abi_version(), crate::ffi::OMNI_ABI_VERSION);
+        assert_eq!(
+            crate::ffi::apk_builder_abi_version(),
+            crate::ffi::APK_BUILDER_ABI_VERSION
+        );
     }
 
     #[test]
     fn the_abi_exposes_a_static_nul_terminated_version() {
-        let ptr = crate::ffi::omni_core_version();
+        let ptr = crate::ffi::apk_builder_core_version();
         assert!(!ptr.is_null());
         let version = unsafe { std::ffi::CStr::from_ptr(ptr) };
         assert_eq!(version.to_str().unwrap(), crate::CORE_VERSION);
@@ -24878,36 +24900,36 @@ Viewbinding   = false
 
     #[test]
     fn the_abi_accepts_null_as_an_empty_observation() {
-        let ptr = unsafe { crate::ffi::omni_state_report(std::ptr::null()) };
+        let ptr = unsafe { crate::ffi::apk_builder_state_report(std::ptr::null()) };
         assert!(!ptr.is_null());
         let report = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()
             .to_string();
-        unsafe { crate::ffi::omni_string_free(ptr) };
+        unsafe { crate::ffi::apk_builder_string_free(ptr) };
         assert!(is_structurally_valid(&report));
     }
 
     #[test]
     fn the_abi_round_trips_an_observation() {
         let input = std::ffi::CString::new("minSdk=30;targetSdk=37").unwrap();
-        let ptr = unsafe { crate::ffi::omni_state_report(input.as_ptr()) };
+        let ptr = unsafe { crate::ffi::apk_builder_state_report(input.as_ptr()) };
         assert!(!ptr.is_null());
         let report = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()
             .to_string();
-        unsafe { crate::ffi::omni_string_free(ptr) };
+        unsafe { crate::ffi::apk_builder_string_free(ptr) };
         assert!(report.contains("\"state\":\"MATCH\""));
     }
 
     #[test]
     fn freeing_null_is_a_no_op() {
-        unsafe { crate::ffi::omni_string_free(std::ptr::null_mut()) };
+        unsafe { crate::ffi::apk_builder_string_free(std::ptr::null_mut()) };
     }
     #[test]
     fn a_project_keeps_its_own_webp_launcher_icon() {
-        let directory = temp_directory("omni-own-icon");
+        let directory = temp_directory("builder-own-icon");
         let root = directory.to_str().unwrap().to_string();
         std::fs::create_dir_all(directory.join("Res/mipmap-hdpi")).unwrap();
         std::fs::create_dir_all(directory.join("Res/mipmap-anydpi-v26")).unwrap();
@@ -24943,7 +24965,7 @@ Viewbinding   = false
 
     #[test]
     fn a_library_module_brings_its_r_class_resources_and_manifest() {
-        let directory = temp_directory("omni-modules");
+        let directory = temp_directory("builder-modules");
         let at = |path: &str, text: &str| {
             let path = directory.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -25101,8 +25123,14 @@ Viewbinding   = false
 
         let lowered = crate::desugar::lowered(made.clone(), 30).unwrap();
         let names: Vec<&str> = lowered.iter().map(|(name, _)| name.as_str()).collect();
-        assert!(names.contains(&"omni/desugar/Backports.class"), "{names:?}");
-        assert!(names.contains(&"omni/desugar/RecordTag.class"), "{names:?}");
+        assert!(
+            names.contains(&"com/apk/builder/desugar/Backports.class"),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"com/apk/builder/desugar/RecordTag.class"),
+            "{names:?}"
+        );
         let point = lowered
             .iter()
             .find(|(name, _)| name == "t/Newer$Point.class")
@@ -25114,7 +25142,7 @@ Viewbinding   = false
                 .as_deref()
                 .map(|held| held.replace('.', "/"))
                 .as_deref(),
-            Some("omni/desugar/RecordTag"),
+            Some("com/apk/builder/desugar/RecordTag"),
             "java.lang.Record is not on Android before API 34"
         );
         let newer = lowered
@@ -25123,7 +25151,7 @@ Viewbinding   = false
             .unwrap();
         let said = pool_texts(&newer.1).join("\n");
         assert!(
-            said.contains("omni/desugar/Backports"),
+            said.contains("com/apk/builder/desugar/Backports"),
             "the calls go to the stand-ins"
         );
         for (name, bytes) in &lowered {
@@ -25196,7 +25224,7 @@ Viewbinding   = false
 
     #[test]
     fn a_gradle_flavor_is_built_with_its_sources_and_placeholders() {
-        let directory = temp_directory("omni-flavors");
+        let directory = temp_directory("builder-flavors");
         let at = |path: &str, text: &str| {
             let path = directory.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -25302,7 +25330,7 @@ Viewbinding   = false
     }
     #[test]
     fn a_gradle_project_names_its_values_through_ext_and_takes_only_linked_modules() {
-        let directory = temp_directory("omni-ext");
+        let directory = temp_directory("builder-ext");
         let at = |path: &str, text: &str| {
             let path = directory.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -25441,7 +25469,7 @@ Viewbinding   = false
 
     #[test]
     fn libgdx_natives_are_fetched_by_classifier_and_packed_per_abi() {
-        let directory = temp_directory("omni-natives");
+        let directory = temp_directory("builder-natives");
         let at = |path: &str, text: &str| {
             let path = directory.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -25958,7 +25986,7 @@ mod java {
 
     #[test]
     fn the_contract_says_what_this_is_and_holds_together() {
-        assert_eq!(CONTRACT.id, "omni.plugin.java");
+        assert_eq!(CONTRACT.id, "plugin.java");
         assert!(CONTRACT.produces_artifacts);
         for required in CONTRACT.required_capabilities {
             assert!(!CONTRACT.forbidden_capabilities.contains(required));
@@ -26233,7 +26261,7 @@ mod java {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory =
-            std::env::temp_dir().join(format!("omni-dexdump-{}-{mine}", std::process::id()));
+            std::env::temp_dir().join(format!("builder-dexdump-{}-{mine}", std::process::id()));
         std::fs::create_dir_all(&directory).ok()?;
         let path = directory.join("classes.dex");
         std::fs::write(&path, bytes).ok()?;
@@ -26461,7 +26489,7 @@ mod java {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory =
-            std::env::temp_dir().join(format!("omni-verify-{}-{mine}", std::process::id()));
+            std::env::temp_dir().join(format!("builder-verify-{}-{mine}", std::process::id()));
         let path = directory.join(format!("{name}.class"));
         std::fs::create_dir_all(path.parent()?).ok()?;
         std::fs::write(&path, bytes).ok()?;
@@ -28127,7 +28155,7 @@ public class Chooser implements Codes {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory =
-            std::env::temp_dir().join(format!("omni-run-{}-{mine}", std::process::id()));
+            std::env::temp_dir().join(format!("builder-run-{}-{mine}", std::process::id()));
         std::fs::create_dir_all(&directory).ok()?;
         for (name, bytes) in produced {
             let path = directory.join(name);
@@ -30685,7 +30713,7 @@ public class Deep {
         arrays.add(new int[] {1, 2});
         out.append(arrays.get(0)[1]).append(' ');
 
-        Path temp = Files.createDirectories(Paths.get(System.getProperty("java.io.tmpdir"), "omni-probe"));
+        Path temp = Files.createDirectories(Paths.get(System.getProperty("java.io.tmpdir"), "builder-probe"));
         Path file = temp.resolve("held.txt");
         Files.writeString(file, "one\ntwo");
         out.append(Files.exists(file)).append(Files.readAllLines(file).size())
@@ -31238,7 +31266,7 @@ public class Main {
     public static void main(String[] args) throws Exception {
         StringBuilder out = new StringBuilder();
 
-        String source = "{\"name\":\"omni\",\"count\":3,\"real\":1.5,\"ok\":true,"
+        String source = "{\"name\":\"builder\",\"count\":3,\"real\":1.5,\"ok\":true,"
             + "\"none\":null,\"rows\":[1,2,{\"deep\":[true]}]}";
         Node held = new Reader(source).read();
         out.append(held.written()).append(' ');
@@ -33003,7 +33031,7 @@ public class Branch extends Root {
             Some(Ok(said)) => {
                 assert_eq!(
                     said.trim(),
-                    "{\"name\":\"omni\",\"count\":3,\"real\":1.5,\"ok\":true,\"none\":null,\
+                    "{\"name\":\"builder\",\"count\":3,\"real\":1.5,\"ok\":true,\"none\":null,\
                      \"rows\":[1,2,{\"deep\":[true]}]} table:6 text:4/number:3/row:3 \
                      table:1 not a number at 5/5"
                 );
@@ -35215,7 +35243,7 @@ import java.io.IOException;
 public class Traced {
 
     public static final int WIDTH = 3;
-    public static final String NAME = "omni";
+    public static final String NAME = "builder";
     public static final long BIG = 40L;
     public static final boolean ON = true;
     public static final char MARK = '!';
@@ -35263,7 +35291,7 @@ public class Traced {
                 assert_eq!(
                     said.trim(),
                     "Traced.java:18 Traced.java:20 Traced.java:20 Traced.java:31 \
-                     3omni40true!1.574"
+                     3builder40true!1.574"
                 );
                 eprintln!("java: the file and the line, and javac's answer");
             }
@@ -35334,7 +35362,7 @@ public class Screen extends Activity implements View.OnClickListener {
         root.setBackgroundColor(Color.parseColor("#101014"));
 
         title = new TextView(this);
-        title.setText("Omni");
+        title.setText("Apk Builder");
         title.setTextSize(28f);
         title.setTextColor(Color.WHITE);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -35346,7 +35374,7 @@ public class Screen extends Activity implements View.OnClickListener {
         input.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
-                title.setText(s.length() == 0 ? "Omni" : s.toString());
+                title.setText(s.length() == 0 ? "Apk Builder" : s.toString());
             }
             @Override public void afterTextChanged(Editable s) { }
         });
@@ -35476,7 +35504,7 @@ public class Screen extends Activity implements View.OnClickListener {
             return;
         };
         let directory = std::env::temp_dir().join(format!(
-            "omni-semantics-{}",
+            "builder-semantics-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|held| held.as_nanos())
@@ -38010,7 +38038,7 @@ public class Si {
             return;
         };
         let directory = std::env::temp_dir().join(format!(
-            "omni-jvm-{}-{}",
+            "builder-jvm-{}-{}",
             main.replace('.', "-"),
             std::process::id()
         ));
@@ -38435,7 +38463,7 @@ mod java_fixer {
 
     #[test]
     fn a_missing_style_is_offered_both_ways_and_either_one_holds() {
-        let root = temp("omni-fixer-style");
+        let root = temp("builder-fixer-style");
         let folder = root.to_str().unwrap().to_string();
         std::fs::write(root.join("AndroidManifest.xml"), MANIFEST).unwrap();
 
@@ -38472,7 +38500,7 @@ mod java_fixer {
 
     #[test]
     fn a_manifest_with_no_package_takes_the_one_its_sources_declare() {
-        let root = temp("omni-fixer-package");
+        let root = temp("builder-fixer-package");
         let folder = root.to_str().unwrap().to_string();
         std::fs::write(root.join("AndroidManifest.xml"), MANIFEST).unwrap();
         let sources = root.join("Java");
@@ -38500,7 +38528,7 @@ mod java_fixer {
 
     #[test]
     fn a_repair_that_no_longer_matches_is_refused_rather_than_guessed_at() {
-        let root = temp("omni-fixer-stale");
+        let root = temp("builder-fixer-stale");
         let folder = root.to_str().unwrap().to_string();
         std::fs::write(root.join("AndroidManifest.xml"), MANIFEST).unwrap();
         let offered = repairs_for(
@@ -38520,7 +38548,7 @@ mod java_fixer {
 
     #[test]
     fn a_repair_cannot_reach_outside_the_project() {
-        let root = temp("omni-fixer-escape");
+        let root = temp("builder-fixer-escape");
         let folder = root.to_str().unwrap().to_string();
         let error = apply(
             &folder,
@@ -38541,7 +38569,7 @@ mod java_fixer {
 
     #[test]
     fn a_java_source_is_mended_where_the_refusal_points() {
-        let directory = temp("omni-java-mend");
+        let directory = temp("builder-java-mend");
         let sources = directory.join("Java/com/tr/yt");
         std::fs::create_dir_all(&sources).unwrap();
         let named = "Java/com/tr/yt/Held.java";
@@ -38579,7 +38607,7 @@ mod java_fixer {
 
     #[test]
     fn a_block_left_open_is_closed_at_the_end_of_the_file() {
-        let directory = temp("omni-java-close");
+        let directory = temp("builder-java-close");
         let sources = directory.join("Java");
         std::fs::create_dir_all(&sources).unwrap();
         let named = "Java/Open.java";
@@ -38603,7 +38631,7 @@ mod java_fixer {
 
     #[test]
     fn a_name_the_project_declares_elsewhere_is_imported() {
-        let directory = temp("omni-java-import");
+        let directory = temp("builder-java-import");
         let sources = directory.join("Java/com/tr/yt");
         std::fs::create_dir_all(&sources).unwrap();
         std::fs::write(
@@ -38639,7 +38667,7 @@ mod java_fixer {
 
     #[test]
     fn two_repairs_never_fight_over_one_line() {
-        let directory = temp("omni-java-clash");
+        let directory = temp("builder-java-clash");
         std::fs::create_dir_all(directory.join("Java")).unwrap();
         let named = "Java/Twice.java";
         std::fs::write(
@@ -38662,7 +38690,7 @@ mod java_fixer {
 
     #[test]
     fn a_repair_never_reaches_outside_the_project() {
-        let directory = temp("omni-java-escape");
+        let directory = temp("builder-java-escape");
         let root = directory.to_str().unwrap();
         let wandering = Repair {
             code: "EJ007".to_string(),
@@ -38699,7 +38727,7 @@ mod cpp {
 
     #[test]
     fn the_contract_is_self_consistent() {
-        assert_eq!(CONTRACT.id, "omni.plugin.cpp");
+        assert_eq!(CONTRACT.id, "plugin.cpp");
         assert!(!CONTRACT.produces_artifacts);
         assert!(!CONTRACT.inputs.is_empty());
         assert!(!CONTRACT.outputs.is_empty());
@@ -38723,7 +38751,7 @@ mod cpp {
             .expect_err("a plugin that produces nothing must never report success");
 
         assert_eq!(error.code, "E0001");
-        assert_eq!(error.origin, "omni.plugin.cpp");
+        assert_eq!(error.origin, "plugin.cpp");
         assert!(error.message.contains("not implemented"));
         assert!(error.suggestion.is_some());
     }
@@ -38738,7 +38766,7 @@ mod kotlin {
 
     #[test]
     fn the_contract_is_self_consistent() {
-        assert_eq!(CONTRACT.id, "omni.plugin.kotlin");
+        assert_eq!(CONTRACT.id, "plugin.kotlin");
         assert!(!CONTRACT.produces_artifacts);
         assert!(!CONTRACT.inputs.is_empty());
         assert!(!CONTRACT.outputs.is_empty());
@@ -38762,7 +38790,7 @@ mod kotlin {
             .expect_err("a plugin that produces nothing must never report success");
 
         assert_eq!(error.code, "E0001");
-        assert_eq!(error.origin, "omni.plugin.kotlin");
+        assert_eq!(error.origin, "plugin.kotlin");
         assert!(error.message.contains("not implemented"));
         assert!(error.suggestion.is_some());
     }
@@ -38777,7 +38805,7 @@ mod rust {
 
     #[test]
     fn the_contract_is_self_consistent() {
-        assert_eq!(CONTRACT.id, "omni.plugin.rust");
+        assert_eq!(CONTRACT.id, "plugin.rust");
         assert!(!CONTRACT.produces_artifacts);
         assert!(!CONTRACT.inputs.is_empty());
         assert!(!CONTRACT.outputs.is_empty());
@@ -38801,7 +38829,7 @@ mod rust {
             .expect_err("a plugin that produces nothing must never report success");
 
         assert_eq!(error.code, "E0001");
-        assert_eq!(error.origin, "omni.plugin.rust");
+        assert_eq!(error.origin, "plugin.rust");
         assert!(error.message.contains("not implemented"));
         assert!(error.suggestion.is_some());
     }

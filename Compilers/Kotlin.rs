@@ -3,11 +3,11 @@ use crate::diag::Diagnostic;
 use crate::plugin::{unimplemented_diagnostic, Context, Contract, Outcome, Plugin, Version};
 
 pub static CONTRACT: Contract = Contract {
-    id: "omni.plugin.kotlin",
+    id: "plugin.kotlin",
     display_name: "Kotlin",
     version: Version::new(0, 1, 0),
     produces_artifacts: false,
-    summary: "Translates Kotlin source into the Omni compiler intermediate representation.",
+    summary: "Translates Kotlin source into the Apk Builder compiler intermediate representation.",
     inputs: &["kotlin.source", "project.model", "classpath.index"],
     outputs: &["compiler.ir", "jvm.class", "diagnostics"],
     required_capabilities: &[

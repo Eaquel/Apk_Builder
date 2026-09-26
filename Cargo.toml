@@ -1,5 +1,5 @@
 [package]
-name          = "omni_core"
+name          = "apk_builder_core"
 version       = "1.0.0"
 edition       = "2021"
 rust-version  = "1.97.1"
@@ -8,7 +8,7 @@ description   = "Apk_Builder Core — build graph, capability security and toolc
 license       = "MIT"
 
 [lib]
-name       = "omni_core"
+name       = "apk_builder_core"
 path       = "Builder.rs"
 crate-type = ["staticlib", "lib"]
 

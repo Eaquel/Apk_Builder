@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Omni" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/omni_background</item>
-        <item name="android:colorBackground">@color/omni_background</item>
-        <item name="android:textColorPrimary">@color/omni_foreground</item>
+    <style name="Theme.ApkBuilder" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:textColorPrimary">@color/foreground</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:enforceStatusBarContrast">false</item>
