@@ -23280,6 +23280,288 @@ pub mod dexwrite {
         crate::binary::modified_utf8::units(left).cmp(crate::binary::modified_utf8::units(right))
     }
 
+    const CONST_STRING: u16 = 0x1a;
+
+    const CONST_STRING_JUMBO: u16 = 0x1b;
+
+    fn is_payload(insn: &Insn) -> bool {
+        matches!(insn.units.first(), Some(0x0100 | 0x0200 | 0x0300))
+    }
+
+    fn is_padding(insn: &Insn) -> bool {
+        insn.units.len() == 1 && insn.units[0] == 0 && insn.patch.is_none()
+    }
+
+    fn opcode_of(insn: &Insn) -> u16 {
+        insn.units.first().map(|one| one & 0xff).unwrap_or(0)
+    }
+
+    fn signed(units: &[u16], at: usize, wide: bool) -> i64 {
+        if wide {
+            (u32::from(units[at]) | (u32::from(units[at + 1]) << 16)) as i32 as i64
+        } else {
+            units[at] as i16 as i64
+        }
+    }
+
+    fn reach(insn: &Insn) -> Option<i64> {
+        let units = &insn.units;
+        match opcode_of(insn) {
+            0x28 if !is_payload(insn) => Some((units[0] >> 8) as u8 as i8 as i64),
+            0x29 => Some(signed(units, 1, false)),
+            0x2a | 0x2b | 0x2c | 0x26 => Some(signed(units, 1, true)),
+            0x32..=0x3d => Some(signed(units, 1, false)),
+            _ => None,
+        }
+    }
+
+    pub fn names_a_far_string(class: &Class, far: &dyn Fn(&str) -> bool) -> bool {
+        class.methods().any(|method| {
+            method.instructions.iter().any(|insn| {
+                matches!(&insn.operand, Operand::Text(text) if opcode_of(insn) == CONST_STRING && far(text))
+            })
+        })
+    }
+
+    pub fn with_far_strings(
+        class: &Class,
+        far: &dyn Fn(&str) -> bool,
+    ) -> Result<Class, Diagnostic> {
+        let mut out = class.clone();
+        for method in out
+            .direct_methods
+            .iter_mut()
+            .chain(out.virtual_methods.iter_mut())
+        {
+            let reaches = method.instructions.iter().any(|insn| {
+                matches!(&insn.operand, Operand::Text(text) if opcode_of(insn) == CONST_STRING && far(text))
+            });
+            if reaches {
+                *method = widened(method, far)?;
+            }
+        }
+        Ok(out)
+    }
+
+    fn far_branch(distance: i64, method: &Method) -> Diagnostic {
+        fail(
+            "EW011",
+            "A branch reaches further than a Dalvik branch can.",
+        )
+        .with_context(format!("Distance: {distance} code units"))
+        .with_context(format!(
+            "Method: {}.{}",
+            method.reference.class, method.reference.name
+        ))
+    }
+
+    pub fn widened(method: &Method, far: &dyn Fn(&str) -> bool) -> Result<Method, Diagnostic> {
+        let mut old_at: Vec<u32> = Vec::with_capacity(method.instructions.len());
+        let mut running = 0u32;
+        for insn in &method.instructions {
+            old_at.push(running);
+            running += insn.width() as u32;
+        }
+        let old_total = running;
+
+        let mut kept: Vec<(u32, Insn)> = Vec::new();
+        let mut dropped: Vec<u32> = Vec::new();
+        for (index, insn) in method.instructions.iter().enumerate() {
+            let next_is_payload = method.instructions.get(index + 1).is_some_and(is_payload);
+            if is_padding(insn) && next_is_payload {
+                dropped.push(old_at[index]);
+                continue;
+            }
+            let mut held = insn.clone();
+            if let Operand::Text(text) = &insn.operand {
+                if opcode_of(insn) == CONST_STRING && far(text) {
+                    held.units = vec![CONST_STRING_JUMBO | (insn.units[0] & 0xff00), 0, 0];
+                    held.patch = Some(1);
+                }
+            }
+            kept.push((old_at[index], held));
+        }
+
+        let starts: HashMap<u32, usize> = kept
+            .iter()
+            .enumerate()
+            .map(|(index, (at, _))| (*at, index))
+            .collect();
+        let targets: Vec<Option<usize>> = kept
+            .iter()
+            .map(|(at, insn)| {
+                reach(insn).and_then(|distance| {
+                    let target = i64::from(*at) + distance;
+                    u32::try_from(target)
+                        .ok()
+                        .and_then(|one| starts.get(&one).copied())
+                })
+            })
+            .collect();
+        for ((at, insn), target) in kept.iter().zip(&targets) {
+            if reach(insn).is_some() && target.is_none() {
+                return Err(fail("EW012", "A branch points at no instruction.")
+                    .with_context(format!("Offset {at}")));
+            }
+        }
+
+        let mut new_at: Vec<u32>;
+        let mut padded: Vec<bool>;
+        loop {
+            new_at = Vec::with_capacity(kept.len());
+            padded = Vec::with_capacity(kept.len());
+            let mut running = 0u32;
+            for (_, insn) in &kept {
+                let pad = is_payload(insn) && running % 2 == 1;
+                if pad {
+                    running += 1;
+                }
+                padded.push(pad);
+                new_at.push(running);
+                running += insn.width() as u32;
+            }
+            let mut grew = false;
+            for (index, (_, insn)) in kept.iter_mut().enumerate() {
+                let Some(target) = targets[index] else {
+                    continue;
+                };
+                let distance = i64::from(new_at[target]) - i64::from(new_at[index]);
+                match opcode_of(insn) {
+                    0x28 if i8::try_from(distance).is_err() => {
+                        insn.units = vec![0x0029, 0];
+                        grew = true;
+                    }
+                    0x29 if i16::try_from(distance).is_err() => {
+                        insn.units = vec![0x002a, 0, 0];
+                        grew = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        let new_total = kept
+            .last()
+            .map(|(_, insn)| new_at[kept.len() - 1] + insn.width() as u32)
+            .unwrap_or(0);
+
+        let map = |old: u32| -> u32 {
+            if old >= old_total {
+                return new_total;
+            }
+            if let Some(index) = starts.get(&old) {
+                return new_at[*index];
+            }
+            if dropped.contains(&old) {
+                let following = kept.iter().position(|(at, _)| *at > old);
+                return match following {
+                    Some(index) => new_at[index] - u32::from(padded[index]),
+                    None => new_total,
+                };
+            }
+            let before = kept.iter().rposition(|(at, _)| *at <= old).unwrap_or(0);
+            new_at[before]
+        };
+
+        let mut instructions: Vec<Insn> = Vec::with_capacity(kept.len() + 4);
+        let mut payload_from: HashMap<usize, usize> = HashMap::new();
+        for (index, (_, insn)) in kept.iter().enumerate() {
+            if matches!(opcode_of(insn), 0x2b | 0x2c) {
+                if let Some(target) = targets[index] {
+                    payload_from.insert(target, index);
+                }
+            }
+        }
+        for (index, (old, insn)) in kept.iter().enumerate() {
+            if padded[index] {
+                instructions.push(Insn::raw(vec![0x0000]));
+            }
+            let mut held = insn.clone();
+            if let Some(target) = targets[index] {
+                let distance = i64::from(new_at[target]) - i64::from(new_at[index]);
+                match opcode_of(&held) {
+                    0x28 => {
+                        let small =
+                            i8::try_from(distance).map_err(|_| far_branch(distance, method))?;
+                        held.units[0] = (held.units[0] & 0x00ff) | (u16::from(small as u8) << 8);
+                    }
+                    0x29 | 0x32..=0x3d => {
+                        let short =
+                            i16::try_from(distance).map_err(|_| far_branch(distance, method))?;
+                        held.units[1] = short as u16;
+                    }
+                    _ => {
+                        let wide = distance as i32 as u32;
+                        held.units[1] = wide as u16;
+                        held.units[2] = (wide >> 16) as u16;
+                    }
+                }
+            }
+            if let Some(switch) = payload_from.get(&index) {
+                let switch_old = kept[*switch].0;
+                let switch_new = new_at[*switch];
+                let count = usize::from(held.units[1]);
+                let first = if held.units[0] == 0x0100 {
+                    4
+                } else {
+                    2 + count * 2
+                };
+                for step in 0..count {
+                    let at = first + step * 2;
+                    let relative = signed(&held.units, at, true);
+                    let aimed = u32::try_from(i64::from(switch_old) + relative).map_err(|_| {
+                        fail("EW012", "A branch points at no instruction.")
+                            .with_context(format!("Offset {old}"))
+                    })?;
+                    let landing = map(aimed);
+                    let wide = (i64::from(landing) - i64::from(switch_new)) as i32 as u32;
+                    held.units[at] = wide as u16;
+                    held.units[at + 1] = (wide >> 16) as u16;
+                }
+            }
+            instructions.push(held);
+        }
+
+        let tries = method
+            .tries
+            .iter()
+            .map(|one| {
+                let start = map(one.start);
+                let end = map(one.start + u32::from(one.units));
+                let units = u16::try_from(end.saturating_sub(start)).map_err(|_| {
+                    fail(
+                        "EW013",
+                        "A guarded range grew past what a try item can hold.",
+                    )
+                    .with_context(format!("Method: {}", method.reference.name))
+                })?;
+                Ok(Try {
+                    start,
+                    units,
+                    catches: one
+                        .catches
+                        .iter()
+                        .map(|(kind, address)| (kind.clone(), map(*address)))
+                        .collect(),
+                })
+            })
+            .collect::<Result<Vec<Try>, Diagnostic>>()?;
+        let lines = method
+            .lines
+            .iter()
+            .map(|(address, line)| (map(*address), *line))
+            .collect();
+
+        Ok(Method {
+            instructions,
+            tries,
+            lines,
+            ..method.clone()
+        })
+    }
+
     const MOST_OF_ONE_THING: usize = 65_536;
 
     #[derive(Default)]
@@ -23467,7 +23749,8 @@ pub mod dexwrite {
                     .count()
                 + shared.methods.len();
 
-            let over = types > most || strings > most || fields > most || methods > most;
+            let over =
+                types > most || strings > u32::MAX as usize || fields > most || methods > most;
             if over && here.is_empty() {
                 return Err(fail(
                     "EW006",
@@ -23705,6 +23988,23 @@ pub mod dexwrite {
             pools.methods = methods;
         }
         pools.method_at = positions(&pools.methods);
+
+        let far = |text: &str| {
+            pools
+                .string_at
+                .get(text)
+                .is_some_and(|at| *at > u32::from(u16::MAX))
+        };
+        let widened: Vec<Class>;
+        let classes: &[Class] = if classes.iter().any(|one| names_a_far_string(one, &far)) {
+            widened = classes
+                .iter()
+                .map(|one| with_far_strings(one, &far))
+                .collect::<Result<Vec<Class>, Diagnostic>>()?;
+            &widened
+        } else {
+            classes
+        };
 
         let header_size = 0x70usize;
         let string_ids_off = header_size;
@@ -24009,6 +24309,23 @@ pub mod dexwrite {
                             Operand::Type(descriptor) => pools.index_of_type(descriptor)?,
                             Operand::Text(text) => pools.index_of_string(text)?,
                         };
+                        if units
+                            .first()
+                            .is_some_and(|one| one & 0xff == CONST_STRING_JUMBO)
+                            && matches!(instruction.operand, Operand::Text(_))
+                        {
+                            let (Some(low), Some(high)) = (units.get(at), units.get(at + 1)) else {
+                                return Err(fail(
+                                    "EW007",
+                                    "An instruction says to fill in a unit it does not have.",
+                                ));
+                            };
+                            let _ = (low, high);
+                            units[at] = index as u16;
+                            units[at + 1] = (index >> 16) as u16;
+                            instructions.extend_from_slice(&units);
+                            continue;
+                        }
                         if index > u32::from(u16::MAX) {
                             return Err(fail(
                                 "EW006",

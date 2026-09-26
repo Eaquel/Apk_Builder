@@ -6414,12 +6414,7 @@ public final class Family {
             for one in &parts {
                 let count =
                     |at: usize| u32::from_le_bytes(one[at..at + 4].try_into().unwrap()) as usize;
-                for (what, at) in [
-                    ("strings", 0x38),
-                    ("types", 0x40),
-                    ("fields", 0x50),
-                    ("methods", 0x58),
-                ] {
+                for (what, at) in [("types", 0x40), ("fields", 0x50), ("methods", 0x58)] {
                     assert!(
                         count(at) <= most,
                         "{} {what} were written where {most} were allowed",
@@ -6430,6 +6425,181 @@ public final class Family {
             split += 1;
         }
         assert!(split > 3, "only {split} walls were tried");
+    }
+
+    fn a_method(
+        class: &str,
+        name: &str,
+        registers: u16,
+        instructions: Vec<crate::dexwrite::Insn>,
+    ) -> crate::dexwrite::Method {
+        crate::dexwrite::Method {
+            reference: crate::dexwrite::MethodRef {
+                class: class.to_string(),
+                name: name.to_string(),
+                return_type: "V".to_string(),
+                parameters: Vec::new(),
+            },
+            access_flags: 0x0009,
+            registers,
+            inputs: 0,
+            outputs: 0,
+            instructions,
+            lines: Vec::new(),
+            annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
+            tries: Vec::new(),
+        }
+    }
+
+    fn a_string(register: u16, text: &str) -> crate::dexwrite::Insn {
+        crate::dexwrite::Insn::pointing(
+            vec![0x001a | (register << 8), 0],
+            1,
+            crate::dexwrite::Operand::Text(text.to_string()),
+        )
+    }
+
+    #[test]
+    fn seventy_thousand_strings_fit_one_dex_through_jumbo_strings() {
+        use crate::dexwrite::Insn;
+        let mut classes = Vec::new();
+        for part in 0..70 {
+            let named = format!("Lmany/Fill{part:02};");
+            let mut class = crate::dexwrite::Class::named(&named, "Ljava/lang/Object;", 1);
+            let mut code: Vec<Insn> = (0..1000)
+                .map(|at| a_string(0, &format!("s{:05}", part * 1000 + at)))
+                .collect();
+            code.push(Insn::raw(vec![0x000e]));
+            class.direct_methods.push(a_method(&named, "fill", 1, code));
+            classes.push(class);
+        }
+
+        let far = "Lmany/Far;";
+        let mut check = a_method(
+            far,
+            "check",
+            3,
+            vec![
+                a_string(0, "zzz_a"),
+                Insn::raw(vec![0x0038, 8]),
+                a_string(1, "zzz_b"),
+                Insn::raw(vec![0x0212]),
+                Insn::raw(vec![0x022b, 13, 0]),
+                a_string(1, "zzz_case"),
+                Insn::raw(vec![0x0029, 4]),
+                a_string(1, "zzz_skipped"),
+                a_string(1, "zzz_after"),
+                Insn::raw(vec![0x000e]),
+                Insn::raw(vec![0x0000]),
+                Insn::raw(vec![0x0100, 1, 0, 0, 3, 0]),
+            ],
+        );
+        check.tries = vec![crate::dexwrite::Try {
+            start: 4,
+            units: 6,
+            catches: vec![(None, 16)],
+        }];
+        check.lines = vec![(0, 10), (10, 20), (16, 30)];
+        let mut class = crate::dexwrite::Class::named(far, "Ljava/lang/Object;", 1);
+        class.direct_methods.push(check);
+        classes.push(class);
+
+        let files = crate::dexwrite::write_all(&classes, &[]).expect("it is written");
+        assert_eq!(files.len(), 1, "strings alone no longer split a dex");
+        let mut sink = Sink::new();
+        let read = crate::dex::read(&files[0], &mut sink).expect("our own reader reads it");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert!(
+            read.strings.len() > 70_000,
+            "{} strings",
+            read.strings.len()
+        );
+
+        let body = read.body("many.Far", "check").expect("the method is there");
+        let code = body.code.as_ref().expect("with code");
+        let at = |address: u32| {
+            code.instructions
+                .iter()
+                .find(|one| one.address == address)
+                .unwrap_or_else(|| panic!("nothing starts at {address}:\n{}", code.to_text()))
+        };
+        let names = |one: &crate::dex::Instruction| one.about.clone().unwrap_or_default();
+        let jumbo: Vec<&crate::dex::Instruction> = code
+            .instructions
+            .iter()
+            .filter(|one| one.name == "const-string/jumbo")
+            .collect();
+        assert_eq!(
+            jumbo.len(),
+            5,
+            "every far string is loaded wide:\n{}",
+            code.to_text()
+        );
+        for one in &jumbo {
+            let index = u32::from(one.units[1]) | (u32::from(one.units[2]) << 16);
+            assert!(index > 0xffff, "{index}");
+            assert!(read.strings[index as usize].starts_with("zzz_"));
+        }
+
+        let branch = |name: &str| {
+            code.instructions
+                .iter()
+                .find(|one| one.name == name)
+                .unwrap_or_else(|| panic!("no {name}:\n{}", code.to_text()))
+        };
+        let if_zero = branch("if-eqz");
+        let lands = at((i64::from(if_zero.address) + i64::from(if_zero.units[1] as i16)) as u32);
+        assert!(
+            names(lands).contains("zzz_case"),
+            "if-eqz lands on {}",
+            lands.to_text()
+        );
+        let jump = branch("goto/16");
+        let lands = at((i64::from(jump.address) + i64::from(jump.units[1] as i16)) as u32);
+        assert!(
+            names(lands).contains("zzz_after"),
+            "goto lands on {}",
+            lands.to_text()
+        );
+
+        let switch = branch("packed-switch");
+        let away = (u32::from(switch.units[1]) | (u32::from(switch.units[2]) << 16)) as i32;
+        let payload = (i64::from(switch.address) + i64::from(away)) as u32;
+        assert_eq!(payload % 2, 0, "a payload sits on an even unit");
+        let table = at(payload);
+        assert_eq!(
+            table.units[0],
+            0x0100,
+            "the switch points at its table:\n{}",
+            code.to_text()
+        );
+        let case = (u32::from(table.units[4]) | (u32::from(table.units[5]) << 16)) as i32;
+        let lands = at((i64::from(switch.address) + i64::from(case)) as u32);
+        assert!(
+            names(lands).contains("zzz_case"),
+            "the case lands on {}",
+            lands.to_text()
+        );
+
+        assert_eq!(code.tries.len(), 1);
+        let guarded = &code.tries[0];
+        assert!(
+            names(at(guarded.start)).contains("zzz_b"),
+            "the range still opens at the same instruction"
+        );
+        assert!(
+            names(at(guarded.start + u32::from(guarded.units))).contains("zzz_case"),
+            "and still closes before the same one"
+        );
+        assert!(names(at(guarded.catches[0].address)).contains("zzz_after"));
+
+        if let Some(said) = dexdump_text(&files[0]) {
+            assert!(
+                said.contains("const-string/jumbo v0, \"zzz_a\""),
+                "dexdump reads the wide load"
+            );
+        }
     }
 
     #[test]
@@ -6451,7 +6621,9 @@ public final class Family {
         assert_eq!(whole.len(), 1, "nothing here needs more than one");
 
         let mut parts = None;
-        for most in [64usize, 80, 96, 112, 128, 160, 192, 224, 256, 320] {
+        for most in [
+            16usize, 24, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+        ] {
             let Ok(held) = crate::dexwrite::write_all_holding(&classes, &[], most) else {
                 continue;
             };

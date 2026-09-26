@@ -4403,6 +4403,10 @@ class BuilderActivity : Activity() {
         showing = true
         Bell.hush(this, Bell.BUILD_NOTE)
         aurora.resumeDrawing()
+        if (screen is Screen.Logcat && watchWanted && !watchReading) {
+            startWatching()
+            paintTheWatch()
+        }
         awaitingInstall?.let { waiting ->
             if (packageManager.canRequestPackageInstalls()) {
                 awaitingInstall = null
