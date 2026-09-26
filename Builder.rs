@@ -8779,26 +8779,34 @@ pub mod binary {
             )
         }
 
+        pub const LONE: u32 = 0x10_f000;
+
+        const SURROGATES: u32 = 0x800;
+
+        pub fn units(text: &str) -> impl Iterator<Item = u16> + '_ {
+            text.chars().flat_map(|point| {
+                let value = point as u32;
+                let mut held = [0u16; 2];
+                let count = if (LONE..LONE + SURROGATES).contains(&value) {
+                    held[0] = (0xd800 + value - LONE) as u16;
+                    1
+                } else {
+                    point.encode_utf16(&mut held).len()
+                };
+                held.into_iter().take(count)
+            })
+        }
+
         pub fn encode(text: &str) -> Vec<u8> {
             let mut out = Vec::with_capacity(text.len() + 8);
-            for point in text.chars() {
-                let value = point as u32;
-                if value == 0 {
-                    out.extend_from_slice(&[0xc0, 0x80]);
-                } else if value < 0x80 {
-                    out.push(value as u8);
-                } else if value < 0x800 {
-                    out.push(0xc0 | (value >> 6) as u8);
-                    out.push(0x80 | (value & 0x3f) as u8);
-                } else if value < 0x1_0000 {
-                    out.push(0xe0 | (value >> 12) as u8);
-                    out.push(0x80 | ((value >> 6) & 0x3f) as u8);
-                    out.push(0x80 | (value & 0x3f) as u8);
-                } else {
-                    let mut units = [0u16; 2];
-                    let pair = point.encode_utf16(&mut units);
-                    for unit in pair {
-                        let unit = u32::from(*unit);
+            for unit in units(text) {
+                match unit {
+                    0x0001..=0x007f => out.push(unit as u8),
+                    0 | 0x0080..=0x07ff => {
+                        out.push(0xc0 | (unit >> 6) as u8);
+                        out.push(0x80 | (unit & 0x3f) as u8);
+                    }
+                    _ => {
                         out.push(0xe0 | (unit >> 12) as u8);
                         out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
                         out.push(0x80 | (unit & 0x3f) as u8);
@@ -8855,8 +8863,31 @@ pub mod binary {
                 }
             }
 
-            String::from_utf16(&units)
-                .map_err(|_| fail("E7053", "A string contains an unpaired surrogate."))
+            let mut text = String::with_capacity(units.len());
+            for decoded in char::decode_utf16(units) {
+                let point = match decoded {
+                    Ok(point) if (LONE..LONE + SURROGATES).contains(&(point as u32)) => {
+                        return Err(fail(
+                            "E7053",
+                            "A string holds a character kept for lone surrogates.",
+                        ));
+                    }
+                    Ok(point) => point,
+                    Err(lone) => kept_for(lone.unpaired_surrogate()),
+                };
+                text.push(point);
+            }
+            Ok(text)
+        }
+
+        fn kept_for(unit: u16) -> char {
+            char::from_u32(LONE + u32::from(unit) - 0xd800).unwrap_or(char::REPLACEMENT_CHARACTER)
+        }
+
+        pub fn from_units(units: &[u16]) -> String {
+            char::decode_utf16(units.iter().copied())
+                .map(|decoded| decoded.unwrap_or_else(|lone| kept_for(lone.unpaired_surrogate())))
+                .collect()
         }
     }
 
@@ -11432,6 +11463,9 @@ pub mod resources {
                 .iter()
                 .find(|existing| existing.order_key() == entry.order_key())
             {
+                if entry.kind == Kind::Id && previous.kind == Kind::Id {
+                    return true;
+                }
                 sink.emit(
                     self.problem(
                         "E9013",
@@ -12048,6 +12082,9 @@ pub mod resources {
                 return None;
             };
             return Some(Value::Reference(reference));
+        }
+        if let Some(attribute) = theme_attribute(trimmed) {
+            return Some(Value::Attribute(attribute));
         }
 
         match kind {
@@ -14020,6 +14057,20 @@ pub mod archive {
         name == TABLE_ENTRY || is_native_library(name)
     }
 
+    pub const KEPT_UNCOMPRESSED: &[&str] = &[
+        "jpg", "jpeg", "png", "gif", "wav", "mp2", "mp3", "ogg", "aac", "mpg", "mpeg", "mid",
+        "midi", "smf", "jet", "rtttl", "imy", "xmf", "mp4", "m4a", "m4v", "3gp", "3gpp", "3g2",
+        "3gpp2", "amr", "awb", "wma", "wmv", "webm", "mkv",
+    ];
+
+    pub fn kept_uncompressed(name: &str) -> bool {
+        name.rsplit_once('.').is_some_and(|(_, extension)| {
+            KEPT_UNCOMPRESSED
+                .iter()
+                .any(|one| one.eq_ignore_ascii_case(extension))
+        })
+    }
+
     #[derive(Clone, Debug, Default)]
     pub struct Builder {
         entries: Vec<Pending>,
@@ -14105,7 +14156,8 @@ pub mod archive {
                 .with_context(format!("Limit: {MAX_ENTRIES}")));
             }
 
-            let must_store = must_be_stored(&name);
+            let must_store =
+                must_be_stored(&name) || (self.android_alignment && kept_uncompressed(&name));
             self.entries.push(Pending {
                 name,
                 bytes,
@@ -22543,21 +22595,7 @@ pub mod dexwrite {
     }
 
     pub fn encode_modified_utf8(text: &str) -> Vec<u8> {
-        let mut out = Vec::with_capacity(text.len() + 1);
-        for unit in text.encode_utf16() {
-            match unit {
-                0x0001..=0x007f => out.push(unit as u8),
-                0 | 0x0080..=0x07ff => {
-                    out.push(0xc0 | (unit >> 6) as u8);
-                    out.push(0x80 | (unit & 0x3f) as u8);
-                }
-                _ => {
-                    out.push(0xe0 | (unit >> 12) as u8);
-                    out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
-                    out.push(0x80 | (unit & 0x3f) as u8);
-                }
-            }
-        }
+        let mut out = crate::binary::modified_utf8::encode(text);
         out.push(0);
         out
     }
@@ -23095,7 +23133,7 @@ pub mod dexwrite {
     }
 
     fn utf16_order(left: &str, right: &str) -> core::cmp::Ordering {
-        left.encode_utf16().cmp(right.encode_utf16())
+        crate::binary::modified_utf8::units(left).cmp(crate::binary::modified_utf8::units(right))
     }
 
     const MOST_OF_ONE_THING: usize = 65_536;
@@ -23115,6 +23153,7 @@ pub mod dexwrite {
 
     impl Needs {
         fn kind(&mut self, descriptor: &str) {
+            self.text(descriptor);
             if !self.seen_types.contains(descriptor) {
                 self.seen_types.insert(descriptor.to_string());
                 self.types.push(descriptor.to_string());
@@ -23174,6 +23213,15 @@ pub mod dexwrite {
                 Element::List(held) => {
                     for one in held {
                         self.element(one);
+                    }
+                }
+                Element::Method {
+                    class,
+                    name,
+                    descriptor,
+                } => {
+                    if let Some(reference) = method_named(class, name, descriptor) {
+                        self.method(&reference);
                     }
                 }
                 _ => {}
@@ -23528,7 +23576,10 @@ pub mod dexwrite {
         for text in &pools.strings {
             string_data_offsets.push((data_off + data.len()) as u32);
             let encoded = encode_modified_utf8(text);
-            uleb128(&mut data, text.encode_utf16().count() as u32);
+            uleb128(
+                &mut data,
+                crate::binary::modified_utf8::units(text).count() as u32,
+            );
             data.extend_from_slice(&encoded);
         }
 
@@ -23818,7 +23869,9 @@ pub mod dexwrite {
                             return Err(fail(
                                 "EW006",
                                 "This dex holds more of one thing than an instruction can name.",
-                            ));
+                            )
+                            .with_context(format!("Index: {index}"))
+                            .with_context(format!("Names: {:?}", instruction.operand)));
                         }
                         let Some(slot) = units.get_mut(at) else {
                             return Err(fail(
@@ -28907,6 +28960,7 @@ public interface ViewBinding {
     }
 
     pub fn field_name(id: &str) -> String {
+        let id = id.strip_prefix(PLATFORM_ID).unwrap_or(id);
         let mut out = String::new();
         for (at, part) in id.split('_').filter(|one| !one.is_empty()).enumerate() {
             let mut chars = part.chars();
@@ -28946,9 +29000,21 @@ public interface ViewBinding {
 
     fn id_of(element: &crate::xml::Element) -> Option<String> {
         let said = element.attribute("android:id")?;
+        if let Some(platform) = said.strip_prefix("@android:id/") {
+            return Some(format!("{PLATFORM_ID}{platform}"));
+        }
         said.strip_prefix("@+id/")
             .or_else(|| said.strip_prefix("@id/"))
             .map(str::to_string)
+    }
+
+    pub const PLATFORM_ID: &str = "android:";
+
+    fn id_reference(package: &str, id: &str) -> String {
+        match id.strip_prefix(PLATFORM_ID) {
+            Some(platform) => format!("android.R.id.{platform}"),
+            None => format!("{package}.R.id.{id}"),
+        }
     }
 
     fn gather(element: &crate::xml::Element, into: &mut Vec<Found>, top: bool) {
@@ -29162,7 +29228,7 @@ public interface ViewBinding {
             for one in &fields {
                 let named = field_name(&one.id);
                 let kind = qualified(package, &one.kind, one.included.is_some());
-                let found = format!("rootView.findViewById({package}.R.id.{})", one.id);
+                let found = format!("rootView.findViewById({})", id_reference(package, &one.id));
                 if one.merged {
                     text.push_str(&format!(
                         "        {kind} {named} = {kind}.bind(rootView);\n"
@@ -29173,8 +29239,8 @@ public interface ViewBinding {
                     ));
                     if one.everywhere {
                         text.push_str(&format!(
-                            "        if ({named}Found == null) {{\n            throw missing(rootView, {package}.R.id.{});\n        }}\n",
-                            one.id
+                            "        if ({named}Found == null) {{\n            throw missing(rootView, {});\n        }}\n",
+                            id_reference(package, &one.id)
                         ));
                         text.push_str(&format!(
                             "        {kind} {named} = {kind}.bind({named}Found);\n"
@@ -29188,8 +29254,8 @@ public interface ViewBinding {
                     text.push_str(&format!("        {kind} {named} = ({kind}) {found};\n"));
                     if one.everywhere {
                         text.push_str(&format!(
-                            "        if ({named} == null) {{\n            throw missing(rootView, {package}.R.id.{});\n        }}\n",
-                            one.id
+                            "        if ({named} == null) {{\n            throw missing(rootView, {});\n        }}\n",
+                            id_reference(package, &one.id)
                         ));
                     }
                 }
@@ -32342,6 +32408,10 @@ pub mod gradle {
         "runtimeOnly",
         "compile",
         "provided",
+        "releaseImplementation",
+        "releaseApi",
+        "releaseCompileOnly",
+        "releaseRuntimeOnly",
     ];
 
     pub const PROCESSING_CONFIGURATIONS: &[&str] = &["annotationProcessor", "kapt", "ksp"];
@@ -32370,6 +32440,7 @@ pub mod gradle {
         pub unread: Vec<String>,
         pub placeholders: Vec<(String, String)>,
         pub flavors: Vec<String>,
+        pub linked: Vec<String>,
     }
 
     pub fn plain(text: &str) -> String {
@@ -32532,6 +32603,136 @@ pub mod gradle {
             at += 1;
         }
         None
+    }
+
+    pub fn merged(text: &str, named: &str) -> String {
+        every_block(text, named).join("\n")
+    }
+
+    pub fn with_applied(
+        text: &str,
+        folder: &std::path::Path,
+        root: &std::path::Path,
+        depth: usize,
+    ) -> String {
+        let mut out = text.to_string();
+        if depth > 4 {
+            return out;
+        }
+        for said in statements(text) {
+            let said = said.trim();
+            let Some(rest) = said
+                .strip_prefix("apply from")
+                .or_else(|| said.strip_prefix("apply(from"))
+            else {
+                continue;
+            };
+            let rest = rest
+                .trim_start()
+                .trim_start_matches([':', '='])
+                .trim()
+                .trim_end_matches(')');
+            let from_root = rest.starts_with("rootProject.file");
+            let rest = rest
+                .trim_start_matches("rootProject.file(")
+                .trim_start_matches("file(");
+            let Some(named) = unquoted(rest) else {
+                continue;
+            };
+            let mut at_root = from_root;
+            let mut named = named;
+            for mark in [
+                "${rootDir}",
+                "$rootDir",
+                "${rootProject.projectDir}",
+                "$rootProject.projectDir",
+            ] {
+                if let Some(held) = named.strip_prefix(mark) {
+                    named = held.trim_start_matches('/').to_string();
+                    at_root = true;
+                }
+            }
+            if named.contains("://") || named.contains('$') {
+                continue;
+            }
+            let path = if at_root {
+                root.join(&named)
+            } else {
+                folder.join(&named)
+            };
+            let Some(script) = text_of(&path) else {
+                continue;
+            };
+            let beside = path.parent().unwrap_or(folder).to_path_buf();
+            out.push('\n');
+            out.push_str(&with_applied(&plain(&script), &beside, root, depth + 1));
+        }
+        out
+    }
+
+    pub fn every_block(text: &str, named: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let held: Vec<char> = text.chars().collect();
+        let mut at = 0usize;
+        while at < held.len() {
+            if held[at] == '"' || held[at] == '\'' {
+                let (_, next) = quoted(&held, at);
+                at = next;
+                continue;
+            }
+            if !word_at(&held, at, named) {
+                at += 1;
+                continue;
+            }
+            let after = skip_blank(&held, at + named.chars().count());
+            if after < held.len() && held[after] == '{' {
+                if let Some(shut) = closing(&held, after) {
+                    out.push(held[after + 1..shut].iter().collect());
+                    at = shut + 1;
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        out
+    }
+
+    pub fn looked_up(said: &str, known: &std::collections::BTreeMap<String, String>) -> String {
+        let trimmed = said.trim();
+        let bare = trimmed
+            .strip_prefix("rootProject.ext.")
+            .or_else(|| trimmed.strip_prefix("project.ext."))
+            .or_else(|| trimmed.strip_prefix("rootProject."))
+            .or_else(|| trimmed.strip_prefix("ext."))
+            .unwrap_or(trimmed);
+        if !bare.is_empty() && bare.chars().all(|here| is_name(here) || here == '.') {
+            if let Some(held) = known.get(bare) {
+                return held.clone();
+            }
+        }
+        filled(said, known)
+    }
+
+    fn value_known(
+        text: &str,
+        key: &str,
+        known: &std::collections::BTreeMap<String, String>,
+    ) -> Option<String> {
+        value(text, key).map(|held| looked_up(&held, known))
+    }
+
+    fn number_known(
+        text: &str,
+        keys: &[&str],
+        known: &std::collections::BTreeMap<String, String>,
+    ) -> Option<u32> {
+        if let Some(found) = number(text, keys) {
+            return Some(found);
+        }
+        keys.iter()
+            .filter_map(|key| value(text, key))
+            .map(|held| looked_up(&held, known))
+            .find_map(|held| held.trim().parse::<u32>().ok())
     }
 
     pub fn without(text: &str, named: &str) -> String {
@@ -32848,6 +33049,16 @@ pub mod gradle {
             .cloned()
     }
 
+    pub const NATIVES_CONFIGURATION: &str = "natives";
+
+    pub fn native_classifier(said: &str) -> Option<String> {
+        let classifier = said.split(':').nth(3)?.trim();
+        let abi = classifier.strip_prefix("natives-")?;
+        crate::builder::PREBUILT_ABIS
+            .contains(&abi)
+            .then(|| classifier.to_string())
+    }
+
     fn coordinate(said: &str) -> Option<(String, String)> {
         let mut pieces = said.split(':');
         let group = pieces.next()?.trim().to_string();
@@ -32990,14 +33201,39 @@ pub mod gradle {
         known: &std::collections::BTreeMap<String, String>,
         into: &mut Read,
     ) {
-        let Some(body) = block(text, "dependencies") else {
-            return;
-        };
-        for said in statements(&body) {
+        dependencies_of(text, held, known, None, into);
+    }
+
+    pub const FLAVORED_CONFIGURATIONS: &[&str] =
+        &["Implementation", "Api", "CompileOnly", "RuntimeOnly"];
+
+    pub fn dependencies_of(
+        text: &str,
+        held: &crate::settings::Catalogue,
+        known: &std::collections::BTreeMap<String, String>,
+        flavors: Option<&[String]>,
+        into: &mut Read,
+    ) {
+        let bodies = every_block(text, "dependencies");
+        for said in bodies.iter().flat_map(|body| statements(body)) {
             let configuration = first_word(&said);
-            let kept = KEPT_CONFIGURATIONS.contains(&configuration);
-            let processing = PROCESSING_CONFIGURATIONS.contains(&configuration);
-            if !kept && !processing {
+            let (kept, processing, natives) = match flavors {
+                None => (
+                    KEPT_CONFIGURATIONS.contains(&configuration),
+                    PROCESSING_CONFIGURATIONS.contains(&configuration),
+                    configuration == NATIVES_CONFIGURATION,
+                ),
+                Some(chosen) => (
+                    chosen.iter().any(|flavor| {
+                        FLAVORED_CONFIGURATIONS
+                            .iter()
+                            .any(|suffix| configuration == format!("{flavor}{suffix}"))
+                    }),
+                    false,
+                    false,
+                ),
+            };
+            if !kept && !processing && !natives {
                 continue;
             }
             let raw = said[configuration.len()..].trim();
@@ -33006,10 +33242,18 @@ pub mod gradle {
                 None => raw,
             };
             if raw.starts_with("project") {
-                if let Some(named) = unquoted(&inner_text(raw)) {
+                let inside = inner_text(raw);
+                let inside = match inside.split_once("path:") {
+                    Some((_, rest)) => rest.split(',').next().unwrap_or_default().to_string(),
+                    None => inside,
+                };
+                if let Some(named) = unquoted(&inside) {
                     let named = named.trim_start_matches(':').replace(':', "/");
                     if !named.is_empty() && !into.modules.contains(&named) {
-                        into.modules.push(named);
+                        into.modules.push(named.clone());
+                    }
+                    if !named.is_empty() && !into.linked.contains(&named) {
+                        into.linked.push(named);
                     }
                 }
                 continue;
@@ -33075,6 +33319,14 @@ pub mod gradle {
             let Some((name, version)) = found else {
                 into.unread.push(said.trim().to_string());
                 continue;
+            };
+            let classifier = unquoted(&argument)
+                .map(|held| filled(&held, known))
+                .and_then(|held| native_classifier(&held));
+            let version = match classifier {
+                Some(classifier) => format!("{version}:{classifier}"),
+                None if natives => continue,
+                None => version,
             };
             let one = Dependency {
                 name,
@@ -33242,11 +33494,20 @@ pub mod gradle {
                     unquoted(&inner_text(&said[said.find("kotlin").unwrap_or(0) + 6..]))
                         .map(|held| format!("org.jetbrains.kotlin.{held}"))
                 } else if said.trim_start().starts_with("alias") {
-                    Some(
-                        inner_text(&said[said.find("alias").unwrap_or(0) + 5..])
-                            .trim_start_matches("libs.plugins.")
-                            .to_string(),
-                    )
+                    let written = inner_text(&said[said.find("alias").unwrap_or(0) + 5..]);
+                    let key = written
+                        .trim()
+                        .trim_start_matches("libs.plugins.")
+                        .to_string();
+                    let listed = into
+                        .settings
+                        .catalogue
+                        .plugins
+                        .iter()
+                        .find(|one| one.name.replace(['-', '_'], ".") == key)
+                        .map(|one| one.file.clone())
+                        .filter(|one| !one.is_empty());
+                    Some(listed.unwrap_or(key))
                 } else {
                     None
                 };
@@ -33351,7 +33612,10 @@ pub mod gradle {
                 continue;
             };
             let mut found = Read::default();
-            plugins(&plain(&text), &mut found);
+            if let Some(listed) = text_of(&here.join(CATALOGUE_FILE)) {
+                found.settings.catalogue = catalogue(&listed);
+            }
+            plugins(&with_applied(&plain(&text), &folder, here, 0), &mut found);
             if found.plugins.iter().any(|one| one == APPLICATION_PLUGIN) {
                 return Some(named.clone());
             }
@@ -33395,7 +33659,7 @@ pub mod gradle {
             return Err(fail("EG202", "The Gradle build file could not be read.")
                 .with_context(format!("Path: {}", path.display())));
         };
-        let text = plain(&raw);
+        let text = with_applied(&plain(&raw), &folder, here, 0);
 
         let mut found = Read::default();
         let held = match text_of(&here.join(CATALOGUE_FILE)) {
@@ -33437,13 +33701,13 @@ pub mod gradle {
             }
         }
 
-        let android = block(&text, "android").unwrap_or_default();
-        let default = block(&android, "defaultConfig").unwrap_or_default();
+        let android = merged(&text, "android");
+        let default = merged(&android, "defaultConfig");
 
-        if let Some(held) = value(&android, "namespace") {
+        if let Some(held) = value_known(&android, "namespace", &known) {
             found.settings.namespace = held;
         }
-        if let Some(held) = value(&default, "applicationId") {
+        if let Some(held) = value_known(&default, "applicationId", &known) {
             found.settings.application_id = held;
         }
         if found.settings.namespace.is_empty() {
@@ -33467,7 +33731,7 @@ pub mod gradle {
             found.settings.application_id = found.settings.namespace.clone();
         }
         found.settings.package = found.settings.namespace.clone();
-        let features = block(&android, "buildFeatures").unwrap_or_default();
+        let features = merged(&android, "buildFeatures");
         let old_style = block(&android, "viewBinding").unwrap_or_default();
         if flag(&features, &["viewBinding"]) == Some(true)
             || flag(&android, &["viewBinding.enabled", "viewBinding.isEnabled"]) == Some(true)
@@ -33485,48 +33749,46 @@ pub mod gradle {
             }
         }
 
-        if let Some(held) = number(&android, &["compileSdk", "compileSdkVersion"]) {
+        if let Some(held) = number_known(&android, &["compileSdk", "compileSdkVersion"], &known) {
             found.settings.compile_sdk = held;
         }
-        if let Some(held) = number(&default, &["minSdk", "minSdkVersion"]) {
+        if let Some(held) = number_known(&default, &["minSdk", "minSdkVersion"], &known) {
             found.settings.min_sdk = held;
         }
-        if let Some(held) = number(&default, &["targetSdk", "targetSdkVersion"]) {
+        if let Some(held) = number_known(&default, &["targetSdk", "targetSdkVersion"], &known) {
             found.settings.target_sdk = held;
         }
-        if let Some(held) = number(&default, &["versionCode"]) {
+        if let Some(held) = number_known(&default, &["versionCode"], &known) {
             found.settings.version_code = held.max(1);
         }
-        if let Some(held) = value(&default, "versionName") {
+        if let Some(held) = value_known(&default, "versionName", &known) {
             found.settings.version_name = held;
         }
 
-        let release = block(&android, "buildTypes")
-            .and_then(|types| block(&types, "release"))
-            .unwrap_or_default();
+        let release = merged(&merged(&android, "buildTypes"), "release");
         let (chosen, left) = chosen_flavors(&android);
         let mut suffix = String::new();
         for (name, body) in &chosen {
             found.flavors.push(name.clone());
-            if let Some(held) = value(body, "applicationId") {
+            if let Some(held) = value_known(body, "applicationId", &known) {
                 found.settings.application_id = held;
             }
-            if let Some(held) = value(body, "applicationIdSuffix") {
+            if let Some(held) = value_known(body, "applicationIdSuffix", &known) {
                 suffix.push_str(&held);
             }
-            if let Some(held) = number(body, &["minSdk", "minSdkVersion"]) {
+            if let Some(held) = number_known(body, &["minSdk", "minSdkVersion"], &known) {
                 found.settings.min_sdk = held;
             }
-            if let Some(held) = number(body, &["targetSdk", "targetSdkVersion"]) {
+            if let Some(held) = number_known(body, &["targetSdk", "targetSdkVersion"], &known) {
                 found.settings.target_sdk = held;
             }
-            if let Some(held) = number(body, &["versionCode"]) {
+            if let Some(held) = number_known(body, &["versionCode"], &known) {
                 found.settings.version_code = held.max(1);
             }
-            if let Some(held) = value(body, "versionName") {
+            if let Some(held) = value_known(body, "versionName", &known) {
                 found.settings.version_name = held;
             }
-            if let Some(held) = value(body, "versionNameSuffix") {
+            if let Some(held) = value_known(body, "versionNameSuffix", &known) {
                 found.settings.version_name.push_str(&held);
             }
         }
@@ -33545,11 +33807,14 @@ pub mod gradle {
                 }
             ));
         }
-        found.placeholders = placeholders(&default);
+        found.placeholders = placeholders(&default)
+            .into_iter()
+            .map(|(key, held)| (key, looked_up(&held, &known)))
+            .collect();
         for (_, body) in &chosen {
             for (key, held) in placeholders(body) {
                 found.placeholders.retain(|(one, _)| *one != key);
-                found.placeholders.push((key, held));
+                found.placeholders.push((key, looked_up(&held, &known)));
             }
         }
         for (key, held) in placeholders(&release) {
@@ -33559,12 +33824,34 @@ pub mod gradle {
         if !suffix.is_empty() {
             found.settings.application_id.push_str(&suffix);
         }
+        if !found.flavors.is_empty() {
+            let flavors = found.flavors.clone();
+            dependencies_of(&text, &held, &known, Some(&flavors), &mut found);
+            let mut named = String::new();
+            for (at, flavor) in flavors.iter().enumerate() {
+                let mut letters = flavor.chars();
+                if at > 0 {
+                    if let Some(first) = letters.next() {
+                        named.extend(first.to_uppercase());
+                    }
+                }
+                named.push_str(letters.as_str());
+            }
+            found.settings.build_config.push(crate::settings::Declared {
+                kind: "String".to_string(),
+                name: "FLAVOR".to_string(),
+                value: format!("\"{named}\""),
+            });
+        }
         let flavor_bodies: Vec<&String> = chosen.iter().map(|(_, body)| body).collect();
         let mut places: Vec<&String> = vec![&default];
         places.extend(flavor_bodies);
         places.push(&release);
         for place in places {
-            for said in statements(place) {
+            let mut scanned: Vec<String> = vec![place.clone()];
+            scanned.extend(every_block(place, "else"));
+            let mut here: Vec<(usize, crate::settings::Declared)> = Vec::new();
+            for said in scanned.iter().flat_map(|one| statements(one)) {
                 let said = said.trim();
                 let (keyword, into) = if said.starts_with("buildConfigField") {
                     ("buildConfigField", 0)
@@ -33574,15 +33861,38 @@ pub mod gradle {
                     continue;
                 };
                 let held = literals(&said[keyword.len()..]);
-                let [kind, name, value] = held.as_slice() else {
-                    found.unread.push(said.to_string());
-                    continue;
+                let (kind, name, value) = match held.as_slice() {
+                    [kind, name, value] => (kind.clone(), name.clone(), value.clone()),
+                    [kind, name, ..] | [kind, name] if into == 0 => {
+                        found.unread.push(said.to_string());
+                        let unknown = match kind.trim() {
+                            "String" => "\"\"",
+                            "boolean" => "false",
+                            "long" => "0L",
+                            "float" => "0f",
+                            "double" => "0.0",
+                            "int" | "short" | "byte" | "char" => "0",
+                            _ => "null",
+                        };
+                        (kind.clone(), name.clone(), unknown.to_string())
+                    }
+                    _ => {
+                        found.unread.push(said.to_string());
+                        continue;
+                    }
                 };
                 let one = crate::settings::Declared {
-                    kind: filled(kind, &known),
-                    name: filled(name, &known),
-                    value: filled(value, &known),
+                    kind: filled(&kind, &known),
+                    name: filled(&name, &known),
+                    value: filled(&value, &known),
                 };
+                if !here.iter().any(|(was, held)| {
+                    *was == into && held.name == one.name && held.kind == one.kind
+                }) {
+                    here.push((into, one));
+                }
+            }
+            for (into, one) in here {
                 let listed = if into == 0 {
                     &mut found.settings.build_config
                 } else {
@@ -33602,7 +33912,7 @@ pub mod gradle {
             }
         }
 
-        let compile = block(&android, "compileOptions").unwrap_or_default();
+        let compile = merged(&android, "compileOptions");
         if let Some(held) = value(&compile, "sourceCompatibility") {
             found.settings.java.source = level_of(&held);
         }
@@ -33900,9 +34210,6 @@ pub mod gradle {
         let here = root.join(module);
         let res = here.join("src/main/res");
         let manifest = here.join("src/main/AndroidManifest.xml");
-        if !res.is_dir() && !manifest.is_file() {
-            return Ok(());
-        }
         let into = root
             .join(crate::scaffold::MODULES_FOLDER)
             .join(module.replace(['/', ':'], "_"));
@@ -33985,7 +34292,7 @@ pub mod gradle {
 
         let mut out = Adopted {
             module: module.clone(),
-            modules: found.modules.clone(),
+            modules: found.linked.clone(),
             moved: 0,
             processors: found.processors.clone(),
             unread: found.unread.clone(),
@@ -34003,7 +34310,7 @@ pub mod gradle {
         adopt_module(here, &module, true, &mut out)?;
         let placeholders = found.placeholders.clone();
         let mut settings = found.settings;
-        let mut waiting = found.modules.clone();
+        let mut waiting = found.linked.clone();
         let mut done: Vec<String> = vec![module.clone()];
         while !waiting.is_empty() {
             let one = waiting.remove(0);
@@ -34011,6 +34318,9 @@ pub mod gradle {
                 continue;
             }
             done.push(one.clone());
+            if !out.modules.contains(&one) {
+                out.modules.push(one.clone());
+            }
             let within = read(root, &one).ok();
             let mut namespace = String::new();
             if let Some(within) = &within {
@@ -34037,12 +34347,9 @@ pub mod gradle {
                         out.unread.push(held.clone());
                     }
                 }
-                for held in &within.modules {
+                for held in &within.linked {
                     if !done.contains(held) && !waiting.contains(held) {
                         waiting.push(held.clone());
-                    }
-                    if !out.modules.contains(held) {
-                        out.modules.push(held.clone());
                     }
                 }
                 if within.plugins.iter().any(|held| held == LIBRARY_PLUGIN) {
@@ -34050,6 +34357,34 @@ pub mod gradle {
                 }
             }
             adopt_library_module(here, &one, &namespace, &mut out)?;
+            if let Some(within) = within.as_ref().filter(|within| {
+                !namespace.is_empty() && within.plugins.iter().any(|held| held == LIBRARY_PLUGIN)
+            }) {
+                let path = here
+                    .join(crate::scaffold::JAVA_FOLDER)
+                    .join(namespace.replace('.', "/"))
+                    .join(format!("{}.java", crate::builder::BUILD_CONFIG));
+                if !path.exists() {
+                    let text = crate::builder::library_build_config_source(
+                        &namespace,
+                        &within.settings.build_config,
+                    );
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    std::fs::write(&path, text).map_err(|why| {
+                        fail(
+                            "EG206",
+                            "A file from the Gradle project could not be moved.",
+                        )
+                        .with_context(format!("Path: {}", path.display()))
+                        .with_context(format!("Reason: {why}"))
+                    })?;
+                }
+            }
+            for flavor in &found.flavors {
+                adopt_source_set(here, &one, flavor, &mut out)?;
+            }
             adopt_module(here, &one, false, &mut out)?;
         }
 
@@ -34161,6 +34496,7 @@ pub mod maven {
         pub group: String,
         pub artifact: String,
         pub version: String,
+        pub classifier: String,
     }
 
     impl Coordinate {
@@ -34169,16 +34505,21 @@ pub mod maven {
             let group = pieces.next()?.trim().to_string();
             let artifact = pieces.next()?.trim().to_string();
             let version = pieces.next().unwrap_or("").trim().to_string();
+            let classifier = pieces.next().unwrap_or("").trim().to_string();
             if group.is_empty() || artifact.is_empty() {
                 return None;
             }
             if !fit(&group) || !fit(&artifact) || !fit(&version) {
                 return None;
             }
+            if !classifier.is_empty() && !fit(&classifier) {
+                return None;
+            }
             Some(Coordinate {
                 group,
                 artifact,
                 version: settled(&version),
+                classifier,
             })
         }
 
@@ -34187,7 +34528,13 @@ pub mod maven {
         }
 
         pub fn text(&self) -> String {
-            format!("{}:{}:{}", self.group, self.artifact, self.version)
+            if self.classifier.is_empty() {
+                return format!("{}:{}:{}", self.group, self.artifact, self.version);
+            }
+            format!(
+                "{}:{}:{}:{}",
+                self.group, self.artifact, self.version, self.classifier
+            )
         }
 
         pub fn under(&self) -> String {
@@ -34200,7 +34547,13 @@ pub mod maven {
         }
 
         pub fn file(&self, kind: &str) -> String {
-            format!("{}-{}.{kind}", self.artifact, self.version)
+            if self.classifier.is_empty() {
+                return format!("{}-{}.{kind}", self.artifact, self.version);
+            }
+            format!(
+                "{}-{}-{}.{kind}",
+                self.artifact, self.version, self.classifier
+            )
         }
 
         pub fn stored(&self, kind: &str) -> String {
@@ -34981,6 +35334,9 @@ pub mod maven {
                 unresolved.push(found.named());
                 continue;
             }
+            if !found.classifier.is_empty() {
+                continue;
+            }
             if !roots.iter().any(|held| held.coordinate == found) {
                 roots.push(Need {
                     coordinate: found,
@@ -34992,6 +35348,25 @@ pub mod maven {
         Ok(Some((roots, unresolved)))
     }
 
+    pub fn classified(root: &str) -> Vec<Coordinate> {
+        let Ok(Some(settings)) = crate::settings::held(root) else {
+            return Vec::new();
+        };
+        let mut out: Vec<Coordinate> = Vec::new();
+        for one in &settings.dependencies {
+            if !one.file.is_empty() {
+                continue;
+            }
+            let Some(found) = Coordinate::parse(&format!("{}:{}", one.name, one.version)) else {
+                continue;
+            };
+            if !found.classifier.is_empty() && !found.version.is_empty() && !out.contains(&found) {
+                out.push(found);
+            }
+        }
+        out
+    }
+
     pub fn plan(root: &str) -> Result<Plan, Diagnostic> {
         let mut out = Plan::default();
         let Some((roots, unresolved)) = wanted_roots(root)? else {
@@ -34999,6 +35374,18 @@ pub mod maven {
             return Ok(out);
         };
         out.unresolved = unresolved;
+        for one in classified(root) {
+            if library_path(root, &one, JAR).is_file() {
+                out.held.push(one.text());
+                continue;
+            }
+            out.wanted.push(Want {
+                coordinate: one.text(),
+                kind: JAR.to_string(),
+                urls: one.urls(JAR),
+                path: format!("{}/{}", crate::scaffold::LIBRARY_FOLDER, one.stored(JAR)),
+            });
+        }
         let resolved = resolve(root, &roots);
         out.rounds = resolved.rounds;
         out.unresolved.extend(resolved.unresolved);
@@ -47061,6 +47448,21 @@ pub mod builder {
                     build_config_source(&namespace, &identity, settings),
                 ));
             }
+            for (_, manifest) in local_modules(root) {
+                let Some(package) = manifest.as_deref().and_then(package_of) else {
+                    continue;
+                };
+                if package.is_empty()
+                    || package == namespace
+                    || declares_build_config(root, &package)
+                {
+                    continue;
+                }
+                sources.push((
+                    format!("{}/{BUILD_CONFIG}.java", package.replace('.', "/")),
+                    library_build_config_source(&package, &settings.build_config),
+                ));
+            }
         }
 
         let interfaces: Vec<(String, String)> = {
@@ -47429,6 +47831,32 @@ pub mod builder {
         out
     }
 
+    pub fn library_build_config_source(
+        package: &str,
+        fields: &[crate::settings::Declared],
+    ) -> String {
+        let mut out = format!(
+            "package {package};\n\npublic final class {BUILD_CONFIG} {{\n    \
+             public static final boolean DEBUG = false;\n    \
+             public static final String LIBRARY_PACKAGE_NAME = \"{}\";\n    \
+             public static final String BUILD_TYPE = \"{BUILD_TYPE}\";\n",
+            java_text(package),
+        );
+        for one in fields {
+            if one.value.trim().is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "    public static final {} {} = {};\n",
+                one.kind.trim(),
+                one.name.trim(),
+                one.value.trim()
+            ));
+        }
+        out.push_str("}\n");
+        out
+    }
+
     pub const GENERATED_VALUES: &str = "gradleResValues.xml";
 
     fn xml_text(said: &str) -> String {
@@ -47665,6 +48093,9 @@ public final class R {{
         read.extend(generated);
 
         let classpath = what_it_may_call_into(root)?;
+        if classpath.get("androidx/viewbinding/ViewBinding").is_some() {
+            read.retain(|(name, _)| name != "androidx/viewbinding/ViewBinding.java");
+        }
         crate::progress::keep_going()?;
         let made = crate::room::generated(&read, &classpath)?;
         read.extend(made);
@@ -47976,9 +48407,51 @@ public final class R {{
         pub rules: Vec<String>,
     }
 
+    pub const PREBUILT_ABIS: &[&str] = &["armeabi-v7a", "arm64-v8a", "x86", "x86_64"];
+
+    pub fn native_abi_of(path: &std::path::Path) -> Option<&'static str> {
+        let stem = path.file_stem()?.to_string_lossy().to_string();
+        let (_, abi) = stem.rsplit_once("-natives-")?;
+        PREBUILT_ABIS.iter().copied().find(|one| *one == abi)
+    }
+
+    fn natives_carried(
+        path: &std::path::Path,
+        abi: &str,
+        out: &mut Brought,
+    ) -> Result<(), Diagnostic> {
+        let where_from = path.display().to_string();
+        let bytes = std::fs::read(path).map_err(|why| {
+            fail("EB045", "A dependency could not be read.")
+                .with_context(format!("Path: {where_from}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        let mut sink = Sink::new();
+        let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+            return Err(fail("EB046", "A dependency is not an archive this reads.")
+                .with_context(format!("Path: {where_from}")));
+        };
+        for entry in archive.entries() {
+            if entry.is_directory() || !entry.name.ends_with(".so") {
+                continue;
+            }
+            let name = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+            let held = entry_bytes(&bytes, entry, &where_from)?;
+            let placed = format!("lib/{abi}/{name}");
+            if !out.carried.iter().any(|(one, _)| *one == placed) {
+                out.carried.push((placed, held));
+            }
+        }
+        Ok(())
+    }
+
     pub fn brought_by_libraries(root: &str) -> Result<Brought, Diagnostic> {
         let mut out = Brought::default();
         for path in packaged_jars(root) {
+            if let Some(abi) = native_abi_of(&path) {
+                natives_carried(&path, abi, &mut out)?;
+                continue;
+            }
             if path.extension().is_none_or(|held| held != "aar") {
                 continue;
             }

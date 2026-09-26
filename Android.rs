@@ -114815,10 +114815,15 @@ public class ByteArrayInputStream {
     protected int mark;
     protected int pos;
     public native ByteArrayInputStream(byte[] a0, int a1, int a2);
+    public native int available();
     public native void mark(int a0);
     public native boolean markSupported();
+    public native int read();
+    public native int read(byte[] a0, int a1, int a2);
+    public native byte[] readAllBytes();
     public native int readNBytes(byte[] a0, int a1, int a2);
     public native void reset();
+    public native long skip(long a0);
     public native long transferTo(java.io.OutputStream a0) throws java.io.IOException;
 }
 
@@ -114828,14 +114833,17 @@ public class ByteArrayOutputStream {
     public native java.lang.String toString(int a0);
     public native java.lang.String toString(java.lang.String a0) throws java.io.UnsupportedEncodingException;
     public native java.lang.String toString(java.nio.charset.Charset a0);
+    public native void write(byte[] a0, int a1, int a2);
+    public native void write(int a0);
     public native void writeBytes(byte[] a0);
     public native void writeTo(java.io.OutputStream a0) throws java.io.IOException;
 }
 
-public class File {
+public class File implements java.lang.Comparable, java.io.Serializable {
     public static final java.lang.String pathSeparator;
     public static final char pathSeparatorChar;
     public static final char separatorChar;
+    public native File(java.net.URI a0);
     public native boolean canExecute();
     public native static java.io.File createTempFile(java.lang.String a0, java.lang.String a1) throws java.io.IOException;
     public native static java.io.File createTempFile(java.lang.String a0, java.lang.String a1, java.io.File a2) throws java.io.IOException;
@@ -114865,25 +114873,36 @@ public class File {
 }
 
 public class FileInputStream {
+    public native FileInputStream(java.io.FileDescriptor a0);
     protected native void finalize() throws java.io.IOException;
     public native java.nio.channels.FileChannel getChannel();
     public native java.io.FileDescriptor getFD() throws java.io.IOException;
 }
 
 public class FileOutputStream {
+    public native FileOutputStream(java.io.File a0, boolean a1) throws java.io.FileNotFoundException;
+    public native FileOutputStream(java.io.FileDescriptor a0);
     protected native void finalize() throws java.io.IOException;
     public native java.nio.channels.FileChannel getChannel();
     public native java.io.FileDescriptor getFD() throws java.io.IOException;
 }
 
+public class FileReader {
+    public native FileReader(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
+    public native FileReader(java.io.FileDescriptor a0);
+    public native FileReader(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
+}
+
 public class FileWriter {
+    public native FileWriter(java.io.File a0, boolean a1) throws java.io.IOException;
     public native FileWriter(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native FileWriter(java.io.File a0, java.nio.charset.Charset a1, boolean a2) throws java.io.IOException;
+    public native FileWriter(java.io.FileDescriptor a0);
     public native FileWriter(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native FileWriter(java.lang.String a0, java.nio.charset.Charset a1, boolean a2) throws java.io.IOException;
 }
 
-public abstract class InputStream {
+public abstract class InputStream implements java.io.Closeable {
     public native void mark(int a0);
     public native boolean markSupported();
     public native static java.io.InputStream nullInputStream();
@@ -114895,13 +114914,15 @@ public abstract class InputStream {
 }
 
 public class InputStreamReader {
+    public native InputStreamReader(java.io.InputStream a0, java.nio.charset.Charset a1);
+    public native InputStreamReader(java.io.InputStream a0, java.nio.charset.CharsetDecoder a1);
     public native java.lang.String getEncoding();
     public native int read(char[] a0, int a1, int a2) throws java.io.IOException;
     public native int read(java.nio.CharBuffer a0) throws java.io.IOException;
     public native boolean ready() throws java.io.IOException;
 }
 
-public abstract class OutputStream {
+public abstract class OutputStream implements java.io.Closeable, java.io.Flushable {
     public native static java.io.OutputStream nullOutputStream();
 }
 
@@ -114915,12 +114936,14 @@ public class OutputStreamWriter {
     public native void write(java.lang.String a0, int a1, int a2) throws java.io.IOException;
 }
 
-public class PrintStream {
+public class PrintStream implements java.lang.Appendable, java.io.Closeable {
+    public native PrintStream(java.io.File a0) throws java.io.FileNotFoundException;
     public native PrintStream(java.io.File a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
     public native PrintStream(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native PrintStream(java.io.OutputStream a0, boolean a1);
     public native PrintStream(java.io.OutputStream a0, boolean a1, java.lang.String a2) throws java.io.UnsupportedEncodingException;
     public native PrintStream(java.io.OutputStream a0, boolean a1, java.nio.charset.Charset a2);
+    public native PrintStream(java.lang.String a0) throws java.io.FileNotFoundException;
     public native PrintStream(java.lang.String a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
     public native PrintStream(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native java.io.PrintStream append(char a0);
@@ -114928,25 +114951,34 @@ public class PrintStream {
     public native java.io.PrintStream append(java.lang.CharSequence a0, int a1, int a2);
     public native boolean checkError();
     protected native void clearError();
+    public native void close();
+    public native void flush();
     public native java.io.PrintStream format(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
     public native java.io.PrintStream printf(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
     protected native void setError();
+    public native void write(byte[] a0, int a1, int a2);
+    public native void write(int a0);
     public native void writeBytes(byte[] a0);
 }
 
 public class PrintWriter {
     protected java.io.Writer out;
+    public native PrintWriter(java.io.File a0) throws java.io.FileNotFoundException;
     public native PrintWriter(java.io.File a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
     public native PrintWriter(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native PrintWriter(java.io.OutputStream a0, boolean a1);
     public native PrintWriter(java.io.OutputStream a0, boolean a1, java.nio.charset.Charset a2);
     public native PrintWriter(java.io.Writer a0, boolean a1);
+    public native PrintWriter(java.lang.String a0) throws java.io.FileNotFoundException;
     public native PrintWriter(java.lang.String a0, java.lang.String a1) throws java.io.FileNotFoundException, java.io.UnsupportedEncodingException;
     public native PrintWriter(java.lang.String a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native java.io.PrintWriter append(char a0);
+    public native java.io.PrintWriter append(java.lang.CharSequence a0);
     public native java.io.PrintWriter append(java.lang.CharSequence a0, int a1, int a2);
     public native boolean checkError();
     protected native void clearError();
+    public native void close();
+    public native void flush();
     public native java.io.PrintWriter format(java.lang.String a0, java.lang.Object... a1);
     public native java.io.PrintWriter format(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
     public native void print(boolean a0);
@@ -114965,11 +114997,14 @@ public class PrintWriter {
     public native void println(int a0);
     public native void println(long a0);
     protected native void setError();
+    public native void write(char[] a0);
     public native void write(char[] a0, int a1, int a2);
+    public native void write(int a0);
+    public native void write(java.lang.String a0);
     public native void write(java.lang.String a0, int a1, int a2);
 }
 
-public abstract class Reader {
+public abstract class Reader implements java.io.Closeable, java.lang.Readable {
     protected java.lang.Object lock;
     protected native Reader(java.lang.Object a0);
     public native void mark(int a0) throws java.io.IOException;
@@ -114984,6 +115019,7 @@ public abstract class Reader {
 }
 
 public class StringReader {
+    public native void close();
     public native void mark(int a0) throws java.io.IOException;
     public native boolean markSupported();
     public native int read(char[] a0, int a1, int a2) throws java.io.IOException;
@@ -114995,13 +115031,21 @@ public class StringReader {
 public class StringWriter {
     public native StringWriter(int a0);
     public native java.io.StringWriter append(char a0);
+    public native java.io.StringWriter append(java.lang.CharSequence a0);
     public native java.io.StringWriter append(java.lang.CharSequence a0, int a1, int a2);
+    public native void flush();
     public native java.lang.StringBuffer getBuffer();
     public native void write(char[] a0, int a1, int a2);
+    public native void write(int a0);
+    public native void write(java.lang.String a0);
     public native void write(java.lang.String a0, int a1, int a2);
 }
 
-public abstract class Writer {
+public class UncheckedIOException {
+    public native java.io.IOException getCause();
+}
+
+public abstract class Writer implements java.lang.Appendable, java.io.Closeable, java.io.Flushable {
     protected java.lang.Object lock;
     protected native Writer(java.lang.Object a0);
     public native java.io.Writer append(char a0) throws java.io.IOException;
@@ -115035,7 +115079,7 @@ public class AssertionError {
     public native AssertionError(long a0);
 }
 
-public class Boolean {
+public class Boolean implements java.lang.Comparable, java.io.Serializable {
     public static final java.lang.Class<java.lang.Boolean> TYPE;
     public native Boolean(java.lang.String a0);
     public native static boolean getBoolean(java.lang.String a0);
@@ -115043,7 +115087,7 @@ public class Boolean {
     public native static java.lang.Boolean valueOf(java.lang.String a0);
 }
 
-public class Byte {
+public class Byte implements java.lang.Comparable {
     public static final int BYTES = 1;
     public static final int SIZE = 8;
     public static final java.lang.Class<java.lang.Byte> TYPE;
@@ -115064,7 +115108,7 @@ public interface CharSequence {
     default void getChars(int a0, int a1, char[] a2, int a3) { }
 }
 
-public class Character {
+public class Character implements java.lang.Comparable, java.io.Serializable {
     public static final int BYTES = 2;
     public static final byte COMBINING_SPACING_MARK = 8;
     public static final byte CONNECTOR_PUNCTUATION = 23;
@@ -115738,7 +115782,7 @@ public class Character {
     }
 }
 
-public class Class<T> {
+public class Class<T> implements java.lang.reflect.AnnotatedElement, java.lang.reflect.GenericDeclaration, java.io.Serializable, java.lang.reflect.Type, java.lang.invoke.TypeDescriptor.OfField {
     public native java.lang.Class<java.lang.Object> arrayType();
     public native java.lang.Class<java.lang.Object> componentType();
     public native java.lang.String descriptorString();
@@ -115788,12 +115832,12 @@ public class ClassNotFoundException {
     public native java.lang.Throwable getException();
 }
 
-public interface Deprecated {
+public interface Deprecated extends java.lang.annotation.Annotation {
     boolean forRemoval();
     java.lang.String since();
 }
 
-public class Double {
+public class Double implements java.lang.Comparable {
     public static final int BYTES = 8;
     public static final int MAX_EXPONENT = 1023;
     public static final int MIN_EXPONENT = -1022;
@@ -115812,9 +115856,10 @@ public class Double {
     public native static java.lang.Double valueOf(java.lang.String a0) throws java.lang.NumberFormatException;
 }
 
-public abstract class Enum<E extends java.lang.Enum<E>> {
+public abstract class Enum<E extends java.lang.Enum<E>> implements java.lang.Comparable, java.io.Serializable {
     protected native Enum(java.lang.String a0, int a1);
     protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
+    public native int compareTo(E a0);
     protected native void finalize();
 }
 
@@ -115826,7 +115871,7 @@ public class Exception {
     protected native Exception(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
 }
 
-public class Float {
+public class Float implements java.lang.Comparable {
     public static final int BYTES = 4;
     public static final int MAX_EXPONENT = 127;
     public static final int MIN_EXPONENT = -126;
@@ -115855,7 +115900,7 @@ public class IndexOutOfBoundsException {
     public native IndexOutOfBoundsException(long a0);
 }
 
-public class Integer {
+public class Integer implements java.lang.Comparable {
     public static final java.lang.Class<java.lang.Integer> TYPE;
     public native Integer(java.lang.String a0) throws java.lang.NumberFormatException;
     public native static int compareUnsigned(int a0, int a1);
@@ -115877,7 +115922,7 @@ public interface Iterable<T> {
     default java.util.Spliterator<T> spliterator() { return null; }
 }
 
-public class Long {
+public class Long implements java.lang.Comparable {
     public static final int BYTES = 8;
     public static final int SIZE = 64;
     public static final java.lang.Class<java.lang.Long> TYPE;
@@ -115949,6 +115994,9 @@ public class Math {
     public native static long unsignedPowExact(long a0, int a1);
 }
 
+public abstract class Number implements java.io.Serializable {
+}
+
 public class Object {
     protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
     protected native void finalize() throws java.lang.Throwable;
@@ -115959,7 +116007,7 @@ public class RuntimeException {
     protected native RuntimeException(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
 }
 
-public class Short {
+public class Short implements java.lang.Comparable {
     public static final int BYTES = 2;
     public static final int SIZE = 16;
     public static final java.lang.Class<java.lang.Short> TYPE;
@@ -115974,19 +116022,22 @@ public class Short {
     public native static java.lang.Short valueOf(java.lang.String a0, int a1) throws java.lang.NumberFormatException;
 }
 
-public class StackTraceElement {
+public class StackTraceElement implements java.io.Serializable {
     public native StackTraceElement(java.lang.String a0, java.lang.String a1, java.lang.String a2, int a3);
     public native boolean isNativeMethod();
 }
 
-public class String {
+public class String implements java.lang.CharSequence, java.lang.Comparable, java.io.Serializable {
     public static final java.util.Comparator<java.lang.String> CASE_INSENSITIVE_ORDER;
     public native String(byte[] a0, int a1);
     public native String(byte[] a0, int a1, int a2, int a3);
+    public native String(byte[] a0, int a1, int a2, java.nio.charset.Charset a3);
     public native String(int[] a0, int a1, int a2);
+    public native String(java.lang.StringBuffer a0);
     public native int codePointBefore(int a0);
     public native int codePointCount(int a0, int a1);
     public native java.util.stream.IntStream codePoints();
+    public native boolean contentEquals(java.lang.StringBuffer a0);
     public native static java.lang.String copyValueOf(char[] a0, int a1, int a2);
     public native static java.lang.String format(java.util.Locale a0, java.lang.String a1, java.lang.Object... a2);
     public native void getBytes(int a0, int a1, byte[] a2, int a3);
@@ -116006,14 +116057,16 @@ public class String {
     public native java.lang.String translateEscapes();
 }
 
-public class StringBuffer {
+public class StringBuffer implements java.lang.Appendable, java.lang.CharSequence, java.lang.Comparable, java.io.Serializable {
     public native StringBuffer(int a0);
+    public native StringBuffer(java.lang.CharSequence a0);
     public native java.lang.StringBuffer append(boolean a0);
     public native java.lang.StringBuffer append(char[] a0);
     public native java.lang.StringBuffer append(char[] a0, int a1, int a2);
     public native java.lang.StringBuffer append(double a0);
     public native java.lang.StringBuffer append(float a0);
     public native java.lang.StringBuffer append(java.lang.CharSequence a0, int a1, int a2);
+    public native java.lang.StringBuffer append(java.lang.StringBuffer a0);
     public native java.lang.StringBuffer append(long a0);
     public native java.lang.StringBuffer appendCodePoint(int a0);
     public native int capacity();
@@ -116055,9 +116108,10 @@ public class StringBuffer {
     public native void trimToSize();
 }
 
-public class StringBuilder {
+public class StringBuilder implements java.lang.Appendable, java.lang.CharSequence, java.lang.Comparable, java.io.Serializable {
     public native java.lang.StringBuilder append(char[] a0, int a1, int a2);
     public native java.lang.StringBuilder append(java.lang.CharSequence a0, int a1, int a2);
+    public native java.lang.StringBuilder append(java.lang.StringBuffer a0);
     public native java.lang.StringBuilder appendCodePoint(int a0);
     public native int capacity();
     public native java.util.stream.IntStream chars();
@@ -116074,6 +116128,7 @@ public class StringBuilder {
     public native java.lang.StringBuilder insert(int a0, char[] a1, int a2, int a3);
     public native java.lang.StringBuilder insert(int a0, double a1);
     public native java.lang.StringBuilder insert(int a0, float a1);
+    public native java.lang.StringBuilder insert(int a0, java.lang.CharSequence a1);
     public native java.lang.StringBuilder insert(int a0, java.lang.CharSequence a1, int a2, int a3);
     public native java.lang.StringBuilder insert(int a0, long a1);
     public native int lastIndexOf(java.lang.String a0, int a1);
@@ -116107,13 +116162,16 @@ public class System {
     public native static void setSecurityManager(java.lang.SecurityManager a0);
 }
 
-public class Thread {
+public class Thread implements java.lang.Runnable {
     public static final int MAX_PRIORITY = 10;
     public static final int MIN_PRIORITY = 1;
     public static final int NORM_PRIORITY = 5;
+    public native Thread(java.lang.String a0);
+    public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1);
     public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1, java.lang.String a2);
     public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1, java.lang.String a2, long a3);
     public native Thread(java.lang.ThreadGroup a0, java.lang.Runnable a1, java.lang.String a2, long a3, boolean a4);
+    public native Thread(java.lang.ThreadGroup a0, java.lang.String a1);
     public native static int activeCount();
     public native void checkAccess();
     protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
@@ -116156,7 +116214,7 @@ public class Thread {
     }
 }
 
-public class Throwable {
+public class Throwable implements java.io.Serializable {
     protected native Throwable(java.lang.String a0, java.lang.Throwable a1, boolean a2, boolean a3);
     public native java.lang.Throwable fillInStackTrace();
     public native void printStackTrace(java.io.PrintStream a0);
@@ -116184,7 +116242,7 @@ public class ElementType {
         r####"
 package java.lang.reflect;
 
-public class AccessibleObject {
+public class AccessibleObject implements java.lang.reflect.AnnotatedElement {
     public native <T extends java.lang.annotation.Annotation> T[] getAnnotationsByType(java.lang.Class<T> a0);
     public native <T extends java.lang.annotation.Annotation> T getDeclaredAnnotation(java.lang.Class<T> a0);
     public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
@@ -116226,7 +116284,7 @@ public class Constructor {
     public native java.lang.String toGenericString();
 }
 
-public class Field {
+public class Field implements java.lang.reflect.Member {
     public native <T extends java.lang.annotation.Annotation> T[] getAnnotationsByType(java.lang.Class<T> a0);
     public native boolean getBoolean(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
     public native byte getByte(java.lang.Object a0) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
@@ -116248,6 +116306,10 @@ public class Field {
     public native void setLong(java.lang.Object a0, long a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
     public native void setShort(java.lang.Object a0, short a1) throws java.lang.IllegalAccessException, java.lang.IllegalArgumentException;
     public native java.lang.String toGenericString();
+}
+
+public class InvocationTargetException {
+    public native InvocationTargetException(java.lang.Throwable a0, java.lang.String a1);
 }
 
 public interface Member {
@@ -116287,7 +116349,7 @@ public class Modifier {
     public native static int parameterModifiers();
 }
 
-public class RecordComponent {
+public class RecordComponent implements java.lang.reflect.AnnotatedElement {
     public native <T extends java.lang.annotation.Annotation> T getAnnotation(java.lang.Class<T> a0);
     public native java.lang.annotation.Annotation[] getAnnotations();
     public native java.lang.annotation.Annotation[] getDeclaredAnnotations();
@@ -116302,7 +116364,7 @@ public class RecordComponent {
         r####"
 package java.math;
 
-public class BigDecimal {
+public class BigDecimal implements java.lang.Comparable {
     public static final int ROUND_CEILING = 2;
     public static final int ROUND_DOWN = 1;
     public static final int ROUND_FLOOR = 3;
@@ -116318,6 +116380,7 @@ public class BigDecimal {
     public native BigDecimal(double a0, java.math.MathContext a1);
     public native BigDecimal(int a0, java.math.MathContext a1);
     public native BigDecimal(java.lang.String a0, java.math.MathContext a1);
+    public native BigDecimal(java.math.BigInteger a0);
     public native BigDecimal(java.math.BigInteger a0, int a1);
     public native BigDecimal(java.math.BigInteger a0, int a1, java.math.MathContext a2);
     public native BigDecimal(java.math.BigInteger a0, java.math.MathContext a1);
@@ -116365,7 +116428,7 @@ public class BigDecimal {
     public native static java.math.BigDecimal valueOf(long a0, int a1);
 }
 
-public class BigInteger {
+public class BigInteger implements java.lang.Comparable {
     public native BigInteger(byte[] a0);
     public native BigInteger(byte[] a0, int a1, int a2);
     public native BigInteger(int a0, byte[] a1);
@@ -116473,7 +116536,7 @@ public abstract class HttpURLConnection {
     public abstract boolean usingProxy();
 }
 
-public class URI {
+public class URI implements java.lang.Comparable, java.io.Serializable {
     public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2) throws java.net.URISyntaxException;
     public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2, int a3, java.lang.String a4, java.lang.String a5, java.lang.String a6) throws java.net.URISyntaxException;
     public native URI(java.lang.String a0, java.lang.String a1, java.lang.String a2, java.lang.String a3) throws java.net.URISyntaxException;
@@ -116498,7 +116561,7 @@ public class URI {
     public native java.lang.String toASCIIString();
 }
 
-public class URL {
+public class URL implements java.io.Serializable {
     public native URL(java.lang.String a0, java.lang.String a1, int a2, java.lang.String a3) throws java.net.MalformedURLException;
     public native URL(java.lang.String a0, java.lang.String a1, int a2, java.lang.String a3, java.net.URLStreamHandler a4) throws java.net.MalformedURLException;
     public native URL(java.lang.String a0, java.lang.String a1, java.lang.String a2) throws java.net.MalformedURLException;
@@ -116573,10 +116636,12 @@ public abstract class URLConnection {
 
 public class URLDecoder {
     public native static java.lang.String decode(java.lang.String a0);
+    public native static java.lang.String decode(java.lang.String a0, java.nio.charset.Charset a1);
 }
 
 public class URLEncoder {
     public native static java.lang.String encode(java.lang.String a0);
+    public native static java.lang.String encode(java.lang.String a0, java.nio.charset.Charset a1);
 }
 "####,
     ),
@@ -116585,7 +116650,7 @@ public class URLEncoder {
         r####"
 package java.nio.charset;
 
-public abstract class Charset {
+public abstract class Charset implements java.lang.Comparable {
     protected native Charset(java.lang.String a0, java.lang.String[] a1);
     public native java.util.Set<java.lang.String> aliases();
     public native static java.util.SortedMap<java.lang.String, java.nio.charset.Charset> availableCharsets();
@@ -116619,6 +116684,7 @@ public class FileAlreadyExistsException {
 }
 
 public class Files {
+    public native static long copy(java.io.InputStream a0, java.nio.file.Path a1, java.nio.file.CopyOption... a2) throws java.io.IOException;
     public native static long copy(java.nio.file.Path a0, java.io.OutputStream a1) throws java.io.IOException;
     public native static java.nio.file.Path createLink(java.nio.file.Path a0, java.nio.file.Path a1) throws java.io.IOException;
     public native static java.nio.file.Path createSymbolicLink(java.nio.file.Path a0, java.nio.file.Path a1, java.nio.file.attribute.FileAttribute<java.lang.Object>... a2) throws java.io.IOException;
@@ -116667,7 +116733,9 @@ public class NoSuchFileException {
     public native NoSuchFileException(java.lang.String a0, java.lang.String a1, java.lang.String a2);
 }
 
-public interface Path {
+public interface Path extends java.lang.Comparable, java.lang.Iterable, java.nio.file.Watchable {
+    int compareTo(java.nio.file.Path a0);
+    boolean endsWith(java.nio.file.Path a0);
     java.nio.file.FileSystem getFileSystem();
     java.nio.file.Path getRoot();
     boolean isAbsolute();
@@ -116678,6 +116746,7 @@ public interface Path {
     java.nio.file.Path relativize(java.nio.file.Path a0);
     java.nio.file.Path resolveSibling(java.lang.String a0);
     java.nio.file.Path resolveSibling(java.nio.file.Path a0);
+    boolean startsWith(java.nio.file.Path a0);
     java.nio.file.Path subpath(int a0, int a1);
     java.nio.file.Path toRealPath(java.nio.file.LinkOption... a0) throws java.io.IOException;
     java.net.URI toUri();
@@ -116687,7 +116756,7 @@ public class Paths {
     public native static java.nio.file.Path get(java.net.URI a0);
 }
 
-public class StandardOpenOption {
+public class StandardOpenOption implements java.nio.file.OpenOption {
     public static final java.nio.file.StandardOpenOption DELETE_ON_CLOSE;
     public static final java.nio.file.StandardOpenOption DSYNC;
     public static final java.nio.file.StandardOpenOption SPARSE;
@@ -116812,7 +116881,7 @@ public class DecimalFormat {
     public native java.lang.String toPattern();
 }
 
-public abstract class Format {
+public abstract class Format implements java.lang.Cloneable, java.io.Serializable {
     public native java.lang.Object clone();
     public abstract java.lang.StringBuffer format(java.lang.Object a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
     public native java.text.AttributedCharacterIterator formatToCharacterIterator(java.lang.Object a0);
@@ -116869,6 +116938,7 @@ public abstract class NumberFormat {
 }
 
 public class SimpleDateFormat {
+    public native SimpleDateFormat(java.lang.String a0, java.text.DateFormatSymbols a1);
     public native void applyLocalizedPattern(java.lang.String a0);
     public native java.lang.Object clone();
     public native java.lang.StringBuffer format(java.util.Date a0, java.lang.StringBuffer a1, java.text.FieldPosition a2);
@@ -116887,7 +116957,7 @@ public class SimpleDateFormat {
         r####"
 package java.time;
 
-public class DayOfWeek {
+public class DayOfWeek implements java.time.temporal.TemporalAccessor, java.time.temporal.TemporalAdjuster {
     public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
     public native static java.time.DayOfWeek from(java.time.temporal.TemporalAccessor a0);
     public native int get(java.time.temporal.TemporalField a0);
@@ -116898,7 +116968,7 @@ public class DayOfWeek {
     public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
 }
 
-public class Duration {
+public class Duration implements java.lang.Comparable, java.io.Serializable, java.time.temporal.TemporalAmount {
     public native java.time.Duration abs();
     public native java.time.temporal.Temporal addTo(java.time.temporal.Temporal a0);
     public native long dividedBy(java.time.Duration a0);
@@ -116939,7 +117009,7 @@ public class Duration {
     public native java.time.Duration withSeconds(long a0);
 }
 
-public class Instant {
+public class Instant implements java.lang.Comparable, java.io.Serializable, java.time.temporal.Temporal, java.time.temporal.TemporalAdjuster {
     public static final java.time.Instant MAX;
     public static final java.time.Instant MIN;
     public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
@@ -116969,7 +117039,7 @@ public class Instant {
     public native java.time.Instant with(java.time.temporal.TemporalField a0, long a1);
 }
 
-public class LocalDate {
+public class LocalDate implements java.time.chrono.ChronoLocalDate, java.io.Serializable, java.time.temporal.Temporal, java.time.temporal.TemporalAdjuster {
     public static final java.time.LocalDate EPOCH;
     public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
     public native java.time.ZonedDateTime atStartOfDay(java.time.ZoneId a0);
@@ -117006,7 +117076,7 @@ public class LocalDate {
     public native java.time.LocalDate with(java.time.temporal.TemporalField a0, long a1);
 }
 
-public class LocalDateTime {
+public class LocalDateTime implements java.time.chrono.ChronoLocalDateTime, java.io.Serializable, java.time.temporal.Temporal, java.time.temporal.TemporalAdjuster {
     public static final java.time.LocalDateTime MAX;
     public static final java.time.LocalDateTime MIN;
     public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
@@ -117062,7 +117132,7 @@ public class LocalDateTime {
     public native java.time.LocalDateTime withYear(int a0);
 }
 
-public class LocalTime {
+public class LocalTime implements java.lang.Comparable, java.io.Serializable, java.time.temporal.Temporal, java.time.temporal.TemporalAdjuster {
     public static final java.time.LocalTime MIDNIGHT;
     public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
     public native java.time.LocalDateTime atDate(java.time.LocalDate a0);
@@ -117104,7 +117174,7 @@ public class LocalTime {
     public native java.time.LocalTime withSecond(int a0);
 }
 
-public class Month {
+public class Month implements java.time.temporal.TemporalAccessor, java.time.temporal.TemporalAdjuster {
     public native java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0);
     public native int firstDayOfYear(boolean a0);
     public native java.time.Month firstMonthOfQuarter();
@@ -117119,7 +117189,7 @@ public class Month {
     public native java.time.temporal.ValueRange range(java.time.temporal.TemporalField a0);
 }
 
-public class Period {
+public class Period implements java.time.chrono.ChronoPeriod, java.io.Serializable {
     public static final java.time.Period ZERO;
     public native java.time.temporal.Temporal addTo(java.time.temporal.Temporal a0);
     public native static java.time.Period from(java.time.temporal.TemporalAmount a0);
@@ -117148,7 +117218,7 @@ public class Period {
     public native java.time.Period withYears(int a0);
 }
 
-public abstract class ZoneId {
+public abstract class ZoneId implements java.io.Serializable {
     public static final java.util.Map<java.lang.String, java.lang.String> SHORT_IDS;
     public native static java.time.ZoneId from(java.time.temporal.TemporalAccessor a0);
     public native static java.util.Set<java.lang.String> getAvailableZoneIds();
@@ -117159,7 +117229,7 @@ public abstract class ZoneId {
     public native static java.time.ZoneId ofOffset(java.lang.String a0, java.time.ZoneOffset a1);
 }
 
-public class ZonedDateTime {
+public class ZonedDateTime implements java.time.chrono.ChronoZonedDateTime, java.io.Serializable, java.time.temporal.Temporal {
     public native static java.time.ZonedDateTime from(java.time.temporal.TemporalAccessor a0);
     public native int get(java.time.temporal.TemporalField a0);
     public native int getDayOfMonth();
@@ -117185,6 +117255,7 @@ public class ZonedDateTime {
     public native java.time.ZonedDateTime minusSeconds(long a0);
     public native java.time.ZonedDateTime minusWeeks(long a0);
     public native java.time.ZonedDateTime minusYears(long a0);
+    public native static java.time.ZonedDateTime now(java.time.Clock a0);
     public native static java.time.ZonedDateTime of(int a0, int a1, int a2, int a3, int a4, int a5, int a6, java.time.ZoneId a7);
     public native static java.time.ZonedDateTime of(java.time.LocalDate a0, java.time.LocalTime a1, java.time.ZoneId a2);
     public native static java.time.ZonedDateTime of(java.time.LocalDateTime a0, java.time.ZoneId a1);
@@ -117233,9 +117304,10 @@ public class ZonedDateTime {
         r####"
 package java.time.chrono;
 
-public interface ChronoLocalDate {
+public interface ChronoLocalDate extends java.lang.Comparable, java.time.temporal.Temporal, java.time.temporal.TemporalAdjuster {
     default java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0) { return null; }
     default java.time.chrono.ChronoLocalDateTime<java.lang.Object> atTime(java.time.LocalTime a0) { return null; }
+    default int compareTo(java.time.chrono.ChronoLocalDate a0) { return 0; }
     default java.lang.String format(java.time.format.DateTimeFormatter a0) { return null; }
     static java.time.chrono.ChronoLocalDate from(java.time.temporal.TemporalAccessor a0);
     java.time.chrono.Chronology getChronology();
@@ -117261,9 +117333,10 @@ public interface ChronoLocalDate {
     default java.time.chrono.ChronoLocalDate with(java.time.temporal.TemporalField a0, long a1) { return null; }
 }
 
-public interface ChronoLocalDateTime<D extends java.time.chrono.ChronoLocalDate> {
+public interface ChronoLocalDateTime<D extends java.time.chrono.ChronoLocalDate> extends java.lang.Comparable, java.time.temporal.Temporal, java.time.temporal.TemporalAdjuster {
     default java.time.temporal.Temporal adjustInto(java.time.temporal.Temporal a0) { return null; }
     java.time.chrono.ChronoZonedDateTime<D> atZone(java.time.ZoneId a0);
+    default int compareTo(java.time.chrono.ChronoLocalDateTime<java.lang.Object> a0) { return 0; }
     default java.lang.String format(java.time.format.DateTimeFormatter a0) { return null; }
     static java.time.chrono.ChronoLocalDateTime<java.lang.Object> from(java.time.temporal.TemporalAccessor a0);
     default java.time.chrono.Chronology getChronology() { return null; }
@@ -117286,7 +117359,8 @@ public interface ChronoLocalDateTime<D extends java.time.chrono.ChronoLocalDate>
     java.time.chrono.ChronoLocalDateTime<D> with(java.time.temporal.TemporalField a0, long a1);
 }
 
-public interface ChronoZonedDateTime<D extends java.time.chrono.ChronoLocalDate> {
+public interface ChronoZonedDateTime<D extends java.time.chrono.ChronoLocalDate> extends java.lang.Comparable, java.time.temporal.Temporal {
+    default int compareTo(java.time.chrono.ChronoZonedDateTime<java.lang.Object> a0) { return 0; }
     default java.lang.String format(java.time.format.DateTimeFormatter a0) { return null; }
     static java.time.chrono.ChronoZonedDateTime<java.lang.Object> from(java.time.temporal.TemporalAccessor a0);
     default int get(java.time.temporal.TemporalField a0) { return 0; }
@@ -117375,7 +117449,7 @@ public class DateTimeParseException {
         r####"
 package java.time.temporal;
 
-public class ChronoUnit {
+public class ChronoUnit implements java.time.temporal.TemporalUnit {
     public static final java.time.temporal.ChronoUnit CENTURIES;
     public static final java.time.temporal.ChronoUnit DECADES;
     public static final java.time.temporal.ChronoUnit ERAS;
@@ -117391,7 +117465,7 @@ public class ChronoUnit {
     public native boolean isTimeBased();
 }
 
-public interface Temporal {
+public interface Temporal extends java.time.temporal.TemporalAccessor {
     boolean isSupported(java.time.temporal.TemporalUnit a0);
     default java.time.temporal.Temporal minus(java.time.temporal.TemporalAmount a0) { return null; }
     default java.time.temporal.Temporal minus(long a0, java.time.temporal.TemporalUnit a1) { return null; }
@@ -117433,14 +117507,14 @@ public interface TemporalUnit {
         r####"
 package java.util;
 
-public abstract class AbstractList<E> {
+public abstract class AbstractList<E> implements java.util.List {
     protected int modCount;
     public native boolean addAll(int a0, java.util.Collection<E> a1);
     public native java.util.ListIterator<E> listIterator(int a0);
     protected native void removeRange(int a0, int a1);
 }
 
-public abstract class AbstractMap<K, V> {
+public abstract class AbstractMap<K, V> implements java.util.Map {
     protected native java.lang.Object clone() throws java.lang.CloneNotSupportedException;
     public static class SimpleEntry<K, V> implements java.util.Map.Entry<K, V>, java.io.Serializable {
         public native SimpleEntry(java.util.Map.Entry<K, V> a0);
@@ -117464,7 +117538,7 @@ public abstract class AbstractMap<K, V> {
     }
 }
 
-public class ArrayDeque<E> {
+public class ArrayDeque<E> implements java.lang.Cloneable, java.util.Deque, java.io.Serializable {
     public native java.util.ArrayDeque<E> clone();
     public native E getFirst();
     public native E getLast();
@@ -117476,7 +117550,7 @@ public class ArrayDeque<E> {
     public native java.util.Spliterator<E> spliterator();
 }
 
-public class ArrayList<E> {
+public class ArrayList<E> implements java.lang.Cloneable, java.util.List, java.util.RandomAccess, java.io.Serializable {
     public native boolean addAll(int a0, java.util.Collection<E> a1);
     public native void addFirst(E a0);
     public native void addLast(E a0);
@@ -117665,7 +117739,7 @@ public class Arrays {
     public native static <T> java.util.stream.Stream<T> stream(T[] a0, int a1, int a2);
 }
 
-public class BitSet {
+public class BitSet implements java.lang.Cloneable, java.io.Serializable {
     public native void and(java.util.BitSet a0);
     public native void andNot(java.util.BitSet a0);
     public native void clear();
@@ -117693,7 +117767,7 @@ public class BitSet {
     public native void xor(java.util.BitSet a0);
 }
 
-public abstract class Calendar {
+public abstract class Calendar implements java.lang.Cloneable, java.lang.Comparable, java.io.Serializable {
     public static final int ALL_STYLES = 0;
     public static final int AM = 0;
     public static final int AM_PM = 9;
@@ -117807,7 +117881,7 @@ public abstract class Calendar {
     }
 }
 
-public interface Collection<E> {
+public interface Collection<E> extends java.lang.Iterable {
     default java.util.stream.Stream<E> parallelStream() { return null; }
     default java.util.Spliterator<E> spliterator() { return null; }
     default <T> T[] toArray(java.util.function.IntFunction<T[]> a0) { return null; }
@@ -117872,7 +117946,7 @@ public interface Comparator<T> {
     default <U> java.util.Comparator<T> thenComparing(java.util.function.Function<T, U> a0, java.util.Comparator<U> a1) { return null; }
 }
 
-public class Date {
+public class Date implements java.lang.Cloneable, java.lang.Comparable, java.io.Serializable {
     public native Date(int a0, int a1, int a2);
     public native Date(int a0, int a1, int a2, int a3, int a4);
     public native Date(int a0, int a1, int a2, int a3, int a4, int a5);
@@ -117900,7 +117974,7 @@ public class Date {
     public native java.lang.String toLocaleString();
 }
 
-public interface Deque<E> {
+public interface Deque<E> extends java.util.Queue, java.util.SequencedCollection {
     E getFirst();
     E getLast();
     boolean offerFirst(E a0);
@@ -117911,12 +117985,15 @@ public interface Deque<E> {
     default java.util.Deque<E> reversed() { return null; }
 }
 
-public class EnumMap<K extends java.lang.Enum<K>, V> {
+public class EnumMap<K extends java.lang.Enum<K>, V> implements java.lang.Cloneable, java.io.Serializable {
+    public native EnumMap(java.util.EnumMap<K, V> a0);
     public native java.util.EnumMap<K, V> clone();
 }
 
-public abstract class EnumSet<E extends java.lang.Enum<E>> {
+public abstract class EnumSet<E extends java.lang.Enum<E>> implements java.lang.Cloneable, java.io.Serializable {
     public native java.util.EnumSet<E> clone();
+    public native static <E extends java.lang.Enum<E>> java.util.EnumSet<E> copyOf(java.util.EnumSet<E> a0);
+    public native static <E extends java.lang.Enum<E>> java.util.EnumSet<E> of(E a0, E a1, E a2, E a3, E a4);
     public native static <E extends java.lang.Enum<E>> java.util.EnumSet<E> of(E a0, E... a1);
 }
 
@@ -117954,7 +118031,7 @@ public class GregorianCalendar {
     public native java.time.ZonedDateTime toZonedDateTime();
 }
 
-public class HashMap<K, V> {
+public class HashMap<K, V> implements java.lang.Cloneable, java.util.Map, java.io.Serializable {
     public native HashMap(int a0, float a1);
     public native java.lang.Object clone();
     public native static <K, V> java.util.HashMap<K, V> newHashMap(int a0);
@@ -117964,14 +118041,14 @@ public class HashMap<K, V> {
     public native void replaceAll(java.util.function.BiFunction<K, V, V> a0);
 }
 
-public class HashSet<E> {
+public class HashSet<E> implements java.lang.Cloneable, java.io.Serializable, java.util.Set {
     public native HashSet(int a0, float a1);
     public native java.lang.Object clone();
     public native static <T> java.util.HashSet<T> newHashSet(int a0);
     public native java.util.Spliterator<E> spliterator();
 }
 
-public class LinkedHashMap<K, V> {
+public class LinkedHashMap<K, V> implements java.util.Map, java.util.SequencedMap {
     public native LinkedHashMap(int a0, float a1);
     public native LinkedHashMap(int a0, float a1, boolean a2);
     public native static <K, V> java.util.LinkedHashMap<K, V> newLinkedHashMap(int a0);
@@ -117985,7 +118062,7 @@ public class LinkedHashMap<K, V> {
     public native java.util.SequencedCollection<V> sequencedValues();
 }
 
-public class LinkedHashSet<E> {
+public class LinkedHashSet<E> implements java.lang.Cloneable, java.util.SequencedSet, java.io.Serializable, java.util.Set {
     public native LinkedHashSet(int a0, float a1);
     public native void addFirst(E a0);
     public native void addLast(E a0);
@@ -117998,7 +118075,7 @@ public class LinkedHashSet<E> {
     public native java.util.Spliterator<E> spliterator();
 }
 
-public class LinkedList<E> {
+public class LinkedList<E> implements java.lang.Cloneable, java.util.Deque, java.util.List, java.io.Serializable {
     public native boolean addAll(int a0, java.util.Collection<E> a1);
     public native java.lang.Object clone();
     public native java.util.ListIterator<E> listIterator(int a0);
@@ -118011,7 +118088,7 @@ public class LinkedList<E> {
     public native java.util.Spliterator<E> spliterator();
 }
 
-public interface List<E> {
+public interface List<E> extends java.util.Collection, java.util.SequencedCollection {
     boolean addAll(int a0, java.util.Collection<E> a1);
     default void addFirst(E a0) { }
     default void addLast(E a0) { }
@@ -118024,7 +118101,7 @@ public interface List<E> {
     default java.util.Spliterator<E> spliterator() { return null; }
 }
 
-public class Locale {
+public class Locale implements java.lang.Cloneable, java.io.Serializable {
     public static final java.util.Locale CANADA;
     public static final java.util.Locale CANADA_FRENCH;
     public static final java.util.Locale CHINA;
@@ -118153,7 +118230,7 @@ public interface Map<K, V> {
     }
 }
 
-public interface NavigableMap<K, V> {
+public interface NavigableMap<K, V> extends java.util.SortedMap {
     java.util.Map.Entry<K, V> ceilingEntry(K a0);
     java.util.NavigableSet<K> descendingKeySet();
     java.util.Map.Entry<K, V> floorEntry(K a0);
@@ -118167,7 +118244,7 @@ public interface NavigableMap<K, V> {
     java.util.NavigableMap<K, V> tailMap(K a0, boolean a1);
 }
 
-public interface NavigableSet<E> {
+public interface NavigableSet<E> extends java.util.SortedSet {
     java.util.Iterator<E> descendingIterator();
     java.util.NavigableSet<E> headSet(E a0, boolean a1);
     default E removeFirst() { return null; }
@@ -118225,11 +118302,11 @@ public class OptionalLong {
     public native java.util.stream.LongStream stream();
 }
 
-public interface Queue<E> {
+public interface Queue<E> extends java.util.Collection {
     E remove();
 }
 
-public class Random {
+public class Random implements java.util.random.RandomGenerator, java.io.Serializable {
     public native java.util.stream.DoubleStream doubles();
     public native java.util.stream.DoubleStream doubles(double a0, double a1);
     public native java.util.stream.DoubleStream doubles(long a0);
@@ -118246,13 +118323,17 @@ public class Random {
     public native void nextBytes(byte[] a0);
 }
 
-public class Scanner {
+public class Scanner implements java.io.Closeable, java.util.Iterator {
+    public native Scanner(java.io.File a0) throws java.io.FileNotFoundException;
     public native Scanner(java.io.File a0, java.lang.String a1) throws java.io.FileNotFoundException;
     public native Scanner(java.io.File a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native Scanner(java.io.InputStream a0, java.lang.String a1);
     public native Scanner(java.io.InputStream a0, java.nio.charset.Charset a1);
+    public native Scanner(java.lang.Readable a0);
+    public native Scanner(java.nio.channels.ReadableByteChannel a0);
     public native Scanner(java.nio.channels.ReadableByteChannel a0, java.lang.String a1);
     public native Scanner(java.nio.channels.ReadableByteChannel a0, java.nio.charset.Charset a1);
+    public native Scanner(java.nio.file.Path a0) throws java.io.IOException;
     public native Scanner(java.nio.file.Path a0, java.lang.String a1) throws java.io.IOException;
     public native Scanner(java.nio.file.Path a0, java.nio.charset.Charset a1) throws java.io.IOException;
     public native java.util.regex.Pattern delimiter();
@@ -118305,18 +118386,18 @@ public class Scanner {
     public native java.util.Scanner useRadix(int a0);
 }
 
-public interface Set<E> {
+public interface Set<E> extends java.util.Collection {
     default java.util.Spliterator<E> spliterator() { return null; }
 }
 
-public interface SortedMap<K, V> {
+public interface SortedMap<K, V> extends java.util.Map, java.util.SequencedMap {
     default V putFirst(K a0, V a1) { return null; }
     default V putLast(K a0, V a1) { return null; }
     default java.util.SortedMap<K, V> reversed() { return null; }
     java.util.SortedMap<K, V> subMap(K a0, K a1);
 }
 
-public interface SortedSet<E> {
+public interface SortedSet<E> extends java.util.SequencedSet, java.util.Set {
     default void addFirst(E a0) { }
     default void addLast(E a0) { }
     default E getFirst() { return null; }
@@ -118332,7 +118413,7 @@ public class StringJoiner {
     public native java.util.StringJoiner setEmptyValue(java.lang.CharSequence a0);
 }
 
-public abstract class TimeZone {
+public abstract class TimeZone implements java.lang.Cloneable, java.io.Serializable {
     public static final int LONG = 1;
     public static final int SHORT = 0;
     public native java.lang.Object clone();
@@ -118345,6 +118426,7 @@ public abstract class TimeZone {
     public native java.lang.String getDisplayName(java.util.Locale a0);
     public abstract int getOffset(int a0, int a1, int a2, int a3, int a4, int a5);
     public native int getOffset(long a0);
+    public native static java.util.TimeZone getTimeZone(java.time.ZoneId a0);
     public native boolean hasSameRules(java.util.TimeZone a0);
     public abstract boolean inDaylightTime(java.util.Date a0);
     public native boolean observesDaylightTime();
@@ -118355,7 +118437,8 @@ public abstract class TimeZone {
     public abstract boolean useDaylightTime();
 }
 
-public class TreeMap<K, V> {
+public class TreeMap<K, V> implements java.lang.Cloneable, java.util.NavigableMap, java.io.Serializable {
+    public native TreeMap(java.util.SortedMap<K, V> a0);
     public native java.util.Map.Entry<K, V> ceilingEntry(K a0);
     public native java.lang.Object clone();
     public native java.util.NavigableSet<K> descendingKeySet();
@@ -118374,7 +118457,8 @@ public class TreeMap<K, V> {
     public native java.util.NavigableMap<K, V> tailMap(K a0, boolean a1);
 }
 
-public class TreeSet<E> {
+public class TreeSet<E> implements java.lang.Cloneable, java.util.NavigableSet, java.io.Serializable {
+    public native TreeSet(java.util.SortedSet<E> a0);
     public native void addFirst(E a0);
     public native void addLast(E a0);
     public native java.lang.Object clone();
@@ -118385,7 +118469,7 @@ public class TreeSet<E> {
     public native java.util.NavigableSet<E> tailSet(E a0, boolean a1);
 }
 
-public class UUID {
+public class UUID implements java.lang.Comparable, java.io.Serializable {
     public native UUID(long a0, long a1);
     public native int clockSequence();
     public native int compareTo(java.util.UUID a0);
@@ -118396,7 +118480,7 @@ public class UUID {
     public native int version();
 }
 
-public class Vector<E> {
+public class Vector<E> implements java.lang.Cloneable, java.util.List, java.util.RandomAccess, java.io.Serializable {
     protected int capacityIncrement;
     protected int elementCount;
     protected java.lang.Object[] elementData;
@@ -118433,7 +118517,7 @@ public class Vector<E> {
         r####"
 package java.util.concurrent;
 
-public class ConcurrentHashMap<K, V> {
+public class ConcurrentHashMap<K, V> implements java.util.concurrent.ConcurrentMap, java.io.Serializable {
     public native ConcurrentHashMap(int a0, float a1);
     public native ConcurrentHashMap(int a0, float a1, int a2);
     public native ConcurrentHashMap(java.util.Map<K, V> a0);
@@ -118503,12 +118587,12 @@ public class ConcurrentHashMap<K, V> {
     }
 }
 
-public class ConcurrentLinkedQueue<E> {
+public class ConcurrentLinkedQueue<E> implements java.util.Queue, java.io.Serializable {
     public native ConcurrentLinkedQueue(java.util.Collection<E> a0);
     public native java.util.Spliterator<E> spliterator();
 }
 
-public class CopyOnWriteArrayList<E> {
+public class CopyOnWriteArrayList<E> implements java.lang.Cloneable, java.util.List, java.util.RandomAccess, java.io.Serializable {
     public native CopyOnWriteArrayList(E[] a0);
     public native CopyOnWriteArrayList(java.util.Collection<E> a0);
     public native boolean addAll(int a0, java.util.Collection<E> a1);
@@ -118528,7 +118612,7 @@ public class CopyOnWriteArrayList<E> {
     public native java.util.Spliterator<E> spliterator();
 }
 
-public interface ExecutorService {
+public interface ExecutorService extends java.lang.AutoCloseable, java.util.concurrent.Executor {
     default void close() { }
     <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<java.util.concurrent.Callable<T>> a0) throws java.lang.InterruptedException;
     <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<java.util.concurrent.Callable<T>> a0, long a1, java.util.concurrent.TimeUnit a2) throws java.lang.InterruptedException;
@@ -118594,7 +118678,7 @@ public class TimeUnit {
         r####"
 package java.util.concurrent.atomic;
 
-public class AtomicBoolean {
+public class AtomicBoolean implements java.io.Serializable {
     public native boolean compareAndExchange(boolean a0, boolean a1);
     public native boolean compareAndExchangeAcquire(boolean a0, boolean a1);
     public native boolean compareAndExchangeRelease(boolean a0, boolean a1);
@@ -118612,7 +118696,7 @@ public class AtomicBoolean {
     public native boolean weakCompareAndSetVolatile(boolean a0, boolean a1);
 }
 
-public class AtomicInteger {
+public class AtomicInteger implements java.io.Serializable {
     public native int accumulateAndGet(int a0, java.util.function.IntBinaryOperator a1);
     public native int compareAndExchange(int a0, int a1);
     public native int compareAndExchangeAcquire(int a0, int a1);
@@ -118634,7 +118718,7 @@ public class AtomicInteger {
     public native boolean weakCompareAndSetVolatile(int a0, int a1);
 }
 
-public class AtomicLong {
+public class AtomicLong implements java.io.Serializable {
     public native long accumulateAndGet(long a0, java.util.function.LongBinaryOperator a1);
     public native long compareAndExchange(long a0, long a1);
     public native long compareAndExchangeAcquire(long a0, long a1);
@@ -118659,7 +118743,7 @@ public class AtomicLong {
     public native boolean weakCompareAndSetVolatile(long a0, long a1);
 }
 
-public class AtomicReference<V> {
+public class AtomicReference<V> implements java.io.Serializable {
     public native V accumulateAndGet(V a0, java.util.function.BinaryOperator<V> a1);
     public native V compareAndExchange(V a0, V a1);
     public native V compareAndExchangeAcquire(V a0, V a1);
@@ -118742,7 +118826,7 @@ public interface LongUnaryOperator {
         r####"
 package java.util.regex;
 
-public class Matcher {
+public class Matcher implements java.util.regex.MatchResult {
     public native java.util.regex.Matcher appendReplacement(java.lang.StringBuffer a0, java.lang.String a1);
     public native java.util.regex.Matcher appendReplacement(java.lang.StringBuilder a0, java.lang.String a1);
     public native java.lang.StringBuffer appendTail(java.lang.StringBuffer a0);
@@ -118757,6 +118841,8 @@ public class Matcher {
     public native java.util.regex.Matcher region(int a0, int a1);
     public native int regionEnd();
     public native int regionStart();
+    public native java.lang.String replaceAll(java.util.function.Function<java.util.regex.MatchResult, java.lang.String> a0);
+    public native java.lang.String replaceFirst(java.util.function.Function<java.util.regex.MatchResult, java.lang.String> a0);
     public native boolean requireEnd();
     public native java.util.regex.Matcher reset(java.lang.CharSequence a0);
     public native java.util.stream.Stream<java.util.regex.MatchResult> results();
@@ -118767,7 +118853,7 @@ public class Matcher {
     public native java.util.regex.Matcher useTransparentBounds(boolean a0);
 }
 
-public class Pattern {
+public class Pattern implements java.io.Serializable {
     public static final int CANON_EQ = 128;
     public static final int COMMENTS = 4;
     public static final int LITERAL = 16;
@@ -118790,7 +118876,7 @@ public class PatternSyntaxException {
         r####"
 package java.util.stream;
 
-public interface BaseStream<T, S extends java.util.stream.BaseStream<T, S>> {
+public interface BaseStream<T, S extends java.util.stream.BaseStream<T, S>> extends java.lang.AutoCloseable {
     boolean isParallel();
     S onClose(java.lang.Runnable a0);
     java.util.Spliterator<T> spliterator();
@@ -118834,7 +118920,7 @@ public class Collectors {
     public native static <T, K, U> java.util.stream.Collector<T, java.lang.Object, java.util.Map<K, U>> toUnmodifiableMap(java.util.function.Function<T, K> a0, java.util.function.Function<T, U> a1, java.util.function.BinaryOperator<U> a2);
 }
 
-public interface DoubleStream {
+public interface DoubleStream extends java.util.stream.BaseStream {
     boolean allMatch(java.util.function.DoublePredicate a0);
     boolean anyMatch(java.util.function.DoublePredicate a0);
     static java.util.stream.DoubleStream.Builder builder();
@@ -118852,6 +118938,7 @@ public interface DoubleStream {
     static java.util.stream.DoubleStream generate(java.util.function.DoubleSupplier a0);
     static java.util.stream.DoubleStream iterate(double a0, java.util.function.DoublePredicate a1, java.util.function.DoubleUnaryOperator a2);
     static java.util.stream.DoubleStream iterate(double a0, java.util.function.DoubleUnaryOperator a1);
+    java.util.PrimitiveIterator.OfDouble iterator();
     java.util.stream.DoubleStream limit(long a0);
     default java.util.stream.DoubleStream mapMulti(java.util.stream.DoubleStream.DoubleMapMultiConsumer a0) { return null; }
     java.util.stream.IntStream mapToInt(java.util.function.DoubleToIntFunction a0);
@@ -118861,9 +118948,11 @@ public interface DoubleStream {
     java.util.OptionalDouble min();
     boolean noneMatch(java.util.function.DoublePredicate a0);
     static java.util.stream.DoubleStream of(double a0);
+    java.util.stream.DoubleStream parallel();
     java.util.stream.DoubleStream peek(java.util.function.DoubleConsumer a0);
     double reduce(double a0, java.util.function.DoubleBinaryOperator a1);
     java.util.OptionalDouble reduce(java.util.function.DoubleBinaryOperator a0);
+    java.util.stream.DoubleStream sequential();
     java.util.stream.DoubleStream skip(long a0);
     java.util.stream.DoubleStream sorted();
     java.util.Spliterator.OfDouble spliterator();
@@ -118879,7 +118968,7 @@ public interface DoubleStream {
     }
 }
 
-public interface IntStream {
+public interface IntStream extends java.util.stream.BaseStream {
     java.util.stream.LongStream asLongStream();
     static java.util.stream.IntStream.Builder builder();
     <R> R collect(java.util.function.Supplier<R> a0, java.util.function.ObjIntConsumer<R> a1, java.util.function.BiConsumer<R, R> a2);
@@ -118893,12 +118982,15 @@ public interface IntStream {
     static java.util.stream.IntStream generate(java.util.function.IntSupplier a0);
     static java.util.stream.IntStream iterate(int a0, java.util.function.IntPredicate a1, java.util.function.IntUnaryOperator a2);
     static java.util.stream.IntStream iterate(int a0, java.util.function.IntUnaryOperator a1);
+    java.util.PrimitiveIterator.OfInt iterator();
     default java.util.stream.IntStream mapMulti(java.util.stream.IntStream.IntMapMultiConsumer a0) { return null; }
     java.util.stream.DoubleStream mapToDouble(java.util.function.IntToDoubleFunction a0);
     boolean noneMatch(java.util.function.IntPredicate a0);
     static java.util.stream.IntStream of(int a0);
+    java.util.stream.IntStream parallel();
     java.util.stream.IntStream peek(java.util.function.IntConsumer a0);
     java.util.OptionalInt reduce(java.util.function.IntBinaryOperator a0);
+    java.util.stream.IntStream sequential();
     java.util.Spliterator.OfInt spliterator();
     java.util.IntSummaryStatistics summaryStatistics();
     default java.util.stream.IntStream takeWhile(java.util.function.IntPredicate a0) { return null; }
@@ -118912,7 +119004,7 @@ public interface IntStream {
     }
 }
 
-public interface LongStream {
+public interface LongStream extends java.util.stream.BaseStream {
     boolean allMatch(java.util.function.LongPredicate a0);
     boolean anyMatch(java.util.function.LongPredicate a0);
     java.util.stream.DoubleStream asDoubleStream();
@@ -118932,6 +119024,7 @@ public interface LongStream {
     static java.util.stream.LongStream generate(java.util.function.LongSupplier a0);
     static java.util.stream.LongStream iterate(long a0, java.util.function.LongPredicate a1, java.util.function.LongUnaryOperator a2);
     static java.util.stream.LongStream iterate(long a0, java.util.function.LongUnaryOperator a1);
+    java.util.PrimitiveIterator.OfLong iterator();
     java.util.stream.LongStream limit(long a0);
     default java.util.stream.LongStream mapMulti(java.util.stream.LongStream.LongMapMultiConsumer a0) { return null; }
     java.util.stream.DoubleStream mapToDouble(java.util.function.LongToDoubleFunction a0);
@@ -118941,10 +119034,12 @@ public interface LongStream {
     java.util.OptionalLong min();
     boolean noneMatch(java.util.function.LongPredicate a0);
     static java.util.stream.LongStream of(long a0);
+    java.util.stream.LongStream parallel();
     java.util.stream.LongStream peek(java.util.function.LongConsumer a0);
     static java.util.stream.LongStream rangeClosed(long a0, long a1);
     java.util.OptionalLong reduce(java.util.function.LongBinaryOperator a0);
     long reduce(long a0, java.util.function.LongBinaryOperator a1);
+    java.util.stream.LongStream sequential();
     java.util.stream.LongStream skip(long a0);
     java.util.stream.LongStream sorted();
     java.util.Spliterator.OfLong spliterator();
@@ -118960,7 +119055,7 @@ public interface LongStream {
     }
 }
 
-public interface Stream<T> {
+public interface Stream<T> extends java.util.stream.BaseStream {
     static <T> java.util.stream.Stream.Builder<T> builder();
     <R> R collect(java.util.function.Supplier<R> a0, java.util.function.BiConsumer<R, T> a1, java.util.function.BiConsumer<R, R> a2);
     java.util.stream.DoubleStream flatMapToDouble(java.util.function.Function<T, java.util.stream.DoubleStream> a0);

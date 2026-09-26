@@ -6402,6 +6402,45 @@ public final class Family {
     }
 
     #[test]
+    fn no_dex_file_names_more_than_it_was_allowed() {
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut classes = Vec::new();
+        for source in [A_PROGRAM_THAT_USES_THE_LOT, A_PROGRAM_OF_THE_SUGARED_KIND] {
+            for (_, bytes) in crate::compilers::java::compile(source.trim_start(), &classpath)
+                .expect("the program compiles")
+            {
+                let class = crate::jvm::read(&bytes).expect("it reads back");
+                classes.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+            }
+        }
+
+        let mut split = 0;
+        for most in [64usize, 80, 96, 112, 128, 160, 192, 224, 256, 320] {
+            let Ok(parts) = crate::dexwrite::write_all_holding(&classes, &[], most) else {
+                continue;
+            };
+            for one in &parts {
+                let count =
+                    |at: usize| u32::from_le_bytes(one[at..at + 4].try_into().unwrap()) as usize;
+                for (what, at) in [
+                    ("strings", 0x38),
+                    ("types", 0x40),
+                    ("fields", 0x50),
+                    ("methods", 0x58),
+                ] {
+                    assert!(
+                        count(at) <= most,
+                        "{} {what} were written where {most} were allowed",
+                        count(at)
+                    );
+                }
+            }
+            split += 1;
+        }
+        assert!(split > 3, "only {split} walls were tried");
+    }
+
+    #[test]
     fn a_package_carries_as_many_dex_files_as_it_takes() {
         let classpath = crate::compilers::java::Classpath::new();
         let mut classes = Vec::new();
@@ -10341,7 +10380,7 @@ package com.omni.probe;
 
 public class Walk {
     private int taps;
-    private static final String LABEL = "walk";
+    private static final String LABEL = String.valueOf("walk");
 
     public int classify(int value) {
         switch (value) {
@@ -10721,10 +10760,36 @@ public class Walk {
     }
 
     #[test]
+    fn a_lone_surrogate_is_carried_through_unchanged() {
+        for bytes in [
+            &[0xed, 0xa0, 0xbd][..],
+            &[0xed, 0xb2, 0x80],
+            &[0x41, 0xed, 0xb2, 0x80, 0xed, 0xa0, 0xbd, 0x42],
+            &[0xed, 0xa0, 0x80, 0xed, 0xbf, 0xbf],
+        ] {
+            let text = modified_utf8::decode(bytes).unwrap();
+            assert_eq!(modified_utf8::encode(&text), bytes, "{bytes:?}");
+        }
+
+        let text = modified_utf8::decode(&[0x41, 0xed, 0xb2, 0x80, 0x42]).unwrap();
+        assert_eq!(
+            modified_utf8::units(&text).collect::<Vec<u16>>(),
+            [0x41, 0xdc80, 0x42]
+        );
+        assert_eq!(modified_utf8::from_units(&[0x41, 0xdc80, 0x42]), text);
+
+        let kept = [0xed, 0xaf, 0xbc, 0xed, 0xb0, 0x80];
+        assert_eq!(
+            char::from_u32(modified_utf8::LONE).map(String::from),
+            Some(String::from_utf16(&[0xdbfc, 0xdc00]).unwrap())
+        );
+        let error = modified_utf8::decode(&kept).unwrap_err();
+        assert_eq!(error.code, "E7053");
+    }
+
+    #[test]
     fn a_broken_string_is_refused_rather_than_repaired() {
         let cases: &[(&[u8], &str)] = &[
-            (&[0xed, 0xa0, 0xbd], "E7053"),
-            (&[0xed, 0xb2, 0x80], "E7053"),
             (&[0xc2], "E7050"),
             (&[0xe2, 0x86], "E7050"),
             (&[0xc2, 0x41], "E7051"),
@@ -25188,6 +25253,254 @@ Viewbinding   = false
         std::fs::remove_dir_all(&directory).ok();
     }
     #[test]
+    fn a_gradle_project_names_its_values_through_ext_and_takes_only_linked_modules() {
+        let directory = temp_directory("omni-ext");
+        let at = |path: &str, text: &str| {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        at(
+            "settings.gradle",
+            "include ':core', ':android', ':desktop', ':services', ':services:updates:githubUpdates'\n",
+        );
+        at(
+            "build.gradle",
+            "allprojects {\n\
+                 ext {\n\
+                     appPackageName = 'com.demo.dungeon'\n\
+                     appVersionCode = 845\n\
+                     appVersionName = '3.2.5'\n\
+                     appAndroidCompileSDK = 35\n\
+                     appAndroidMinSDK = 21\n\
+                     appAndroidTargetSDK = 35\n\
+                 }\n\
+             }\n",
+        );
+        at(
+            "android/build.gradle",
+            "apply plugin: 'com.android.application'\n\
+             android {\n\
+                 compileSdkVersion appAndroidCompileSDK\n\
+                 namespace = appPackageName\n\
+                 defaultConfig {\n\
+                     manifestPlaceholders = [appName:appName]\n\
+                     applicationId appPackageName\n\
+                     versionCode appVersionCode\n\
+                     versionName appVersionName\n\
+                     minSdkVersion appAndroidMinSDK\n\
+                     targetSdkVersion appAndroidTargetSDK\n\
+                 }\n\
+                 buildTypes {\n\
+                     release {\n\
+                         dependencies {\n\
+                             releaseImplementation project(path: ':services:updates:githubUpdates', configuration: 'default')\n\
+                         }\n\
+                     }\n\
+                 }\n\
+             }\n\
+             dependencies {\n\
+                 implementation project(':core')\n\
+                 implementation 'com.google.code.gson:gson:2.10.1'\n\
+             }\n",
+        );
+        at(
+            "android/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+             <application /></manifest>",
+        );
+        at(
+            "core/build.gradle",
+            "apply plugin: 'java-library'\n\
+             dependencies { api 'com.google.code.gson:gson:2.10.1' }\n",
+        );
+        at(
+            "core/src/main/java/com/demo/dungeon/Dungeon.java",
+            "package com.demo.dungeon; public class Dungeon {}",
+        );
+        at(
+            "desktop/build.gradle",
+            "apply plugin: 'application'\n\
+             dependencies {\n\
+                 implementation project(':core')\n\
+                 implementation 'com.badlogicgames.gdx:gdx-backend-lwjgl3:1.12.1'\n\
+             }\n",
+        );
+        at(
+            "desktop/src/main/java/com/demo/dungeon/Desktop.java",
+            "package com.demo.dungeon; public class Desktop {}",
+        );
+        at(
+            "services/updates/githubUpdates/build.gradle",
+            "apply plugin: 'java-library'\n",
+        );
+        at(
+            "services/updates/githubUpdates/src/main/java/com/demo/dungeon/Updates.java",
+            "package com.demo.dungeon; public class Updates {}",
+        );
+
+        let root = directory.to_str().unwrap().to_string();
+        let adopted = crate::gradle::adopt(&root)
+            .unwrap()
+            .expect("a Gradle project");
+        assert_eq!(adopted.module, "android");
+        assert!(
+            !adopted.modules.contains(&"desktop".to_string()),
+            "a module the application never links is left where it is: {:?}",
+            adopted.modules
+        );
+        assert!(
+            adopted.modules.contains(&"core".to_string()),
+            "{:?}",
+            adopted.modules
+        );
+        assert!(
+            adopted
+                .modules
+                .contains(&"services/updates/githubUpdates".to_string()),
+            "a module named by path inside a build type is linked: {:?}",
+            adopted.modules
+        );
+        assert!(directory
+            .join("Java/com/demo/dungeon/Dungeon.java")
+            .is_file());
+        assert!(directory
+            .join("Java/com/demo/dungeon/Updates.java")
+            .is_file());
+        assert!(
+            !directory
+                .join("Java/com/demo/dungeon/Desktop.java")
+                .exists(),
+            "the desktop launcher does not reach the Android sources"
+        );
+
+        let settings = crate::settings::held(&root).unwrap().unwrap();
+        assert_eq!(settings.application_id, "com.demo.dungeon");
+        assert_eq!(settings.namespace, "com.demo.dungeon");
+        assert_eq!(settings.version_name, "3.2.5");
+        assert_eq!(settings.version_code, 845);
+        assert_eq!(settings.min_sdk, 21);
+        assert_eq!(settings.target_sdk, 35);
+        assert!(
+            !settings.dependencies.iter().any(|one| one
+                .name
+                .starts_with("com.badlogicgames.gdx:gdx-backend-lwjgl3")),
+            "a desktop module's dependency does not leak in: {:?}",
+            settings.dependencies
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn libgdx_natives_are_fetched_by_classifier_and_packed_per_abi() {
+        let directory = temp_directory("omni-natives");
+        let at = |path: &str, text: &str| {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        at("settings.gradle", "include ':android'\n");
+        at("build.gradle", "ext { gdxVersion = '1.14.0' }\n");
+        at(
+            "android/build.gradle",
+            "apply plugin: 'com.android.application'\n\
+             android { namespace 'com.demo.game'; compileSdk 35\n\
+             defaultConfig { applicationId 'com.demo.game'; minSdk 30; targetSdk 35 } }\n\
+             configurations { natives }\n\
+             dependencies {\n\
+                 implementation \"com.badlogicgames.gdx:gdx-backend-android:$gdxVersion\"\n\
+                 natives \"com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86_64\"\n\
+                 natives \"com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-arm64-v8a\"\n\
+                 natives \"com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-desktop\"\n\
+             }\n",
+        );
+        at(
+            "android/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+             <application /></manifest>",
+        );
+        let root = directory.to_str().unwrap().to_string();
+        crate::gradle::adopt(&root)
+            .unwrap()
+            .expect("a Gradle project");
+        let settings = crate::settings::held(&root).unwrap().unwrap();
+        let versions: Vec<String> = settings
+            .dependencies
+            .iter()
+            .filter(|one| one.name == "com.badlogicgames.gdx:gdx-platform")
+            .map(|one| one.version.clone())
+            .collect();
+        assert_eq!(
+            versions,
+            vec!["1.14.0:natives-x86_64", "1.14.0:natives-arm64-v8a"],
+            "each Android ABI is kept and the desktop one is not"
+        );
+
+        let classified = crate::maven::classified(&root);
+        assert_eq!(classified.len(), 2);
+        assert_eq!(
+            classified[0].urls(crate::maven::JAR)[0],
+            "https://repo1.maven.org/maven2/com/badlogicgames/gdx/gdx-platform/1.14.0/\
+             gdx-platform-1.14.0-natives-x86_64.jar"
+        );
+        let stored = classified[0].stored(crate::maven::JAR);
+        assert_eq!(
+            stored,
+            "com.badlogicgames.gdx.gdx-platform-1.14.0-natives-x86_64.jar"
+        );
+
+        let mut jar = crate::archive::Builder::new();
+        jar.add("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n".to_vec())
+            .unwrap();
+        jar.add("libgdx.so", b"\x7fELF-not-really".to_vec())
+            .unwrap();
+        let folder = directory.join(crate::scaffold::LIBRARY_FOLDER);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(&stored), jar.finish().unwrap()).unwrap();
+
+        let brought = crate::builder::brought_by_libraries(&root).unwrap();
+        assert!(
+            brought
+                .carried
+                .iter()
+                .any(|(name, bytes)| name == "lib/x86_64/libgdx.so"
+                    && bytes == b"\x7fELF-not-really"),
+            "{:?}",
+            brought
+                .carried
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn media_is_stored_uncompressed_as_aapt_stores_it() {
+        let mut apk = crate::archive::Builder::for_android();
+        let sound = vec![7u8; 4096];
+        apk.add("assets/music/theme.ogg", sound.clone()).unwrap();
+        apk.add("assets/text/story.txt", vec![b'a'; 4096]).unwrap();
+        let bytes = apk.finish().unwrap();
+        let mut sink = crate::diag::Sink::new();
+        let read = crate::archive::read(&bytes, &mut sink).unwrap();
+        let method = |name: &str| {
+            read.entries()
+                .iter()
+                .find(|one| one.name == name)
+                .map(|one| one.compressed_size == one.uncompressed_size)
+                .unwrap()
+        };
+        assert!(
+            method("assets/music/theme.ogg"),
+            "AssetManager.openFd needs the sound stored as it is"
+        );
+        assert!(!method("assets/text/story.txt"), "text is still compressed");
+        assert!(crate::archive::kept_uncompressed("res/raw/CLICK.MP3"));
+        assert!(!crate::archive::kept_uncompressed("assets/level.json"));
+    }
+
+    #[test]
     fn view_binding_classes_are_written_as_agp_writes_them() {
         let layout = |folder: &str, name: &str, text: &str| {
             (folder.to_string(), name.to_string(), text.to_string())
@@ -36460,6 +36773,1058 @@ public class Screen extends Activity implements View.OnClickListener {
 
         eprintln!("java: a class compiled here became the classpath for the next one");
     }
+    #[test]
+    fn casts_reach_every_form_javac_takes() {
+        runs_like_the_jdk(
+            &[(
+                "Casts.java",
+                r####"import java.io.Serializable;
+public class Casts {
+    static class Base { Object make() { return "base"; } }
+    static class Kid extends Base {
+        @Override Object make() { String s = (String) super.make(); return s + "!"; }
+    }
+    public static void main(String[] args) {
+        System.out.println(new Kid().make());
+        int bits = 5;
+        long flipped = (long) ~bits;
+        boolean yes = (boolean) !false;
+        Object boxed = (Object) 1.5f;
+        Object dbl = (Object) 2.25;
+        Object k = (Object) int.class;
+        Object v = (Object) void.class;
+        Object sw = (Object) switch (bits) { case 5 -> "five"; default -> "other"; };
+        Runnable r = (Runnable & Serializable) () -> System.out.println("lambda");
+        r.run();
+        System.out.println(flipped + " " + yes + " " + boxed + " " + dbl + " " + k + " " + v + " " + sw + " " + (r instanceof Serializable));
+    }
+}
+"####,
+            )],
+            "Casts",
+            "base!\nlambda\n-6 true 1.5 2.25 int void five true\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Inter.java",
+                r####"import java.io.*;
+import java.util.*;
+import java.util.function.*;
+public class Inter {
+    interface Named { default String name() { return "named"; } }
+    public static void main(String[] args) throws Exception {
+        Runnable r = (Runnable & Serializable) () -> System.out.println("lambda");
+        r.run();
+        Object o = (Runnable) () -> System.out.println("object target");
+        ((Runnable) o).run();
+        Supplier<String> s = (Supplier<String> & Named) () -> "sup";
+        System.out.println(s.get() + " " + (s instanceof Named) + " " + ((Named) s).name() + " " + (r instanceof Serializable));
+        Comparator<String> c = (Comparator<String> & Serializable) String::compareTo;
+        List<String> l = new ArrayList<>(List.of("b", "a", "c"));
+        l.sort(c);
+        System.out.println(l + " " + (c instanceof Serializable));
+        Object x = new ArrayList<String>();
+        List<String> both = (List<String> & RandomAccess) x;
+        System.out.println(both.size());
+        try { Object y = new LinkedList<String>(); List<String> bad = (List<String> & RandomAccess) y; System.out.println("no"); }
+        catch (ClassCastException e) { System.out.println("cce"); }
+        Object t = (Object) true, f = (Object) 1.5f;
+        System.out.println(t + " " + f + " " + (int) (Object) 7 + " " + (long) (Object) 9L);
+    }
+}
+"####,
+            )],
+            "Inter",
+            "lambda\nobject target\nsup true named true\n[a, b, c] true\n0\ncce\ntrue 1.5 7 9\n",
+        );
+    }
+
+    #[test]
+    fn enum_chains_old_array_brackets_and_annotated_locals_compile() {
+        runs_like_the_jdk(
+            &[(
+                "En.java",
+                r####"public class En {
+    enum Badge {
+        A, B(5), C(7, Kind.GLOBAL);
+        enum Kind { HIDDEN, LOCAL, GLOBAL }
+        final int image; final Kind kind;
+        Badge() { this(-1, Kind.HIDDEN); }
+        Badge(int image) { this(image, Kind.LOCAL); }
+        Badge(int image, Kind kind) { this.image = image; this.kind = kind; }
+    }
+    public static void main(String[] a) {
+        for (Badge b : Badge.values()) System.out.println(b + " " + b.ordinal() + " " + b.image + " " + b.kind);
+        int n[] = {1, 2}, m = 3;
+        System.out.println(sum(n, new int[]{m}));
+        @SuppressWarnings("unchecked") java.util.List<String> l = (java.util.List<String>) (Object) new java.util.ArrayList<String>();
+        boolean flag = true;
+        for (int i = flag ? 0 : 1; i < 3; i += 2) System.out.print(i);
+        System.out.println();
+    }
+    static int sum(int left[], int right[]) { return left[0] + left[1] + right[0]; }
+}
+"####,
+            )],
+            "En",
+            "A 0 -1 HIDDEN\nB 1 5 LOCAL\nC 2 7 GLOBAL\n6\n02\n",
+        );
+    }
+
+    #[test]
+    fn boxed_values_open_wherever_javac_opens_them() {
+        runs_like_the_jdk(
+            &[(
+                "Bo.java",
+                r####"public class Bo {
+    static Boolean yes() { return Boolean.TRUE; }
+    static Boolean no() { return false; }
+    public static void main(String[] a) {
+        if (yes() && !no()) System.out.println("and-not");
+        if (no() || yes()) System.out.println("or");
+        int n = 0; Boolean go = true;
+        while (go) { n++; if (n == 3) go = false; }
+        for (int i = 0; yes() && i < 2; i++) n += 10;
+        do { n++; } while (no());
+        String s = yes() ? "t" : "f";
+        Object o = 5;
+        String k = switch (o) { case Integer i when yes() -> "int"; default -> "other"; };
+        assert yes();
+        System.out.println(n + s + k);
+    }
+}
+"####,
+            )],
+            "Bo",
+            "and-not\nor\n24tint\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Ix.java",
+                r####"import java.util.*;
+public class Ix {
+    public static void main(String[] a) {
+        List<Integer> path = List.of(0, 2, 1);
+        boolean[] pit = {false, true, true};
+        int dist = 2; Integer d2 = 1;
+        while (dist > 0 && pit[path.get(dist)]) dist--;
+        long big = d2; double dd = path.get(1);
+        int[] arr = new int[path.get(1)];
+        System.out.println(dist + " " + big + " " + dd + " " + arr.length + " " + pit[d2]);
+    }
+}
+"####,
+            )],
+            "Ix",
+            "0 1 2.0 2 true\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Fe.java",
+                r####"public class Fe {
+    public static void main(String[] a) {
+        int[] n = {1, -2, 3};
+        int sum = 0;
+        for (Integer ofs : n) sum += ofs;
+        Integer[] boxed = {4, 5};
+        for (int v : boxed) sum += v;
+        for (long v : boxed) sum += (int) v;
+        for (Object o : n) System.out.print(o + ",");
+        char[] cs = {'a'};
+        for (Character c : cs) System.out.print(c);
+        System.out.println(" " + sum);
+    }
+}
+"####,
+            )],
+            "Fe",
+            "1,-2,3,a 20\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Rk.java",
+                r####"import java.util.*;
+public class Rk {
+    public LinkedHashMap<Long, Integer> hist = new LinkedHashMap<>();
+    void save() {
+        hist.put(5L, 7); hist.put(9L, 3);
+        long[] dates = new long[hist.size()];
+        int[] scores = new int[hist.size()];
+        int i = 0;
+        for (Long l : hist.keySet()) {
+            dates[i] = l;
+            scores[i] = hist.get(l);
+            i++;
+        }
+        System.out.println(Arrays.toString(dates) + Arrays.toString(scores));
+    }
+    public static void main(String[] a) { new Rk().save(); }
+}
+class Rk2 {
+    public static void main(String[] a) {
+        Integer[] boxed = new Integer[2]; boxed[0] = 5; boxed[1] = 'c' + 0;
+        Object[] objs = new Object[1]; objs[0] = 3.5;
+        long[] ls = new long[1]; Integer in = 9; ls[0] = in;
+        double[] ds = {0}; Long big = 4L; ds[0] = big;
+        System.out.println(java.util.Arrays.toString(boxed) + objs[0] + ls[0] + ds[0]);
+    }
+}
+"####,
+            )],
+            "Rk",
+            "[5, 9][7, 3]\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Rk.java",
+                r####"import java.util.*;
+public class Rk {
+    public LinkedHashMap<Long, Integer> hist = new LinkedHashMap<>();
+    void save() {
+        hist.put(5L, 7); hist.put(9L, 3);
+        long[] dates = new long[hist.size()];
+        int[] scores = new int[hist.size()];
+        int i = 0;
+        for (Long l : hist.keySet()) {
+            dates[i] = l;
+            scores[i] = hist.get(l);
+            i++;
+        }
+        System.out.println(Arrays.toString(dates) + Arrays.toString(scores));
+    }
+    public static void main(String[] a) { new Rk().save(); }
+}
+class Rk2 {
+    public static void main(String[] a) {
+        Integer[] boxed = new Integer[2]; boxed[0] = 5; boxed[1] = 'c' + 0;
+        Object[] objs = new Object[1]; objs[0] = 3.5;
+        long[] ls = new long[1]; Integer in = 9; ls[0] = in;
+        double[] ds = {0}; Long big = 4L; ds[0] = big;
+        System.out.println(java.util.Arrays.toString(boxed) + objs[0] + ls[0] + ds[0]);
+    }
+}
+"####,
+            )],
+            "Rk2",
+            "[5, 99]3.594.0\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Sb.java",
+                r####"public class Sb {
+    public static void main(String[] a) {
+        Integer v = 2; Character c = 'b';
+        switch (v) { case 1: System.out.print("one "); break; case 2: System.out.print("two "); break; default: System.out.print("other "); }
+        String s = switch (c) { case 'a' -> "A"; case 'b' -> "B"; default -> "?"; };
+        Object o = v;
+        String t = switch (o) { case Integer i when i > 1 -> "big"; default -> "small"; };
+        System.out.println(s + " " + t);
+    }
+}
+"####,
+            )],
+            "Sb",
+            "two B big\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Cmp.java",
+                r####"public class Cmp {
+    private int cool = 5;
+    int own = 9;
+    class Inner { void act() { cool -= 1f; cool *= 1.5; } }
+    void me() { own -= 2.5f; this.own += 0.6; }
+    public static void main(String[] a) {
+        Cmp c = new Cmp(); c.new Inner().act(); c.me();
+        int[] arr = {7}; arr[0] /= 2.0; byte b = 10; b += 300; short s = 1; s *= 1000;
+        char ch = 'a'; ch += 1.5; long l = 3; l *= 2.5;
+        System.out.println(c.cool + " " + c.own + " " + arr[0] + " " + b + " " + s + " " + ch + " " + l);
+    }
+}
+"####,
+            )],
+            "Cmp",
+            "6 6 3 54 1000 b 7\n",
+        );
+    }
+
+    #[test]
+    fn outer_instances_and_captured_names_are_reached_as_javac_reaches_them() {
+        runs_like_the_jdk(
+            &[("Early.java", r####"public class Early {
+    String name = "outer";
+    static class Button {
+        final String shown;
+        Button(String label) { shown = label + ":" + describe(); }
+        String describe() { return "base"; }
+    }
+    class Titled extends Button {
+        Titled(String extra) {
+            super(Early.this.name + "/" + extra);
+        }
+        @Override String describe() { return "titled-" + name; }
+    }
+    class Delegating extends Button {
+        Delegating() { this("d"); }
+        Delegating(String s) { super(s); }
+        @Override String describe() { return "del-" + name; }
+    }
+    class Plain extends Button {
+        { System.out.println("init block sees " + name); }
+        Plain() { super("p"); }
+        @Override String describe() { return "plain-" + name; }
+    }
+    void run() {
+        String captured = "cap";
+        Button anon = new Button("a") {
+            @Override String describe() { return "anon-" + captured + "-" + name; }
+        };
+        System.out.println(anon.shown);
+        System.out.println(new Titled("x").shown);
+        System.out.println(new Delegating().shown);
+        System.out.println(new Plain().shown);
+        class Local extends Button {
+            Local() { super("l"); }
+            @Override String describe() { return "local-" + captured + "-" + name; }
+        }
+        System.out.println(new Local().shown);
+        class NoCtor extends Button {
+            NoCtor() { super("n"); }
+            @Override String describe() { return "noctor-" + captured; }
+        }
+        System.out.println(new NoCtor().shown);
+    }
+    public static void main(String[] a) { new Early().run(); }
+}
+"####)],
+            "Early",
+            "a:anon-cap-outer\nouter/x:titled-outer\nd:del-outer\ninit block sees outer\np:plain-outer\nl:local-cap-outer\nn:noctor-cap\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Early2.java",
+                r####"public class Early2 {
+    String name = "outer";
+    static class Button { final String shown; Button(String l) { shown = l + ":" + describe(); } String describe() { return "base"; } }
+    void run() {
+        String captured = "cap";
+        class Local extends Button {
+            Local() { this("l2"); }
+            Local(String s) { super(s); }
+            @Override String describe() { return "local-" + captured + "-" + name; }
+        }
+        System.out.println(new Local().shown + " " + new Local("direct").shown);
+    }
+    public static void main(String[] a) { new Early2().run(); }
+}
+"####,
+            )],
+            "Early2",
+            "l2:local-cap-outer direct:local-cap-outer\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Nest2.java",
+                r####"import java.util.function.*;
+public class Nest2 {
+    String tag = "T";
+    static class ItemButton { String held = "none"; public void item(String item) { held = item; } protected void onClick() {} }
+    interface Selector { void onSelect(String item); }
+    static void select(Selector s) { s.onSelect("picked"); }
+    void build() {
+        ItemButton btn = new ItemButton() {
+            @Override protected void onClick() {
+                select(new Selector() {
+                    @Override public void onSelect(String item) {
+                        Runnable r = () -> item(item + tag + this.getClass().getSimpleName().isEmpty());
+                        r.run();
+                    }
+                });
+                Supplier<Object> s = () -> new Object() { @Override public String toString() { return "in-lambda-" + tag + held; } };
+                System.out.println(s.get());
+            }
+        };
+        btn.onClick();
+        System.out.println(btn.held);
+    }
+    public static void main(String[] a) { new Nest2().build(); }
+}
+"####,
+            )],
+            "Nest2",
+            "in-lambda-TpickedTtrue\npickedTtrue\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Ord.java",
+                r####"public class Ord {
+    static abstract class Btn { abstract String click(); }
+    public static void main(String[] a) {
+        String item = "outer";
+        Btn b = new Btn() {
+            String click() {
+                String seen = item;
+                String item = "inner";
+                return seen + "/" + item;
+            }
+        };
+        Runnable r = () -> { String x = item; System.out.println("lambda " + x); };
+        r.run();
+        System.out.println(b.click());
+    }
+}
+"####,
+            )],
+            "Ord",
+            "lambda outer\nouter/inner\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "An.java",
+                r####"public class An {
+    static abstract class Window { int size; void resize(int w) { size = w; } }
+    public static void main(String[] a) {
+        int w = 100; String label = "x";
+        Window win = new Window() {
+            { int w, h; if (label.isEmpty()) { w = 1; } else { w = 2; } resize(w); }
+            int twice(int w) { w = w * 2; return w; }
+            @Override public String toString() { return label + size + twice(3) + w; }
+        };
+        System.out.println(win);
+    }
+}
+"####,
+            )],
+            "An",
+            "x26100\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "An2.java",
+                r####"import java.util.function.*;
+public class An2 {
+    static abstract class Window { int size; void resize(int w) { size = w; } }
+    static abstract class Button { abstract String click(); }
+    public static void main(String[] a) {
+        int w = 100; String label = "x";
+        Button b = new Button() {
+            String click() {
+                Window win = new Window() { { int w, h; w = label.length() + 1; resize(w); } };
+                IntUnaryOperator f = v -> { int w2 = v * 2; return w2 + w; };
+                return label + win.size + f.applyAsInt(3) + w;
+            }
+        };
+        System.out.println(b.click());
+    }
+}
+"####,
+            )],
+            "An2",
+            "x2106100\n",
+        );
+        runs_like_the_jdk(
+            &[
+                (
+                    "p/Buff.java",
+                    r####"package p;
+public class Buff {
+    public enum buffType { POSITIVE, NEGATIVE, NEUTRAL }
+    public buffType type = buffType.NEUTRAL;
+    public static class Nested { public String hi() { return "nested"; } }
+}
+"####,
+                ),
+                (
+                    "p/Artifact.java",
+                    r####"package p;
+public class Artifact {
+    public class ArtifactBuff extends Buff { }
+}
+"####,
+                ),
+                (
+                    "p/Cloak.java",
+                    r####"package p;
+public class Cloak extends Artifact {
+    String tag = "cloak";
+    public class Stealth extends ArtifactBuff {
+        { type = buffType.POSITIVE; }
+        Nested make() { return new Nested(); }
+        String who() { return tag; }
+    }
+    public class Timed extends ArtifactBuff {
+        final int turns;
+        Timed(int turns) { super(); this.turns = turns; }
+    }
+    ArtifactBuff fresh() { return new ArtifactBuff(); }
+    ArtifactBuff anon() { return new ArtifactBuff() { @Override public String toString() { return "anon-" + tag; } }; }
+    public static void main(String[] a) {
+        Cloak c = new Cloak();
+        Stealth s = c.new Stealth();
+        System.out.println(s.type + " " + s.make().hi() + " " + s.who() + " " + c.new Timed(3).turns + " " + c.fresh().type + " " + c.anon());
+    }
+}
+"####,
+                ),
+            ],
+            "p.Cloak",
+            "POSITIVE nested cloak 3 NEUTRAL anon-cloak\n",
+        );
+    }
+
+    #[test]
+    fn overloads_common_supertypes_and_case_scopes_follow_the_language() {
+        runs_like_the_jdk(
+            &[(
+                "Ov.java",
+                r####"public class Ov {
+    static class Gizmo { }
+    static class Group extends Gizmo { int n; public Gizmo add(Gizmo g) { n++; return g; } }
+    static class Blob { }
+    static class Scene extends Group {
+        public static void add(Blob b) { System.out.println("blob"); }
+        public static void add(Blob b, int x) { }
+        void build() { Group terrain = new Group(); add(terrain); add(new Blob()); this.add(new Gizmo()); System.out.println(n); }
+    }
+    public static void main(String[] a) { new Scene().build(); }
+}
+"####,
+            )],
+            "Ov",
+            "blob\n2\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Lub.java",
+                r####"import java.util.*;
+public class Lub {
+    static class Item { String n; Item(String n) { this.n = n; } }
+    static class Bag extends Item implements Iterable<Item> {
+        List<Item> in = new ArrayList<>(List.of(new Item("b1"), new Item("b2")));
+        Bag() { super("bag"); }
+        public Iterator<Item> iterator() { return in.iterator(); }
+    }
+    static class Belongings implements Iterable<Item> {
+        public Iterator<Item> iterator() { return List.of(new Item("h1")).iterator(); }
+    }
+    public static void main(String[] a) {
+        Bag bag = null; Belongings mine = new Belongings();
+        for (Item i : bag == null ? mine : bag) System.out.print(i.n + " ");
+        bag = new Bag();
+        for (Item i : bag == null ? mine : bag) System.out.print(i.n + " ");
+        List<String> l = a.length > 5 ? new LinkedList<>(List.of("x")) : new ArrayList<>(List.of("y"));
+        System.out.println(l.get(0) + " " + (a.length > 5 ? new ArrayList<String>() : new LinkedList<String>()).size());
+    }
+}
+"####,
+            )],
+            "Lub",
+            "h1 b1 b2 y 0\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Sw.java",
+                r####"public class Sw {
+    static String pick(int n) {
+        switch (n) {
+            case 0: default:
+                String i = "zero";
+                return i + i.length();
+            case 1:
+                i = "one";
+                if (i.length() > 2) { return i; } else { return "short"; }
+            case 2:
+                int k = 5;
+            case 3:
+                k = 7;
+                return "k" + k;
+        }
+    }
+    public static void main(String[] a) {
+        for (int n = 0; n < 5; n++) System.out.print(pick(n) + " ");
+        System.out.println();
+    }
+}
+"####,
+            )],
+            "Sw",
+            "zero4 one k7 k7 zero4 \n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Sup.java",
+                r####"public class Sup {
+    int x = 1;
+    @Override public boolean equals(Object o) { if (super.equals(o)) return true; return o instanceof Sup s && s.x == x; }
+    @Override public int hashCode() { return super.hashCode() * 0 + x; }
+    enum E { A; @Override public String toString() { return "e-" + super.toString(); } }
+    public static void main(String[] a) { Sup s = new Sup(); System.out.println(s.equals(s) + " " + s.equals(new Sup()) + " " + s.hashCode() + " " + E.A); }
+}
+"####,
+            )],
+            "Sup",
+            "true true 1 e-A\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "G.java",
+                r####"import java.util.*;
+public class G {
+    static class Buff { }
+    static class Asc extends Buff { void onLevelSwitch() { System.out.println("switch"); } }
+    static class Char {
+        List<Buff> buffs = new ArrayList<>();
+        public <T extends Buff> T buff( Class<T> c ) {
+            for (Buff b : buffs) { if (b.getClass() == c) { return (T)b; } }
+            return null;
+        }
+        public <T extends Buff> T plain( Class<T> c ) { return buff(c); }
+    }
+    static class Hero extends Char { }
+    public static void main(String[] a) {
+        Hero hero = new Hero(); hero.buffs.add(new Asc());
+        if (hero.buff(Asc.class) != null) hero.buff(Asc.class).onLevelSwitch();
+        hero.plain(Asc.class).onLevelSwitch();
+    }
+}
+"####,
+            )],
+            "G",
+            "switch\nswitch\n",
+        );
+    }
+
+    #[test]
+    fn constants_are_inlined_and_long_concatenations_compile_at_once() {
+        runs_like_the_jdk(
+            &[("K.java", r####"public class K {
+    static final int MINE = 5; static final long BIG = 1L << 40; static final float F = 1.5f; static final double D = 2;
+    static final String S = "s" + MINE; static final char C = 'q'; static final byte B = 3; static final boolean Z = true;
+    interface I { int X = 7; }
+    static class Sub implements I { int get() { return X + MINE; } }
+    public static void main(String[] a) {
+        System.out.println(MINE + " " + BIG + " " + F + " " + D + " " + S + " " + C + " " + B + " " + Z + " " + Integer.MAX_VALUE + " " + Long.MIN_VALUE + " " + Double.MAX_VALUE + " " + Float.NaN + " " + new Sub().get() + " " + Math.PI);
+    }
+}
+"####)],
+            "K",
+            "5 1099511627776 1.5 2.0 s5 q 3 true 2147483647 -9223372036854775808 1.7976931348623157E308 NaN 12 3.141592653589793\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Cat.java",
+                r####"public class Cat {
+    public static void main(String[] a) {
+        int x = 2; char c = 'c'; boolean b = true; Object o = null; long l = 5L;
+        String long1 = "p0" + x + "p1" + x + "p2" + x + "p3" + x + "p4" + x + "p5" + x + "p6" + x + "p7" + x + "p8" + x + "p9" + x + "p10" + x + "p11" + x + "p12" + x + "p13" + x + "p14" + x + "p15" + x + "p16" + x + "p17" + x + "p18" + x + "p19" + x + "p20" + x + "p21" + x + "p22" + x + "p23" + x + "p24" + x + "p25" + x + "p26" + x + "p27" + x + "p28" + x + "p29" + x + "p30" + x + "p31" + x + "p32" + x + "p33" + x + "p34" + x + "p35" + x + "p36" + x + "p37" + x + "p38" + x + "p39" + x;
+        int sum = x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x;
+        String mixed = 1 + 2 + "a" + 1 + 2 + c + b + o + l + 1.5f + (x + x) + x * 3;
+        String right = "r" + ("s" + (x + ("t" + x)));
+        String cc = c + "" + (char)(c + 1);
+        Runnable r = () -> System.out.print("lam ");
+        String withLambda = "L" + ((Runnable) () -> {}).getClass().isSynthetic() + x;
+        r.run();
+        System.out.println(long1.length() + " " + sum + " " + mixed + " " + right + " " + cc + " " + withLambda.startsWith("L"));
+    }
+}"####,
+            )],
+            "Cat",
+            "lam 150 80 3a12ctruenull51.546 rs2t2 cd true\n",
+        );
+        let platform = r####"
+            import android.os.Build;
+            public class Guarded {
+                int check() {
+                    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ? 1 : 0;
+                }
+            }
+        "####;
+        let made = compile_together(
+            &[("Guarded.java".to_string(), platform.to_string())],
+            &empty(),
+        )
+        .expect("it compiles");
+        let class = &made
+            .iter()
+            .find(|(name, _)| name == "Guarded.class")
+            .unwrap()
+            .1;
+        assert!(
+            !class.windows(8).any(|held| held == b"TIRAMISU"),
+            "a constant the platform may not have yet is written in, as javac writes it"
+        );
+        assert!(
+            class.windows(7).any(|held| held == b"SDK_INT"),
+            "a field that is not a constant is still read"
+        );
+    }
+
+    #[test]
+    fn generic_calls_infer_from_bounds_targets_and_constructor_arguments() {
+        runs_like_the_jdk(
+            &[(
+                "Pf.java",
+                r####"import java.util.*;
+public class Pf {
+    static class Pair<F, S> { public final F first; public final S second; Pair(F f, S s) { first = f; second = s; } }
+    static class Box<T extends CharSequence> { T held; List<T> all = new ArrayList<>(); }
+    public static void main(String[] a) {
+        Pair<Integer, String> p = new Pair<>(3, "x");
+        boolean zero = p.first == 0;
+        int twice = p.first * 2;
+        Box<String> b = new Box<>(); b.held = "abc"; b.all.add("q");
+        System.out.println(zero + " " + twice + " " + p.second.length() + " " + b.held.toUpperCase() + " " + b.all.get(0).length());
+    }
+}
+"####,
+            )],
+            "Pf",
+            "false 6 1 ABC 1\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Dia.java",
+                r####"import java.util.*;
+public class Dia {
+    static class Pair<F, S> { public final F first; public final S second; Pair(F f, S s) { first = f; second = s; } }
+    public static void main(String[] a) {
+        var p = new Pair<>(3, "xy");
+        System.out.println(p.second.length() + " " + (p.first + 1) + " " + new Pair<>(List.of("q"), 2.5).first.get(0));
+    }
+}
+"####,
+            )],
+            "Dia",
+            "2 4 q\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Inf.java",
+                r####"import java.util.*;
+import java.util.function.*;
+public class Inf {
+    static class View { int vis = 0; int getVisibility() { return vis; } }
+    static class Btn extends View { }
+    static Map<Integer, View> views = new HashMap<>();
+    @SuppressWarnings("unchecked") static <T extends View> T find(int id) { return (T) views.get(id); }
+    static void show(boolean visible) { System.out.print("visible=" + visible + " "); }
+    static <T> T pick(T a, T b) { return a != null ? a : b; }
+    public static void main(String[] a) {
+        views.put(1, new Btn());
+        show(find(1).getVisibility() == 0);
+        Btn b = find(1);
+        View v = find(1);
+        int n = find(1).getVisibility() + 3;
+        String s = pick(null, "x");
+        List<String> l = Collections.emptyList();
+        Supplier<List<String>> sup = ArrayList::new;
+        Object o = pick("y", "z");
+        System.out.println(b.getVisibility() + " " + v.getVisibility() + " " + n + " " + s + " " + l.size() + " " + sup.get().size() + " " + o);
+    }
+}
+"####,
+            )],
+            "Inf",
+            "visible=true 0 0 3 x 0 0 y\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Fp.java",
+                r####"public class Fp {
+    static class Pref { CharSequence s = "sum"; CharSequence getSummary() { return s; } }
+    static class EditPref extends Pref { String text() { return "edit"; } }
+    static <T extends Pref> T find(CharSequence key) { @SuppressWarnings("unchecked") T t = (T) (key.length() > 3 ? new EditPref() : new Pref()); return t; }
+    static String plain(CharSequence label, CharSequence text) { return label + ":" + text; }
+    public static void main(String[] a) {
+        System.out.println(plain("x", find("ab").getSummary()));
+        EditPref e = find("abcd");
+        System.out.println(e.text());
+    }
+}
+"####,
+            )],
+            "Fp",
+            "x:sum\nedit\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Anon.java",
+                r####"import java.util.*;
+public class Anon {
+    static class View { }
+    static class NavView extends View { String name = "nav"; }
+    static Map<Integer, View> views = new HashMap<>();
+    @SuppressWarnings("unchecked") static <T extends View> T find(int id) { return (T) views.get(id); }
+    static class Nav { final NavView view; Nav(NavView v) { view = v; } void selected() {} }
+    static Nav nav;
+    public static void main(String[] a) {
+        views.put(1, new NavView());
+        nav = new Nav(find(1)) { @Override void selected() { System.out.println("selected " + view.name); } };
+        nav.selected();
+    }
+}
+"####,
+            )],
+            "Anon",
+            "selected nav\n",
+        );
+    }
+
+    #[test]
+    fn lambdas_take_their_shape_from_where_they_are_handed() {
+        runs_like_the_jdk(
+            &[(
+                "CondL.java",
+                r####"import java.util.*;
+import java.util.function.*;
+public class CondL {
+    public static void main(String[] a) {
+        boolean ascending = a.length == 0;
+        Comparator<String> c = ascending ? (x, y) -> x.compareTo(y) : (x, y) -> y.compareTo(x);
+        List<String> l = new ArrayList<>(List.of("b", "c", "a"));
+        l.sort(c);
+        Function<String, Integer> f = ascending ? String::length : s -> -1;
+        Runnable r = ascending ? () -> System.out.print("run ") : null;
+        r.run();
+        Collections.sort(l, !ascending ? Comparator.naturalOrder() : Comparator.reverseOrder());
+        System.out.println(l + " " + f.apply("abcd"));
+    }
+}
+"####,
+            )],
+            "CondL",
+            "run [c, b, a] 4\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Sub.java",
+                r####"import java.util.concurrent.*;
+public class Sub {
+    static boolean stopped = false;
+    public static void main(String[] a) throws Exception {
+        ExecutorService ex = Executors.newSingleThreadExecutor();
+        Future<?> f1 = ex.submit(() -> { if (stopped) { return; } System.out.println("runnable ran"); });
+        Future<Integer> f2 = ex.submit(() -> { if (stopped) return 0; return 42; });
+        Future<?> f3 = ex.submit(() -> System.out.println("expression runnable"));
+        Future<String> f4 = ex.submit(() -> "value");
+        f1.get();
+        System.out.println(f2.get() + " " + f4.get() + " " + (f3.get() == null));
+        ex.shutdown();
+    }
+}
+"####,
+            )],
+            "Sub",
+            "runnable ran\nexpression runnable\n42 value true\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Mr.java",
+                r####"import java.util.*;
+import java.util.concurrent.Callable;
+import java.util.function.*;
+public class Mr {
+    static class Obs<T> {
+        final Callable<? extends T> source;
+        Obs(Callable<? extends T> s) { source = s; }
+        static <T> Obs<T> from(Callable<? extends T> c) { return new Obs<>(c); }
+        Obs<T> on(String scheduler) { return this; }
+        void subscribe(Consumer<? super T> ok) { try { ok.accept(source.call()); } catch (Exception e) { throw new RuntimeException(e); } }
+    }
+    static List<String> names() { return List.of("a", "bb"); }
+    public static void main(String[] a) {
+        Obs.from(Mr::names).on("x").subscribe(result -> {
+            int total = 0;
+            for (String s : result) total += s.length();
+            System.out.println(total + " " + result.size());
+        });
+        Obs.from(() -> 42).subscribe(n -> System.out.println(n + 1));
+    }
+}
+"####,
+            )],
+            "Mr",
+            "3 2\n43\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Bl.java",
+                r####"import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.*;
+public class Bl {
+    static <T> T call(Callable<T> c) throws Exception { return c.call(); }
+    public static void main(String[] a) throws Exception {
+        String s = call(() -> { int n = 3; var sb = new StringBuilder(); for (int i = 0; i < n; i++) sb.append(i); String out = sb.toString(); return out; }).toUpperCase();
+        System.out.println(s + " " + call(() -> { List<Integer> l = List.of(4, 5); return l; }).get(1));
+    }
+}
+"####,
+            )],
+            "Bl",
+            "012 5\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Tern.java",
+                r####"public class Tern {
+    static final int ONE = 1;
+    static String take(byte b) { return "byte" + b; }
+    static String take(int i) { return "int" + i; }
+    static String takeC(char c) { return "char" + c; }
+    static String takeC(int i) { return "int" + i; }
+    public static void main(String[] a) {
+        boolean t = a.length == 0;
+        byte b1 = t ? (byte) 1 : 0;
+        System.out.println(take(t ? (byte) 1 : 0) + " " + take(t ? (byte) 2 : ONE) + " " + take(t ? (byte) 3 : 300) + " " + takeC(t ? 'x' : 0) + " " + b1 + " " + (t ? (short) 5 : (byte) 6));
+    }
+}
+"####,
+            )],
+            "Tern",
+            "byte1 byte2 int3 charx 1 5\n",
+        );
+    }
+
+    #[test]
+    fn anonymous_classes_hold_their_own_classes_and_lambdas_reach_super() {
+        runs_like_the_jdk(
+            &[(
+                "Ain.java",
+                r####"import java.util.*;
+public class Ain {
+    interface Shower { String show(int at); }
+    abstract static class Base<T> implements Shower { final List<T> items; Base(List<T> items) { this.items = items; } T get(int at) { return items.get(at); } }
+    public static void main(String[] a) {
+        String prefix = "p";
+        Shower s = new Base<>(List.of("a", "b")) {
+            Holder holder;
+            class Holder { String title; int n; }
+            public String show(int at) {
+                if (holder == null) { holder = new Holder(); holder.n = 0; }
+                holder.n++;
+                holder.title = prefix + get(at);
+                return holder.title + holder.n;
+            }
+        };
+        System.out.println(s.show(0) + s.show(1));
+    }
+}
+"####,
+            )],
+            "Ain",
+            "pa1pb2\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Sl.java",
+                r####"import java.util.function.*;
+public class Sl {
+    static class Base {
+        int shown = 0;
+        void setVisibility(int v) { shown = v; System.out.println("base " + v); }
+        String name(String p) { return "base-" + p; }
+        String name(int p) { return "int-" + p; }
+    }
+    static class Menu extends Base {
+        @Override void setVisibility(int v) {
+            if (v == 1) {
+                Runnable r = () -> super.setVisibility(v * 10);
+                r.run();
+            } else {
+                super.setVisibility(v);
+            }
+        }
+        @Override String name(String p) { return "menu"; }
+        String both() {
+            Function<String, String> f = s -> super.name(s) + "/" + super.name(s.length());
+            Supplier<Supplier<String>> deep = () -> () -> super.name("deep");
+            return f.apply("xy") + " " + deep.get().get();
+        }
+    }
+    public static void main(String[] a) {
+        Menu m = new Menu();
+        m.setVisibility(1);
+        m.setVisibility(2);
+        System.out.println(m.shown + " " + m.both());
+    }
+}
+"####,
+            )],
+            "Sl",
+            "base 10\nbase 2\n2 base-xy/int-2 base-deep\n",
+        );
+    }
+
+    #[test]
+    fn annotated_locals_rethrown_unions_and_static_imports_compile_as_javac_does() {
+        runs_like_the_jdk(
+            &[(
+                "Ann.java",
+                r####"import java.lang.annotation.*;
+import java.util.*;
+public class Ann {
+    @Retention(RetentionPolicy.CLASS) @interface Nullable {}
+    @Retention(RetentionPolicy.CLASS) @interface NonNull {}
+    private final @NonNull String name = "n";
+    private static final @Nullable Object nothing = null;
+    public @Nullable String get(final @NonNull String given, @Nullable final Integer other) {
+        final @Nullable String local = given + other;
+        @NonNull final String second = local + "!";
+        for (final @NonNull String part : List.of("a", "b")) { if (part.equals("b")) return second + part; }
+        try { throw new IllegalStateException(); } catch (final @NonNull IllegalStateException e) { return "caught"; }
+    }
+    public static void main(String[] a) { System.out.println(new Ann().get("g", 1) + " " + new Ann().name + " " + nothing); }
+}
+"####,
+            )],
+            "Ann",
+            "g1!b n null\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Re.java",
+                r####"import java.io.*;
+public class Re {
+    static int work(boolean io) throws IOException {
+        try {
+            if (io) throw new IOException("io");
+            throw new IllegalStateException("state");
+        } catch (IOException | IllegalStateException e) {
+            System.out.print("caught " + e.getMessage() + " ");
+            throw e;
+        }
+    }
+    public static void main(String[] a) {
+        try { work(true); } catch (IOException e) { System.out.print("outer io "); }
+        try { work(false); } catch (IOException | RuntimeException e) { System.out.println("outer " + e.getClass().getSimpleName()); }
+    }
+}
+"####,
+            )],
+            "Re",
+            "caught io outer io caught state outer IllegalStateException\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Si.java",
+                r####"import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.*;
+import static java.lang.Math.PI;
+public class Si {
+    interface Consts { String NAME = "consts"; }
+    static class User implements Consts { String who() { return NAME.toUpperCase(); } }
+    public static void main(String[] a) {
+        System.out.println(HOURS.toMillis(2) + " " + MINUTES.toSeconds(3) + " " + new User().who() + " " + (PI > 3));
+    }
+}
+"####,
+            )],
+            "Si",
+            "7200000 180 CONSTS true\n",
+        );
+    }
+
     fn java_25() -> Option<std::path::PathBuf> {
         let Ok(entries) = std::fs::read_dir("/usr/lib/jvm") else {
             return None;
