@@ -28096,6 +28096,2732 @@ public final class {class_name} extends ContentProvider {{
     }
 }
 
+pub mod debugger {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+    use std::sync::Mutex;
+
+    pub const PACKAGE: &str = "com.apk.builder.debug";
+
+    pub const FOLDER: &str = "com/apk/builder/debug/";
+
+    pub const AUTHORITY_SUFFIX: &str = ".debugger";
+
+    pub const PRESENCE_ACTION: &str = "com.apk.builder.debug.RUNTIME";
+
+    pub const PROVIDER: &str = "com.apk.builder.debug.DebugProvider";
+
+    pub const RECEIVER: &str = "com.apk.builder.debug.Presence";
+
+    pub const FACTORY: &str = "com.apk.builder.debug.ComponentFactory";
+
+    pub const HOST_PACKAGE: &str = "com.apk.builder";
+
+    pub const RUNTIME_VERSION: u32 = 1;
+
+    pub const DEBUG_PROFILE: &str = "debug";
+
+    pub const RELEASE_PROFILE: &str = "release";
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.debugger",
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Level {
+        Off,
+        Crash,
+        Standard,
+        Full,
+    }
+
+    impl Level {
+        pub fn parse(said: &str) -> Option<Level> {
+            match said.trim() {
+                "off" => Some(Level::Off),
+                "crash" => Some(Level::Crash),
+                "standard" => Some(Level::Standard),
+                "full" => Some(Level::Full),
+                _ => None,
+            }
+        }
+
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Level::Off => "off",
+                Level::Crash => "crash",
+                Level::Standard => "standard",
+                Level::Full => "full",
+            }
+        }
+
+        pub fn for_profile(profile: &str) -> Level {
+            if profile == DEBUG_PROFILE {
+                Level::Full
+            } else {
+                Level::Standard
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Host {
+        pub package: String,
+        pub certificate: String,
+        pub debugger: bool,
+        pub seal: bool,
+    }
+
+    static HOST: Mutex<Option<Host>> = Mutex::new(None);
+
+    pub fn read_host(spec: &str) -> Result<Host, Diagnostic> {
+        let read = crate::json::read(spec)
+            .ok_or_else(|| fail("EU001", "The debugger settings are not JSON."))?;
+        let package = read
+            .get("package")
+            .and_then(|one| one.text())
+            .unwrap_or(HOST_PACKAGE)
+            .trim()
+            .to_string();
+        if package.is_empty() || !package.contains('.') {
+            return Err(fail(
+                "EU002",
+                "The package that reads the debugger is not a package name.",
+            )
+            .with_context(format!("Value: {package:?}")));
+        }
+        let certificate: String = read
+            .get("certificate")
+            .and_then(|one| one.text())
+            .unwrap_or_default()
+            .chars()
+            .filter(|one| one.is_ascii_hexdigit())
+            .flat_map(char::to_uppercase)
+            .collect();
+        if !certificate.is_empty() && certificate.len() != 64 {
+            return Err(
+                fail("EU003", "The certificate digest is not a SHA-256 digest.")
+                    .with_context(format!("Length: {}", certificate.len())),
+            );
+        }
+        let host = Host {
+            package,
+            certificate,
+            debugger: read
+                .get("debugger")
+                .and_then(|one| one.boolean())
+                .unwrap_or(true),
+            seal: read
+                .get("seal")
+                .and_then(|one| one.boolean())
+                .unwrap_or(true),
+        };
+        Ok(host)
+    }
+
+    pub fn configure(spec: &str) -> Result<Host, Diagnostic> {
+        let host = read_host(spec)?;
+        if let Ok(mut held) = HOST.lock() {
+            *held = Some(host.clone());
+        }
+        Ok(host)
+    }
+
+    pub const COLLECTED: &[&str] = &[
+        "crashes",
+        "native_crashes",
+        "not_responding",
+        "exits",
+        "lifecycle",
+        "memory",
+        "performance",
+        "frames",
+        "own_log",
+        "device",
+    ];
+
+    pub fn write_host(w: &mut crate::json::Writer, host: &Host) {
+        w.field_bool("configured", true);
+        w.field_str("package", &host.package);
+        w.field_bool("certified", !host.certificate.is_empty());
+        w.field_bool("debugger", host.debugger);
+        w.field_bool("seal", host.seal);
+        w.field_u64("runtime", u64::from(RUNTIME_VERSION));
+        w.field_str("authoritySuffix", AUTHORITY_SUFFIX);
+        w.field_str("presence", PRESENCE_ACTION);
+        w.begin_array(Some("collected"));
+        for one in COLLECTED {
+            w.element_str(one);
+        }
+        w.end_array();
+    }
+
+    pub fn host() -> Option<Host> {
+        HOST.lock().ok().and_then(|held| held.clone())
+    }
+
+    pub fn forget() {
+        if let Ok(mut held) = HOST.lock() {
+            *held = None;
+        }
+    }
+
+    pub fn seals() -> bool {
+        host().map(|one| one.seal).unwrap_or(true)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Plan {
+        pub level: Level,
+        pub profile: String,
+        pub factory: String,
+        pub host: String,
+        pub certificate: String,
+    }
+
+    pub fn plan(
+        host: &Host,
+        settings: Option<&crate::settings::Settings>,
+        manifest: &str,
+    ) -> Option<Plan> {
+        if !host.debugger {
+            return None;
+        }
+        let debugging = settings
+            .map(|one| one.debugging.clone())
+            .unwrap_or_default();
+        if !debugging.enabled {
+            return None;
+        }
+        let level = debugging.level_for(&debugging.profile);
+        if level == Level::Off {
+            return None;
+        }
+        let mut quiet = crate::diag::Sink::new();
+        let factory = crate::xml::parse(manifest, "AndroidManifest.xml", &mut quiet)
+            .and_then(|root| {
+                root.children
+                    .iter()
+                    .find(|one| one.name == "application")
+                    .and_then(|one| one.attribute("android:appComponentFactory"))
+                    .map(str::to_string)
+            })
+            .filter(|one| one != FACTORY)
+            .map(|one| {
+                if one.starts_with('.') {
+                    let package = crate::builder::package_of(manifest).unwrap_or_default();
+                    format!("{package}{one}")
+                } else {
+                    one
+                }
+            })
+            .unwrap_or_default();
+        Some(Plan {
+            level,
+            profile: debugging.profile.clone(),
+            factory,
+            host: host.package.clone(),
+            certificate: host.certificate.clone(),
+        })
+    }
+
+    fn java_string(said: &str) -> String {
+        let mut out = String::with_capacity(said.len() + 2);
+        out.push('"');
+        for one in said.chars() {
+            match one {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                _ => out.push(one),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    pub fn build_facts(plan: &Plan) -> String {
+        format!(
+            "package {PACKAGE};\n\npublic final class BuildFacts {{\n\n    public static final String LEVEL = {};\n\n    public static final String PROFILE = {};\n\n    public static final String HOST = {};\n\n    public static final String HOST_CERTIFICATE = {};\n\n    public static final String BUILDER_VERSION = {};\n\n    public static final String FACTORY = {};\n\n    public static final int RUNTIME_VERSION = {RUNTIME_VERSION};\n\n    private BuildFacts() {{\n    }}\n}}\n",
+            java_string(plan.level.as_str()),
+            java_string(&plan.profile),
+            java_string(&plan.host),
+            java_string(&plan.certificate),
+            java_string(env!("CARGO_PKG_VERSION")),
+            java_string(&plan.factory),
+        )
+    }
+
+    pub fn sources(plan: &Plan) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = RUNTIME
+            .iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect();
+        out.push((format!("{FOLDER}BuildFacts.java"), build_facts(plan)));
+        out
+    }
+
+    pub fn is_runtime_class(descriptor: &str) -> bool {
+        descriptor.trim_start_matches('L').starts_with(FOLDER)
+    }
+
+    pub fn authority(application_id: &str) -> String {
+        format!("{application_id}{AUTHORITY_SUFFIX}")
+    }
+
+    pub fn declare(root: &mut crate::xml::Element, application_id: &str, plan: &Plan) {
+        let where_at = root.position;
+        let said = |name: &str, value: &str| crate::xml::Attribute {
+            name: name.to_string(),
+            value: value.to_string(),
+            position: where_at,
+        };
+        let element = |name: &str,
+                       attributes: Vec<crate::xml::Attribute>,
+                       children: Vec<crate::xml::Element>| {
+            let count = children.len();
+            crate::xml::Element {
+                name: name.to_string(),
+                attributes,
+                children,
+                text: String::new(),
+                position: where_at,
+                child_at: vec![0; count],
+            }
+        };
+        let seeing_the_host = element(
+            "queries",
+            Vec::new(),
+            vec![element(
+                "package",
+                vec![said("android:name", &plan.host)],
+                Vec::new(),
+            )],
+        );
+        let at = root
+            .children
+            .iter()
+            .position(|one| one.name == "application")
+            .unwrap_or(root.children.len());
+        root.children.insert(at, seeing_the_host);
+        root.child_at
+            .insert(at.min(root.child_at.len()), root.text.len());
+
+        let Some(application) = root
+            .children
+            .iter_mut()
+            .find(|child| child.name == "application")
+        else {
+            return;
+        };
+        application
+            .attributes
+            .retain(|one| one.name != "android:appComponentFactory");
+        application
+            .attributes
+            .push(said("android:appComponentFactory", FACTORY));
+        let provider = element(
+            "provider",
+            vec![
+                said("android:name", PROVIDER),
+                said("android:authorities", &authority(application_id)),
+                said("android:exported", "true"),
+                said("android:initOrder", "2147483646"),
+            ],
+            Vec::new(),
+        );
+        let receiver = element(
+            "receiver",
+            vec![
+                said("android:name", RECEIVER),
+                said("android:exported", "true"),
+            ],
+            vec![element(
+                "intent-filter",
+                Vec::new(),
+                vec![element(
+                    "action",
+                    vec![said("android:name", PRESENCE_ACTION)],
+                    Vec::new(),
+                )],
+            )],
+        );
+        application.child_at.push(application.text.len());
+        application.children.push(provider);
+        application.child_at.push(application.text.len());
+        application.children.push(receiver);
+    }
+
+    pub const RUNTIME: &[(&str, &str)] = &[
+        (
+            "com/apk/builder/debug/Journal.java",
+            r####"package com.apk.builder.debug;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+public final class Journal {
+
+    public static final int KEPT = 4000;
+
+    public static final long SEGMENT = 512L * 1024L;
+
+    public static final int SEGMENTS = 4;
+
+    public static final int LONGEST = 64 * 1024;
+
+    public static final int CRASH_LONGEST = 256 * 1024;
+
+    public static final int BURST = 400;
+
+    public static final String PREFIX = "journal-";
+
+    public static final String SUFFIX = ".jsonl";
+
+    public static final String NEXT = "journal.next";
+
+    public static final String OUTBOX = "outbox";
+
+    public static final String WAITING = "waiting-";
+
+    public static final class Event {
+        public final long seq;
+        public final long time;
+        public final String kind;
+        public final char level;
+        public final String tag;
+        public final String text;
+
+        public Event(long seq, long time, String kind, char level, String tag, String text) {
+            this.seq = seq;
+            this.time = time;
+            this.kind = kind;
+            this.level = level;
+            this.tag = tag;
+            this.text = text;
+        }
+
+        public String line() {
+            StringBuilder out = new StringBuilder(text.length() + tag.length() + 64);
+            out.append("{\"s\":").append(seq);
+            out.append(",\"t\":").append(time);
+            out.append(",\"k\":");
+            quote(out, kind);
+            out.append(",\"l\":");
+            quote(out, String.valueOf(level));
+            out.append(",\"g\":");
+            quote(out, tag);
+            out.append(",\"x\":");
+            quote(out, text);
+            out.append('}');
+            return out.toString();
+        }
+
+        public static Event parse(String line) {
+            try {
+                Reading reading = new Reading(line);
+                reading.expect('{');
+                long seq = 0;
+                long time = 0;
+                String kind = null;
+                String level = null;
+                String tag = null;
+                String text = null;
+                while (true) {
+                    String key = reading.string();
+                    reading.expect(':');
+                    if (key.equals("s")) {
+                        seq = reading.number();
+                    } else if (key.equals("t")) {
+                        time = reading.number();
+                    } else if (key.equals("k")) {
+                        kind = reading.string();
+                    } else if (key.equals("l")) {
+                        level = reading.string();
+                    } else if (key.equals("g")) {
+                        tag = reading.string();
+                    } else if (key.equals("x")) {
+                        text = reading.string();
+                    } else {
+                        return null;
+                    }
+                    char next = reading.next();
+                    if (next == '}') {
+                        break;
+                    }
+                    if (next != ',') {
+                        return null;
+                    }
+                }
+                if (seq <= 0 || kind == null || level == null || level.length() != 1
+                        || tag == null || text == null) {
+                    return null;
+                }
+                return new Event(seq, time, kind, level.charAt(0), tag, text);
+            } catch (RuntimeException broken) {
+                return null;
+            }
+        }
+    }
+
+    static void quote(StringBuilder out, String said) {
+        out.append('"');
+        for (int at = 0; at < said.length(); at++) {
+            char one = said.charAt(at);
+            switch (one) {
+                case '"':
+                    out.append("\\\"");
+                    break;
+                case '\\':
+                    out.append("\\\\");
+                    break;
+                case '\n':
+                    out.append("\\n");
+                    break;
+                case '\r':
+                    out.append("\\r");
+                    break;
+                case '\t':
+                    out.append("\\t");
+                    break;
+                default:
+                    if (one < 0x20 || one == 0x2028 || one == 0x2029) {
+                        out.append("\\u");
+                        String hex = Integer.toHexString(one);
+                        for (int pad = hex.length(); pad < 4; pad++) {
+                            out.append('0');
+                        }
+                        out.append(hex);
+                    } else {
+                        out.append(one);
+                    }
+            }
+        }
+        out.append('"');
+    }
+
+    static final class Reading {
+        private final String text;
+        private int at;
+
+        Reading(String text) {
+            this.text = text;
+        }
+
+        char next() {
+            while (at < text.length() && text.charAt(at) == ' ') {
+                at++;
+            }
+            if (at >= text.length()) {
+                throw new IllegalArgumentException("ended early");
+            }
+            return text.charAt(at++);
+        }
+
+        void expect(char wanted) {
+            if (next() != wanted) {
+                throw new IllegalArgumentException("expected " + wanted);
+            }
+        }
+
+        long number() {
+            while (at < text.length() && text.charAt(at) == ' ') {
+                at++;
+            }
+            int from = at;
+            if (at < text.length() && text.charAt(at) == '-') {
+                at++;
+            }
+            while (at < text.length() && Character.isDigit(text.charAt(at))) {
+                at++;
+            }
+            return Long.parseLong(text.substring(from, at));
+        }
+
+        String string() {
+            expect('"');
+            StringBuilder out = new StringBuilder();
+            while (true) {
+                if (at >= text.length()) {
+                    throw new IllegalArgumentException("string never closed");
+                }
+                char one = text.charAt(at++);
+                if (one == '"') {
+                    return out.toString();
+                }
+                if (one != '\\') {
+                    out.append(one);
+                    continue;
+                }
+                char escaped = text.charAt(at++);
+                switch (escaped) {
+                    case 'n':
+                        out.append('\n');
+                        break;
+                    case 'r':
+                        out.append('\r');
+                        break;
+                    case 't':
+                        out.append('\t');
+                        break;
+                    case 'u':
+                        out.append((char) Integer.parseInt(text.substring(at, at + 4), 16));
+                        at += 4;
+                        break;
+                    default:
+                        out.append(escaped);
+                }
+            }
+        }
+    }
+
+    private final File folder;
+    private final boolean aside;
+    private final ArrayDeque<Event> held = new ArrayDeque<Event>();
+    private final Map<String, long[]> bursts = new HashMap<String, long[]>();
+    private long next = 1;
+    private int segment;
+    private long written;
+    private FileOutputStream stream;
+    private Writer out;
+    private boolean dirty;
+    private long dropped;
+
+    public Journal(File folder) {
+        this(folder, false);
+    }
+
+    private Journal(File folder, boolean aside) {
+        this.folder = folder;
+        this.aside = aside;
+        folder.mkdirs();
+        if (!aside) {
+            load();
+        }
+    }
+
+    public static Journal aside(File outbox) {
+        return new Journal(outbox, true);
+    }
+
+    public static File outbox(File folder) {
+        return new File(folder, OUTBOX);
+    }
+
+    public File folder() {
+        return folder;
+    }
+
+    public boolean isAside() {
+        return aside;
+    }
+
+    private int[] segments() {
+        String[] names = folder.list();
+        if (names == null) {
+            return new int[0];
+        }
+        int[] found = new int[names.length];
+        int count = 0;
+        for (String name : names) {
+            if (!name.startsWith(PREFIX) || !name.endsWith(SUFFIX)) {
+                continue;
+            }
+            try {
+                found[count++] = Integer.parseInt(
+                        name.substring(PREFIX.length(), name.length() - SUFFIX.length()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        int[] kept = Arrays.copyOf(found, count);
+        Arrays.sort(kept);
+        return kept;
+    }
+
+    private File named(int index) {
+        return new File(folder, PREFIX + index + SUFFIX);
+    }
+
+    private synchronized void load() {
+        int[] indices = segments();
+        for (int index : indices) {
+            File file = named(index);
+            try {
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(new FileInputStream(file), "UTF-8"));
+                try {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        Event event = Event.parse(line);
+                        if (event == null) {
+                            continue;
+                        }
+                        held.addLast(event);
+                        while (held.size() > KEPT) {
+                            held.removeFirst();
+                        }
+                        if (event.seq >= next) {
+                            next = event.seq + 1;
+                        }
+                    }
+                } finally {
+                    reader.close();
+                }
+            } catch (IOException ignored) {
+            }
+        }
+        segment = indices.length == 0 ? 0 : indices[indices.length - 1];
+        written = named(segment).length();
+        long remembered = readNumber(new File(folder, NEXT));
+        if (remembered > next) {
+            next = remembered;
+        }
+    }
+
+    static long readNumber(File file) {
+        try {
+            FileInputStream in = new FileInputStream(file);
+            try {
+                byte[] held = new byte[32];
+                int read = in.read(held);
+                return read > 0
+                        ? Long.parseLong(new String(held, 0, read, "UTF-8").trim()) : 0L;
+            } finally {
+                in.close();
+            }
+        } catch (Exception absent) {
+            return 0L;
+        }
+    }
+
+    static void writeNumber(File file, long value) {
+        File beside = new File(file.getPath() + ".new");
+        try {
+            FileOutputStream out = new FileOutputStream(beside);
+            try {
+                out.write(Long.toString(value).getBytes("UTF-8"));
+                out.getFD().sync();
+            } finally {
+                out.close();
+            }
+            if (!beside.renameTo(file)) {
+                beside.delete();
+            }
+        } catch (IOException ignored) {
+            beside.delete();
+        }
+    }
+
+    private void open() throws IOException {
+        if (out != null) {
+            return;
+        }
+        stream = new FileOutputStream(named(segment), true);
+        out = new OutputStreamWriter(stream, "UTF-8");
+    }
+
+    private void rotate() throws IOException {
+        close();
+        segment++;
+        written = 0;
+        int[] indices = segments();
+        for (int index : indices) {
+            if (index <= segment - SEGMENTS) {
+                named(index).delete();
+            }
+        }
+    }
+
+    private void close() {
+        if (out == null) {
+            return;
+        }
+        try {
+            out.flush();
+            out.close();
+        } catch (IOException ignored) {
+        }
+        out = null;
+        stream = null;
+    }
+
+    private boolean allowed(String kind, long time) {
+        if (kind.equals("crash") || kind.equals("anr") || kind.equals("exit")) {
+            return true;
+        }
+        long second = time / 1000L;
+        long[] count = bursts.get(kind);
+        if (count == null) {
+            count = new long[] {second, 0};
+            bursts.put(kind, count);
+        }
+        if (count[0] != second) {
+            count[0] = second;
+            count[1] = 0;
+        }
+        count[1]++;
+        return count[1] <= BURST;
+    }
+
+    public Event record(String kind, char level, String tag, String text) {
+        return record(kind, level, tag, text, System.currentTimeMillis());
+    }
+
+    public synchronized Event record(String kind, char level, String tag, String text,
+            long time) {
+        if (!allowed(kind, time)) {
+            dropped++;
+            return null;
+        }
+        if (dropped > 0) {
+            long lost = dropped;
+            dropped = 0;
+            store(new Event(next++, time, "info", 'W', "Debugger",
+                    lost + " events were left out to keep the app fast"));
+        }
+        int longest = kind.equals("crash") || kind.equals("anr") || kind.equals("exit")
+                ? CRASH_LONGEST : LONGEST;
+        String kept = text == null ? "" : text;
+        if (kept.length() > longest) {
+            kept = kept.substring(0, longest) + "\n… (" + (kept.length() - longest)
+                    + " more characters)";
+        }
+        Event event = new Event(next++, time, kind, level, tag == null ? "" : tag, kept);
+        store(event);
+        return event;
+    }
+
+    private void store(Event event) {
+        if (aside) {
+            waiting(event);
+            return;
+        }
+        held.addLast(event);
+        while (held.size() > KEPT) {
+            held.removeFirst();
+        }
+        try {
+            open();
+            String line = event.line();
+            out.write(line);
+            out.write('\n');
+            written += line.length() + 1;
+            dirty = true;
+            if (written > SEGMENT) {
+                rotate();
+            }
+        } catch (IOException ignored) {
+            close();
+        }
+    }
+
+    private void waiting(Event event) {
+        String name = WAITING + event.time + "-" + processId() + "-" + event.seq + SUFFIX;
+        File file = new File(folder, name);
+        File beside = new File(folder, name + ".new");
+        try {
+            FileOutputStream stream = new FileOutputStream(beside);
+            try {
+                Writer writer = new OutputStreamWriter(stream, "UTF-8");
+                writer.write(event.line());
+                writer.write('\n');
+                writer.flush();
+                stream.getFD().sync();
+            } finally {
+                stream.close();
+            }
+            if (!beside.renameTo(file)) {
+                beside.delete();
+            }
+        } catch (IOException ignored) {
+            beside.delete();
+        }
+    }
+
+    private static long pid = -1;
+
+    static long processId() {
+        if (pid < 0) {
+            try {
+                pid = Long.parseLong(new File("/proc/self").getCanonicalFile().getName());
+            } catch (Exception unknown) {
+                pid = 0;
+            }
+        }
+        return pid;
+    }
+
+    public synchronized int adopt(File outbox) {
+        String[] names = outbox.list();
+        if (names == null || names.length == 0) {
+            return 0;
+        }
+        Arrays.sort(names);
+        int taken = 0;
+        for (String name : names) {
+            if (!name.startsWith(WAITING) || !name.endsWith(SUFFIX)) {
+                continue;
+            }
+            File file = new File(outbox, name);
+            try {
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(new FileInputStream(file), "UTF-8"));
+                try {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        Event event = Event.parse(line);
+                        if (event != null) {
+                            record(event.kind, event.level, event.tag, event.text, event.time);
+                            taken++;
+                        }
+                    }
+                } finally {
+                    reader.close();
+                }
+            } catch (IOException ignored) {
+            }
+            file.delete();
+        }
+        if (taken > 0) {
+            sync();
+        }
+        return taken;
+    }
+
+    public synchronized Event recordNow(String kind, char level, String tag, String text) {
+        Event event = record(kind, level, tag, text);
+        sync();
+        return event;
+    }
+
+    public synchronized void flush() {
+        if (!dirty || out == null) {
+            return;
+        }
+        try {
+            out.flush();
+        } catch (IOException ignored) {
+        }
+        dirty = false;
+    }
+
+    public synchronized void sync() {
+        if (out == null) {
+            return;
+        }
+        try {
+            out.flush();
+            stream.getFD().sync();
+        } catch (IOException ignored) {
+        }
+        dirty = false;
+    }
+
+    public synchronized List<Event> since(long after, int most) {
+        List<Event> out = new ArrayList<Event>();
+        Iterator<Event> walking = held.iterator();
+        while (walking.hasNext() && out.size() < most) {
+            Event one = walking.next();
+            if (one.seq > after) {
+                out.add(one);
+            }
+        }
+        return out;
+    }
+
+    public synchronized long last() {
+        return next - 1;
+    }
+
+    public synchronized int size() {
+        return held.size();
+    }
+
+    public synchronized void clear() {
+        close();
+        writeNumber(new File(folder, NEXT), next);
+        for (int index : segments()) {
+            named(index).delete();
+        }
+        held.clear();
+        bursts.clear();
+        segment++;
+        written = 0;
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/Crashes.java",
+            r####"package com.apk.builder.debug;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.Map;
+
+public final class Crashes implements Thread.UncaughtExceptionHandler {
+
+    public static final int MOST_THREADS = 40;
+
+    public static final int MOST_FRAMES = 40;
+
+    private static volatile Crashes installed;
+
+    private static volatile String process = "";
+
+    public static final int RESERVE = 256 * 1024;
+
+    private static volatile byte[] reserve = new byte[RESERVE];
+
+    private static volatile Throwable lastRecorded;
+
+    private static final ThreadLocal<Boolean> HANDLING = new ThreadLocal<Boolean>();
+
+    private final Journal journal;
+
+    private final Thread.UncaughtExceptionHandler before;
+
+    private Crashes(Journal journal, Thread.UncaughtExceptionHandler before) {
+        this.journal = journal;
+        this.before = before;
+    }
+
+    public static synchronized Crashes install(Journal journal) {
+        Thread.UncaughtExceptionHandler current = Thread.getDefaultUncaughtExceptionHandler();
+        if (current instanceof Crashes) {
+            installed = (Crashes) current;
+            return installed;
+        }
+        Crashes made = new Crashes(journal, current);
+        Thread.setDefaultUncaughtExceptionHandler(made);
+        installed = made;
+        return made;
+    }
+
+    public static synchronized boolean reassert() {
+        Crashes held = installed;
+        if (held == null) {
+            return false;
+        }
+        Thread.UncaughtExceptionHandler current = Thread.getDefaultUncaughtExceptionHandler();
+        if (current == held || current instanceof Crashes) {
+            return false;
+        }
+        Crashes made = new Crashes(held.journal, current);
+        Thread.setDefaultUncaughtExceptionHandler(made);
+        installed = made;
+        return true;
+    }
+
+    public Thread.UncaughtExceptionHandler before() {
+        return before;
+    }
+
+    static boolean outOfMemory(Throwable thrown) {
+        for (Throwable one = thrown; one != null; one = one.getCause()) {
+            if (one instanceof OutOfMemoryError) {
+                return true;
+            }
+            if (one.getCause() == one) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    public static Crashes installed() {
+        return installed;
+    }
+
+    public static void describeTheProcess(String said) {
+        process = said == null ? "" : said;
+    }
+
+    public static String trace(Throwable thrown) {
+        StringWriter out = new StringWriter();
+        PrintWriter writer = new PrintWriter(out);
+        thrown.printStackTrace(writer);
+        writer.flush();
+        return out.toString();
+    }
+
+    public static String threads(Thread skipped) {
+        StringBuilder out = new StringBuilder();
+        Map<Thread, StackTraceElement[]> all;
+        try {
+            all = Thread.getAllStackTraces();
+        } catch (Throwable refused) {
+            return "";
+        }
+        int shown = 0;
+        for (Map.Entry<Thread, StackTraceElement[]> one : all.entrySet()) {
+            Thread thread = one.getKey();
+            if (thread == skipped) {
+                continue;
+            }
+            if (shown >= MOST_THREADS) {
+                out.append("… ").append(all.size() - shown).append(" more threads\n");
+                break;
+            }
+            describe(out, thread, one.getValue());
+            shown++;
+        }
+        return out.toString();
+    }
+
+    public static void describe(StringBuilder out, Thread thread, StackTraceElement[] frames) {
+        out.append('"').append(thread.getName()).append("\" id=").append(thread.getId())
+                .append(" state=").append(thread.getState());
+        if (thread.isDaemon()) {
+            out.append(" daemon");
+        }
+        out.append('\n');
+        int count = 0;
+        for (StackTraceElement frame : frames) {
+            if (count >= MOST_FRAMES) {
+                out.append("    … ").append(frames.length - count).append(" more\n");
+                break;
+            }
+            out.append("    at ").append(frame).append('\n');
+            count++;
+        }
+        out.append('\n');
+    }
+
+    public static String memory() {
+        Runtime runtime = Runtime.getRuntime();
+        long used = runtime.totalMemory() - runtime.freeMemory();
+        return "Java heap: " + megabytes(used) + " used of " + megabytes(runtime.maxMemory())
+                + " allowed";
+    }
+
+    public static String megabytes(long bytes) {
+        long tenths = bytes * 10L / (1024L * 1024L);
+        return (tenths / 10L) + "." + (tenths % 10L) + " MB";
+    }
+
+    public String report(Thread thread, Throwable thrown) {
+        StringBuilder out = new StringBuilder();
+        out.append("FATAL EXCEPTION: ").append(thread.getName()).append('\n');
+        if (process.length() > 0) {
+            out.append(process).append('\n');
+        }
+        out.append(trace(thrown));
+        out.append("\n--- ").append(memory()).append(" ---\n\n");
+        String others = threads(thread);
+        if (others.length() > 0) {
+            out.append("--- Other threads ---\n").append(others);
+        }
+        return out.toString();
+    }
+
+    @Override
+    public void uncaughtException(Thread thread, Throwable thrown) {
+        if (HANDLING.get() == null && lastRecorded != thrown) {
+            HANDLING.set(Boolean.TRUE);
+            try {
+                if (outOfMemory(thrown)) {
+                    reserve = null;
+                }
+                String said;
+                try {
+                    said = report(thread, thrown);
+                } catch (Throwable broken) {
+                    said = "FATAL EXCEPTION: " + thread.getName() + "\n" + thrown;
+                }
+                journal.recordNow("crash", 'F', thrown.getClass().getName(), said);
+                lastRecorded = thrown;
+            } catch (Throwable ignored) {
+            } finally {
+                HANDLING.remove();
+            }
+        }
+        if (before != null) {
+            before.uncaughtException(thread, thrown);
+        }
+    }
+
+    static int reserved() {
+        byte[] held = reserve;
+        return held == null ? 0 : held.length;
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/Tombstone.java",
+            r####"package com.apk.builder.debug;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public final class Tombstone {
+
+    public static final int MOST_FRAMES = 64;
+
+    private Tombstone() {
+    }
+
+    static final class Field {
+        final int number;
+        final int wire;
+        final long value;
+        final int from;
+        final int to;
+
+        Field(int number, int wire, long value, int from, int to) {
+            this.number = number;
+            this.wire = wire;
+            this.value = value;
+            this.from = from;
+            this.to = to;
+        }
+    }
+
+    static final class Proto {
+        private final byte[] bytes;
+        private int at;
+        private final int end;
+
+        Proto(byte[] bytes, int from, int to) {
+            this.bytes = bytes;
+            this.at = from;
+            this.end = to;
+        }
+
+        boolean more() {
+            return at < end;
+        }
+
+        long varint() {
+            long out = 0;
+            int shift = 0;
+            while (true) {
+                if (at >= end || shift > 63) {
+                    throw new IllegalArgumentException("varint runs past the end");
+                }
+                int one = bytes[at++] & 0xFF;
+                out |= (long) (one & 0x7F) << shift;
+                if ((one & 0x80) == 0) {
+                    return out;
+                }
+                shift += 7;
+            }
+        }
+
+        Field next() {
+            long key = varint();
+            int number = (int) (key >>> 3);
+            int wire = (int) (key & 7);
+            switch (wire) {
+                case 0:
+                    return new Field(number, wire, varint(), 0, 0);
+                case 1: {
+                    if (at + 8 > end) {
+                        throw new IllegalArgumentException("fixed64 runs past the end");
+                    }
+                    long value = 0;
+                    for (int shift = 0; shift < 64; shift += 8) {
+                        value |= (long) (bytes[at++] & 0xFF) << shift;
+                    }
+                    return new Field(number, wire, value, 0, 0);
+                }
+                case 2: {
+                    long length = varint();
+                    if (length < 0 || at + length > end) {
+                        throw new IllegalArgumentException("a field runs past the end");
+                    }
+                    int from = at;
+                    at += (int) length;
+                    return new Field(number, wire, length, from, at);
+                }
+                case 5: {
+                    if (at + 4 > end) {
+                        throw new IllegalArgumentException("fixed32 runs past the end");
+                    }
+                    long value = 0;
+                    for (int shift = 0; shift < 32; shift += 8) {
+                        value |= (long) (bytes[at++] & 0xFF) << shift;
+                    }
+                    return new Field(number, wire, value, 0, 0);
+                }
+                default:
+                    throw new IllegalArgumentException("wire type " + wire + " is not read");
+            }
+        }
+
+        String text(Field field) {
+            try {
+                return new String(bytes, field.from, field.to - field.from, "UTF-8");
+            } catch (java.io.UnsupportedEncodingException never) {
+                return "";
+            }
+        }
+
+        Proto inside(Field field) {
+            return new Proto(bytes, field.from, field.to);
+        }
+    }
+
+    static final class Frame {
+        long relativePc;
+        long pc;
+        String function = "";
+        long offset;
+        String file = "";
+        String buildId = "";
+    }
+
+    static final class Crashed {
+        int id;
+        String name = "";
+        final List<Frame> frames = new ArrayList<Frame>();
+    }
+
+    public static boolean looksLikeText(byte[] bytes) {
+        int looked = Math.min(bytes.length, 512);
+        if (looked == 0) {
+            return true;
+        }
+        int plain = 0;
+        for (int at = 0; at < looked; at++) {
+            int one = bytes[at] & 0xFF;
+            if (one == '\n' || one == '\r' || one == '\t' || (one >= 0x20 && one < 0x7F)
+                    || one >= 0xC0) {
+                plain++;
+            }
+        }
+        return plain * 10 >= looked * 9;
+    }
+
+    public static String read(byte[] bytes) {
+        try {
+            return describe(bytes);
+        } catch (RuntimeException broken) {
+            return "A native crash record of " + bytes.length
+                    + " bytes could not be read: " + broken.getMessage();
+        }
+    }
+
+    private static String describe(byte[] bytes) {
+        Proto proto = new Proto(bytes, 0, bytes.length);
+        String fingerprint = "";
+        String timestamp = "";
+        long pid = 0;
+        long tid = 0;
+        long uptime = -1;
+        List<String> command = new ArrayList<String>();
+        String signalName = "";
+        long signalNumber = -1;
+        String codeName = "";
+        long code = 0;
+        boolean faulted = false;
+        long faultAddress = 0;
+        String abort = "";
+        List<String> causes = new ArrayList<String>();
+        List<Crashed> threads = new ArrayList<Crashed>();
+        while (proto.more()) {
+            Field field = proto.next();
+            switch (field.number) {
+                case 2:
+                    if (field.wire == 2) {
+                        fingerprint = proto.text(field);
+                    }
+                    break;
+                case 4:
+                    if (field.wire == 2) {
+                        timestamp = proto.text(field);
+                    }
+                    break;
+                case 5:
+                    pid = field.value;
+                    break;
+                case 6:
+                    tid = field.value;
+                    break;
+                case 9:
+                    if (field.wire == 2) {
+                        command.add(proto.text(field));
+                    }
+                    break;
+                case 10:
+                    if (field.wire == 2) {
+                        Proto signal = proto.inside(field);
+                        while (signal.more()) {
+                            Field part = signal.next();
+                            if (part.number == 1) {
+                                signalNumber = part.value;
+                            } else if (part.number == 2 && part.wire == 2) {
+                                signalName = signal.text(part);
+                            } else if (part.number == 3) {
+                                code = part.value;
+                            } else if (part.number == 4 && part.wire == 2) {
+                                codeName = signal.text(part);
+                            } else if (part.number == 8) {
+                                faulted = part.value != 0;
+                            } else if (part.number == 9) {
+                                faultAddress = part.value;
+                            }
+                        }
+                    }
+                    break;
+                case 14:
+                    if (field.wire == 2) {
+                        abort = proto.text(field);
+                    }
+                    break;
+                case 15:
+                    if (field.wire == 2) {
+                        Proto cause = proto.inside(field);
+                        while (cause.more()) {
+                            Field part = cause.next();
+                            if (part.number == 1 && part.wire == 2) {
+                                causes.add(cause.text(part));
+                            }
+                        }
+                    }
+                    break;
+                case 16:
+                    if (field.wire == 2) {
+                        Crashed thread = entry(proto.inside(field));
+                        if (thread != null) {
+                            threads.add(thread);
+                        }
+                    }
+                    break;
+                case 20:
+                    uptime = field.value;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("Native crash");
+        if (signalName.length() > 0 || signalNumber >= 0) {
+            out.append(": signal ").append(signalNumber >= 0 ? signalNumber : 0);
+            if (signalName.length() > 0) {
+                out.append(" (").append(signalName).append(')');
+            }
+            out.append(", code ").append(code);
+            if (codeName.length() > 0) {
+                out.append(" (").append(codeName).append(')');
+            }
+            if (faulted) {
+                out.append(", fault address 0x").append(Long.toHexString(faultAddress));
+            }
+        }
+        out.append('\n');
+        if (command.size() > 0) {
+            out.append("Command line:");
+            for (String one : command) {
+                out.append(' ').append(one);
+            }
+            out.append('\n');
+        }
+        out.append("pid ").append(pid).append(", tid ").append(tid);
+        if (uptime >= 0) {
+            out.append(", up ").append(uptime).append(" s");
+        }
+        out.append('\n');
+        if (timestamp.length() > 0) {
+            out.append("Time: ").append(timestamp).append('\n');
+        }
+        if (fingerprint.length() > 0) {
+            out.append("Build: ").append(fingerprint).append('\n');
+        }
+        if (abort.length() > 0) {
+            out.append("Abort message: ").append(abort).append('\n');
+        }
+        for (String cause : causes) {
+            out.append("Cause: ").append(cause).append('\n');
+        }
+        Crashed crashing = null;
+        for (Crashed thread : threads) {
+            if (thread.id == tid) {
+                crashing = thread;
+            }
+        }
+        if (crashing == null && threads.size() > 0) {
+            crashing = threads.get(0);
+        }
+        if (crashing != null) {
+            out.append("Backtrace of \"").append(crashing.name).append("\" (tid ")
+                    .append(crashing.id).append("):\n");
+            int number = 0;
+            for (Frame frame : crashing.frames) {
+                if (number >= MOST_FRAMES) {
+                    out.append("  … ").append(crashing.frames.size() - number)
+                            .append(" more frames\n");
+                    break;
+                }
+                out.append("  #");
+                if (number < 10) {
+                    out.append('0');
+                }
+                out.append(number).append(" pc ");
+                String hex = Long.toHexString(frame.relativePc);
+                for (int pad = hex.length(); pad < 16; pad++) {
+                    out.append('0');
+                }
+                out.append(hex).append("  ").append(frame.file.length() > 0 ? frame.file : "?");
+                if (frame.function.length() > 0) {
+                    out.append(" (").append(frame.function).append('+').append(frame.offset)
+                            .append(')');
+                }
+                if (frame.buildId.length() > 0) {
+                    out.append(" (BuildId: ").append(frame.buildId).append(')');
+                }
+                out.append('\n');
+                number++;
+            }
+        }
+        return out.toString();
+    }
+
+    private static Crashed entry(Proto map) {
+        long key = -1;
+        Crashed thread = null;
+        while (map.more()) {
+            Field part = map.next();
+            if (part.number == 1) {
+                key = part.value;
+            } else if (part.number == 2 && part.wire == 2) {
+                thread = thread(map.inside(part));
+            }
+        }
+        if (thread != null && thread.id == 0 && key >= 0) {
+            thread.id = (int) key;
+        }
+        return thread;
+    }
+
+    private static Crashed thread(Proto proto) {
+        Crashed thread = new Crashed();
+        while (proto.more()) {
+            Field part = proto.next();
+            if (part.number == 1) {
+                thread.id = (int) part.value;
+            } else if (part.number == 2 && part.wire == 2) {
+                thread.name = proto.text(part);
+            } else if (part.number == 4 && part.wire == 2) {
+                thread.frames.add(frame(proto.inside(part)));
+            }
+        }
+        return thread;
+    }
+
+    private static Frame frame(Proto proto) {
+        Frame frame = new Frame();
+        while (proto.more()) {
+            Field part = proto.next();
+            switch (part.number) {
+                case 1:
+                    frame.relativePc = part.value;
+                    break;
+                case 2:
+                    frame.pc = part.value;
+                    break;
+                case 4:
+                    if (part.wire == 2) {
+                        frame.function = proto.text(part);
+                    }
+                    break;
+                case 5:
+                    frame.offset = part.value;
+                    break;
+                case 6:
+                    if (part.wire == 2) {
+                        frame.file = proto.text(part);
+                    }
+                    break;
+                case 8:
+                    if (part.wire == 2) {
+                        frame.buildId = proto.text(part);
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+        return frame;
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/Debugger.java",
+            r####"package com.apk.builder.debug;
+
+import android.app.Application;
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.os.Build;
+import android.os.Process;
+
+import java.io.File;
+
+public final class Debugger {
+
+    public static final String TAG = "Debugger";
+
+    public static final String CRASH_ONLY = "crash";
+
+    public static final String STANDARD = "standard";
+
+    public static final String FULL = "full";
+
+    private static volatile Journal journal;
+
+    private static volatile boolean started;
+
+    private static volatile String summary = "";
+
+    private Debugger() {
+    }
+
+    public static int level() {
+        if (FULL.equals(BuildFacts.LEVEL)) {
+            return 3;
+        }
+        if (STANDARD.equals(BuildFacts.LEVEL)) {
+            return 2;
+        }
+        return 1;
+    }
+
+    public static String[] collected() {
+        int level = level();
+        if (level >= 3) {
+            return new String[] {"crashes", "native_crashes", "not_responding", "exits",
+                    "device", "lifecycle", "memory", "performance", "frames", "own_log"};
+        }
+        if (level == 2) {
+            return new String[] {"crashes", "native_crashes", "not_responding", "exits",
+                    "device", "lifecycle", "memory", "performance"};
+        }
+        return new String[] {"crashes", "native_crashes", "not_responding", "exits", "device"};
+    }
+
+    static File folder(File dataDirectory) {
+        return new File(new File(dataDirectory, "no_backup"), "debugger");
+    }
+
+    static synchronized Journal open(File dataDirectory) {
+        if (journal == null) {
+            journal = new Journal(folder(dataDirectory));
+            Crashes.describeTheProcess("Process: " + processName() + ", PID: " + Process.myPid());
+            Crashes.install(journal);
+        }
+        return journal;
+    }
+
+    static synchronized Journal openAside(File dataDirectory, String process) {
+        if (journal == null) {
+            aside = true;
+            journal = Journal.aside(Journal.outbox(folder(dataDirectory)));
+            Crashes.describeTheProcess("Process: " + process + ", PID: " + Process.myPid());
+            Crashes.install(journal);
+        }
+        return journal;
+    }
+
+    private static volatile boolean aside;
+
+    public static boolean aside() {
+        return aside;
+    }
+
+    static String processName() {
+        try {
+            String named = Application.getProcessName();
+            if (named != null && named.length() > 0) {
+                return named;
+            }
+        } catch (Throwable unknown) {
+        }
+        return "?";
+    }
+
+    public static Journal journal() {
+        return aside ? null : journal;
+    }
+
+    static Journal anyJournal() {
+        return journal;
+    }
+
+    public static int adoptAside() {
+        Journal held = journal();
+        if (held == null) {
+            return 0;
+        }
+        try {
+            return held.adopt(Journal.outbox(held.folder()));
+        } catch (Throwable refused) {
+            return 0;
+        }
+    }
+
+    public static String summary() {
+        return summary;
+    }
+
+    public static synchronized void start(Context given) {
+        if (started) {
+            return;
+        }
+        started = true;
+        Context context = given.getApplicationContext() != null
+                ? given.getApplicationContext() : given;
+        File data = context.getFilesDir().getParentFile();
+        if (data == null) {
+            data = context.getFilesDir();
+        }
+        final Journal opened = open(data);
+        if (aside) {
+            return;
+        }
+        summary = describe(context);
+        opened.record("start", 'I', TAG, summary);
+        int level = level();
+        if (level >= 2 && context instanceof Application) {
+            ActivityTrail.install((Application) context, opened, level >= 3);
+        }
+        Watchdog.start(opened, level >= 2);
+        final Context kept = context;
+        Thread looking = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                adoptAside();
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        ExitHistory.read(kept, opened);
+                    } catch (Throwable refused) {
+                        opened.record("info", 'W', TAG,
+                                "Earlier exits could not be read: " + refused);
+                    }
+                }
+                opened.flush();
+            }
+        }, "debugger-exits");
+        looking.setDaemon(true);
+        looking.setPriority(Thread.MIN_PRIORITY);
+        looking.start();
+        if (level >= 3) {
+            OwnLog.start(opened);
+        }
+    }
+
+    static String describe(Context context) {
+        StringBuilder out = new StringBuilder();
+        String version = "?";
+        long code = 0;
+        try {
+            PackageInfo info = context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0);
+            version = info.versionName;
+            code = info.getLongVersionCode();
+        } catch (Exception ignored) {
+        }
+        out.append("App: ").append(context.getPackageName()).append(' ').append(version)
+                .append(" (").append(code).append(")\n");
+        out.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ")
+                .append(Build.VERSION.SDK_INT).append(")\n");
+        out.append("Device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append('\n');
+        out.append("ABI: ");
+        String[] abis = Build.SUPPORTED_ABIS;
+        for (int at = 0; at < abis.length; at++) {
+            if (at > 0) {
+                out.append(", ");
+            }
+            out.append(abis[at]);
+        }
+        out.append('\n');
+        out.append("Built by Apk Builder ").append(BuildFacts.BUILDER_VERSION).append('\n');
+        out.append("Profile: ").append(BuildFacts.PROFILE).append(", level ")
+                .append(BuildFacts.LEVEL).append(", runtime ")
+                .append(BuildFacts.RUNTIME_VERSION).append('\n');
+        out.append("Process: ").append(processName()).append(", PID ").append(Process.myPid());
+        return out.toString();
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/Watchdog.java",
+            r####"package com.apk.builder.debug;
+
+import android.os.Debug;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Process;
+import android.os.SystemClock;
+
+public final class Watchdog extends Thread {
+
+    public static final long TICK_MILLIS = 500L;
+
+    public static final long STALLED_MILLIS = 5000L;
+
+    public static final long SAMPLE_MILLIS = 15000L;
+
+    public static final long PAUSED_MILLIS = TICK_MILLIS * 4L;
+
+    private static volatile Watchdog running;
+
+    private final Journal journal;
+
+    private final boolean sampling;
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+
+    private volatile long answered = SystemClock.uptimeMillis();
+
+    private volatile boolean asked;
+
+    private boolean reported;
+
+    private long lastSample;
+
+    private long lastTick;
+
+    private long lastCpu;
+
+    private long lastWall;
+
+    private final Runnable answer = new Runnable() {
+        @Override
+        public void run() {
+            answered = SystemClock.uptimeMillis();
+            asked = false;
+        }
+    };
+
+    private Watchdog(Journal journal, boolean sampling) {
+        super("debugger-watchdog");
+        this.journal = journal;
+        this.sampling = sampling;
+        setDaemon(true);
+        setPriority(Thread.MIN_PRIORITY);
+    }
+
+    public static synchronized void start(Journal journal, boolean sampling) {
+        if (running != null) {
+            return;
+        }
+        running = new Watchdog(journal, sampling);
+        running.start();
+    }
+
+    @Override
+    public void run() {
+        lastWall = SystemClock.elapsedRealtime();
+        lastCpu = Process.getElapsedCpuTime();
+        while (true) {
+            try {
+                Thread.sleep(TICK_MILLIS);
+            } catch (InterruptedException stopped) {
+                return;
+            }
+            try {
+                Crashes.reassert();
+                watch();
+                if (sampling) {
+                    sample();
+                }
+                journal.flush();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void watch() {
+        long now = SystemClock.uptimeMillis();
+        long slept = lastTick == 0 ? TICK_MILLIS : now - lastTick;
+        lastTick = now;
+        if (slept > PAUSED_MILLIS && !reported) {
+            asked = false;
+        }
+        if (!asked) {
+            asked = true;
+            answered = now;
+            main.post(answer);
+            if (reported) {
+                reported = false;
+                journal.record("anr", 'I', Debugger.TAG, "The main thread answers again.");
+            }
+            return;
+        }
+        if (reported || now - answered < STALLED_MILLIS || Debug.isDebuggerConnected()) {
+            return;
+        }
+        reported = true;
+        Thread thread = Looper.getMainLooper().getThread();
+        StringBuilder out = new StringBuilder();
+        out.append("The main thread has not answered for ").append(now - answered)
+                .append(" ms. This is what it is doing:\n\n");
+        Crashes.describe(out, thread, thread.getStackTrace());
+        out.append("--- ").append(Crashes.memory()).append(" ---\n\n");
+        out.append("--- Other threads ---\n").append(Crashes.threads(thread));
+        journal.recordNow("anr", 'E', "ApplicationNotResponding", out.toString());
+    }
+
+    private void sample() {
+        long wall = SystemClock.elapsedRealtime();
+        if (wall - lastSample < SAMPLE_MILLIS) {
+            return;
+        }
+        lastSample = wall;
+        long cpu = Process.getElapsedCpuTime();
+        long spentWall = Math.max(1L, wall - lastWall);
+        int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
+        long percent = (cpu - lastCpu) * 100L / spentWall / cores;
+        lastCpu = cpu;
+        lastWall = wall;
+        StringBuilder out = new StringBuilder();
+        out.append(Crashes.memory());
+        out.append(", native heap ").append(Crashes.megabytes(Debug.getNativeHeapAllocatedSize()));
+        out.append(", CPU ").append(percent).append('%');
+        out.append(", threads ").append(Thread.activeCount());
+        String frames = ActivityTrail.framesSinceLastLook();
+        if (frames.length() > 0) {
+            out.append(", ").append(frames);
+        }
+        journal.record("performance", 'I', "Performance", out.toString());
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/ActivityTrail.java",
+            r####"package com.apk.builder.debug;
+
+import android.app.Activity;
+import android.app.Application;
+import android.content.ComponentCallbacks2;
+import android.content.res.Configuration;
+import android.os.Bundle;
+import android.view.Choreographer;
+
+public final class ActivityTrail implements Application.ActivityLifecycleCallbacks,
+        ComponentCallbacks2, Choreographer.FrameCallback {
+
+    public static final long SLOW_NANOS = 32_000_000L;
+
+    public static final long FROZEN_NANOS = 700_000_000L;
+
+    private static volatile ActivityTrail installed;
+
+    private final Journal journal;
+
+    private final boolean framing;
+
+    private int resumed;
+
+    private boolean watchingFrames;
+
+    private long lastFrame;
+
+    private int slow;
+
+    private int frozen;
+
+    private int drawn;
+
+    private ActivityTrail(Journal journal, boolean framing) {
+        this.journal = journal;
+        this.framing = framing;
+    }
+
+    public static synchronized void install(Application application, Journal journal,
+            boolean framing) {
+        if (installed != null) {
+            return;
+        }
+        installed = new ActivityTrail(journal, framing);
+        application.registerActivityLifecycleCallbacks(installed);
+        application.registerComponentCallbacks(installed);
+    }
+
+    public static String framesSinceLastLook() {
+        ActivityTrail trail = installed;
+        if (trail == null || !trail.framing) {
+            return "";
+        }
+        synchronized (trail) {
+            if (trail.drawn == 0) {
+                return "";
+            }
+            String said = "frames " + trail.drawn + " (slow " + trail.slow + ", frozen "
+                    + trail.frozen + ")";
+            trail.drawn = 0;
+            trail.slow = 0;
+            trail.frozen = 0;
+            return said;
+        }
+    }
+
+    private void note(Activity activity, String what) {
+        journal.record("lifecycle", 'I', activity.getClass().getSimpleName(),
+                activity.getClass().getName() + " " + what);
+    }
+
+    @Override
+    public void onActivityCreated(Activity activity, Bundle saved) {
+        note(activity, saved == null ? "created" : "created again from saved state");
+    }
+
+    @Override
+    public void onActivityStarted(Activity activity) {
+        note(activity, "started");
+    }
+
+    @Override
+    public void onActivityResumed(Activity activity) {
+        note(activity, "resumed");
+        resumed++;
+        if (framing && !watchingFrames) {
+            watchingFrames = true;
+            lastFrame = 0;
+            Choreographer.getInstance().postFrameCallback(this);
+        }
+    }
+
+    @Override
+    public void onActivityPaused(Activity activity) {
+        note(activity, "paused");
+        resumed = Math.max(0, resumed - 1);
+    }
+
+    @Override
+    public void onActivityStopped(Activity activity) {
+        note(activity, "stopped");
+    }
+
+    @Override
+    public void onActivitySaveInstanceState(Activity activity, Bundle state) {
+    }
+
+    @Override
+    public void onActivityDestroyed(Activity activity) {
+        note(activity, "destroyed");
+    }
+
+    @Override
+    public void doFrame(long frameTimeNanos) {
+        if (lastFrame != 0) {
+            long spent = frameTimeNanos - lastFrame;
+            synchronized (this) {
+                drawn++;
+                if (spent >= FROZEN_NANOS) {
+                    frozen++;
+                } else if (spent >= SLOW_NANOS) {
+                    slow++;
+                }
+            }
+        }
+        lastFrame = frameTimeNanos;
+        if (resumed > 0) {
+            Choreographer.getInstance().postFrameCallback(this);
+        } else {
+            watchingFrames = false;
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        if (level >= 10) {
+            journal.record("memory", 'W', "Memory", "The system asked to trim memory, level "
+                    + level + ". " + Crashes.memory());
+        }
+        journal.flush();
+    }
+
+    @Override
+    public void onLowMemory() {
+        journal.record("memory", 'W', "Memory", "The system is low on memory. "
+                + Crashes.memory());
+        journal.flush();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration changed) {
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/ExitHistory.java",
+            r####"package com.apk.builder.debug;
+
+import android.app.ActivityManager;
+import android.app.ApplicationExitInfo;
+import android.content.Context;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+
+public final class ExitHistory {
+
+    public static final int MOST_EXITS = 16;
+
+    public static final int MOST_TRACE_BYTES = 512 * 1024;
+
+    public static final String LAST_SEEN = "exits.last";
+
+    private ExitHistory() {
+    }
+
+    public static String reason(int reason) {
+        switch (reason) {
+            case ApplicationExitInfo.REASON_EXIT_SELF:
+                return "the app exited on its own";
+            case ApplicationExitInfo.REASON_SIGNALED:
+                return "the process was stopped by a signal";
+            case ApplicationExitInfo.REASON_LOW_MEMORY:
+                return "the system ran low on memory";
+            case ApplicationExitInfo.REASON_CRASH:
+                return "an uncaught Java or Kotlin exception";
+            case ApplicationExitInfo.REASON_CRASH_NATIVE:
+                return "a native crash in C, C++ or Rust code";
+            case ApplicationExitInfo.REASON_ANR:
+                return "the app stopped responding";
+            case ApplicationExitInfo.REASON_INITIALIZATION_FAILURE:
+                return "the process failed while starting";
+            case ApplicationExitInfo.REASON_PERMISSION_CHANGE:
+                return "a permission was changed";
+            case ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE:
+                return "the app used too many resources";
+            case ApplicationExitInfo.REASON_USER_REQUESTED:
+                return "the user asked for it";
+            case ApplicationExitInfo.REASON_USER_STOPPED:
+                return "the user stopped the app";
+            case ApplicationExitInfo.REASON_DEPENDENCY_DIED:
+                return "a process it depends on died";
+            default:
+                return "reason " + reason;
+        }
+    }
+
+    private static boolean serious(int reason) {
+        return reason == ApplicationExitInfo.REASON_CRASH
+                || reason == ApplicationExitInfo.REASON_CRASH_NATIVE
+                || reason == ApplicationExitInfo.REASON_ANR
+                || reason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE;
+    }
+
+    public static void read(Context context, Journal journal) {
+        ActivityManager manager =
+                (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        if (manager == null) {
+            return;
+        }
+        List<ApplicationExitInfo> exits =
+                manager.getHistoricalProcessExitReasons(null, 0, MOST_EXITS);
+        File mark = new File(journal.folder(), LAST_SEEN);
+        long seen = readMark(mark);
+        long newest = seen;
+        for (int at = exits.size() - 1; at >= 0; at--) {
+            ApplicationExitInfo exit = exits.get(at);
+            if (exit.getTimestamp() <= seen) {
+                continue;
+            }
+            newest = Math.max(newest, exit.getTimestamp());
+            journal.record("exit", serious(exit.getReason()) ? 'E' : 'I', "ProcessExit",
+                    describe(exit), exit.getTimestamp());
+        }
+        if (newest != seen) {
+            writeMark(mark, newest);
+        }
+    }
+
+    static String describe(ApplicationExitInfo exit) {
+        StringBuilder out = new StringBuilder();
+        out.append("An earlier run ended: ").append(reason(exit.getReason())).append('\n');
+        if (exit.getProcessName() != null) {
+            out.append("Process: ").append(exit.getProcessName()).append('\n');
+        }
+        out.append("pid ").append(exit.getPid()).append(", status ").append(exit.getStatus())
+                .append(", importance ").append(exit.getImportance()).append('\n');
+        out.append("Memory then: PSS ").append(exit.getPss()).append(" KB, RSS ")
+                .append(exit.getRss()).append(" KB\n");
+        if (exit.getDescription() != null && exit.getDescription().length() > 0) {
+            out.append("Android says: ").append(exit.getDescription()).append('\n');
+        }
+        int reason = exit.getReason();
+        if (reason == ApplicationExitInfo.REASON_ANR
+                || reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
+            byte[] trace = trace(exit);
+            if (trace != null && trace.length > 0) {
+                out.append('\n');
+                if (reason == ApplicationExitInfo.REASON_CRASH_NATIVE
+                        && !Tombstone.looksLikeText(trace)) {
+                    out.append(Tombstone.read(trace));
+                } else {
+                    try {
+                        out.append(new String(trace, "UTF-8"));
+                    } catch (java.io.UnsupportedEncodingException never) {
+                        out.append(trace.length).append(" bytes of trace");
+                    }
+                }
+            }
+        }
+        return out.toString();
+    }
+
+    private static byte[] trace(ApplicationExitInfo exit) {
+        InputStream in = null;
+        try {
+            in = exit.getTraceInputStream();
+            if (in == null) {
+                return null;
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) > 0 && out.size() < MOST_TRACE_BYTES) {
+                out.write(buffer, 0, read);
+            }
+            return out.toByteArray();
+        } catch (IOException refused) {
+            return null;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private static long readMark(File mark) {
+        try {
+            FileInputStream in = new FileInputStream(mark);
+            try {
+                byte[] held = new byte[32];
+                int read = in.read(held);
+                return read > 0 ? Long.parseLong(new String(held, 0, read, "UTF-8").trim()) : 0L;
+            } finally {
+                in.close();
+            }
+        } catch (Exception absent) {
+            return 0L;
+        }
+    }
+
+    private static void writeMark(File mark, long value) {
+        try {
+            FileOutputStream out = new FileOutputStream(mark);
+            try {
+                out.write(Long.toString(value).getBytes("UTF-8"));
+            } finally {
+                out.close();
+            }
+        } catch (IOException ignored) {
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/OwnLog.java",
+            r####"package com.apk.builder.debug;
+
+import android.os.Process;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
+public final class OwnLog extends Thread {
+
+    private static volatile OwnLog running;
+
+    private final Journal journal;
+
+    private OwnLog(Journal journal) {
+        super("debugger-own-log");
+        this.journal = journal;
+        setDaemon(true);
+        setPriority(Thread.MIN_PRIORITY);
+    }
+
+    public static synchronized void start(Journal journal) {
+        if (running != null) {
+            return;
+        }
+        running = new OwnLog(journal);
+        running.start();
+    }
+
+    static String[] command() {
+        return new String[] {"logcat", "-v", "threadtime", "-T", "1",
+                "--pid=" + Process.myPid()};
+    }
+
+    public static char level(String line) {
+        String[] parts = line.trim().split("\\s+", 7);
+        if (parts.length >= 6 && parts[4].length() == 1) {
+            return parts[4].charAt(0);
+        }
+        return 'I';
+    }
+
+    public static String tag(String line) {
+        String[] parts = line.trim().split("\\s+", 6);
+        if (parts.length < 6) {
+            return "";
+        }
+        String rest = parts[5];
+        int colon = rest.indexOf(": ");
+        return colon > 0 ? rest.substring(0, colon).trim() : rest.trim();
+    }
+
+    public static String message(String line) {
+        String[] parts = line.trim().split("\\s+", 6);
+        if (parts.length < 6) {
+            return line;
+        }
+        String rest = parts[5];
+        int colon = rest.indexOf(": ");
+        return colon > 0 ? rest.substring(colon + 2) : rest;
+    }
+
+    @Override
+    public void run() {
+        java.lang.Process reading = null;
+        try {
+            reading = Runtime.getRuntime().exec(command());
+            BufferedReader lines = new BufferedReader(
+                    new InputStreamReader(reading.getInputStream(), "UTF-8"));
+            String line;
+            while ((line = lines.readLine()) != null) {
+                if (line.startsWith("---------")) {
+                    continue;
+                }
+                String tag = tag(line);
+                if (tag.equals(Debugger.TAG)) {
+                    continue;
+                }
+                journal.record("log", level(line), tag, message(line));
+            }
+        } catch (Throwable refused) {
+            journal.record("info", 'W', Debugger.TAG,
+                    "The app's own log could not be read: " + refused);
+        } finally {
+            if (reading != null) {
+                reading.destroy();
+            }
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/CallerCheck.java",
+            r####"package com.apk.builder.debug;
+
+import android.content.Context;
+import android.content.pm.PackageManager;
+
+public final class CallerCheck {
+
+    private CallerCheck() {
+    }
+
+    public static byte[] unhex(String hex) {
+        String plain = hex.replace(":", "").trim();
+        if (plain.length() % 2 != 0) {
+            return new byte[0];
+        }
+        byte[] out = new byte[plain.length() / 2];
+        for (int at = 0; at < out.length; at++) {
+            out[at] = (byte) Integer.parseInt(plain.substring(at * 2, at * 2 + 2), 16);
+        }
+        return out;
+    }
+
+    public static boolean trusted(Context context, String caller) {
+        if (caller == null) {
+            return false;
+        }
+        if (caller.equals(context.getPackageName())) {
+            return true;
+        }
+        if (!caller.equals(BuildFacts.HOST)) {
+            return false;
+        }
+        if (BuildFacts.HOST_CERTIFICATE.length() == 0) {
+            return true;
+        }
+        return signedBy(context, caller, unhex(BuildFacts.HOST_CERTIFICATE));
+    }
+
+    static boolean signedBy(Context context, String caller, byte[] wanted) {
+        if (wanted.length != 32) {
+            return false;
+        }
+        try {
+            return context.getPackageManager().hasSigningCertificate(caller, wanted,
+                    PackageManager.CERT_INPUT_SHA256);
+        } catch (RuntimeException refused) {
+            return false;
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/DebugProvider.java",
+            r####"package com.apk.builder.debug;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.net.Uri;
+import android.os.Bundle;
+
+import java.util.List;
+
+public final class DebugProvider extends ContentProvider {
+
+    public static final String AUTHORITY_SUFFIX = ".debugger";
+
+    public static final String[] EVENT_COLUMNS =
+            new String[] {"seq", "time", "kind", "level", "tag", "text"};
+
+    public static final String[] ABOUT_COLUMNS = new String[] {"key", "value"};
+
+    public static final int MOST_ROWS = 500;
+
+    public static final int MOST_CHARACTERS = 900 * 1024;
+
+    @Override
+    public boolean onCreate() {
+        try {
+            Debugger.start(getContext());
+        } catch (Throwable refused) {
+            android.util.Log.w(Debugger.TAG, "The debugger could not start", refused);
+        }
+        return true;
+    }
+
+    private boolean trusted() {
+        return CallerCheck.trusted(getContext(), getCallingPackage());
+    }
+
+    @Override
+    public Cursor query(Uri uri, String[] projection, String selection, String[] arguments,
+            String order) {
+        if (!trusted()) {
+            throw new SecurityException("Only Apk Builder reads this app's debugger.");
+        }
+        Debugger.adoptAside();
+        Journal journal = Debugger.journal();
+        String path = uri.getLastPathSegment();
+        if ("about".equals(path)) {
+            MatrixCursor about = new MatrixCursor(ABOUT_COLUMNS);
+            about.addRow(new Object[] {"summary", Debugger.summary()});
+            about.addRow(new Object[] {"level", BuildFacts.LEVEL});
+            about.addRow(new Object[] {"profile", BuildFacts.PROFILE});
+            about.addRow(new Object[] {"runtime", String.valueOf(BuildFacts.RUNTIME_VERSION)});
+            about.addRow(new Object[] {"builder", BuildFacts.BUILDER_VERSION});
+            about.addRow(new Object[] {"last", String.valueOf(
+                    journal == null ? 0 : journal.last())});
+            StringBuilder kinds = new StringBuilder();
+            for (String one : Debugger.collected()) {
+                if (kinds.length() > 0) {
+                    kinds.append(',');
+                }
+                kinds.append(one);
+            }
+            about.addRow(new Object[] {"collected", kinds.toString()});
+            return about;
+        }
+        MatrixCursor events = new MatrixCursor(EVENT_COLUMNS);
+        if (journal == null) {
+            return events;
+        }
+        long after = 0;
+        String given = uri.getQueryParameter("after");
+        if (given != null) {
+            try {
+                after = Long.parseLong(given);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        List<Journal.Event> found = journal.since(after, MOST_ROWS);
+        int characters = 0;
+        for (Journal.Event one : found) {
+            characters += one.text.length() + one.tag.length();
+            if (characters > MOST_CHARACTERS && events.getCount() > 0) {
+                break;
+            }
+            events.addRow(new Object[] {one.seq, one.time, one.kind, String.valueOf(one.level),
+                    one.tag, one.text});
+        }
+        return events;
+    }
+
+    @Override
+    public Bundle call(String method, String argument, Bundle extras) {
+        if (!trusted()) {
+            throw new SecurityException("Only Apk Builder reads this app's debugger.");
+        }
+        Bundle out = new Bundle();
+        Debugger.adoptAside();
+        Journal journal = Debugger.journal();
+        if (journal == null) {
+            out.putBoolean("ok", false);
+            return out;
+        }
+        if ("clear".equals(method)) {
+            journal.clear();
+            out.putBoolean("ok", true);
+        } else if ("snapshot".equals(method)) {
+            StringBuilder said = new StringBuilder();
+            said.append(Crashes.memory()).append("\n\n");
+            said.append(Crashes.threads(null));
+            journal.record("snapshot", 'I', Debugger.TAG, said.toString());
+            out.putBoolean("ok", true);
+        } else if ("status".equals(method)) {
+            out.putBoolean("ok", true);
+        } else {
+            out.putBoolean("ok", false);
+        }
+        out.putLong("last", journal.last());
+        out.putString("level", BuildFacts.LEVEL);
+        return out;
+    }
+
+    @Override
+    public String getType(Uri uri) {
+        return null;
+    }
+
+    @Override
+    public Uri insert(Uri uri, ContentValues values) {
+        return null;
+    }
+
+    @Override
+    public int delete(Uri uri, String selection, String[] arguments) {
+        return 0;
+    }
+
+    @Override
+    public int update(Uri uri, ContentValues values, String selection, String[] arguments) {
+        return 0;
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/ComponentFactory.java",
+            r####"package com.apk.builder.debug;
+
+import android.app.Activity;
+import android.app.AppComponentFactory;
+import android.app.Application;
+import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.ContentProvider;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+
+import java.io.File;
+
+public final class ComponentFactory extends AppComponentFactory {
+
+    private AppComponentFactory inner;
+
+    private boolean looked;
+
+    private AppComponentFactory inner(ClassLoader loader) {
+        if (!looked) {
+            looked = true;
+            if (BuildFacts.FACTORY.length() > 0) {
+                try {
+                    inner = (AppComponentFactory) Class.forName(BuildFacts.FACTORY, true, loader)
+                            .getDeclaredConstructor().newInstance();
+                } catch (Throwable refused) {
+                    failed("component factory", BuildFacts.FACTORY, refused);
+                }
+            }
+        }
+        return inner;
+    }
+
+    private static void failed(String what, String name, Throwable thrown) {
+        Journal journal = Debugger.anyJournal();
+        if (journal == null) {
+            return;
+        }
+        journal.recordNow("crash", 'F', thrown.getClass().getName(),
+                "Android could not create the " + what + " " + name + ".\n"
+                        + "This is how a missing class, a class the device refuses to verify,"
+                        + " or code that failed to load shows itself.\n\n"
+                        + Crashes.trace(thrown));
+    }
+
+    static boolean mainProcess(String process, ApplicationInfo info) {
+        if (process == null || process.length() == 0 || info == null) {
+            return true;
+        }
+        String main = info.processName != null ? info.processName : info.packageName;
+        return main == null || main.equals(process);
+    }
+
+    @Override
+    public ClassLoader instantiateClassLoader(ClassLoader loader, ApplicationInfo info) {
+        try {
+            if (info != null && info.dataDir != null) {
+                String process = Application.getProcessName();
+                if (mainProcess(process, info)) {
+                    Debugger.open(new File(info.dataDir));
+                } else {
+                    Debugger.openAside(new File(info.dataDir), process);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        AppComponentFactory held = inner(loader);
+        return held != null ? held.instantiateClassLoader(loader, info)
+                : super.instantiateClassLoader(loader, info);
+    }
+
+    @Override
+    public Application instantiateApplication(ClassLoader loader, String className)
+            throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        try {
+            AppComponentFactory held = inner(loader);
+            return held != null ? held.instantiateApplication(loader, className)
+                    : super.instantiateApplication(loader, className);
+        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
+            failed("application", className, e);
+            throw e;
+        } catch (RuntimeException | Error e) {
+            failed("application", className, e);
+            throw e;
+        }
+    }
+
+    @Override
+    public Activity instantiateActivity(ClassLoader loader, String className, Intent intent)
+            throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        try {
+            AppComponentFactory held = inner(loader);
+            return held != null ? held.instantiateActivity(loader, className, intent)
+                    : super.instantiateActivity(loader, className, intent);
+        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
+            failed("activity", className, e);
+            throw e;
+        } catch (RuntimeException | Error e) {
+            failed("activity", className, e);
+            throw e;
+        }
+    }
+
+    @Override
+    public BroadcastReceiver instantiateReceiver(ClassLoader loader, String className,
+            Intent intent)
+            throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        try {
+            AppComponentFactory held = inner(loader);
+            return held != null ? held.instantiateReceiver(loader, className, intent)
+                    : super.instantiateReceiver(loader, className, intent);
+        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
+            failed("broadcast receiver", className, e);
+            throw e;
+        } catch (RuntimeException | Error e) {
+            failed("broadcast receiver", className, e);
+            throw e;
+        }
+    }
+
+    @Override
+    public Service instantiateService(ClassLoader loader, String className, Intent intent)
+            throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        try {
+            AppComponentFactory held = inner(loader);
+            return held != null ? held.instantiateService(loader, className, intent)
+                    : super.instantiateService(loader, className, intent);
+        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
+            failed("service", className, e);
+            throw e;
+        } catch (RuntimeException | Error e) {
+            failed("service", className, e);
+            throw e;
+        }
+    }
+
+    @Override
+    public ContentProvider instantiateProvider(ClassLoader loader, String className)
+            throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        try {
+            AppComponentFactory held = inner(loader);
+            return held != null ? held.instantiateProvider(loader, className)
+                    : super.instantiateProvider(loader, className);
+        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
+            failed("content provider", className, e);
+            throw e;
+        } catch (RuntimeException | Error e) {
+            failed("content provider", className, e);
+            throw e;
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/debug/Presence.java",
+            r####"package com.apk.builder.debug;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+
+public final class Presence extends BroadcastReceiver {
+
+    public static final String ACTION = "com.apk.builder.debug.RUNTIME";
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+    }
+}
+"####,
+        ),
+    ];
+}
+
 pub mod verity {
     use crate::diag::{Diagnostic, Severity};
     use crate::hash::Sha256;
@@ -31722,6 +34448,42 @@ pub mod settings {
         }
     }
 
+    pub const DEBUGGER_LEVELS: &[(&str, &str)] =
+        &[(DEBUG_VARIANT, "full"), (RELEASE_VARIANT, "standard")];
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Debugging {
+        pub enabled: bool,
+        pub profile: String,
+        pub levels: Vec<Named>,
+    }
+
+    impl Default for Debugging {
+        fn default() -> Debugging {
+            Debugging {
+                enabled: true,
+                profile: DEBUG_VARIANT.to_string(),
+                levels: DEBUGGER_LEVELS
+                    .iter()
+                    .map(|(name, value)| Named {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl Debugging {
+        pub fn level_for(&self, profile: &str) -> crate::debugger::Level {
+            self.levels
+                .iter()
+                .find(|one| one.name == profile)
+                .and_then(|one| crate::debugger::Level::parse(&one.value))
+                .unwrap_or_else(|| crate::debugger::Level::for_profile(profile))
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Settings {
         pub package: String,
@@ -31752,6 +34514,7 @@ pub mod settings {
         pub resources: Resources,
         pub catalogue: Catalogue,
         pub signing: Signing,
+        pub debugging: Debugging,
     }
 
     impl Default for Settings {
@@ -31785,6 +34548,7 @@ pub mod settings {
                 resources: Resources::default(),
                 catalogue: Catalogue::default(),
                 signing: Signing::default(),
+                debugging: Debugging::default(),
             }
         }
     }
@@ -32117,6 +34881,24 @@ pub mod settings {
             w.end_object();
             w.end_object();
 
+            w.blank();
+            w.note("The debugger Apk Builder puts into the package it builds. It");
+            w.note("keeps crashes, freezes and why the process ended on the device,");
+            w.note("inside the application's own storage, and only Apk Builder can");
+            w.note("read them. Nothing leaves the device. profile is the build type");
+            w.note("being built; levels says how much is kept for each: off, crash,");
+            w.note("standard or full.");
+            w.note("Example: levels { \"debug\": \"full\", \"release\": \"crash\" }");
+            w.begin_object(Some("debugger"));
+            w.field_bool("enabled", self.debugging.enabled);
+            w.field_str("profile", &self.debugging.profile);
+            w.begin_object(Some("levels"));
+            for one in &self.debugging.levels {
+                w.field_str(&one.name, &one.value);
+            }
+            w.end_object();
+            w.end_object();
+
             w.end_object();
             w.finish()
         }
@@ -32229,6 +35011,32 @@ pub mod settings {
                 }
                 if let Some(found) = build.get("viewBinding").and_then(|one| one.boolean()) {
                     out.view_binding = found;
+                }
+            }
+            if let Some(debugger) = held.get("debugger") {
+                if let Some(found) = debugger.get("enabled").and_then(|one| one.boolean()) {
+                    out.debugging.enabled = found;
+                }
+                if let Some(found) = word(debugger, "profile").filter(|one| !one.trim().is_empty())
+                {
+                    out.debugging.profile = found.trim().to_string();
+                }
+                if let Some(Json::Object(levels)) = debugger.get("levels") {
+                    let read: Vec<Named> = levels
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            let value = value.text()?.trim();
+                            crate::debugger::Level::parse(value)?;
+                            Some(Named {
+                                name: name.trim().to_string(),
+                                value: value.to_string(),
+                            })
+                        })
+                        .filter(|one| !one.name.is_empty())
+                        .collect();
+                    if !read.is_empty() {
+                        out.debugging.levels = read;
+                    }
                 }
             }
             if let Some(found) = word(&held, "namespace") {
@@ -46756,6 +49564,8 @@ pub mod builder {
 
         pub sealed: Option<String>,
 
+        pub debugger: Option<crate::debugger::Plan>,
+
         pub shrink: bool,
 
         pub seal_resources: bool,
@@ -47385,6 +50195,7 @@ pub mod builder {
             library_packages: Vec::new(),
             keep_rules: Vec::new(),
             sealed: None,
+            debugger: None,
             shrink: true,
             seal_resources: false,
         }
@@ -47514,6 +50325,7 @@ pub mod builder {
             library_packages: Vec::new(),
             keep_rules: Vec::new(),
             sealed: None,
+            debugger: None,
             shrink: true,
             seal_resources: false,
         })
@@ -47526,10 +50338,18 @@ pub mod builder {
     }
 
     pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
-        sealed_project(root, None)
+        project_for(root, None, None)
     }
 
     pub fn sealed_project(root: &str, fingerprint: Option<&str>) -> Result<Project, Diagnostic> {
+        project_for(root, fingerprint, crate::debugger::host().as_ref())
+    }
+
+    pub fn project_for(
+        root: &str,
+        fingerprint: Option<&str>,
+        host: Option<&crate::debugger::Host>,
+    ) -> Result<Project, Diagnostic> {
         crate::progress::enter_checked("project")?;
         let manifest = crate::scaffold::read_manifest(root)?;
         let held = crate::settings::held(root)?;
@@ -47716,7 +50536,7 @@ pub mod builder {
             sources.extend(made);
         }
 
-        if let Some(made_by) = fingerprint {
+        if let Some(made_by) = fingerprint.filter(|_| host.is_none_or(|one| one.seal)) {
             let mut named = crate::diag::Sink::new();
             let parsed = crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut named);
             let package = parsed.as_ref().map(package_name).unwrap_or_default();
@@ -47735,6 +50555,13 @@ pub mod builder {
                 ));
                 project.sealed = Some(crate::seal::class_name(&package));
             }
+        }
+
+        if let Some(plan) =
+            host.and_then(|one| crate::debugger::plan(one, held.as_ref(), &project.manifest))
+        {
+            sources.extend(crate::debugger::sources(&plan));
+            project.debugger = Some(plan);
         }
 
         let written = compiled_java(root, sources)?;
@@ -48886,7 +51713,7 @@ public final class R {{
         true
     }
 
-    fn package_of(manifest: &str) -> Option<String> {
+    pub fn package_of(manifest: &str) -> Option<String> {
         let mut sink = Sink::new();
         let root = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink)?;
         root.attribute("package").map(|held| held.to_string())
@@ -49246,6 +52073,9 @@ public final class R {{
         let report = guard::inspect_manifest(&root);
 
         let package = package_name(&root);
+        if let Some(plan) = &project.debugger {
+            crate::debugger::declare(&mut root, &package, plan);
+        }
         Ok(Prepared {
             root,
             icons,
@@ -49293,6 +52123,15 @@ public final class R {{
                     &project.code,
                     &project.keep_rules,
                 ));
+                if project.debugger.is_some() {
+                    roots.extend(
+                        project
+                            .code
+                            .iter()
+                            .filter(|one| crate::debugger::is_runtime_class(&one.descriptor))
+                            .map(|one| one.descriptor.clone()),
+                    );
+                }
                 let texts: Vec<String> = project
                     .resources
                     .iter()
@@ -53472,6 +56311,22 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
+    #[no_mangle]
+    pub unsafe extern "C" fn apk_builder_debugger_configure(spec: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let spec = text_from(spec).unwrap_or_default();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::debugger::configure(&spec) {
+                Ok(host) => crate::debugger::write_host(&mut w, &host),
+                Err(error) => write_failure(&mut w, "configured", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     fn write_failure(w: &mut crate::json::Writer, done: &str, error: &crate::diag::Diagnostic) {
         error.write_body(w, done, false);
     }
@@ -54513,8 +57368,8 @@ pub mod ffi {
                     )
                 })
                 .and_then(|held| {
-                    crate::x509::Certificate::parse(&held)?;
-                    let project = crate::builder::from_project(&root)?;
+                    let made_by = crate::builder::made_by(&held)?;
+                    let project = crate::builder::sealed_project(&root, Some(&made_by))?;
                     let made = crate::builder::unsigned(&project, &mut sink)?;
                     let asked = crate::signing::to_sign(
                         &made.package,

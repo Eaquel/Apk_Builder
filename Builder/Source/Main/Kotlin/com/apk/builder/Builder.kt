@@ -606,6 +606,8 @@ object Builder {
 
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
+    external fun nativeDebuggerConfigure(spec: String): String
+
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
 
     external fun nativeDefaultKey(directory: String): String

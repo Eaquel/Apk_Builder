@@ -32,6 +32,8 @@ char *apk_builder_vibe(const char *request);
 char *apk_builder_verify_self(const char *package_path,
                        const char *expected_certificate);
 
+char *apk_builder_debugger_configure(const char *spec);
+
 char *apk_builder_create_key(const char *directory, const char *spec,
                       const char *password);
 

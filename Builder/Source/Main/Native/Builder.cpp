@@ -892,6 +892,16 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeVibe(
   return HandBack(env, apk_builder_vibe(held.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeDebuggerConfigure(
+    JNIEnv *env, jobject , jstring spec) {
+  std::string held;
+  if (spec == nullptr || !JavaStringToUtf8(env, spec, &held)) {
+    ThrowJava(env, kIllegalState, "The debugger settings have to be given as text.");
+    return nullptr;
+  }
+  return HandBack(env, apk_builder_debugger_configure(held.c_str()));
+}
+
 JNIEXPORT void JNICALL Java_com_apk_builder_Builder_nativeBuildExpect(
     JNIEnv *env, jobject , jstring timings) {
   if (timings == nullptr) {

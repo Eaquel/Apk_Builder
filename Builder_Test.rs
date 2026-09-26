@@ -790,7 +790,7 @@ mod core {
     fn a_string_without_a_terminator_is_refused() {
         let mut r = reader(b"builder\0rest");
         assert_eq!(r.cstring().unwrap(), b"builder");
-        assert_eq!(r.position(), 5);
+        assert_eq!(r.position(), 8);
         assert_eq!(
             reader(b"no terminator").cstring().unwrap_err().code,
             "E7008"
@@ -8100,21 +8100,22 @@ public final class MainActivity extends Activity {
     }
 
     const INFOZIP_SAMPLE: &[u8] = &[
-        0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x04,
-        0xc9, 0x25, 0x28, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
-        0x61, 0x2e, 0x74, 0x78, 0x74, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x6f, 0x6d, 0x6e, 0x69,
-        0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x33,
-        0xeb, 0xbf, 0xe0, 0x0c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
-        0x64, 0x69, 0x72, 0x2f, 0x62, 0x2e, 0x74, 0x78, 0x74, 0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64,
-        0x20, 0x65, 0x6e, 0x74, 0x72, 0x79, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x04, 0xc9, 0x25, 0x28, 0x0a, 0x00, 0x00, 0x00,
-        0x0a, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0xa4, 0x81, 0x00, 0x00, 0x00, 0x00, 0x61, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x01,
-        0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x33, 0xeb,
-        0xbf, 0xe0, 0x0c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x2d, 0x00, 0x00, 0x00, 0x64, 0x69,
-        0x72, 0x2f, 0x62, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00,
-        0x02, 0x00, 0x02, 0x00, 0x6a, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x86, 0x61, 0x3a, 0x5d, 0xbc,
+        0xe8, 0x87, 0x4b, 0x0d, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+        0x61, 0x2e, 0x74, 0x78, 0x74, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x62, 0x75, 0x69, 0x6c,
+        0x64, 0x65, 0x72, 0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x86, 0x61,
+        0x3a, 0x5d, 0x33, 0xeb, 0xbf, 0xe0, 0x0c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x09,
+        0x00, 0x00, 0x00, 0x64, 0x69, 0x72, 0x2f, 0x62, 0x2e, 0x74, 0x78, 0x74, 0x73, 0x65, 0x63,
+        0x6f, 0x6e, 0x64, 0x20, 0x65, 0x6e, 0x74, 0x72, 0x79, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03,
+        0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x86, 0x61, 0x3a, 0x5d, 0xbc, 0xe8, 0x87, 0x4b, 0x0d,
+        0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x00, 0x00, 0x00, 0x00, 0x61, 0x2e, 0x74, 0x78, 0x74,
+        0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x86, 0x61, 0x3a,
+        0x5d, 0x33, 0xeb, 0xbf, 0xe0, 0x0c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x09, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x30, 0x00, 0x00,
+        0x00, 0x64, 0x69, 0x72, 0x2f, 0x62, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x05, 0x06, 0x00,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x6a, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
+        0x00, 0x00,
     ];
 
     #[test]
@@ -8127,7 +8128,7 @@ public final class MainActivity extends Activity {
         assert_eq!(archive.size(), INFOZIP_SAMPLE.len() as u64);
 
         let a = archive.entry("a.txt").expect("a.txt");
-        assert_eq!(a.uncompressed_size, 10);
+        assert_eq!(a.uncompressed_size, 13);
         assert_eq!(a.compression, archive::Compression::Stored);
         assert!(!a.is_directory());
 
@@ -8588,59 +8589,64 @@ public final class MainActivity extends Activity {
     }
 
     const CONFORMANCE_CERTIFICATE: &[u8] = &[
-        0x30, 0x82, 0x03, 0x11, 0x30, 0x82, 0x01, 0xf9, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x08,
+        0x30, 0x82, 0x03, 0x5f, 0x30, 0x82, 0x02, 0x47, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x08,
         0x5d, 0x97, 0xb8, 0x2e, 0x92, 0x26, 0xcb, 0xb1, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
-        0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c, 0x05, 0x00, 0x30, 0x37, 0x31, 0x0b, 0x30, 0x09, 0x06,
-        0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x54, 0x52, 0x31, 0x0d, 0x30, 0x0b, 0x06, 0x03, 0x55,
-        0x04, 0x0a, 0x13, 0x04, 0x4f, 0x6d, 0x6e, 0x69, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55,
-        0x04, 0x03, 0x13, 0x10, 0x4f, 0x6d, 0x6e, 0x69, 0x20, 0x43, 0x6f, 0x6e, 0x66, 0x6f, 0x72,
-        0x6d, 0x61, 0x6e, 0x63, 0x65, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x38, 0x32, 0x30,
-        0x30, 0x38, 0x31, 0x35, 0x35, 0x37, 0x5a, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x39, 0x31, 0x39,
-        0x30, 0x38, 0x31, 0x35, 0x35, 0x37, 0x5a, 0x30, 0x37, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03,
-        0x55, 0x04, 0x06, 0x13, 0x02, 0x54, 0x52, 0x31, 0x0d, 0x30, 0x0b, 0x06, 0x03, 0x55, 0x04,
-        0x0a, 0x13, 0x04, 0x4f, 0x6d, 0x6e, 0x69, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55, 0x04,
-        0x03, 0x13, 0x10, 0x4f, 0x6d, 0x6e, 0x69, 0x20, 0x43, 0x6f, 0x6e, 0x66, 0x6f, 0x72, 0x6d,
-        0x61, 0x6e, 0x63, 0x65, 0x30, 0x82, 0x01, 0x22, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
-        0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0f, 0x00, 0x30, 0x82,
-        0x01, 0x0a, 0x02, 0x82, 0x01, 0x01, 0x00, 0xb0, 0x1f, 0xc3, 0xda, 0xaa, 0xec, 0x54, 0xff,
-        0xbb, 0xf5, 0xf3, 0xda, 0xfd, 0xa5, 0x2c, 0x95, 0x12, 0x1e, 0x14, 0xd1, 0xda, 0xe6, 0xf1,
-        0x81, 0x0a, 0x0a, 0x97, 0xc0, 0x9a, 0xa9, 0xd7, 0x86, 0xaf, 0x8b, 0xe2, 0x1d, 0x8d, 0x18,
-        0x16, 0x45, 0x55, 0xec, 0x5e, 0x88, 0xf5, 0xc7, 0xef, 0xe1, 0xa0, 0x1f, 0xcd, 0x70, 0xf5,
-        0x5f, 0xf9, 0xda, 0x3d, 0x4d, 0x5a, 0xbe, 0x33, 0x52, 0x08, 0x3b, 0xf6, 0x02, 0xa0, 0x2a,
-        0x17, 0x99, 0x2a, 0xa1, 0x75, 0x34, 0x12, 0x2f, 0x9c, 0x72, 0xb2, 0xe7, 0xe8, 0xa1, 0x03,
-        0x31, 0x1e, 0x0d, 0xe6, 0xeb, 0xc1, 0x0c, 0x92, 0x74, 0x0e, 0xc7, 0x78, 0xf5, 0x1b, 0xe4,
-        0x39, 0x04, 0xd4, 0xae, 0x8c, 0x55, 0x23, 0xd0, 0xd4, 0xd5, 0x5d, 0x2a, 0x8f, 0x1d, 0xbb,
-        0x8f, 0x35, 0xef, 0x64, 0xf9, 0x51, 0xd9, 0x77, 0xca, 0x8b, 0x6d, 0x4b, 0xff, 0x98, 0x13,
-        0xd4, 0x10, 0xc1, 0x31, 0xe5, 0xda, 0xad, 0xf7, 0x39, 0x3d, 0x98, 0x21, 0x9f, 0x51, 0xcc,
-        0x51, 0x72, 0xde, 0x76, 0x93, 0xbb, 0xae, 0xfb, 0x96, 0x9c, 0xe6, 0xcd, 0x8b, 0xd1, 0x22,
-        0x31, 0xec, 0x5c, 0x05, 0x7d, 0x13, 0x9e, 0xa7, 0xd0, 0xc5, 0xfc, 0x02, 0xa7, 0x04, 0x7b,
-        0x58, 0xd9, 0x10, 0x2b, 0xf4, 0x5a, 0x40, 0x8a, 0x61, 0xe2, 0xaa, 0x72, 0xaf, 0x61, 0xed,
-        0x7a, 0xc3, 0xc7, 0xa4, 0x23, 0x97, 0xc9, 0xa5, 0x71, 0x11, 0xc8, 0x76, 0x01, 0x51, 0x38,
-        0x29, 0xc7, 0xaa, 0x46, 0x38, 0x7b, 0x35, 0x22, 0x59, 0x4c, 0x78, 0x46, 0x0d, 0xb1, 0x64,
-        0xf3, 0x36, 0xb1, 0x33, 0xcc, 0x25, 0x43, 0x76, 0x86, 0x14, 0x59, 0x68, 0x09, 0x1e, 0x90,
-        0x7a, 0xd4, 0xb3, 0x6f, 0x7a, 0x8f, 0xc9, 0xbd, 0x77, 0x30, 0x5d, 0x89, 0x10, 0x69, 0x18,
-        0xd0, 0xe3, 0xbb, 0x3a, 0xe5, 0x00, 0x36, 0xab, 0x02, 0x03, 0x01, 0x00, 0x01, 0xa3, 0x21,
-        0x30, 0x1f, 0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d, 0x0e, 0x04, 0x16, 0x04, 0x14, 0xee, 0x76,
-        0x4b, 0xad, 0x89, 0xb8, 0xa8, 0x59, 0xe1, 0x5b, 0xb1, 0xf8, 0x72, 0x08, 0xfb, 0x9b, 0x12,
-        0x16, 0xa8, 0x37, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
-        0x0c, 0x05, 0x00, 0x03, 0x82, 0x01, 0x01, 0x00, 0x74, 0x6f, 0x97, 0x28, 0xb6, 0x84, 0xfe,
-        0x21, 0x5c, 0xfb, 0x06, 0xeb, 0x14, 0x9c, 0xc5, 0xd8, 0x04, 0x81, 0x59, 0xda, 0x1f, 0x7f,
-        0x7a, 0x0f, 0xde, 0x22, 0xd9, 0xf5, 0x98, 0x5f, 0x3a, 0xde, 0xed, 0xc9, 0x3c, 0x7b, 0x86,
-        0x09, 0x6b, 0x62, 0xdb, 0x7f, 0x5d, 0x8e, 0xe5, 0x65, 0x2d, 0x48, 0xf4, 0xd2, 0xbe, 0xca,
-        0x44, 0x68, 0xb3, 0x23, 0x15, 0x41, 0x4a, 0x50, 0xcc, 0x0d, 0x3e, 0xf0, 0x9a, 0xfd, 0x7f,
-        0x7c, 0x93, 0x13, 0xd9, 0x32, 0xfe, 0x91, 0x1b, 0x77, 0x8d, 0x1a, 0x69, 0xdb, 0x00, 0xe8,
-        0x7b, 0xff, 0x8d, 0x32, 0x17, 0x95, 0xab, 0xb3, 0xb4, 0x08, 0x12, 0x38, 0x78, 0xf9, 0x84,
-        0x6f, 0x60, 0xee, 0xa2, 0x50, 0xb3, 0x46, 0x1e, 0xa2, 0x82, 0x17, 0xfc, 0x22, 0xda, 0x51,
-        0x77, 0x3c, 0x98, 0xd5, 0x9f, 0x4b, 0x02, 0x7b, 0x33, 0xb4, 0xc6, 0x59, 0x97, 0xd1, 0x79,
-        0xf0, 0x20, 0xdb, 0x0d, 0xc6, 0x16, 0xb3, 0xf4, 0x55, 0xb2, 0xe2, 0x99, 0x48, 0xa2, 0x31,
-        0xc6, 0xa1, 0x56, 0x10, 0xdc, 0x75, 0x2a, 0x59, 0x75, 0xc5, 0xe9, 0xfc, 0xf2, 0xa7, 0x69,
-        0x19, 0x26, 0xb2, 0x73, 0x37, 0x1c, 0x7a, 0xce, 0x81, 0x4b, 0x99, 0x07, 0x1d, 0xe8, 0xfa,
-        0xee, 0xf6, 0x26, 0xd6, 0x31, 0x01, 0x19, 0x0b, 0xfa, 0xb5, 0x58, 0xfd, 0xa0, 0xd9, 0x02,
-        0x63, 0x49, 0x03, 0x8a, 0x82, 0x0c, 0x16, 0x8e, 0xab, 0x86, 0x83, 0x6c, 0x25, 0x52, 0x04,
-        0x7d, 0xcf, 0x58, 0xf1, 0x96, 0x15, 0x78, 0x88, 0x83, 0x94, 0x23, 0x3e, 0xc0, 0x31, 0x13,
-        0x24, 0x46, 0x34, 0xa6, 0x60, 0x9a, 0x70, 0x97, 0xdf, 0xfd, 0xf9, 0x25, 0x76, 0x98, 0xc9,
-        0x54, 0xc4, 0x6a, 0x4b, 0x65, 0xe7, 0x8c, 0x43, 0xa3, 0xdc, 0x0f, 0x22, 0xfe, 0xea, 0x13,
-        0x7b, 0x3a, 0xfc, 0x42, 0xd1, 0x53, 0x88, 0x07, 0x6e,
+        0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c, 0x05, 0x00, 0x30, 0x45, 0x31, 0x0b, 0x30, 0x09, 0x06,
+        0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x54, 0x52, 0x31, 0x14, 0x30, 0x12, 0x06, 0x03, 0x55,
+        0x04, 0x0a, 0x0c, 0x0b, 0x41, 0x70, 0x6b, 0x20, 0x42, 0x75, 0x69, 0x6c, 0x64, 0x65, 0x72,
+        0x31, 0x20, 0x30, 0x1e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x17, 0x41, 0x70, 0x6b, 0x20,
+        0x42, 0x75, 0x69, 0x6c, 0x64, 0x65, 0x72, 0x20, 0x43, 0x6f, 0x6e, 0x66, 0x6f, 0x72, 0x6d,
+        0x61, 0x6e, 0x63, 0x65, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x39, 0x32, 0x36, 0x31,
+        0x32, 0x31, 0x32, 0x31, 0x32, 0x5a, 0x17, 0x0d, 0x32, 0x36, 0x31, 0x30, 0x32, 0x36, 0x31,
+        0x32, 0x31, 0x32, 0x31, 0x32, 0x5a, 0x30, 0x45, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55,
+        0x04, 0x06, 0x13, 0x02, 0x54, 0x52, 0x31, 0x14, 0x30, 0x12, 0x06, 0x03, 0x55, 0x04, 0x0a,
+        0x0c, 0x0b, 0x41, 0x70, 0x6b, 0x20, 0x42, 0x75, 0x69, 0x6c, 0x64, 0x65, 0x72, 0x31, 0x20,
+        0x30, 0x1e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x17, 0x41, 0x70, 0x6b, 0x20, 0x42, 0x75,
+        0x69, 0x6c, 0x64, 0x65, 0x72, 0x20, 0x43, 0x6f, 0x6e, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x6e,
+        0x63, 0x65, 0x30, 0x82, 0x01, 0x22, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
+        0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0f, 0x00, 0x30, 0x82, 0x01, 0x0a,
+        0x02, 0x82, 0x01, 0x01, 0x00, 0xef, 0xdf, 0xa6, 0xa4, 0xf9, 0xa1, 0xd7, 0x35, 0x27, 0x8c,
+        0x88, 0xdd, 0x7d, 0x3e, 0xf3, 0x73, 0x27, 0x90, 0xd8, 0x8c, 0xb7, 0xec, 0xe6, 0x47, 0xf2,
+        0xd2, 0xa8, 0x35, 0x5b, 0xc2, 0x7b, 0x5e, 0xc1, 0x9e, 0xdb, 0x16, 0x14, 0x8e, 0x66, 0xcd,
+        0x1b, 0x24, 0xc5, 0x08, 0xed, 0x91, 0x20, 0xba, 0x03, 0xf9, 0x94, 0xd9, 0xbc, 0xa0, 0x64,
+        0xca, 0x97, 0xd2, 0x8d, 0xb5, 0x6b, 0x05, 0x30, 0x6a, 0xf1, 0x03, 0x6c, 0x19, 0x61, 0x5f,
+        0x76, 0x3e, 0x37, 0x42, 0xd5, 0xd2, 0xbc, 0xe1, 0xa4, 0x51, 0x69, 0xcb, 0xe3, 0x1e, 0x85,
+        0x4a, 0xb8, 0x2b, 0x71, 0x4b, 0x91, 0x8f, 0x1c, 0xc7, 0xc3, 0x19, 0x15, 0x22, 0x26, 0x2a,
+        0x4b, 0xe4, 0x84, 0xdc, 0x0f, 0x4c, 0x82, 0xa0, 0xf5, 0x78, 0x9c, 0x49, 0x02, 0x8d, 0x56,
+        0x1a, 0xb2, 0xdb, 0xdf, 0x1a, 0x56, 0xf2, 0x08, 0xa9, 0x3c, 0x69, 0x32, 0x48, 0xb6, 0x6c,
+        0xc5, 0x4a, 0x0b, 0x5e, 0x9b, 0x23, 0x80, 0x6c, 0xbf, 0xce, 0xd3, 0xfa, 0x1b, 0xe6, 0xc0,
+        0xb3, 0xdb, 0x36, 0x84, 0xb2, 0x08, 0xb7, 0xff, 0x2f, 0xee, 0x65, 0xc4, 0x26, 0x0a, 0x70,
+        0xfd, 0xe6, 0x28, 0x93, 0x97, 0xa8, 0xb9, 0x8d, 0x9a, 0x40, 0x1c, 0xcb, 0xe6, 0x9b, 0x55,
+        0x59, 0x47, 0x37, 0x1f, 0x0f, 0x4f, 0x4b, 0xcc, 0xb7, 0x45, 0x03, 0xdb, 0x6c, 0xb5, 0xf8,
+        0xda, 0xe8, 0xaa, 0x90, 0x78, 0x0e, 0xc3, 0x4d, 0x6f, 0xf9, 0x12, 0xf7, 0xac, 0x26, 0x0d,
+        0x49, 0x96, 0x02, 0x31, 0x36, 0x3c, 0xf9, 0xbb, 0xb0, 0xdc, 0x1d, 0x0e, 0xe1, 0xf0, 0x8a,
+        0x55, 0xec, 0x7b, 0xac, 0x3f, 0x7a, 0x45, 0x44, 0xf9, 0x87, 0xae, 0x16, 0xec, 0x3b, 0x04,
+        0xa2, 0x75, 0xc9, 0x69, 0xcf, 0x86, 0xee, 0x68, 0x72, 0xa5, 0xdf, 0xed, 0x5f, 0x95, 0x66,
+        0x6b, 0x78, 0x79, 0xfc, 0x99, 0xf3, 0x02, 0x03, 0x01, 0x00, 0x01, 0xa3, 0x53, 0x30, 0x51,
+        0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d, 0x0e, 0x04, 0x16, 0x04, 0x14, 0xf2, 0x92, 0x4b, 0xaf,
+        0x3e, 0xa2, 0x68, 0xa8, 0x4b, 0x8b, 0x87, 0x7b, 0xb1, 0x2f, 0xe6, 0x2f, 0xdc, 0x5e, 0x79,
+        0xdc, 0x30, 0x1f, 0x06, 0x03, 0x55, 0x1d, 0x23, 0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0xf2,
+        0x92, 0x4b, 0xaf, 0x3e, 0xa2, 0x68, 0xa8, 0x4b, 0x8b, 0x87, 0x7b, 0xb1, 0x2f, 0xe6, 0x2f,
+        0xdc, 0x5e, 0x79, 0xdc, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04,
+        0x05, 0x30, 0x03, 0x01, 0x01, 0xff, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
+        0x0d, 0x01, 0x01, 0x0c, 0x05, 0x00, 0x03, 0x82, 0x01, 0x01, 0x00, 0x84, 0x6e, 0xac, 0x4e,
+        0xfc, 0xad, 0x63, 0x26, 0x82, 0xa0, 0x37, 0x4b, 0x77, 0xb0, 0x6f, 0xc3, 0xf3, 0x05, 0x70,
+        0x77, 0xf3, 0xdc, 0xa2, 0x24, 0xd5, 0x90, 0x1c, 0x8b, 0x66, 0xda, 0xe0, 0xb2, 0xc6, 0x29,
+        0x02, 0x6d, 0xd8, 0xad, 0x31, 0x77, 0xe4, 0xe3, 0xfa, 0xcc, 0xb8, 0x0a, 0xc9, 0xe4, 0x12,
+        0xb9, 0x2d, 0xb5, 0xf3, 0x32, 0x1f, 0x88, 0x2e, 0x52, 0x16, 0x23, 0xfc, 0x8d, 0x77, 0xfc,
+        0xbd, 0xa1, 0x3d, 0x67, 0x71, 0x85, 0xeb, 0x7e, 0x2e, 0x75, 0x81, 0x5d, 0xf1, 0xb6, 0xfb,
+        0x1e, 0x8a, 0xd2, 0x47, 0xc2, 0x9a, 0x7d, 0xb6, 0xd5, 0x01, 0x07, 0x2a, 0x4b, 0xc7, 0x88,
+        0xc0, 0x49, 0x95, 0xf2, 0xd1, 0xcc, 0x46, 0x21, 0x2f, 0xbe, 0x82, 0xec, 0x4f, 0xc5, 0x11,
+        0xa6, 0xca, 0x44, 0xf2, 0xe3, 0x47, 0x69, 0xe7, 0x10, 0x25, 0x28, 0xc6, 0xf8, 0xd1, 0x8f,
+        0x71, 0x07, 0x27, 0x48, 0x25, 0xd7, 0x7f, 0x28, 0x9e, 0x7d, 0x44, 0xae, 0xd8, 0x53, 0x73,
+        0x9b, 0x1e, 0x89, 0x6a, 0xf6, 0x4e, 0x65, 0x29, 0xe6, 0x16, 0xa4, 0xc5, 0x07, 0xa1, 0x8d,
+        0xda, 0x50, 0x01, 0x9d, 0xf2, 0xcc, 0x98, 0x6a, 0x36, 0xeb, 0x24, 0xed, 0x30, 0xbb, 0x20,
+        0x05, 0x46, 0x33, 0x0c, 0xbe, 0xf7, 0x72, 0xaf, 0x23, 0x08, 0x90, 0xb6, 0x1b, 0x9d, 0x5f,
+        0x5f, 0x56, 0xe7, 0xeb, 0x8f, 0xb0, 0x56, 0x52, 0xc9, 0x60, 0x31, 0x41, 0x94, 0xc6, 0xd7,
+        0x0c, 0xd2, 0x59, 0xcd, 0x92, 0x8d, 0x91, 0xec, 0x2a, 0x39, 0xfb, 0xbd, 0xc6, 0xf0, 0x75,
+        0x33, 0x7a, 0xc0, 0x1d, 0x98, 0x5f, 0x39, 0x1c, 0x71, 0x12, 0x73, 0x29, 0x5f, 0xbf, 0xa2,
+        0x2b, 0xeb, 0xbe, 0x9f, 0x83, 0x4a, 0x0a, 0x54, 0xd6, 0x52, 0x85, 0xe8, 0x8c, 0x3b, 0xb2,
+        0xad, 0x81, 0x64, 0xd9, 0xcd, 0xfc, 0xcb, 0x20, 0xf8, 0x1f, 0x32, 0xe9,
     ];
 
     #[test]
@@ -8743,11 +8749,11 @@ public final class MainActivity extends Activity {
 
         assert_eq!(
             certificate.fingerprint.to_hex(),
-            "a7259d236ba6819af41ef78ed77ed17804f07ec9edce8294a5ff380558289fbe"
+            "978bfd368566d350f6c9c94abcfed03757615cfc5ecae33e0ebc604c0dc2673c"
         );
         assert!(certificate
             .fingerprint_display()
-            .starts_with("A7:25:9D:23:6B:A6:81:9A"));
+            .starts_with("97:8B:FD:36:85:66:D3:50"));
 
         assert!(certificate.not_before.ends_with("UTC"));
         assert!(certificate.not_after > certificate.not_before);
@@ -11791,6 +11797,7 @@ public class Walk {
             application_id: String::new(),
             library_packages: Vec::new(),
             sealed: None,
+            debugger: None,
             shrink: true,
             seal_resources: false,
             keep_rules: Vec::new(),
@@ -12462,6 +12469,7 @@ public class Walk {
                 application_id: String::new(),
                 library_packages: Vec::new(),
                 sealed: None,
+                debugger: None,
                 shrink: true,
                 seal_resources: false,
                 keep_rules: Vec::new(),
@@ -13300,6 +13308,444 @@ public final class App extends Activity {
         assert_eq!(provider.attribute("authorities"), Some("com.tr.yt.seal"));
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    const BUILDER_CERTIFICATE: &str =
+        "0a:1b:2c:3d:4e:5f:60:71:82:93:a4:b5:c6:d7:e8:f9:0a:1b:2c:3d:4e:5f:60:71:82:93:a4:b5:c6:d7:e8:f9";
+
+    fn the_builder_as_host(debugger: bool, seal: bool) -> crate::debugger::Host {
+        crate::debugger::read_host(&format!(
+            "{{\"package\":\"com.apk.builder\",\"certificate\":\"{BUILDER_CERTIFICATE}\",\"debugger\":{debugger},\"seal\":{seal}}}"
+        ))
+        .expect("the host reads")
+    }
+
+    fn a_signed_project(
+        label: &str,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::rsa::PrivateKey,
+        Vec<u8>,
+        String,
+    ) {
+        let directory = temp_directory(label);
+        let root = directory.join("Watched");
+        let spec =
+            "package=com.tr.yt;label=Watched;abis=arm64-v8a;minSdk=30;targetSdk=37;languages=java";
+        crate::scaffold::create(
+            root.to_str().unwrap(),
+            &crate::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project must be created");
+        let key = crate::rsa::generate(2048).expect("a key");
+        let certificate = crate::builder::signing_identity(
+            &key,
+            &crate::builder::Identity::default(),
+            1_787_000_000,
+        )
+        .expect("a certificate");
+        let made_by = crate::builder::made_by(&certificate).expect("a fingerprint");
+        (directory, root, key, certificate, made_by)
+    }
+
+    fn manifest_of(package: &[u8]) -> crate::axml::Node {
+        let mut own = Sink::new();
+        let archive = crate::archive::read(package, &mut own).expect("the package reads back");
+        let manifest = archive
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "AndroidManifest.xml")
+            .expect("a manifest");
+        let bytes = crate::builder::entry_bytes(package, manifest, "package").expect("its bytes");
+        crate::axml::decode(&bytes).expect("the manifest decodes")
+    }
+
+    fn dex_files_of(package: &[u8]) -> Vec<Vec<u8>> {
+        let mut own = Sink::new();
+        let archive = crate::archive::read(package, &mut own).expect("the package reads back");
+        archive
+            .entries()
+            .iter()
+            .filter(|entry| entry.name.starts_with("classes") && entry.name.ends_with(".dex"))
+            .map(|entry| crate::builder::entry_bytes(package, entry, "package").expect("dex"))
+            .collect()
+    }
+
+    fn carries(dex: &[Vec<u8>], descriptor: &str) -> bool {
+        dex.iter().any(|one| {
+            one.windows(descriptor.len())
+                .any(|window| window == descriptor.as_bytes())
+        })
+    }
+
+    #[test]
+    fn what_this_builds_carries_the_debugger_apk_builder_reads() {
+        let _turn = crate::progress::one_at_a_time();
+        let (directory, root, key, certificate, made_by) = a_signed_project("builder-debugger");
+        let host = the_builder_as_host(true, true);
+        assert_eq!(host.certificate.len(), 64, "{}", host.certificate);
+        assert!(
+            host.certificate
+                .chars()
+                .all(|one| one.is_ascii_digit() || one.is_ascii_uppercase()),
+            "the digest is kept as plain upper case hexadecimal: {}",
+            host.certificate
+        );
+
+        let project =
+            crate::builder::project_for(root.to_str().unwrap(), Some(&made_by), Some(&host))
+                .expect("reads");
+        let plan = project.debugger.clone().expect("the debugger is planned");
+        assert_eq!(
+            plan.level,
+            crate::debugger::Level::Full,
+            "a debug build keeps everything"
+        );
+        assert_eq!(plan.profile, "debug");
+        assert_eq!(plan.host, "com.apk.builder");
+        assert_eq!(plan.certificate, host.certificate);
+        assert_eq!(
+            project.sealed.as_deref(),
+            Some("com.tr.yt.Seal"),
+            "the seal still goes in"
+        );
+
+        for (name, _) in crate::debugger::RUNTIME {
+            let descriptor = format!("L{};", name.trim_end_matches(".java"));
+            assert!(
+                project.code.iter().any(|one| one.descriptor == descriptor),
+                "{descriptor} is compiled into the package"
+            );
+        }
+        assert!(
+            project
+                .code
+                .iter()
+                .any(|one| one.descriptor == "Lcom/apk/builder/debug/BuildFacts;"),
+            "what the build decided is carried in a class"
+        );
+        let mut refused = Vec::new();
+        for class in project
+            .code
+            .iter()
+            .filter(|one| crate::debugger::is_runtime_class(&one.descriptor))
+        {
+            refused.extend(what_the_runtime_would_refuse(class));
+        }
+        assert!(
+            refused.is_empty(),
+            "the runtime would refuse the debugger itself:\n  {}",
+            refused.join("\n  ")
+        );
+
+        let mut sink = Sink::new();
+        let outcome = crate::builder::assemble(&project, &key, &certificate, &mut sink)
+            .expect("a project with the debugger still builds");
+        assert!(outcome.signed);
+
+        let dex = dex_files_of(&outcome.package);
+        for kept in [
+            "Lcom/apk/builder/debug/ComponentFactory;",
+            "Lcom/apk/builder/debug/DebugProvider;",
+            "Lcom/apk/builder/debug/Presence;",
+            "Lcom/apk/builder/debug/Journal;",
+            "Lcom/apk/builder/debug/Watchdog;",
+            "Lcom/apk/builder/debug/Tombstone;",
+        ] {
+            assert!(carries(&dex, kept), "the shrinker kept {kept}");
+        }
+
+        let read = manifest_of(&outcome.package);
+        let queries = read
+            .children_named("queries")
+            .flat_map(|one| one.children_named("package"))
+            .filter_map(|one| one.attribute("name"))
+            .collect::<Vec<_>>();
+        assert!(
+            queries.contains(&"com.apk.builder"),
+            "the app can see Apk Builder, so it can check who asks: {queries:?}"
+        );
+        let application = read
+            .children_named("application")
+            .next()
+            .expect("an application");
+        assert_eq!(
+            application.attribute("appComponentFactory"),
+            Some(crate::debugger::FACTORY),
+            "the debugger starts before any of the app's own classes"
+        );
+        let provider = application
+            .children_named("provider")
+            .find(|one| one.attribute("name") == Some(crate::debugger::PROVIDER))
+            .expect("the provider is declared");
+        assert_eq!(
+            provider.attribute("authorities"),
+            Some("com.tr.yt.debugger")
+        );
+        assert_eq!(provider.attribute("exported"), Some("true"));
+        let receiver = application
+            .children_named("receiver")
+            .find(|one| one.attribute("name") == Some(crate::debugger::RECEIVER))
+            .expect("the presence is declared");
+        let action = receiver
+            .children_named("intent-filter")
+            .flat_map(|one| one.children_named("action"))
+            .filter_map(|one| one.attribute("name"))
+            .next();
+        assert_eq!(action, Some(crate::debugger::PRESENCE_ACTION));
+        assert!(
+            application
+                .children_named("provider")
+                .any(|one| one.attribute("name") == Some("com.tr.yt.Seal")),
+            "the seal is declared beside it"
+        );
+        assert!(
+            outcome
+                .guard
+                .findings
+                .iter()
+                .all(|one| !one.what.contains(crate::debugger::PACKAGE)),
+            "the debugger's own parts guard themselves and are not held against the project: {:?}",
+            outcome.guard.findings
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_debugger_and_the_seal_stay_out_when_they_are_turned_off() {
+        let _turn = crate::progress::one_at_a_time();
+        let (directory, root, _key, _certificate, made_by) =
+            a_signed_project("builder-debugger-off");
+        let root_text = root.to_str().unwrap();
+
+        let neither = the_builder_as_host(false, false);
+        let project =
+            crate::builder::project_for(root_text, Some(&made_by), Some(&neither)).expect("reads");
+        assert!(
+            project.debugger.is_none(),
+            "the debugger stays out when Apk Builder says so"
+        );
+        assert!(project.sealed.is_none(), "so does the seal");
+        assert!(
+            !project
+                .code
+                .iter()
+                .any(|one| crate::debugger::is_runtime_class(&one.descriptor)),
+            "no class of the debugger is compiled in"
+        );
+
+        let nobody = crate::builder::project_for(root_text, Some(&made_by), None).expect("reads");
+        assert!(nobody.debugger.is_none(), "nothing asked for a debugger");
+        assert!(
+            nobody.sealed.is_some(),
+            "the seal is on when nothing says otherwise"
+        );
+
+        let both = the_builder_as_host(true, true);
+        let path = root.join(crate::settings::FILE_NAME);
+        let mut settings = crate::settings::held(root_text)
+            .expect("settings read")
+            .unwrap_or_default();
+        settings.debugging.enabled = false;
+        std::fs::write(&path, settings.to_json()).unwrap();
+        let project =
+            crate::builder::project_for(root_text, Some(&made_by), Some(&both)).expect("reads");
+        assert!(
+            project.debugger.is_none(),
+            "the project turned it off for itself"
+        );
+
+        settings.debugging.enabled = true;
+        settings.debugging.profile = "release".to_string();
+        settings.debugging.levels = vec![crate::settings::Named {
+            name: "release".to_string(),
+            value: "off".to_string(),
+        }];
+        std::fs::write(&path, settings.to_json()).unwrap();
+        let project =
+            crate::builder::project_for(root_text, Some(&made_by), Some(&both)).expect("reads");
+        assert!(
+            project.debugger.is_none(),
+            "a profile set to off carries nothing"
+        );
+
+        settings.debugging.levels = vec![crate::settings::Named {
+            name: "release".to_string(),
+            value: "crash".to_string(),
+        }];
+        std::fs::write(&path, settings.to_json()).unwrap();
+        let project =
+            crate::builder::project_for(root_text, Some(&made_by), Some(&both)).expect("reads");
+        let plan = project
+            .debugger
+            .expect("a release build may keep crashes only");
+        assert_eq!(plan.level, crate::debugger::Level::Crash);
+        assert_eq!(plan.profile, "release");
+        assert!(crate::debugger::build_facts(&plan).contains("LEVEL = \"crash\""));
+        assert!(crate::debugger::build_facts(&plan).contains("PROFILE = \"release\""));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn debugger_settings_read_back_as_they_were_written() {
+        let standing = crate::settings::Settings::default();
+        assert!(standing.debugging.enabled);
+        assert_eq!(standing.debugging.profile, "debug");
+        assert_eq!(
+            standing.debugging.level_for("debug"),
+            crate::debugger::Level::Full
+        );
+        assert_eq!(
+            standing.debugging.level_for("release"),
+            crate::debugger::Level::Standard
+        );
+        assert_eq!(
+            standing.debugging.level_for("staging"),
+            crate::debugger::Level::Standard,
+            "a profile nobody named gets the standard level"
+        );
+        let written = standing.to_json();
+        assert!(written.contains("\"debugger\""), "{written}");
+        let back = crate::settings::Settings::from_json(&written).expect("reads back");
+        assert_eq!(back.debugging, standing.debugging);
+
+        let mut changed = standing.clone();
+        changed.debugging.enabled = false;
+        changed.debugging.profile = "staging".to_string();
+        changed.debugging.levels.push(crate::settings::Named {
+            name: "staging".to_string(),
+            value: "crash".to_string(),
+        });
+        let back = crate::settings::Settings::from_json(&changed.to_json()).expect("reads back");
+        assert_eq!(back.debugging, changed.debugging);
+        assert_eq!(
+            back.debugging.level_for("staging"),
+            crate::debugger::Level::Crash
+        );
+
+        let odd = crate::settings::Settings::from_json(
+            r#"{"debugger": {"profile": "  ", "levels": {"debug": "loud", "release": "off"}}}"#,
+        )
+        .expect("reads");
+        assert_eq!(
+            odd.debugging.profile, "debug",
+            "an empty profile keeps the standing one"
+        );
+        assert_eq!(
+            odd.debugging.levels,
+            vec![crate::settings::Named {
+                name: "release".to_string(),
+                value: "off".to_string(),
+            }],
+            "a level that is not a level is left out"
+        );
+        assert_eq!(
+            odd.debugging.level_for("release"),
+            crate::debugger::Level::Off
+        );
+        assert_eq!(
+            odd.debugging.level_for("debug"),
+            crate::debugger::Level::Full
+        );
+    }
+
+    #[test]
+    fn the_host_apk_builder_names_is_read_with_care() {
+        let refused = crate::debugger::read_host("not json").unwrap_err();
+        assert_eq!(refused.code, "EU001");
+        let refused = crate::debugger::read_host(r#"{"package": "builder"}"#).unwrap_err();
+        assert_eq!(refused.code, "EU002");
+        let refused =
+            crate::debugger::read_host(r#"{"package": "com.apk.builder", "certificate": "ab:cd"}"#)
+                .unwrap_err();
+        assert_eq!(refused.code, "EU003");
+
+        let standing = crate::debugger::read_host("{}").expect("everything has a standing value");
+        assert_eq!(standing.package, crate::debugger::HOST_PACKAGE);
+        assert!(standing.certificate.is_empty());
+        assert!(standing.debugger && standing.seal);
+
+        let mut w = crate::json::Writer::new();
+        w.begin_object(None);
+        crate::debugger::write_host(&mut w, &the_builder_as_host(true, false));
+        w.end_object();
+        let said = crate::json::read(&w.finish()).expect("json");
+        assert_eq!(
+            said.get("configured").and_then(|one| one.boolean()),
+            Some(true)
+        );
+        assert_eq!(
+            said.get("certified").and_then(|one| one.boolean()),
+            Some(true)
+        );
+        assert_eq!(said.get("seal").and_then(|one| one.boolean()), Some(false));
+        assert!(
+            said.get("collected")
+                .map(|one| one.strings())
+                .unwrap_or_default()
+                .contains(&"crashes".to_string()),
+            "Apk Builder can show what is collected"
+        );
+    }
+
+    #[test]
+    fn a_component_factory_the_app_already_has_is_wrapped_not_lost() {
+        let host = the_builder_as_host(true, true);
+        let manifest = |factory: &str| {
+            format!(
+                r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.tr.yt"><application android:appComponentFactory="{factory}"><activity android:name=".Main"/></application></manifest>"#
+            )
+        };
+        let plan = crate::debugger::plan(
+            &host,
+            None,
+            &manifest("androidx.core.app.CoreComponentFactory"),
+        )
+        .expect("a plan");
+        assert_eq!(plan.factory, "androidx.core.app.CoreComponentFactory");
+        let plan = crate::debugger::plan(&host, None, &manifest(".Made")).expect("a plan");
+        assert_eq!(
+            plan.factory, "com.tr.yt.Made",
+            "a short name is read against the package"
+        );
+        let plan = crate::debugger::plan(&host, None, &manifest(crate::debugger::FACTORY))
+            .expect("a plan");
+        assert_eq!(plan.factory, "", "the debugger never wraps itself");
+        assert!(crate::debugger::build_facts(&plan).contains("FACTORY = \"\""));
+
+        let mut sink = Sink::new();
+        let mut root = crate::xml::parse(
+            &manifest("androidx.core.app.CoreComponentFactory"),
+            "AndroidManifest.xml",
+            &mut sink,
+        )
+        .expect("parses");
+        crate::debugger::declare(&mut root, "com.tr.yt.dev", &plan);
+        let names: Vec<&str> = root.children.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["queries", "application"],
+            "queries comes before application"
+        );
+        let application = &root.children[1];
+        let factories: Vec<&str> = application
+            .attributes
+            .iter()
+            .filter(|one| one.name == "android:appComponentFactory")
+            .map(|one| one.value.as_str())
+            .collect();
+        assert_eq!(
+            factories,
+            vec![crate::debugger::FACTORY],
+            "one factory, ours, which calls theirs"
+        );
+        assert!(
+            crate::xml::written(&root).contains("android:authorities=\"com.tr.yt.dev.debugger\""),
+            "the authority follows the application id, not the namespace"
+        );
     }
 
     #[test]
@@ -23608,8 +24054,8 @@ Viewbinding   = false
         let usage = vfs.usage();
         assert_eq!(usage.reads, 1);
         assert_eq!(usage.writes, 1);
-        assert_eq!(usage.bytes_written, 4);
-        assert_eq!(usage.bytes_read, 4);
+        assert_eq!(usage.bytes_written, 7);
+        assert_eq!(usage.bytes_read, 7);
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -33032,7 +33478,7 @@ public class Branch extends Root {
                 assert_eq!(
                     said.trim(),
                     "{\"name\":\"builder\",\"count\":3,\"real\":1.5,\"ok\":true,\"none\":null,\
-                     \"rows\":[1,2,{\"deep\":[true]}]} table:6 text:4/number:3/row:3 \
+                     \"rows\":[1,2,{\"deep\":[true]}]} table:6 text:7/number:3/row:3 \
                      table:1 not a number at 5/5"
                 );
                 eprintln!("java: four files, two packages, and javac's answer");
@@ -37867,6 +38313,137 @@ public class Bl {
     }
 
     #[test]
+    fn a_catch_starts_from_the_locals_the_try_began_with() {
+        runs_like_the_jdk(
+            &[(
+                "Held.java",
+                r####"import java.io.*;
+public class Held {
+    static long mark(String text) {
+        try {
+            InputStream in = new ByteArrayInputStream(text.getBytes("UTF-8"));
+            try {
+                byte[] held = new byte[32];
+                int read = in.read(held);
+                return read > 0 ? Long.parseLong(new String(held, 0, read, "UTF-8").trim()) : 0L;
+            } finally {
+                in.close();
+            }
+        } catch (Exception absent) {
+            return -1L;
+        }
+    }
+    static String parse(String said) {
+        StringBuilder out = new StringBuilder();
+        try {
+            int number = Integer.parseInt(said);
+            String written = "n" + number;
+            out.append(written);
+        } catch (NumberFormatException refused) {
+            long other = said.length();
+            out.append("bad").append(other);
+        } finally {
+            out.append('.');
+        }
+        return out.toString();
+    }
+    static int loop(String[] all) {
+        int total = 0;
+        for (String one : all) {
+            try {
+                Object parsed = Integer.valueOf(one);
+                total += (Integer) parsed;
+            } catch (RuntimeException skipped) {
+                String kept = skipped.getClass().getSimpleName();
+                total += kept.length();
+            }
+        }
+        return total;
+    }
+    public static void main(String[] a) {
+        System.out.println(mark(" 42 ") + " " + mark("x"));
+        System.out.println(parse("7") + " " + parse("seven"));
+        System.out.println(loop(new String[] {"1", "two", "3"}));
+    }
+}
+"####,
+            )],
+            "Held",
+            "42 -1\nn7. bad5.\n25\n",
+        );
+        runs_like_the_jdk(
+            &[(
+                "Handled.java",
+                r####"public class Handled {
+    static final ThreadLocal<Boolean> HANDLING = new ThreadLocal<Boolean>();
+    static Object last;
+    static StringBuilder log = new StringBuilder();
+    static String report(Throwable thrown, boolean fail) {
+        if (fail) {
+            throw new IllegalStateException("report failed");
+        }
+        return "report " + thrown.getMessage();
+    }
+    static void handle(Throwable thrown, boolean fail) {
+        if (HANDLING.get() == null && last != thrown) {
+            HANDLING.set(Boolean.TRUE);
+            try {
+                if (thrown instanceof OutOfMemoryError) {
+                    log.append("freed ");
+                }
+                String said;
+                try {
+                    said = report(thrown, fail);
+                } catch (Throwable broken) {
+                    said = "fallback " + thrown;
+                }
+                log.append(said).append(';');
+                last = thrown;
+            } catch (Throwable ignored) {
+            } finally {
+                HANDLING.remove();
+            }
+        }
+        log.append("after;");
+    }
+    public static void main(String[] a) {
+        handle(new RuntimeException("one"), false);
+        handle(new RuntimeException("two"), true);
+        System.out.println(log);
+    }
+}
+"####,
+            )],
+            "Handled",
+            "report one;after;fallback java.lang.RuntimeException: two;after;\n",
+        );
+    }
+
+    #[test]
+    fn the_debugger_runtime_keeps_its_promises_on_the_jdk() {
+        let mut sources: Vec<(&str, &str)> = crate::debugger::RUNTIME
+            .iter()
+            .filter(|(name, _)| {
+                ["Journal.java", "Crashes.java", "Tombstone.java"]
+                    .iter()
+                    .any(|wanted| name.ends_with(wanted))
+            })
+            .copied()
+            .collect();
+        assert_eq!(
+            sources.len(),
+            3,
+            "the pure Java parts of the runtime are all there"
+        );
+        sources.push(("com/apk/builder/debug/JournalCheck.java", JOURNAL_CHECK));
+        runs_like_the_jdk(
+            &sources,
+            "com.apk.builder.debug.JournalCheck",
+            "round trip\npersistence\nrotation\nconcurrency\nbursts\ncrashes\nclearing\nclearing survives a restart\nother processes\nanother handler is wrapped\nout of memory\ntombstones\nspeed\nall held\n",
+        );
+    }
+
+    #[test]
     fn anonymous_classes_hold_their_own_classes_and_lambdas_reach_super() {
         runs_like_the_jdk(
             &[(
@@ -38026,6 +38603,452 @@ public class Si {
         found.sort();
         found.pop()
     }
+
+    const JOURNAL_CHECK: &str = r####"package com.apk.builder.debug;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.util.List;
+
+public final class JournalCheck {
+
+    static int failures;
+
+    static void check(boolean held, String what) {
+        if (!held) {
+            failures++;
+            System.out.println("FAILED " + what);
+        }
+    }
+
+    static File fresh(String name) {
+        File folder = new File(System.getProperty("java.io.tmpdir"),
+                "journal-check-" + name + "-" + System.nanoTime());
+        folder.mkdirs();
+        return folder;
+    }
+
+    static void varint(ByteArrayOutputStream out, long value) {
+        while ((value & ~0x7FL) != 0) {
+            out.write((int) ((value & 0x7F) | 0x80));
+            value >>>= 7;
+        }
+        out.write((int) value);
+    }
+
+    static void number(ByteArrayOutputStream out, int field, long value) {
+        varint(out, (long) field << 3);
+        varint(out, value);
+    }
+
+    static void bytes(ByteArrayOutputStream out, int field, byte[] held) {
+        varint(out, ((long) field << 3) | 2);
+        varint(out, held.length);
+        out.write(held, 0, held.length);
+    }
+
+    static void text(ByteArrayOutputStream out, int field, String said) throws Exception {
+        bytes(out, field, said.getBytes("UTF-8"));
+    }
+
+    static void roundTrip() {
+        String tricky = "quote\" back\\ line\n tab\t turkish çğüşıö mark ✓ low \u0001 sep   end";
+        Journal.Event event = new Journal.Event(7, 123456789L, "crash", 'F', "Tag \"x\"", tricky);
+        Journal.Event back = Journal.Event.parse(event.line());
+        check(back != null, "a line reads back");
+        check(back != null && back.text.equals(tricky), "the text survives");
+        check(back != null && back.tag.equals("Tag \"x\""), "the tag survives");
+        check(back != null && back.seq == 7 && back.time == 123456789L && back.level == 'F',
+                "numbers and level survive");
+        check(Journal.Event.parse("{broken") == null, "a broken line is skipped");
+        check(Journal.Event.parse("{\"s\":0,\"t\":1,\"k\":\"a\",\"l\":\"I\",\"g\":\"\",\"x\":\"\"}")
+                == null, "a line without a sequence is skipped");
+        System.out.println("round trip");
+    }
+
+    static void persistence() {
+        File folder = fresh("persist");
+        Journal first = new Journal(folder);
+        for (int at = 0; at < 100; at++) {
+            first.record("log", 'I', "T", "event " + at, 1000L * at);
+        }
+        first.flush();
+        Journal second = new Journal(folder);
+        check(second.last() == 100, "the sequence continues after a restart");
+        List<Journal.Event> kept = second.since(0, 1000);
+        check(kept.size() == 100, "every event is read back");
+        check(kept.get(99).text.equals("event 99"), "the last event is the last one");
+        Journal.Event next = second.record("log", 'I', "T", "after", 5000000L);
+        check(next.seq == 101, "the next event takes the next number");
+        System.out.println("persistence");
+    }
+
+    static void rotation() {
+        File folder = fresh("rotate");
+        Journal journal = new Journal(folder);
+        StringBuilder kilobyte = new StringBuilder();
+        for (int at = 0; at < 1000; at++) {
+            kilobyte.append('x');
+        }
+        int written = 4000;
+        for (int at = 0; at < written; at++) {
+            journal.record("log", 'D', "Rotate", kilobyte.toString() + at, 10L * at);
+        }
+        journal.flush();
+        String[] files = folder.list();
+        long total = 0;
+        int segments = 0;
+        for (String name : files) {
+            if (name.startsWith(Journal.PREFIX)) {
+                segments++;
+                total += new File(folder, name).length();
+            }
+        }
+        check(segments <= Journal.SEGMENTS, "old segments are removed: " + segments);
+        check(total <= Journal.SEGMENT * Journal.SEGMENTS + 64 * 1024,
+                "the journal stays bounded: " + total);
+        Journal reopened = new Journal(folder);
+        check(reopened.last() == written, "the last number survives rotation");
+        List<Journal.Event> kept = reopened.since(0, 100000);
+        boolean ordered = true;
+        for (int at = 1; at < kept.size(); at++) {
+            if (kept.get(at).seq != kept.get(at - 1).seq + 1) {
+                ordered = false;
+            }
+        }
+        check(ordered, "what survives is a run with no gap");
+        check(kept.get(kept.size() - 1).seq == written, "the newest event is kept");
+        System.out.println("rotation");
+    }
+
+    static void concurrency() throws Exception {
+        File folder = fresh("threads");
+        final Journal journal = new Journal(folder);
+        final int threads = 8;
+        final int each = 3000;
+        Thread[] started = new Thread[threads];
+        for (int at = 0; at < threads; at++) {
+            final int who = at;
+            started[at] = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    for (int one = 0; one < each; one++) {
+                        journal.record("kind" + who, 'I', "T" + who, "thread " + who + " event "
+                                + one, 10L * one);
+                    }
+                }
+            });
+            started[at].start();
+        }
+        for (Thread thread : started) {
+            thread.join();
+        }
+        check(journal.last() == (long) threads * each, "no event is lost: " + journal.last());
+        List<Journal.Event> kept = journal.since(0, 100000);
+        check(kept.size() == Journal.KEPT, "memory keeps its bound: " + kept.size());
+        boolean rising = true;
+        for (int at = 1; at < kept.size(); at++) {
+            if (kept.get(at).seq <= kept.get(at - 1).seq) {
+                rising = false;
+            }
+        }
+        check(rising, "numbers only rise");
+        journal.flush();
+        Journal reopened = new Journal(folder);
+        check(reopened.last() == (long) threads * each, "the numbers survive on disk");
+        System.out.println("concurrency");
+    }
+
+    static void bursts() {
+        File folder = fresh("burst");
+        Journal journal = new Journal(folder);
+        for (int at = 0; at < 1000; at++) {
+            journal.record("log", 'V', "Loud", "line " + at, 42000L);
+        }
+        check(journal.last() == Journal.BURST, "a burst is cut at the limit: " + journal.last());
+        journal.record("log", 'I', "Quiet", "next second", 43000L);
+        List<Journal.Event> tail = journal.since(Journal.BURST, 10);
+        check(tail.size() == 2, "the cut is reported once");
+        check(tail.get(0).kind.equals("info") && tail.get(0).text.startsWith("600 "),
+                "the report says how many were left out");
+        for (int at = 0; at < 1000; at++) {
+            journal.record("crash", 'F', "Crash", "crash " + at, 42000L);
+        }
+        check(journal.last() == Journal.BURST + 2 + 1000, "crashes are never cut");
+        System.out.println("bursts");
+    }
+
+    static void crashes() throws Exception {
+        File folder = fresh("crash");
+        Journal journal = new Journal(folder);
+        final Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread thread, Throwable thrown) {
+            }
+        });
+        Crashes.describeTheProcess("Process: check, PID: 1");
+        Crashes installed = Crashes.install(journal);
+        check(Crashes.install(journal) == installed, "installing twice keeps one handler");
+        Thread failing = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Integer.parseInt("not a number");
+                } catch (NumberFormatException cause) {
+                    throw new IllegalStateException("boom", cause);
+                }
+            }
+        }, "worker");
+        failing.start();
+        failing.join();
+        Thread.setDefaultUncaughtExceptionHandler(before);
+        Journal reopened = new Journal(folder);
+        List<Journal.Event> kept = reopened.since(0, 10);
+        check(kept.size() == 1, "the crash reached the disk before the process would end");
+        Journal.Event crash = kept.get(0);
+        check(crash.kind.equals("crash") && crash.level == 'F', "it is a fatal crash");
+        check(crash.tag.equals("java.lang.IllegalStateException"), "it is named by its type");
+        check(crash.text.startsWith("FATAL EXCEPTION: worker\nProcess: check, PID: 1\n"),
+                "it opens the way Android prints one");
+        check(crash.text.contains("boom") && crash.text.contains("Caused by")
+                && crash.text.contains("NumberFormatException"), "the whole chain is kept");
+        check(crash.text.contains("--- Java heap:"), "memory at the time is kept");
+        System.out.println("crashes");
+    }
+
+    static void clearing() {
+        File folder = fresh("clear");
+        Journal journal = new Journal(folder);
+        for (int at = 0; at < 50; at++) {
+            journal.record("log", 'I', "T", "x" + at, 100L * at);
+        }
+        long before = journal.last();
+        journal.clear();
+        check(journal.size() == 0, "nothing is held after a clear");
+        Journal.Event next = journal.record("log", 'I', "T", "after", 999999L);
+        check(next.seq == before + 1, "numbers keep rising after a clear");
+        journal.flush();
+        Journal reopened = new Journal(folder);
+        check(reopened.since(0, 100).size() == 1, "a clear removes what was on disk");
+        System.out.println("clearing");
+    }
+
+    static void clearingSurvivesARestart() {
+        File folder = fresh("clear-restart");
+        Journal journal = new Journal(folder);
+        for (int at = 0; at < 30; at++) {
+            journal.record("log", 'I', "T", "x" + at, 100L * at);
+        }
+        journal.clear();
+        Journal reopened = new Journal(folder);
+        check(reopened.size() == 0, "a cleared journal opens empty");
+        Journal.Event next = reopened.record("log", 'I', "T", "after", 5000L);
+        check(next.seq == 31, "numbers keep rising after a clear and a restart: " + next.seq);
+        System.out.println("clearing survives a restart");
+    }
+
+    static void otherProcesses() throws Exception {
+        File folder = fresh("aside");
+        Journal main = new Journal(folder);
+        main.record("log", 'I', "T", "main one", 10L);
+        Journal aside = Journal.aside(Journal.outbox(folder));
+        check(aside.isAside(), "a journal for another process says so");
+        aside.recordNow("crash", 'F', "java.lang.RuntimeException", "Process: app:remote\nboom");
+        aside.record("crash", 'F', "java.lang.Error", "second", 20L);
+        check(aside.size() == 0, "another process holds nothing in memory");
+        String[] waiting = Journal.outbox(folder).list();
+        check(waiting != null && waiting.length == 2, "each event waits in its own file");
+        int taken = main.adopt(Journal.outbox(folder));
+        check(taken == 2, "both waiting events are taken in: " + taken);
+        String[] left = Journal.outbox(folder).list();
+        check(left != null && left.length == 0, "what was taken in is removed");
+        List<Journal.Event> kept = main.since(0, 10);
+        check(kept.size() == 3, "the main journal holds all three");
+        boolean remote = false;
+        for (Journal.Event one : kept) {
+            if (one.text.startsWith("Process: app:remote")) {
+                remote = one.kind.equals("crash") && one.seq > 1;
+            }
+        }
+        check(remote, "the other process's crash takes the main journal's next number");
+        check(main.adopt(Journal.outbox(folder)) == 0, "nothing is taken in twice");
+        System.out.println("other processes");
+    }
+
+    static void anotherHandlerIsWrapped() throws Exception {
+        File folder = fresh("reassert");
+        Journal journal = new Journal(folder);
+        final Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
+        final int[] theirs = new int[1];
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread thread, Throwable thrown) {
+            }
+        });
+        Crashes ours = Crashes.install(journal);
+        final Thread.UncaughtExceptionHandler chained = ours;
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread thread, Throwable thrown) {
+                theirs[0]++;
+                chained.uncaughtException(thread, thrown);
+            }
+        });
+        check(Crashes.reassert(), "a handler set after ours is wrapped");
+        check(!Crashes.reassert(), "wrapping happens once");
+        Thread failing = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                throw new IllegalArgumentException("after another handler");
+            }
+        }, "late");
+        failing.start();
+        failing.join();
+        Thread.setDefaultUncaughtExceptionHandler(before);
+        check(theirs[0] == 1, "the app's own handler still runs");
+        List<Journal.Event> kept = new Journal(folder).since(0, 10);
+        check(kept.size() == 1, "the crash is kept once, not twice: " + kept.size());
+        System.out.println("another handler is wrapped");
+    }
+
+    static void outOfMemory() throws Exception {
+        File folder = fresh("memory");
+        Journal journal = new Journal(folder);
+        final Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread thread, Throwable thrown) {
+            }
+        });
+        Crashes.install(journal);
+        check(Crashes.reserved() == Crashes.RESERVE, "memory is held back for a crash report");
+        Thread failing = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                throw new RuntimeException("wrapped", new OutOfMemoryError("Failed to allocate"));
+            }
+        }, "hungry");
+        failing.start();
+        failing.join();
+        Thread.setDefaultUncaughtExceptionHandler(before);
+        check(Crashes.reserved() == 0, "the held memory is let go when memory runs out");
+        List<Journal.Event> kept = new Journal(folder).since(0, 10);
+        check(kept.size() == 1 && kept.get(0).text.contains("OutOfMemoryError"),
+                "running out of memory is reported");
+        System.out.println("out of memory");
+    }
+
+    static void tombstones() throws Exception {
+        ByteArrayOutputStream signal = new ByteArrayOutputStream();
+        number(signal, 1, 11);
+        text(signal, 2, "SIGSEGV");
+        number(signal, 3, 1);
+        text(signal, 4, "SEGV_MAPERR");
+        number(signal, 8, 1);
+        number(signal, 9, 0xdead);
+
+        ByteArrayOutputStream first = new ByteArrayOutputStream();
+        number(first, 1, 0x1234);
+        text(first, 4, "crash_here");
+        number(first, 5, 16);
+        text(first, 6, "/data/app/lib/arm64/libnative.so");
+        text(first, 8, "abc123");
+        ByteArrayOutputStream second = new ByteArrayOutputStream();
+        number(second, 1, 0x5678);
+        text(second, 4, "Java_com_example_Main_run");
+        number(second, 5, 40);
+        text(second, 6, "/data/app/lib/arm64/libnative.so");
+
+        ByteArrayOutputStream thread = new ByteArrayOutputStream();
+        number(thread, 1, 4321);
+        text(thread, 2, "main");
+        bytes(thread, 4, first.toByteArray());
+        bytes(thread, 4, second.toByteArray());
+        ByteArrayOutputStream entry = new ByteArrayOutputStream();
+        number(entry, 1, 4321);
+        bytes(entry, 2, thread.toByteArray());
+
+        ByteArrayOutputStream other = new ByteArrayOutputStream();
+        number(other, 1, 99);
+        text(other, 2, "helper");
+        ByteArrayOutputStream otherEntry = new ByteArrayOutputStream();
+        number(otherEntry, 1, 99);
+        bytes(otherEntry, 2, other.toByteArray());
+
+        ByteArrayOutputStream cause = new ByteArrayOutputStream();
+        text(cause, 1, "null pointer dereference");
+
+        ByteArrayOutputStream tomb = new ByteArrayOutputStream();
+        number(tomb, 1, 3);
+        text(tomb, 2, "google/device/build:17/fingerprint");
+        text(tomb, 4, "2026-09-26 09:00:00");
+        number(tomb, 5, 4321);
+        number(tomb, 6, 4321);
+        text(tomb, 9, "com.example.app");
+        bytes(tomb, 10, signal.toByteArray());
+        text(tomb, 14, "Rust panicked: index out of bounds");
+        bytes(tomb, 15, cause.toByteArray());
+        bytes(tomb, 16, otherEntry.toByteArray());
+        bytes(tomb, 16, entry.toByteArray());
+        number(tomb, 20, 7);
+
+        byte[] held = tomb.toByteArray();
+        check(!Tombstone.looksLikeText(held), "a tombstone is not mistaken for text");
+        String said = Tombstone.read(held);
+        check(said.startsWith("Native crash: signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), "
+                + "fault address 0xdead\n"), "the signal is named: " + said);
+        check(said.contains("Command line: com.example.app"), "the process is named");
+        check(said.contains("pid 4321, tid 4321, up 7 s"), "the ids are kept");
+        check(said.contains("Abort message: Rust panicked: index out of bounds"),
+                "the abort message is kept");
+        check(said.contains("Cause: null pointer dereference"), "the cause is kept");
+        check(said.contains("Backtrace of \"main\" (tid 4321):"), "the crashing thread is chosen");
+        check(said.contains("  #00 pc 0000000000001234  /data/app/lib/arm64/libnative.so "
+                + "(crash_here+16) (BuildId: abc123)"), "the first frame is written out");
+        check(said.contains("  #01 pc 0000000000005678  /data/app/lib/arm64/libnative.so "
+                + "(Java_com_example_Main_run+40)"), "the second frame is written out");
+        check(Tombstone.read(new byte[] {(byte) 0xff, (byte) 0xff, (byte) 0xff})
+                .startsWith("A native crash record of 3 bytes could not be read"),
+                "a broken record is reported, not thrown");
+        check(Tombstone.looksLikeText("----- pid 1 -----\n\"main\" prio=5".getBytes("UTF-8")),
+                "an ANR trace is text");
+        System.out.println("tombstones");
+    }
+
+    static void speed() {
+        File folder = fresh("speed");
+        Journal journal = new Journal(folder);
+        long began = System.nanoTime();
+        int count = 100000;
+        for (int at = 0; at < count; at++) {
+            journal.record("log" + (at % 400), 'D', "Speed", "a small line " + at, at);
+        }
+        journal.flush();
+        long millis = (System.nanoTime() - began) / 1000000L;
+        check(journal.last() == count, "every fast event is kept");
+        check(millis < 20000, "a hundred thousand events take " + millis + " ms");
+        System.out.println("speed");
+    }
+
+    public static void main(String[] args) throws Exception {
+        roundTrip();
+        persistence();
+        rotation();
+        concurrency();
+        bursts();
+        crashes();
+        clearing();
+        clearingSurvivesARestart();
+        otherProcesses();
+        anotherHandlerIsWrapped();
+        outOfMemory();
+        tombstones();
+        speed();
+        System.out.println(failures == 0 ? "all held" : failures + " failed");
+    }
+}
+"####;
 
     fn runs_like_the_jdk(sources: &[(&str, &str)], main: &str, expected: &str) {
         let named: Vec<(String, String)> = sources

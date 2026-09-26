@@ -18276,6 +18276,7 @@ impl Emitter<'_> {
             }
         }
         let begun = self.code.len();
+        let before = self.slots.clone();
         self.caught.push(takes);
         self.open();
         let mut written = Ok(());
@@ -18327,6 +18328,7 @@ impl Emitter<'_> {
                 self.protect(begun, ended, target, Some(name.clone()), outer);
             }
 
+            self.slots = before.clone();
             self.stack_is(vec![Verified::of(&held)]);
             self.a_branch_lands_here();
             self.open();
@@ -18356,6 +18358,7 @@ impl Emitter<'_> {
                 self.protect(from, to, target, None, outer);
             }
 
+            self.slots = before.clone();
             self.stack_is(vec![Verified::of(&throwable)]);
             self.a_branch_lands_here();
             self.open();
