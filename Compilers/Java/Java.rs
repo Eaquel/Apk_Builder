@@ -1186,6 +1186,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -1285,6 +1286,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         line: 1,
         bridge: false,
         annotations: Vec::new(),
+        parameter_annotations: Vec::new(),
         default_value: None,
         own_variables: Vec::new(),
         own_bounds: Vec::new(),
@@ -1337,6 +1339,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         line: 1,
         bridge: false,
         annotations: Vec::new(),
+        parameter_annotations: Vec::new(),
         default_value: None,
         own_variables: Vec::new(),
         own_bounds: Vec::new(),
@@ -1433,6 +1436,7 @@ fn as_the_class_a_record_is(
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -1461,6 +1465,7 @@ fn as_the_class_a_record_is(
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -1508,6 +1513,7 @@ fn as_the_class_a_record_is(
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -1572,6 +1578,7 @@ fn as_the_class_a_record_is(
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -1613,6 +1620,7 @@ fn as_the_class_a_record_is(
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -1745,6 +1753,7 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -2605,6 +2614,8 @@ pub struct Method {
 
     pub annotations: Vec<Annotated>,
 
+    pub parameter_annotations: Vec<Vec<Annotated>>,
+
     pub default_value: Option<Expression>,
 
     pub own_variables: Vec<String>,
@@ -2683,6 +2694,8 @@ pub struct Parser {
 
     held_annotations: Vec<Annotated>,
 
+    parameter_annotations: Vec<Vec<Annotated>>,
+
     bare_lambda: bool,
 
     package: Option<String>,
@@ -2701,6 +2714,7 @@ impl Parser {
             tokens,
             at: 0,
             held_annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             bare_lambda: true,
             package: None,
             imports: Vec::new(),
@@ -3653,6 +3667,7 @@ impl Parser {
                 line,
                 bridge: false,
                 annotations,
+                parameter_annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
                 own_bounds: Vec::new(),
@@ -3695,6 +3710,7 @@ impl Parser {
                 line,
                 bridge: false,
                 annotations,
+                parameter_annotations: std::mem::take(&mut self.parameter_annotations),
                 default_value: None,
                 own_variables,
                 own_bounds,
@@ -3761,6 +3777,7 @@ impl Parser {
                 line,
                 bridge: false,
                 annotations,
+                parameter_annotations: std::mem::take(&mut self.parameter_annotations),
                 default_value,
                 own_variables,
                 own_bounds,
@@ -3914,10 +3931,14 @@ impl Parser {
         let mut variadic = false;
         self.want_mark("(")?;
         let mut found = Vec::new();
+        let mut marked: Vec<Vec<Annotated>> = Vec::new();
+        let before = self.held_annotations.len();
         if !self.is_mark(")") {
             loop {
                 self.skip_annotations()?;
                 self.eat_final()?;
+                self.skip_annotations()?;
+                marked.push(self.held_annotations.split_off(before));
                 self.in_parameters = true;
                 let what = self.written_type();
                 self.in_parameters = false;
@@ -3939,6 +3960,7 @@ impl Parser {
             }
         }
         self.want_mark(")")?;
+        self.parameter_annotations = marked;
         Ok((found, variadic))
     }
 
@@ -6191,6 +6213,16 @@ impl Classpath {
                 .collect(),
             interface,
             abstract_: class.access_flags & 0x0400 != 0,
+            kept_at_runtime: class.access_flags & 0x2000 != 0
+                && class.annotations.iter().any(|held| {
+                    held.descriptor == "Ljava/lang/annotation/Retention;"
+                        && held.values.iter().any(|(_, value)| {
+                            matches!(
+                                value,
+                                crate::jvm::Element::Enum { name, .. } if name == "RUNTIME"
+                            )
+                        })
+                }),
             ..KnownClass::default()
         };
 
@@ -9559,7 +9591,9 @@ public class Class<T> {
     public native java.lang.reflect.Field[] getDeclaredFields();
     public native java.lang.reflect.Field[] getFields();
     public native java.lang.reflect.Constructor getDeclaredConstructor(Class... taken) throws java.lang.NoSuchMethodException ;
-    public native java.lang.annotation.Annotation getAnnotation(Class held);
+    public native <A extends java.lang.annotation.Annotation> A getAnnotation(Class<A> held);
+    public native <A extends java.lang.annotation.Annotation> A getDeclaredAnnotation(Class<A> held);
+    public native <A extends java.lang.annotation.Annotation> A[] getAnnotationsByType(Class<A> held);
     public native java.lang.annotation.Annotation[] getAnnotations();
     public native boolean isAnnotationPresent(Class held);
     public native T[] getEnumConstants();
@@ -9574,7 +9608,7 @@ public class Enum<E> implements Comparable<E> {
     public native int ordinal();
     public native int compareTo(E other);
     public native Class getDeclaringClass();
-    public static native Enum valueOf(Class held, String name);
+    public static native <T extends Enum<T>> T valueOf(Class<T> held, String name);
 }
 
 public class Record { }
@@ -9849,7 +9883,8 @@ public interface Member {
 public class AccessibleObject {
     public native void setAccessible(boolean held);
     public native boolean isAccessible();
-    public native java.lang.annotation.Annotation getAnnotation(Class held);
+    public native <T extends java.lang.annotation.Annotation> T getAnnotation(Class<T> held);
+    public native <T extends java.lang.annotation.Annotation> T getDeclaredAnnotation(Class<T> held);
     public native java.lang.annotation.Annotation[] getAnnotations();
     public native boolean isAnnotationPresent(Class held);
 }
@@ -9866,6 +9901,7 @@ public class Method extends AccessibleObject implements Member {
     public native boolean isVarArgs();
     public native boolean isSynthetic();
     public native boolean isBridge();
+    public native java.lang.annotation.Annotation[][] getParameterAnnotations();
 }
 
 public class Field extends AccessibleObject implements Member {
@@ -18523,6 +18559,7 @@ impl Emitter<'_> {
                 line,
                 bridge: false,
                 annotations: Vec::new(),
+                parameter_annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
                 own_bounds: Vec::new(),
@@ -18906,7 +18943,7 @@ impl Emitter<'_> {
         captured.sort_by_key(|held| held.slot);
 
         let mut copied: Vec<(String, Type)> = Vec::new();
-        if !self.static_ {
+        if self.unit.stands_for_a_lambda && !self.static_ {
             for name in &wanted {
                 if self.local(name).is_some() || copied.iter().any(|(held, _)| held == name) {
                     continue;
@@ -18915,7 +18952,9 @@ impl Emitter<'_> {
                     .unit
                     .fields
                     .iter()
-                    .find(|held| held.name == *name && !held.modifiers.static_)
+                    .find(|held| {
+                        held.name == *name && held.name != OUTER && !held.modifiers.static_
+                    })
                     .cloned()
                 else {
                     continue;
@@ -19094,6 +19133,7 @@ impl Emitter<'_> {
             line,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -19374,6 +19414,7 @@ impl Emitter<'_> {
                 line,
                 bridge: false,
                 annotations: Vec::new(),
+                parameter_annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
                 own_bounds: Vec::new(),
@@ -21533,6 +21574,39 @@ fn runtime_annotations(
     Some((pool.utf8("RuntimeVisibleAnnotations"), body))
 }
 
+fn runtime_parameter_annotations(
+    pool: &mut Pool,
+    classpath: &Classpath,
+    unit: &Unit,
+    method: &Method,
+) -> Option<(u16, Vec<u8>)> {
+    if method.constructor
+        || method.parameter_annotations.len() != method.parameters.len()
+        || method.parameters.len() > usize::from(u8::MAX)
+    {
+        return None;
+    }
+    let mut sets = Vec::new();
+    let mut any = false;
+    for held in &method.parameter_annotations {
+        match runtime_annotations(pool, classpath, unit, held) {
+            Some((_, body)) => {
+                any = true;
+                sets.push(body);
+            }
+            None => sets.push(vec![0, 0]),
+        }
+    }
+    if !any {
+        return None;
+    }
+    let mut body = vec![method.parameters.len() as u8];
+    for one in sets {
+        body.extend_from_slice(&one);
+    }
+    Some((pool.utf8("RuntimeVisibleParameterAnnotations"), body))
+}
+
 fn annotation_value(
     pool: &mut Pool,
     classpath: &Classpath,
@@ -21753,6 +21827,7 @@ fn reaching_up_for_lambdas(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     line,
                     bridge: false,
                     annotations: Vec::new(),
+                    parameter_annotations: Vec::new(),
                     default_value: None,
                     own_variables: Vec::new(),
                     own_bounds: Vec::new(),
@@ -21924,6 +21999,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     bridge: true,
                     line: method.line,
                     annotations: Vec::new(),
+                    parameter_annotations: Vec::new(),
                     default_value: None,
                     own_variables: Vec::new(),
                     own_bounds: Vec::new(),
@@ -22228,6 +22304,7 @@ pub fn compile_unit_in_nest(
             line: 1,
             bridge: false,
             annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
             own_bounds: Vec::new(),
@@ -22251,6 +22328,7 @@ pub fn compile_unit_in_nest(
                 line: 1,
                 bridge: false,
                 annotations: Vec::new(),
+                parameter_annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
                 own_bounds: Vec::new(),
@@ -22308,6 +22386,7 @@ pub fn compile_unit_in_nest(
                     .to_be_bytes(),
             );
             let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
+            let marked = runtime_parameter_annotations(&mut pool, classpath, unit, method);
 
             let default_value = method.default_value.as_ref().and_then(|value| {
                 let body = annotation_value(&mut pool, classpath, unit, value)?;
@@ -22319,6 +22398,7 @@ pub fn compile_unit_in_nest(
                 (pool.utf8("Signature"), index)
             });
             let how_many = u16::from(held.is_some())
+                + u16::from(marked.is_some())
                 + u16::from(default_value.is_some())
                 + u16::from(thrown.is_some())
                 + u16::from(signature.is_some());
@@ -22326,6 +22406,9 @@ pub fn compile_unit_in_nest(
             method_bytes.extend_from_slice(&descriptor.to_be_bytes());
             method_bytes.extend_from_slice(&how_many.to_be_bytes());
             if let Some((name, body)) = held {
+                write_attribute(&mut method_bytes, name, &body);
+            }
+            if let Some((name, body)) = marked {
                 write_attribute(&mut method_bytes, name, &body);
             }
             if let Some((name, body)) = default_value {
@@ -22540,6 +22623,7 @@ pub fn compile_unit_in_nest(
                 .to_be_bytes(),
         );
         let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
+        let marked = runtime_parameter_annotations(&mut pool, classpath, unit, method);
         let thrown = thrown_by(&mut pool, classpath, unit, method);
         let signature = method_signature(classpath, unit, method).map(|written| {
             let index = pool.utf8(&written);
@@ -22547,6 +22631,7 @@ pub fn compile_unit_in_nest(
         });
         let how_many = 1
             + u16::from(held.is_some())
+            + u16::from(marked.is_some())
             + u16::from(thrown.is_some())
             + u16::from(signature.is_some());
         method_bytes.extend_from_slice(&name.to_be_bytes());
@@ -22554,6 +22639,9 @@ pub fn compile_unit_in_nest(
         method_bytes.extend_from_slice(&how_many.to_be_bytes());
         write_attribute(&mut method_bytes, code_name, &attribute);
         if let Some((name, body)) = held {
+            write_attribute(&mut method_bytes, name, &body);
+        }
+        if let Some((name, body)) = marked {
             write_attribute(&mut method_bytes, name, &body);
         }
         if let Some((name, body)) = thrown {

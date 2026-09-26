@@ -38651,6 +38651,250 @@ public class Held {
     }
 
     #[test]
+    fn a_class_written_in_a_field_reads_and_writes_the_fields_around_it_live() {
+        runs_like_the_jdk(
+            &[(
+                "Around.java",
+                r####"import java.util.function.IntSupplier;
+public class Around {
+    private StringBuilder late;
+    private int count;
+    private final Runnable bump = new Runnable() {
+        @Override
+        public void run() {
+            count++;
+            late.append(count);
+        }
+    };
+    private final IntSupplier read = new IntSupplier() {
+        @Override
+        public int getAsInt() {
+            return count * 10;
+        }
+    };
+    private final Runnable shown = () -> System.out.println(late + " " + count + " " + read.getAsInt());
+    public static void main(String[] a) {
+        Around held = new Around();
+        held.late = new StringBuilder("n");
+        held.bump.run();
+        held.bump.run();
+        held.shown.run();
+    }
+}
+"####,
+            )],
+            "Around",
+            "n12 2 20\n",
+        );
+    }
+
+    #[test]
+    fn classes_and_lambdas_written_inside_each_other_see_what_is_around_them() {
+        runs_like_the_jdk(
+            &[(
+                "Nested.java",
+                r####"import java.util.function.*;
+public class Nested {
+    int count = 1;
+    String label = "a";
+    Runnable twice(final String s) {
+        return new Runnable() {
+            int seen = 0;
+            public void run() {
+                seen++;
+                new Runnable() {
+                    public void run() {
+                        System.out.println(s + " " + seen + " " + count + " " + label);
+                    }
+                }.run();
+                Supplier<String> inner = () -> s + seen + count + label;
+                Supplier<Supplier<String>> deep = () -> () -> s + label + count;
+                System.out.println(inner.get() + " " + deep.get().get());
+            }
+        };
+    }
+    public static void main(String[] args) {
+        Nested n = new Nested();
+        Runnable r = n.twice("x");
+        r.run();
+        n.count = 5;
+        n.label = "b";
+        r.run();
+        Function<Integer, Supplier<String>> f = k -> () -> n.label + k;
+        System.out.println(f.apply(3).get());
+    }
+}
+"####,
+            )],
+            "Nested",
+            "x 1 1 a\nx11a xa1\nx 2 5 b\nx25b xb5\nb3\n",
+        );
+    }
+
+    #[test]
+    fn annotations_kept_at_runtime_reach_reflection() {
+        runs_like_the_jdk(
+            &[(
+                "Tagged.java",
+                r####"import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+public class Tagged {
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target({ElementType.METHOD, ElementType.PARAMETER})
+    @interface Tag {
+        String value();
+    }
+    @Retention(RetentionPolicy.CLASS)
+    @interface Quiet {
+    }
+    @Tag("method")
+    public void on(@Tag("first") String first, @Quiet int second, @Tag("third") long third) {
+    }
+    public void plain(String nothing) {
+    }
+    public static void main(String[] a) throws Exception {
+        Method on = Tagged.class.getMethod("on", String.class, int.class, long.class);
+        StringBuilder out = new StringBuilder(on.getAnnotation(Tag.class).value());
+        for (Annotation[] held : on.getParameterAnnotations()) {
+            out.append(' ').append(held.length == 0 ? "-" : ((Tag) held[0]).value());
+        }
+        Method plain = Tagged.class.getMethod("plain", String.class);
+        out.append(' ').append(plain.getAnnotations().length);
+        out.append(' ').append(plain.getParameterAnnotations()[0].length);
+        System.out.println(out);
+    }
+}
+"####,
+            )],
+            "Tagged",
+            "method first - third 0 0\n",
+        );
+    }
+
+    #[test]
+    fn an_annotation_from_a_library_jar_is_kept_when_it_says_so() {
+        let Some(java) = java_25() else {
+            eprintln!("no JDK 25 here, so the library annotation was not checked");
+            return;
+        };
+        let javac = java.with_file_name("javac");
+        let jar = java.with_file_name("jar");
+        if !javac.is_file() || !jar.is_file() {
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("builder-library-annotation-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        let library = directory.join("library");
+        std::fs::create_dir_all(library.join("bus")).unwrap();
+        std::fs::write(
+            library.join("bus/Subscribe.java"),
+            "package bus;\nimport java.lang.annotation.*;\n@Documented\n@Retention(RetentionPolicy.RUNTIME)\n@Target({ElementType.METHOD})\npublic @interface Subscribe {\n    int priority() default 0;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            library.join("bus/Hidden.java"),
+            "package bus;\nimport java.lang.annotation.*;\n@Retention(RetentionPolicy.CLASS)\npublic @interface Hidden {\n}\n",
+        )
+        .unwrap();
+        let classes = directory.join("library-classes");
+        let made = std::process::Command::new(&javac)
+            .arg("-d")
+            .arg(&classes)
+            .arg(library.join("bus/Subscribe.java"))
+            .arg(library.join("bus/Hidden.java"))
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .output()
+            .expect("javac runs");
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let packed = directory.join("bus.jar");
+        let jarred = std::process::Command::new(&jar)
+            .arg("cf")
+            .arg(&packed)
+            .arg("-C")
+            .arg(&classes)
+            .arg(".")
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .output()
+            .expect("jar runs");
+        assert!(
+            jarred.status.success(),
+            "{}",
+            String::from_utf8_lossy(&jarred.stderr)
+        );
+
+        let mut classpath = empty();
+        classpath
+            .learn_jar(&std::fs::read(&packed).unwrap())
+            .expect("the jar is learned");
+        assert!(classpath
+            .get("bus/Subscribe")
+            .is_some_and(|one| one.kept_at_runtime));
+        assert!(classpath
+            .get("bus/Hidden")
+            .is_some_and(|one| !one.kept_at_runtime));
+
+        let source = r####"import bus.*;
+import java.lang.reflect.*;
+public class Listener {
+    @Subscribe(priority = 3)
+    public void onEvent(String event) {
+    }
+    @Hidden
+    public void onOther(String event) {
+    }
+    public static void main(String[] a) throws Exception {
+        int found = 0;
+        int priority = -1;
+        for (Method one : Listener.class.getDeclaredMethods()) {
+            Subscribe held = one.getAnnotation(Subscribe.class);
+            if (held != null) {
+                found++;
+                priority = held.priority();
+            }
+        }
+        System.out.println(found + " " + priority + " " + Listener.class.getMethod("onOther", String.class).getAnnotations().length);
+    }
+}
+"####;
+        let made = compile_together(
+            &[("Listener.java".to_string(), source.to_string())],
+            &classpath,
+        )
+        .expect("it compiles against the jar");
+        let out = directory.join("out");
+        for (name, bytes) in &made {
+            let path = out.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let joined = format!("{}:{}", out.display(), packed.display());
+        let ran = std::process::Command::new(&java)
+            .arg("-cp")
+            .arg(&joined)
+            .arg("Listener")
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .output()
+            .expect("java runs");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "1 3 0\n",
+            "a subscriber finds its method by the annotation a library declared"
+        );
+    }
+
+    #[test]
     fn the_debugger_runtime_keeps_its_promises_on_the_jdk() {
         let mut sources: Vec<(&str, &str)> = crate::debugger::RUNTIME
             .iter()
