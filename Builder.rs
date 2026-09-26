@@ -9029,6 +9029,62 @@ pub mod xml {
         Parser::new(text, origin).run(sink)
     }
 
+    pub fn written(element: &Element) -> String {
+        let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+        write_element(element, &mut out);
+        out.push('\n');
+        out
+    }
+
+    fn write_element(element: &Element, out: &mut String) {
+        out.push('<');
+        out.push_str(&element.name);
+        for attribute in &element.attributes {
+            out.push(' ');
+            out.push_str(&attribute.name);
+            out.push_str("=\"");
+            out.push_str(&escaped(&attribute.value, true));
+            out.push('"');
+        }
+        if element.children.is_empty() && element.text.is_empty() {
+            out.push_str("/>");
+            return;
+        }
+        out.push('>');
+        let mut from = 0;
+        for (index, child) in element.children.iter().enumerate() {
+            let at = element
+                .child_at
+                .get(index)
+                .copied()
+                .unwrap_or(element.text.len())
+                .clamp(from, element.text.len());
+            out.push_str(&escaped(&element.text[from..at], false));
+            from = at;
+            write_element(child, out);
+        }
+        out.push_str(&escaped(&element.text[from..], false));
+        out.push_str("</");
+        out.push_str(&element.name);
+        out.push('>');
+    }
+
+    fn escaped(value: &str, quoted: bool) -> String {
+        let mut out = String::with_capacity(value.len());
+        for one in value.chars() {
+            match one {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' if quoted => out.push_str("&quot;"),
+                '\n' if quoted => out.push_str("&#10;"),
+                '\t' if quoted => out.push_str("&#9;"),
+                _ => out.push(one),
+            }
+        }
+        out
+    }
+
     struct Parser<'a> {
         text: &'a [u8],
         source: &'a str,
@@ -12025,7 +12081,99 @@ pub mod resources {
         }
     }
 
+    pub fn inlined(files: Vec<crate::scaffold::Supplied>) -> Vec<crate::scaffold::Supplied> {
+        let mut out = Vec::with_capacity(files.len());
+        for held in files {
+            let wanted = held.name.ends_with(".xml")
+                && Config::parse_directory(&held.folder)
+                    .is_ok_and(|(kind, _)| kind.is_compiled_xml())
+                && held.bytes.windows(9).any(|one| one == b"aapt:attr");
+            if !wanted {
+                out.push(held);
+                continue;
+            }
+            let text = String::from_utf8_lossy(&held.bytes).to_string();
+            let mut quiet = Sink::new();
+            let Some(mut root) = xml::parse(&text, &held.name, &mut quiet) else {
+                out.push(held);
+                continue;
+            };
+            let stem = held.name.trim_end_matches(".xml").to_string();
+            let kind = held
+                .folder
+                .split('-')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let spaces: Vec<xml::Attribute> = root
+                .attributes
+                .iter()
+                .filter(|one| one.name.starts_with("xmlns"))
+                .cloned()
+                .collect();
+            let mut pulled: Vec<Element> = Vec::new();
+            pull_inline(&mut root, &stem, &kind, &mut pulled);
+            out.push(crate::scaffold::Supplied {
+                folder: held.folder.clone(),
+                name: held.name.clone(),
+                bytes: xml::written(&root).into_bytes(),
+            });
+            for (at, mut one) in pulled.into_iter().enumerate() {
+                for space in spaces.iter().rev() {
+                    if one.attribute(&space.name).is_none() {
+                        one.attributes.insert(0, space.clone());
+                    }
+                }
+                out.push(crate::scaffold::Supplied {
+                    folder: held.folder.clone(),
+                    name: format!("${stem}__{at}.xml"),
+                    bytes: xml::written(&one).into_bytes(),
+                });
+            }
+        }
+        out
+    }
+
+    fn pull_inline(element: &mut Element, stem: &str, kind: &str, pulled: &mut Vec<Element>) {
+        let mut index = 0;
+        while index < element.children.len() {
+            if element.children[index].name != "aapt:attr" {
+                pull_inline(&mut element.children[index], stem, kind, pulled);
+                index += 1;
+                continue;
+            }
+            let holder = element.children.remove(index);
+            if index < element.child_at.len() {
+                element.child_at.remove(index);
+            }
+            let Some(named) = holder.attribute("name").map(str::to_string) else {
+                continue;
+            };
+            let position = holder.position;
+            let Some(mut inside) = holder.children.into_iter().next() else {
+                continue;
+            };
+            let at = pulled.len();
+            pulled.push(inside.clone());
+            pull_inline(&mut inside, stem, kind, pulled);
+            pulled[at] = inside;
+            element.attributes.push(xml::Attribute {
+                name: named,
+                value: format!("@{kind}/${stem}__{at}"),
+                position,
+            });
+        }
+    }
+
     fn validate_name(name: &str) -> Result<(), String> {
+        if let Some(pulled) = name.strip_prefix('$') {
+            let numbered = pulled.rsplit_once("__").is_some_and(|(_, at)| {
+                !at.is_empty() && at.bytes().all(|one| one.is_ascii_digit())
+            });
+            if numbered {
+                return validate_name(pulled);
+            }
+        }
         if name.is_empty() {
             return Err("A resource name is empty.".to_string());
         }
@@ -47395,7 +47543,7 @@ pub mod builder {
                 .push((crate::resources::Config::VALUES_DIRECTORY.to_string(), text));
             project.values_names.push(GENERATED_VALUES.to_string());
         }
-        project.resources = crate::scaffold::resource_files(root);
+        project.resources = crate::resources::inlined(crate::scaffold::resource_files(root));
 
         let mut carried: Vec<(String, Vec<u8>)> = Vec::new();
         for (name, bytes) in brought
@@ -47412,7 +47560,7 @@ pub mod builder {
         project.files.extend(carried);
         project.library_values = brought.values;
         project.library_values_names = brought.values_names;
-        project.library_resources = brought.resources;
+        project.library_resources = crate::resources::inlined(brought.resources);
         project.library_packages = brought.packages;
         project.keep_rules = keep_rules_of(root, held.as_ref(), &brought.rules);
 
@@ -47926,7 +48074,7 @@ public final class R {{
             let mut named: Vec<(&str, u32)> = compiled
                 .assignments()
                 .iter()
-                .filter(|(held, _, _)| *held == kind)
+                .filter(|(held, name, _)| *held == kind && !name.starts_with('$'))
                 .map(|(_, name, id)| (name.as_str(), id.raw()))
                 .collect();
             named.sort();
@@ -48215,11 +48363,23 @@ public final class R {{
             .replace('"', "&quot;")
     }
 
+    const ONLY_ONE: &[&str] = &[
+        "application",
+        "queries",
+        "supports-screens",
+        "uses-configuration",
+        "compatible-screens",
+        "uses-sdk",
+    ];
+
     fn known_as(element: &crate::xml::Element) -> (String, String) {
-        let key = match element.attribute("android:name") {
-            Some(named) => named.to_string(),
-            None if element.name == "intent-filter" => as_xml(element, 0),
-            None => String::new(),
+        let key = if ONLY_ONE.contains(&element.name.as_str()) {
+            String::new()
+        } else {
+            match element.attribute("android:name") {
+                Some(named) => named.to_string(),
+                None => as_xml(element, 0),
+            }
         };
         (element.name.clone(), key)
     }

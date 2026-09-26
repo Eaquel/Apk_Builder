@@ -8262,6 +8262,10 @@ impl Standing {
         }
     }
 
+    pub fn as_seen(&self, erased: &Type, of_the_class: &[Type]) -> Type {
+        self.filled(erased, of_the_class, &[])
+    }
+
     fn says_nothing(&self) -> bool {
         match self {
             Standing::Fixed => true,
@@ -22740,11 +22744,14 @@ pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u
     compile_together(&[("".to_string(), source.to_string())], classpath)
 }
 
-pub fn compile_together(
+type Declared = (Vec<(String, Unit)>, Classpath);
+
+fn parsed_and_declared(
     sources: &[(String, String)],
     classpath: &Classpath,
-) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+) -> Result<Declared, Diagnostic> {
     let mut declared = Vec::new();
+
     for (label, text) in sources {
         let stem = label
             .rsplit(['/', '\\'])
@@ -22797,6 +22804,22 @@ pub fn compile_together(
     for unit in &inside {
         together.declare(unit);
     }
+
+    Ok((declared, together))
+}
+
+pub fn declared_together(
+    sources: &[(String, String)],
+    classpath: &Classpath,
+) -> Result<Classpath, Diagnostic> {
+    Ok(parsed_and_declared(sources, classpath)?.1)
+}
+
+pub fn compile_together(
+    sources: &[(String, String)],
+    classpath: &Classpath,
+) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+    let (declared, mut together) = parsed_and_declared(sources, classpath)?;
 
     for (index, (label, unit)) in declared.iter().enumerate() {
         let name = unit.internal_name();

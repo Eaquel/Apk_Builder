@@ -6859,6 +6859,54 @@ public class Outer {
     }
 
     #[test]
+    fn a_named_application_takes_in_what_libraries_declare() {
+        let application = r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.tr.named">
+    <application android:name=".App" android:label="Named">
+        <activity android:name=".Main" android:exported="true" />
+    </application>
+    <queries>
+        <intent><action android:name="android.intent.action.VIEW" /></intent>
+    </queries>
+</manifest>"#;
+        let library = r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="androidx.work">
+    <application>
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false">
+            <meta-data android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup" />
+        </provider>
+    </application>
+    <queries>
+        <intent><action android:name="android.intent.action.SEND" /></intent>
+    </queries>
+</manifest>"#;
+        let merged = crate::builder::merged_manifest(application, &[library.to_string()])
+            .expect("the manifests merge");
+        let mut sink = crate::diag::Sink::new();
+        let root = crate::xml::parse(&merged, "merged", &mut sink).expect("it reads");
+        let applications: Vec<&crate::xml::Element> = root.children_named("application").collect();
+        assert_eq!(applications.len(), 1, "one application: {merged}");
+        let application = applications[0];
+        assert_eq!(application.attribute("android:name"), Some(".App"));
+        assert!(application.children_named("provider").any(|one| one
+            .attribute("android:authorities")
+            == Some("com.tr.named.androidx-startup")));
+        assert!(application.children_named("activity").next().is_some());
+
+        let queries: Vec<&crate::xml::Element> = root.children_named("queries").collect();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(
+            queries[0].children_named("intent").count(),
+            2,
+            "two different intents stay two"
+        );
+    }
+
+    #[test]
     fn library_manifests_merge_the_way_the_manifest_merger_merges_them() {
         let application = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -25473,6 +25521,110 @@ Viewbinding   = false
                 .collect::<Vec<_>>()
         );
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn an_inline_resource_is_pulled_out_as_aapt_pulls_it() {
+        let written = r#"<?xml version="1.0" encoding="utf-8"?>
+<animation-list xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt" android:oneshot="false">
+    <item android:duration="1000">
+        <aapt:attr name="android:drawable">
+            <layer-list>
+                <item android:drawable="@drawable/bg" />
+                <item>
+                    <aapt:attr name="android:drawable">
+                        <shape android:shape="oval" />
+                    </aapt:attr>
+                </item>
+            </layer-list>
+        </aapt:attr>
+    </item>
+    <item android:duration="80" android:drawable="@drawable/bg" />
+</animation-list>
+"#;
+        let files = vec![
+            crate::scaffold::Supplied {
+                folder: "drawable-v24".to_string(),
+                name: "wave.xml".to_string(),
+                bytes: written.as_bytes().to_vec(),
+            },
+            crate::scaffold::Supplied {
+                folder: "layout".to_string(),
+                name: "plain.xml".to_string(),
+                bytes: b"<FrameLayout />".to_vec(),
+            },
+        ];
+        let out = crate::resources::inlined(files);
+        let names: Vec<&str> = out.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["wave.xml", "$wave__0.xml", "$wave__1.xml", "plain.xml"]
+        );
+        assert!(out
+            .iter()
+            .all(|one| one.folder != "drawable" || one.name == "plain.xml"));
+        assert_eq!(
+            out[3].bytes, b"<FrameLayout />",
+            "a file with nothing inline is left alone"
+        );
+
+        let read = |at: usize| {
+            let text = String::from_utf8(out[at].bytes.clone()).unwrap();
+            let mut sink = Sink::new();
+            crate::xml::parse(&text, "pulled", &mut sink).expect("it reads back")
+        };
+        let outer = read(0);
+        assert!(!String::from_utf8_lossy(&out[0].bytes).contains("aapt:attr"));
+        assert_eq!(
+            outer.children[0].attribute("android:drawable"),
+            Some("@drawable/$wave__0")
+        );
+        assert_eq!(outer.children[1].attribute("android:duration"), Some("80"));
+
+        let first = read(1);
+        assert_eq!(first.name, "layer-list");
+        assert!(
+            first.attribute("xmlns:android").is_some(),
+            "the namespaces go with it"
+        );
+        assert_eq!(
+            first.children[1].attribute("android:drawable"),
+            Some("@drawable/$wave__1")
+        );
+        let second = read(2);
+        assert_eq!(second.name, "shape");
+        assert_eq!(second.attribute("android:shape"), Some("oval"));
+
+        let mut table = ResourceTable::for_package(0x7f);
+        let mut sink = Sink::new();
+        for one in &out[..3] {
+            assert!(
+                table.read_file(&one.folder, &one.name, &one.name, &mut sink),
+                "{} is a name the table takes: {:?}",
+                one.name,
+                sink.entries()
+            );
+        }
+        assert!(!table.read_file("drawable", "$wave.xml", "$wave.xml", &mut sink));
+    }
+
+    #[test]
+    fn xml_is_written_back_as_it_was_read() {
+        let text = "<a x=\"1 &amp; 2\" y=\"&quot;q&quot;\">lead<b/>mid &lt;c&gt;<c z=\"&lt;\">in</c>tail</a>";
+        let mut sink = Sink::new();
+        let first = crate::xml::parse(text, "a", &mut sink).unwrap();
+        let again = crate::xml::written(&first);
+        let second = crate::xml::parse(&again, "a", &mut sink).unwrap();
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.attributes.len(), second.attributes.len());
+        for (left, right) in first.attributes.iter().zip(second.attributes.iter()) {
+            assert_eq!((&left.name, &left.value), (&right.name, &right.value));
+        }
+        assert_eq!(first.text, second.text);
+        assert_eq!(first.child_at, second.child_at);
+        assert_eq!(second.children[1].attribute("z"), Some("<"));
+        assert_eq!(second.children[1].text, "in");
     }
 
     #[test]
