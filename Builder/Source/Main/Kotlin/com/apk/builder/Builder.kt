@@ -3323,8 +3323,6 @@ private sealed interface Screen {
 
     data object Help : Screen
 
-    data object HelpAdb : Screen
-
     data object HelpTalk : Screen
 
     data object HelpDocs : Screen
@@ -3346,9 +3344,10 @@ class BuilderActivity : Activity() {
         const val SPARE_MODELS = 4
 
         val COMMAND_WORDS = setOf(
-            "adb", "fastboot", "alias", "echo", "watch", "timeout", "set", "mkdir", "sleep",
-            "kill", "export", "cat", "grep", "cd", "ls", "logcat", "pm", "am", "dumpsys",
-            "settings", "getprop", "setprop", "sh", "bash", "clear", "exit", "help",
+            "pwd", "ls", "cd", "mkdir", "cp", "mv", "rm", "cat", "head", "tail", "grep",
+            "find", "wc", "du", "df", "ps", "top", "getprop", "uname", "echo", "env", "tar",
+            "sha256sum", "clear", "exit", "alias", "watch", "timeout", "set", "sleep", "kill",
+            "export", "sh", "help", "id", "date", "touch", "chmod",
         )
 
         const val LOOK_MILLIS = 60L
@@ -3501,62 +3500,6 @@ class BuilderActivity : Activity() {
             R.string.omni_talk_step_tips to R.string.omni_talk_step_tips_note,
         )
 
-        val OS_TABS = listOf(
-            R.string.omni_os_windows to R.drawable.omni_logo_windows,
-            R.string.omni_os_mac to R.drawable.omni_logo_apple,
-            R.string.omni_os_linux to R.drawable.omni_logo_linux,
-        )
-
-        val OS_STEPS = listOf(
-            listOf(
-                R.string.omni_os_win_one,
-                R.string.omni_os_win_two,
-                R.string.omni_os_win_three,
-            ),
-            listOf(
-                R.string.omni_os_mac_one,
-                R.string.omni_os_mac_two,
-                R.string.omni_os_mac_three,
-            ),
-            listOf(
-                R.string.omni_os_linux_one,
-                R.string.omni_os_linux_two,
-                R.string.omni_os_linux_three,
-            ),
-        )
-
-        val OS_FILES = listOf(
-            listOf("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "fastboot.exe"),
-            listOf("adb", "fastboot", "etc1tool", "sqlite3"),
-            listOf("adb", "fastboot", "etc1tool", "sqlite3"),
-        )
-
-        val ADB_ALONE = listOf(
-            R.string.omni_adb_a_one to R.string.omni_adb_a_one_note,
-            R.string.omni_adb_a_two to R.string.omni_adb_a_two_note,
-            R.string.omni_adb_a_three to R.string.omni_adb_a_three_note,
-        )
-
-        val ADB_DESK = listOf(
-            R.string.omni_adb_d_one to R.string.omni_adb_d_one_note,
-            R.string.omni_adb_d_setup to R.string.omni_adb_d_setup_note,
-            R.string.omni_adb_d_two to R.string.omni_adb_d_two_note,
-            R.string.omni_adb_d_three to R.string.omni_adb_d_three_note,
-        )
-
-        val ADB_ALONE_ART = listOf(
-            R.drawable.omni_adb_wifi_one,
-            R.drawable.omni_adb_wifi_two,
-            R.drawable.omni_adb_wifi_three,
-        )
-
-        val ADB_DESK_ART = listOf(
-            0,
-            0,
-            R.drawable.omni_adb_usb_two,
-            R.drawable.omni_adb_usb_three,
-        )
-
         val HELP_TOPICS = listOf(
             Triple(
                 R.string.omni_ask_tree,
@@ -3639,7 +3582,6 @@ class BuilderActivity : Activity() {
         )
 
         val HELP_POPULAR = listOf(
-            R.string.omni_help_band_adb,
             R.string.omni_menu_assistant,
             R.string.omni_help_band_terminal,
             R.string.omni_help_band_fixing,
@@ -4000,8 +3942,6 @@ class BuilderActivity : Activity() {
     private var guideOpen = -1
     private var guideHeld: Pair<String, List<GuideSection>>? = null
     private var helpOpen = -1
-    private var adbTab = 0
-    private var osTab = 0
 
     private val talkHeld = mutableListOf<Pair<Boolean, String>>()
     private var talkDraft = ""
@@ -4579,7 +4519,6 @@ class BuilderActivity : Activity() {
             is Screen.Legal -> renderLegal(here.kind)
             is Screen.Developer -> renderDeveloper()
             is Screen.Help -> renderHelp()
-            is Screen.HelpAdb -> renderHelpAdb()
             is Screen.HelpTalk -> renderHelpTalk()
             is Screen.HelpDocs -> renderHelpDocs()
             is Screen.HelpFaq -> renderHelpFaq()
@@ -4647,7 +4586,6 @@ class BuilderActivity : Activity() {
             is Screen.NewProject -> go(Screen.Projects)
             is Screen.WebToApk -> go(Screen.Projects)
             is Screen.Help -> go(cameBefore ?: Screen.Projects)
-            is Screen.HelpAdb -> go(Screen.Help)
             is Screen.HelpTalk -> go(Screen.Help)
             is Screen.HelpDocs -> go(Screen.Help)
             is Screen.HelpFaq -> go(Screen.Help)
@@ -4698,7 +4636,6 @@ class BuilderActivity : Activity() {
             is Screen.Rate -> put("kind", "rate")
             is Screen.About -> put("kind", "about")
             is Screen.Help -> put("kind", "help")
-            is Screen.HelpAdb -> put("kind", "help_adb")
             is Screen.HelpTalk -> put("kind", "help_talk")
             is Screen.HelpDocs -> put("kind", "help_docs")
             is Screen.HelpFaq -> put("kind", "help_faq")
@@ -4730,7 +4667,6 @@ class BuilderActivity : Activity() {
             "rate" -> Screen.Rate
             "about" -> Screen.About
             "help" -> Screen.Help
-            "help_adb" -> Screen.HelpAdb
             "help_talk" -> Screen.HelpTalk
             "help_docs" -> Screen.HelpDocs
             "help_faq" -> Screen.HelpFaq
@@ -4887,7 +4823,7 @@ class BuilderActivity : Activity() {
     )
 
     private fun inHelp(here: Screen): Boolean =
-        here is Screen.Help || here is Screen.HelpAdb || here is Screen.HelpTalk ||
+        here is Screen.Help || here is Screen.HelpTalk ||
             here is Screen.HelpDocs || here is Screen.HelpFaq
 
     private fun homeLike(here: Screen): Boolean =
@@ -5223,16 +5159,12 @@ class BuilderActivity : Activity() {
                 paintTheSteps()
                 return
             }
-            if (here is Screen.HelpAdb || here is Screen.HelpTalk) {
-                val guided = here is Screen.HelpAdb
+            if (here is Screen.HelpTalk) {
                 crown.addView(
                     guideCrown(
-                        if (guided) Mark.Shape.LOG else Mark.Shape.BRAIN,
-                        if (guided) palette.accent else 0xFFB06BFF.toInt(),
-                        getString(
-                            if (guided) R.string.omni_help_adb
-                            else R.string.omni_help_talk_title
-                        ),
+                        Mark.Shape.BRAIN,
+                        0xFFB06BFF.toInt(),
+                        getString(R.string.omni_help_talk_title),
                     ),
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
@@ -16482,9 +16414,8 @@ class BuilderActivity : Activity() {
                                         helpChip(getString(named)) {
                                             go(
                                                 when (which) {
-                                                    0 -> Screen.HelpAdb
-                                                    1 -> Screen.HelpTalk
-                                                    2 -> Screen.HelpDocs
+                                                    0 -> Screen.HelpTalk
+                                                    1 -> Screen.HelpDocs
                                                     else -> Screen.HelpFaq
                                                 }
                                             )
@@ -16509,12 +16440,6 @@ class BuilderActivity : Activity() {
             grid(
                 2,
                 listOf(
-                    helpEntry(
-                        Mark.Shape.LOG,
-                        palette.accent,
-                        getString(R.string.omni_help_adb),
-                        getString(R.string.omni_help_adb_note),
-                    ) { go(Screen.HelpAdb) },
                     helpEntry(
                         Mark.Shape.BRAIN,
                         0xFFB06BFF.toInt(),
@@ -17556,302 +17481,6 @@ class BuilderActivity : Activity() {
             )
         }
         else -> null
-    }
-
-    private fun osRow(): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        OS_TABS.forEachIndexed { at, one ->
-            val on = at == osTab
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    minimumHeight = gap(9)
-                    setPadding(gap(2), gap(2), gap(2), gap(2))
-                    isClickable = true
-                    isFocusable = true
-                    isSelected = on
-                    contentDescription = getString(one.first)
-                    readAs(Button::class.java.name)
-                    background = touchable(
-                        GradientDrawable().apply {
-                            shape = GradientDrawable.RECTANGLE
-                            cornerRadius = gap(5).toFloat()
-                            setColor(if (on) palette.accent else Ink.fade(palette.accent, 0.08f))
-                            setStroke(1, if (on) palette.accent else Ink.fade(palette.accent, 0.3f))
-                        },
-                        palette.accent,
-                    )
-                    setOnClickListener {
-                        osTab = at
-                        render(false)
-                    }
-                    addView(
-                        ImageView(context).apply {
-                            setImageResource(one.second)
-                            scaleType = ImageView.ScaleType.FIT_CENTER
-                            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                        },
-                        LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = getString(one.first)
-                            setTextColor(if (on) Color.WHITE else Ink.hot(palette.muted, 0.3f))
-                            typeface = if (on) Type.strong else Type.body
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        }
-                    )
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                    marginStart = if (at == 0) 0 else gap(1)
-                },
-            )
-        }
-    }
-
-    private fun countedLines(lines: List<String>): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        lines.forEachIndexed { at, line ->
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, gap(1), 0, gap(1))
-                    addView(
-                        TextView(context).apply {
-                            text = (at + 1).toString()
-                            setTextColor(Color.WHITE)
-                            typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-                            gravity = Gravity.CENTER
-                            background = GradientDrawable().apply {
-                                shape = GradientDrawable.OVAL
-                                setColor(Ink.fade(palette.accent, 0.9f))
-                            }
-                        },
-                        LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = line
-                            setTextColor(Ink.hot(palette.muted, 0.3f))
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                            setLineSpacing(gap(1) / 2f, 1f)
-                        },
-                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                    )
-                },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
-            )
-        }
-    }
-
-    private fun filePanel(named: String, names: List<String>): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(gap(2), gap(2), gap(2), gap(2))
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = gap(2).toFloat()
-                setColor(palette.background)
-                setStroke(1, palette.divider)
-            }
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, 0, 0, gap(1))
-                    addView(
-                        View(context).apply {
-                            foreground = Mark(Mark.Shape.CHEVRON_LEFT, palette.muted)
-                        },
-                        LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
-                    )
-                    addView(
-                        View(context).apply {
-                            foreground = Mark(Mark.Shape.FOLDER, palette.marker)
-                        },
-                        LinearLayout.LayoutParams(gap(4), gap(4)).apply { marginEnd = gap(2) },
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = named
-                            setTextColor(palette.foreground)
-                            typeface = Type.strong
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                            maxLines = 1
-                        }
-                    )
-                }
-            )
-            names.forEach { one ->
-                addView(
-                    LinearLayout(context).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPaddingRelative(gap(3), gap(1) / 2, 0, gap(1) / 2)
-                        addView(
-                            View(context).apply {
-                                foreground = Mark(
-                                    if (one.endsWith(".exe")) Mark.Shape.BINARY
-                                    else Mark.Shape.FILE,
-                                    palette.muted,
-                                )
-                            },
-                            LinearLayout.LayoutParams(gap(4), gap(4)).apply {
-                                marginEnd = gap(2)
-                            },
-                        )
-                        addView(
-                            TextView(context).apply {
-                                text = one
-                                setTextColor(Ink.hot(palette.muted, 0.2f))
-                                typeface = Type.data
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-                                maxLines = 1
-                            }
-                        )
-                    },
-                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
-                )
-            }
-        }
-
-    private fun osSteps(): List<View> {
-        val lines = OS_STEPS[osTab].map { getString(it) }
-        val files = OS_FILES[osTab]
-        return listOf(
-            osRow(),
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(
-                    countedLines(lines),
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(2) },
-                )
-                addView(
-                    filePanel("platform-tools", files),
-                    LinearLayout.LayoutParams(gap(36), WRAP_CONTENT),
-                )
-            },
-        )
-    }
-
-    private fun bulletCard(title: String, body: String): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(gap(3), gap(3), gap(3), gap(3))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = gap(3).toFloat()
-                setColor(Ink.fade(palette.accent, 0.07f))
-                setStroke(1, Ink.fade(palette.accent, 0.4f))
-            }
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(2)
-                bottomMargin = gap(1)
-            }
-            addView(
-                View(context).apply {
-                    foreground = Mark(Mark.Shape.INFO_FILL, palette.accent)
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
-                LinearLayout.LayoutParams(gap(8), gap(8)).apply { marginEnd = gap(3) },
-            )
-            addView(
-                LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        TextView(context).apply {
-                            text = title
-                            setTextColor(palette.warning)
-                            typeface = Type.heading
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        }
-                    )
-                    addView(
-                        TextView(context).apply {
-                            text = bulleted(body)
-                            setTextColor(Ink.hot(palette.muted, 0.3f))
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                            setLineSpacing(gap(1) / 2f, 1f)
-                            setPadding(0, gap(1), 0, 0)
-                        }
-                    )
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-            )
-        }
-
-    private fun renderHelpAdb() {
-        content.addView(
-            bandRow(
-                listOf(
-                    getString(R.string.omni_adb_alone),
-                    getString(R.string.omni_adb_desk),
-                ),
-                adbTab,
-            ) {
-                adbTab = it
-                render(false)
-            }
-        )
-        val marked = if (adbTab == 0) Mark.Shape.PHONE else Mark.Shape.SCREEN
-        content.addView(
-            guideHero(
-                marked,
-                palette.accent,
-                getString(
-                    if (adbTab == 0) R.string.omni_adb_alone else R.string.omni_adb_desk
-                ),
-                getString(
-                    if (adbTab == 0) {
-                        R.string.omni_adb_alone_note
-                    } else {
-                        R.string.omni_adb_desk_note
-                    }
-                ),
-                if (adbTab == 1) R.drawable.omni_art_adb_desk
-                else R.drawable.omni_art_help_ask,
-            )
-        )
-        content.addView(
-            bulletCard(
-                getString(R.string.omni_adb_first),
-                getString(
-                    if (adbTab == 0) {
-                        R.string.omni_adb_alone_first
-                    } else {
-                        R.string.omni_adb_desk_first
-                    }
-                ),
-            )
-        )
-        val steps = if (adbTab == 0) ADB_ALONE else ADB_DESK
-        val art = if (adbTab == 0) ADB_ALONE_ART else ADB_DESK_ART
-        steps.forEachIndexed { index, step ->
-            val extra = when {
-                adbTab == 1 && index == 0 -> listOf(
-                    linkPanel(
-                        getString(R.string.omni_adb_tools_link),
-                        getString(R.string.omni_adb_tools_url),
-                    ),
-                    noteStrip(getString(R.string.omni_adb_tools_only)),
-                )
-                adbTab == 1 && index == 1 -> osSteps()
-                else -> emptyList()
-            }
-            content.addView(
-                guideStep(
-                    index + 1,
-                    getString(step.first),
-                    getString(step.second),
-                    art.getOrElse(index) { 0 },
-                    extra,
-                )
-            )
-        }
-        helpFooter()
     }
 
     private fun speakTheDeviceLanguage() {

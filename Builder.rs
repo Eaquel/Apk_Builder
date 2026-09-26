@@ -999,9 +999,6 @@ pub mod terminal_speech;
 #[path = "Vibe_Coding.rs"]
 pub mod vibe_coding;
 
-#[path = "Android_Debug_Bridge.rs"]
-pub mod android_debug_bridge;
-
 pub mod caps {
     use crate::json::Writer;
 
@@ -24019,7 +24016,7 @@ pub mod dexwrite {
                                 "This dex holds more of one thing than an instruction can name.",
                             )
                             .with_context(format!("Index: {index}"))
-                            .with_context(format!("Names: {:?}", instruction.operand)));
+                            .with_context(format!("Instruction: {:?}", instruction.operand)));
                         }
                         let Some(slot) = units.get_mut(at) else {
                             return Err(fail(
