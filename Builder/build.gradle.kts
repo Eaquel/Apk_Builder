@@ -20,10 +20,12 @@ val builderTargetSdk = 37
 
 val builderAbis = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
+    "x86_64" to "x86_64-linux-android",
 )
 
 val builderClangPrefix = mapOf(
     "aarch64-linux-android" to "aarch64-linux-android",
+    "x86_64-linux-android" to "x86_64-linux-android",
 )
 
 val builderRustProfile = "release"

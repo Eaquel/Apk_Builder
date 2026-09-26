@@ -11847,7 +11847,7 @@ public class Walk {
                 "--verbose",
                 "--print-certs",
                 "--min-sdk-version",
-                &crate::compiler::OLDEST_API.to_string(),
+                &crate::compiler::DEFAULT_MIN_API.to_string(),
                 path.to_str().unwrap(),
             ])
             .output()
@@ -12376,7 +12376,7 @@ public class Walk {
                 "--verbose",
                 "--print-certs",
                 "--min-sdk-version",
-                &crate::compiler::OLDEST_API.to_string(),
+                &crate::compiler::DEFAULT_MIN_API.to_string(),
                 path.to_str().unwrap(),
             ])
             .output()
@@ -14012,7 +14012,7 @@ public final class App extends Activity {
                     "verify",
                     "--verbose",
                     "--min-sdk-version",
-                    &crate::compiler::OLDEST_API.to_string(),
+                    &crate::compiler::DEFAULT_MIN_API.to_string(),
                     written.to_str().unwrap(),
                 ])
                 .output()
@@ -18208,12 +18208,16 @@ dependencies {
                 "EP015",
             ),
             (
-                "package=com.tr.yt;label=X;abis=armeabi-v7a;languages=kotlin",
+                "package=com.tr.yt;label=X;abis=mips;languages=kotlin",
                 "EP003",
             ),
             (
-                "package=com.tr.yt;label=X;abis=x86_64;languages=kotlin",
+                "package=com.tr.yt;label=X;abis=arm64-v8a,riscv64;languages=kotlin",
                 "EP003",
+            ),
+            (
+                "package=com.tr.yt;label=X;abis=arm64-v8a;languages=kotlin;minSdk=27",
+                "EP014",
             ),
             (
                 "package=com.tr.yt;label=X;abis=arm64-v8a;languages=go",
@@ -18227,9 +18231,56 @@ dependencies {
     }
 
     #[test]
-    fn every_android_from_eleven_to_seventeen_may_be_named() {
+    fn a_manifest_below_android_nine_is_raised_to_it() {
+        let low = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.tr.low">
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="37" />
+    <application android:label="Low">
+        <activity android:name=".Main" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>"#;
+        assert_eq!(crate::builder::minimum_declared(low), Some(21));
+        let project = crate::builder::from_manifest(low).expect("reads");
+        let mut sink = Sink::new();
+        let prepared = crate::builder::prepare(&project, &mut sink).expect("prepares");
+        let floor = prepared
+            .root
+            .children_named("uses-sdk")
+            .next()
+            .and_then(|one| one.attribute("android:minSdkVersion"))
+            .map(str::to_string);
+        assert_eq!(
+            floor.as_deref(),
+            Some("28"),
+            "nothing older than Android 9 is built"
+        );
+        assert!(
+            sink.entries().iter().any(|one| one.code == "EB065"),
+            "raising it is said, not done quietly: {:?}",
+            sink.entries()
+        );
+
+        let nine = low.replace("minSdkVersion=\"21\"", "minSdkVersion=\"28\"");
+        let project = crate::builder::from_manifest(&nine).expect("reads");
+        let mut sink = Sink::new();
+        crate::builder::prepare(&project, &mut sink).expect("prepares");
+        assert!(
+            sink.entries().iter().all(|one| one.code != "EB065"),
+            "Android 9 itself is left alone"
+        );
+    }
+
+    #[test]
+    fn every_android_from_nine_to_seventeen_may_be_named() {
         for (level, release) in [
-            (30u32, "11"),
+            (28u32, "9"),
+            (29, "10"),
+            (30, "11"),
             (31, "12"),
             (32, "12L"),
             (33, "13"),
@@ -18243,7 +18294,7 @@ dependencies {
                 "Android {release} is API {level}"
             );
         }
-        assert!(!crate::compiler::api_is_supported(29));
+        assert!(!crate::compiler::api_is_supported(27));
         assert!(!crate::compiler::api_is_supported(38));
 
         assert_eq!(crate::compiler::NEWEST_DESCRIBED_API, 37);
@@ -18252,8 +18303,16 @@ dependencies {
         }
 
         let spec = crate::scaffold::Spec::default();
-        assert_eq!(spec.min_sdk, 30);
+        assert_eq!(spec.min_sdk, 30, "Android 11 is where a new project starts");
         assert_eq!(spec.target_sdk, crate::compiler::NEWEST_DESCRIBED_API);
+        assert_eq!(crate::settings::Settings::default().min_sdk, 30);
+
+        let nine = crate::scaffold::Spec::parse(
+            "package=com.tr.yt;label=X;abis=arm64-v8a,x86_64,armeabi-v7a,x86;languages=java;minSdk=28",
+        )
+        .expect("Android 9 may be chosen, and so may every architecture");
+        assert_eq!(nine.min_sdk, 28);
+        assert_eq!(nine.abis, vec!["arm64-v8a", "x86_64", "armeabi-v7a", "x86"]);
 
         let held = crate::scaffold::Spec::parse(
             "package=com.tr.yt;label=X;abis=arm64-v8a;languages=java;targetSdk=37",

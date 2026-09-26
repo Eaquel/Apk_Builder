@@ -507,7 +507,7 @@ def check_bridge() -> str:
         archive.extractall(work)
 
     checked = 0
-    for abi in ("arm64-v8a",):
+    for abi in ("arm64-v8a", "x86_64"):
         library = work / f"lib/{abi}/libapk_builder.so"
         if not library.is_file():
             raise AssertionError(f"no native library for {abi}")

@@ -52,8 +52,6 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
-import android.net.nsd.NsdManager
-import android.net.nsd.NsdServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -296,6 +294,7 @@ class BuilderApplication : Application() {
         Glyphs.open(this)
         AppLog.install(this)
         bindTheSharedKeyToThisDevice()
+        DebuggerHost.configure(this)
         Sentry.arm(this)
     }
 
@@ -345,6 +344,45 @@ class BuilderApplication : Application() {
             },
         )
     }
+}
+
+internal object DebuggerHost {
+
+    const val ACTION = "com.apk.builder.debug.RUNTIME"
+
+    const val AUTHORITY_SUFFIX = ".debugger"
+
+    fun authority(named: String): String = named + AUTHORITY_SUFFIX
+
+    fun certificate(context: Context): String = runCatching {
+        val info = context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.GET_SIGNING_CERTIFICATES,
+        )
+        val first = info.signingInfo?.apkContentsSigners?.firstOrNull()
+            ?: return@runCatching ""
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(first.toByteArray())
+            .joinToString("") { "%02X".format(it) }
+    }.getOrDefault("")
+
+    fun configure(context: Context): String {
+        val spec = JSONObject()
+            .put("package", context.packageName)
+            .put("certificate", certificate(context))
+            .put("debugger", Preferences.debuggerOn(context))
+            .put("seal", Preferences.securityOn(context))
+        return runCatching { Builder.nativeDebuggerConfigure(spec.toString()) }.getOrDefault("")
+    }
+
+    fun carriers(context: Context): List<Pair<String, String>> = runCatching {
+        val packages = context.packageManager
+        packages.queryBroadcastReceivers(Intent(ACTION), 0)
+            .mapNotNull { it.activityInfo?.applicationInfo }
+            .distinctBy { it.packageName }
+            .map { packages.getApplicationLabel(it).toString() to it.packageName }
+            .sortedBy { it.first.lowercase(Locale.getDefault()) }
+    }.getOrDefault(emptyList())
 }
 
 object Sentry {
@@ -1206,6 +1244,9 @@ object Preferences {
     private const val ASSISTANT_EFFORT = "assistant_effort"
     private const val CUSTOM_VENDORS = "custom_vendors"
     private const val ASSISTANT_AGENT = "assistant_agent"
+    private const val DEBUGGER_ON = "debugger_on"
+    private const val SECURITY_ON = "project_security_on"
+    private const val WATCHED_APP = "watched_app"
 
     val LANGUAGES: List<Triple<String, String, String>> = listOf(
         Triple("tr", "Türkçe", "TR"),
@@ -1322,6 +1363,27 @@ object Preferences {
 
     fun setAssistantAgent(context: Context, on: Boolean) {
         store(context).edit().putBoolean(ASSISTANT_AGENT, on).apply()
+    }
+
+    fun debuggerOn(context: Context): Boolean =
+        store(context).getBoolean(DEBUGGER_ON, true)
+
+    fun setDebuggerOn(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(DEBUGGER_ON, on).apply()
+    }
+
+    fun securityOn(context: Context): Boolean =
+        store(context).getBoolean(SECURITY_ON, true)
+
+    fun setSecurityOn(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(SECURITY_ON, on).apply()
+    }
+
+    fun watchedApp(context: Context): String =
+        store(context).getString(WATCHED_APP, "").orEmpty()
+
+    fun setWatchedApp(context: Context, named: String) {
+        store(context).edit().putString(WATCHED_APP, named).apply()
     }
 
     fun setLanguage(context: Context, tag: String) {
@@ -3313,6 +3375,15 @@ private enum class Order(val label: Int, val mark: Mark.Shape) {
     SIZE(R.string.files_by_size, Mark.Shape.CHART),
 }
 
+private class Watched(
+    val seq: Long,
+    val time: Long,
+    val kind: String,
+    val level: Char,
+    val tag: String,
+    val text: String,
+)
+
 private sealed interface Screen {
 
     data object Projects : Screen
@@ -3337,6 +3408,10 @@ private sealed interface Screen {
     data object NewKey : Screen
 
     data object Logcat : Screen
+
+    data object Settings : Screen
+
+    data object VirtualAndroid : Screen
 
     data object Terminal : Screen
 
@@ -3415,8 +3490,6 @@ class BuilderActivity : Activity() {
 
         const val TALK_PATIENCE_SECONDS = 60L
 
-        const val PAIRING_SERVICE = "_adb-tls-pairing._tcp."
-
         const val TRASH_FOLDER = "Trash"
 
         val PACK_FORMATS = listOf("zip", "tar")
@@ -3435,7 +3508,42 @@ class BuilderActivity : Activity() {
 
         const val REPORT_FILE = "Report.json"
 
-        const val LOG_HELD = 600
+        const val CLONE_KEY_EXAMPLE = "ghp_XXXXXXXXXXXXXXXXXXX"
+
+        const val WATCH_HELD = 4000
+
+        const val WATCH_TICK_MILLIS = 1000L
+
+        const val WATCH_ROUNDS = 8
+
+        const val WATCH_PAGE = 500
+
+        const val WATCH_PAINTED = 250_000
+
+        const val WATCH_COPIED = 400_000
+
+        const val WATCH_ASKED = 60_000
+
+        const val WATCH_SERIOUS = 6
+
+        const val WATCH_RECENT = 120
+
+        const val WATCH_LINE = 240
+
+        val WATCH_TIME = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+
+        val DEBUGGER_COLLECTED = listOf(
+            "crashes" to R.string.debugger_collect_crashes,
+            "native_crashes" to R.string.debugger_collect_native,
+            "not_responding" to R.string.debugger_collect_anr,
+            "exits" to R.string.debugger_collect_exits,
+            "device" to R.string.debugger_collect_device,
+            "lifecycle" to R.string.debugger_collect_lifecycle,
+            "memory" to R.string.debugger_collect_memory,
+            "performance" to R.string.debugger_collect_performance,
+            "frames" to R.string.debugger_collect_frames,
+            "own_log" to R.string.debugger_collect_log,
+        )
 
         val TILE_UNTOUCHED = 0xFFF7F8FA.toInt()
         val LABEL_PILL = 0xFF33363A.toInt()
@@ -3447,8 +3555,6 @@ class BuilderActivity : Activity() {
             "{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "->", "\u03bb",
             "<", ">", "@", "\"",
         )
-
-        const val LOG_TICK_MILLIS = 400L
 
         val NATIVE_TILES = listOf(
             Triple(R.drawable.tech_kotlin, "Kotlin", 0xFF642497.toInt()),
@@ -3664,12 +3770,16 @@ class BuilderActivity : Activity() {
         const val DEFAULT_KEY_YEARS = 10
         const val DEFAULT_KEY_PASSWORD = "My_App_Builder"
 
-        val ONLY_ABI = listOf("arm64-v8a")
+        val PROJECT_ABIS = listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
 
-        const val OLDEST_PLATFORM = 30
+        val DEFAULT_ABIS = listOf("arm64-v8a", "x86_64")
+
+        const val OLDEST_PLATFORM = 28
+        const val DEFAULT_PLATFORM = 30
         const val NEWEST_PLATFORM = 37
 
         val ANDROID_RELEASES = listOf(
+            28 to "9", 29 to "10",
             30 to "11", 31 to "12", 32 to "12L", 33 to "13",
             34 to "14", 35 to "15", 36 to "16", 37 to "17",
         )
@@ -3718,22 +3828,6 @@ class BuilderActivity : Activity() {
         const val LIBRARY_ROUNDS = 40
 
         const val LIBRARY_METADATA = "module"
-
-        const val LOG_CRASH_BUFFER = "crash"
-
-        const val LOG_OWNER_FORMAT = "uid"
-
-        const val LOG_BUFFER_BANNER = "---------"
-
-        const val LOG_USER_RANGE = 100_000
-
-        const val LOG_FIRST_APPLICATION = 10_000
-
-        const val SETTINGS_HIGHLIGHT = ":settings:fragment_args_key"
-
-        const val SETTINGS_ARGUMENTS = ":settings:show_fragment_args"
-
-        const val WIRELESS_DEBUGGING_KEY = "toggle_adb_wireless"
 
         const val LIBRARY_SHOWN = 12
 
@@ -3890,14 +3984,7 @@ class BuilderActivity : Activity() {
     private lateinit var dock: LinearLayout
     private lateinit var banner: LinearLayout
 
-    private var logPort = 0
-    private var logWireless = false
-    private var logWired = false
-    private var logSeeking = false
     private var showing = false
-    private var logPairHost = ""
-    private var logPairPort = 0
-    private var listening: NsdManager.DiscoveryListener? = null
 
     private var screen: Screen = Screen.Projects
     private var navigating = false
@@ -3909,9 +3996,10 @@ class BuilderActivity : Activity() {
     private var formLabel = DEFAULT_LABEL
     private var formVersionName = "1.0.0"
     private var formVersionCode = "1"
-    private var formMinSdk = OLDEST_PLATFORM
+    private var formMinSdk = DEFAULT_PLATFORM
     private var formTargetSdk = NEWEST_PLATFORM
     private val formLanguages = linkedSetOf("java")
+    private val formAbis = linkedSetOf<String>().apply { addAll(DEFAULT_ABIS) }
     private val formLocales = linkedSetOf<String>()
     private var formImage: String? = null
     private var imageForProject: String? = null
@@ -3947,18 +4035,21 @@ class BuilderActivity : Activity() {
     private var shellAt = 0
     private var shellControl = false
 
-    private var logReading = false
-    private var logProcess: java.lang.Process? = null
-    private val logHeld = ArrayDeque<String>()
-    private var logRefused = ""
-    private var logView: TextView? = null
-    private var logCount: TextView? = null
-    private var logHollow: View? = null
-    private var logSieve = ""
-    private var logArgs = ""
-    private var logCrashes = false
-    private var logPackage = ""
-    private var logPackageShown = ""
+    @Volatile private var watchReading = false
+    private var watchWanted = false
+    @Volatile private var watchTurn = 0
+    @Volatile private var watchPackage = ""
+    private var watchLabel = ""
+    private var watchCursor = 0L
+    private val watchHeld = ArrayDeque<Watched>()
+    @Volatile private var watchAbout: Map<String, String> = emptyMap()
+    private var watchRefused = ""
+    private var watchLinked = false
+    private var watchKind = 0
+    private var watchSieve = ""
+    private var watchView: TextView? = null
+    private var watchCount: TextView? = null
+    private var watchHollow: View? = null
 
     private var webAddress = ""
     private val webParts = WEB_PARTS_ON.toMutableList()
@@ -4351,7 +4442,7 @@ class BuilderActivity : Activity() {
         showing = false
         hideOffers()
         keepTheDraft()
-        stopTheLog()
+        pauseTheWatch()
         aurora.pauseDrawing()
         super.onPause()
         AppLog.flushSession()
@@ -4360,8 +4451,7 @@ class BuilderActivity : Activity() {
     override fun onDestroy() {
         keepTheDraft()
         stopTheBuild()
-        stopTheLog()
-        stopListeningForPairing()
+        pauseTheWatch()
         closeTheShell()
         AppLog.flushSession()
         super.onDestroy()
@@ -4476,14 +4566,13 @@ class BuilderActivity : Activity() {
         editorUndo = null
         editorRedo = null
         editorMore = null
-        logView = null
-        logCount = null
-        logHollow = null
+        watchView = null
+        watchCount = null
+        watchHollow = null
         leftBox = null
         rightBox = null
         if (screen !is Screen.Logcat) {
-            stopTheLog()
-            stopListeningForPairing()
+            pauseTheWatch()
         }
         if (screen !is Screen.Terminal) {
             closeTheShell()
@@ -4540,6 +4629,8 @@ class BuilderActivity : Activity() {
             is Screen.Keys -> renderKeys()
             is Screen.NewKey -> renderNewKey()
             is Screen.Logcat -> renderLogcat()
+            is Screen.Settings -> renderSettings()
+            is Screen.VirtualAndroid -> renderVirtualAndroid()
             is Screen.Terminal -> renderTerminal()
             is Screen.Assistant -> renderAssistant()
             is Screen.Theme -> renderTheme()
@@ -4637,7 +4728,19 @@ class BuilderActivity : Activity() {
             is Screen.NewKey -> go(Screen.Keys)
             is Screen.Legal -> go(Screen.About)
             is Screen.Developer -> go(Screen.About)
+            is Screen.Assistant -> leaveTheAssistant()
             else -> go(sideCameFrom ?: Screen.Projects)
+        }
+    }
+
+    private fun leaveTheAssistant() {
+        val came = sideCameFrom
+        val root = talkRoot
+        when {
+            came is Screen.Files || came is Screen.Editor || came is Screen.Picture ||
+                came is Screen.Build -> go(came)
+            root != null && File(root).isDirectory -> go(Screen.Files(root, ""))
+            else -> go(came ?: Screen.Projects)
         }
     }
 
@@ -4659,6 +4762,8 @@ class BuilderActivity : Activity() {
             is Screen.Keys -> put("kind", "keys")
             is Screen.NewKey -> put("kind", "keys")
             is Screen.Logcat -> put("kind", "logcat")
+            is Screen.Settings -> put("kind", "settings")
+            is Screen.VirtualAndroid -> put("kind", "virtual")
             is Screen.Terminal -> put("kind", "terminal")
             is Screen.Assistant -> put("kind", "assistant")
             is Screen.Theme -> put("kind", "theme")
@@ -4690,6 +4795,8 @@ class BuilderActivity : Activity() {
             "trash" -> Screen.Trash
             "keys" -> Screen.Keys
             "logcat" -> Screen.Logcat
+            "settings" -> Screen.Settings
+            "virtual" -> Screen.VirtualAndroid
             "terminal" -> Screen.Terminal
             "assistant" -> Screen.Assistant
             "theme" -> Screen.Theme
@@ -4748,6 +4855,7 @@ class BuilderActivity : Activity() {
 
     private fun asideScreen(one: Screen): Boolean =
         one is Screen.Terminal || one is Screen.Logcat || one is Screen.Assistant ||
+            one is Screen.Settings || one is Screen.VirtualAndroid ||
             one is Screen.Trash || one is Screen.Theme || one is Screen.Languages ||
             one is Screen.Feedback || one is Screen.Rate || one is Screen.About ||
             one is Screen.Legal || one is Screen.Developer || one is Screen.Keys ||
@@ -4849,6 +4957,8 @@ class BuilderActivity : Activity() {
                 else -> R.string.about_policy
             }
             is Screen.Developer -> R.string.about_developer
+            is Screen.Settings -> R.string.settings_title
+            is Screen.VirtualAndroid -> R.string.virtual_title
             else -> R.string.brand_note
         }
     )
@@ -5098,7 +5208,9 @@ class BuilderActivity : Activity() {
         } else {
             if (here is Screen.Assistant) {
                 crown.addView(
-                    markControl(Mark.Shape.MENU, R.string.menu_title) { openTheDrawer() },
+                    markControl(Mark.Shape.CHEVRON_LEFT, R.string.action_back) {
+                        leaveTheAssistant()
+                    },
                     each,
                 )
                 effortChip()?.let { chip ->
@@ -5548,7 +5660,7 @@ class BuilderActivity : Activity() {
             }
         }
         rows += MenuChoice(
-            Mark.Shape.LOG,
+            Mark.Shape.BUG,
             getString(R.string.menu_logcat),
             parted = true,
         ) { go(Screen.Logcat) }
@@ -5563,10 +5675,11 @@ class BuilderActivity : Activity() {
             ) { sortMenu(under) }
         }
         rows += MenuChoice(
-            Mark.Shape.HELP,
-            getString(R.string.menu_help),
+            Mark.Shape.GEAR,
+            getString(R.string.settings_title),
             parted = true,
-        ) { go(Screen.Help) }
+        ) { go(Screen.Settings) }
+        rows += MenuChoice(Mark.Shape.HELP, getString(R.string.menu_help)) { go(Screen.Help) }
         anchoredMenu(under, rows)
     }
 
@@ -6010,9 +6123,17 @@ class BuilderActivity : Activity() {
             }
         )
         list.addView(
-            drawerRow(Mark.Shape.NOTE, R.string.menu_logcat, here is Screen.Logcat) {
+            drawerRow(Mark.Shape.BUG, R.string.menu_logcat, here is Screen.Logcat) {
                 leaveFor(Screen.Logcat)
             }
+        )
+        list.addView(
+            drawerRow(
+                Mark.Shape.PHONE,
+                R.string.virtual_title,
+                here is Screen.VirtualAndroid,
+                getString(R.string.virtual_soon),
+            ) { leaveFor(Screen.VirtualAndroid) }
         )
         list.addView(
             drawerRow(Mark.Shape.SHIELD, R.string.keys_manage, here is Screen.Keys) {
@@ -6020,6 +6141,16 @@ class BuilderActivity : Activity() {
             }
         )
         list.addView(drawerSection(getString(R.string.menu_other)))
+        list.addView(
+            drawerRow(Mark.Shape.GEAR, R.string.settings_title, here is Screen.Settings) {
+                leaveFor(Screen.Settings)
+            }
+        )
+        list.addView(
+            drawerRow(Mark.Shape.BOOK, R.string.menu_docs, inHelp(here)) {
+                leaveFor(Screen.Help)
+            }
+        )
         list.addView(
             drawerRow(Mark.Shape.BRUSH, R.string.settings_theme, here is Screen.Theme) {
                 leaveFor(Screen.Theme)
@@ -6319,6 +6450,27 @@ class BuilderActivity : Activity() {
             }
         )
         content.addView(told)
+
+        val kinds = card()
+        kinds.addView(
+            TextView(this).apply {
+                text = getString(R.string.form_abis)
+                setTextColor(palette.foreground)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            }
+        )
+        kinds.addView(
+            chips(PROJECT_ABIS, { PROJECT_ABIS[it] in formAbis }) { at ->
+                val one = PROJECT_ABIS[at]
+                if (one !in formAbis) {
+                    formAbis.add(one)
+                } else if (formAbis.size > 1) {
+                    formAbis.remove(one)
+                }
+            }
+        )
+        content.addView(kinds)
 
         content.addView(primary(getString(R.string.action_create)) { createProject() })
         content.addView(
@@ -9139,6 +9291,11 @@ class BuilderActivity : Activity() {
                         }
                     )
                 },
+                MenuChoice(
+                    Mark.Shape.GEAR,
+                    getString(R.string.settings_title),
+                    parted = true,
+                ) { go(Screen.Settings) },
             ),
         )
     }
@@ -9843,135 +10000,426 @@ class BuilderActivity : Activity() {
         results.addView(notice(getString(R.string.trash_sent, project.name), palette.ok))
     }
 
-    private fun heldLog(): String = synchronized(logHeld) {
-        val needle = logSieve.trim().lowercase(Locale.getDefault())
-        logHeld.filter { needle.isEmpty() || it.lowercase(Locale.getDefault()).contains(needle) }
-            .joinToString("\n")
+    private fun debuggerAddress(named: String, path: String): Uri =
+        Uri.Builder()
+            .scheme("content")
+            .authority(DebuggerHost.authority(named))
+            .appendPath(path)
+            .build()
+
+    private fun readTheAbout(named: String): Map<String, String> {
+        val out = linkedMapOf<String, String>()
+        val rows = contentResolver.query(debuggerAddress(named, "about"), null, null, null, null)
+            ?: throw IllegalStateException(getString(R.string.debugger_gone))
+        rows.use { held ->
+            while (held.moveToNext()) {
+                out[held.getString(0).orEmpty()] = held.getString(1).orEmpty()
+            }
+        }
+        return out
     }
 
-    private fun paintTheLog() {
-        val written = heldLog()
-        logView?.text = written
-        logView?.visibility = if (written.isEmpty()) View.GONE else View.VISIBLE
-        logHollow?.visibility = if (written.isEmpty()) View.VISIBLE else View.GONE
-        logCount?.text = said(
-            getString(if (logReading) R.string.log_running else R.string.log_stopped),
-            getString(R.string.log_lines, synchronized(logHeld) { logHeld.size }),
+    private fun readTheEvents(named: String, after: Long): List<Watched> {
+        val asked = debuggerAddress(named, "events").buildUpon()
+            .appendQueryParameter("after", after.toString())
+            .build()
+        val rows = contentResolver.query(asked, null, null, null, null)
+            ?: throw IllegalStateException(getString(R.string.debugger_gone))
+        val out = mutableListOf<Watched>()
+        rows.use { held ->
+            while (held.moveToNext()) {
+                out.add(
+                    Watched(
+                        held.getLong(0),
+                        held.getLong(1),
+                        held.getString(2).orEmpty(),
+                        held.getString(3).orEmpty().firstOrNull() ?: 'I',
+                        held.getString(4).orEmpty(),
+                        held.getString(5).orEmpty(),
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    private fun fetchTheDebugger(named: String) {
+        val about = readTheAbout(named)
+        val last = about["last"]?.toLongOrNull() ?: 0L
+        synchronized(watchHeld) {
+            if (last < watchCursor) {
+                watchHeld.clear()
+                watchCursor = 0L
+            }
+        }
+        for (round in 0 until WATCH_ROUNDS) {
+            val after = synchronized(watchHeld) { watchCursor }
+            val found = readTheEvents(named, after)
+            if (found.isEmpty()) {
+                break
+            }
+            synchronized(watchHeld) {
+                if (named != watchPackage) {
+                    return
+                }
+                found.forEach { one -> watchHeld.addLast(one) }
+                while (watchHeld.size > WATCH_HELD) {
+                    watchHeld.removeFirst()
+                }
+                watchCursor = found.last().seq
+            }
+            if (found.size < WATCH_PAGE) {
+                break
+            }
+        }
+        watchAbout = about
+    }
+
+    private fun debuggerRefusal(failed: Throwable): String = when (failed) {
+        is SecurityException -> getString(R.string.debugger_refused)
+        else -> failed.message ?: failed.javaClass.simpleName
+    }
+
+    private fun fetched(turn: Int, failed: Throwable?) {
+        if (turn != watchTurn || isFinishing || isDestroyed) {
+            return
+        }
+        val before = watchRefused
+        watchRefused = failed?.let { debuggerRefusal(it) }.orEmpty()
+        if (failed != null) {
+            watchReading = false
+        }
+        if (screen !is Screen.Logcat) {
+            return
+        }
+        val linked = failed == null
+        if (before != watchRefused || watchLinked != linked || !linked) {
+            watchLinked = linked
+            render(false)
+        } else {
+            paintTheWatch()
+        }
+    }
+
+    private fun startWatching() {
+        if (watchReading || watchPackage.isEmpty()) {
+            return
+        }
+        watchReading = true
+        watchWanted = true
+        val named = watchPackage
+        watchTurn += 1
+        val turn = watchTurn
+        Thread {
+            while (watchReading && turn == watchTurn) {
+                val failed = runCatching { fetchTheDebugger(named) }.exceptionOrNull()
+                runOnUiThread { fetched(turn, failed) }
+                if (failed != null) {
+                    break
+                }
+                try {
+                    Thread.sleep(WATCH_TICK_MILLIS)
+                } catch (stopped: InterruptedException) {
+                    break
+                }
+            }
+        }.apply {
+            name = "debugger-panel"
+            isDaemon = true
+        }.start()
+    }
+
+    private fun stopWatching() {
+        watchWanted = false
+        pauseTheWatch()
+    }
+
+    private fun pauseTheWatch() {
+        watchReading = false
+        watchTurn += 1
+    }
+
+    private fun fetchOnce() {
+        val named = watchPackage
+        if (named.isEmpty() || watchReading) {
+            return
+        }
+        val turn = watchTurn
+        Thread {
+            val failed = runCatching { fetchTheDebugger(named) }.exceptionOrNull()
+            runOnUiThread { fetched(turn, failed) }
+        }.apply { isDaemon = true }.start()
+    }
+
+    private fun askTheDebugger(method: String, done: () -> Unit) {
+        val named = watchPackage
+        if (named.isEmpty()) {
+            return
+        }
+        Thread {
+            val answer = runCatching {
+                contentResolver.call(DebuggerHost.authority(named), method, null, null)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                val failed = answer.exceptionOrNull()
+                when {
+                    failed != null -> flash(debuggerRefusal(failed), palette.error)
+                    answer.getOrNull()?.getBoolean("ok", false) != true ->
+                        flash(getString(R.string.debugger_gone), palette.error)
+                    else -> done()
+                }
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    private fun watchKinds(chip: Int): Set<String>? = when (chip) {
+        1 -> setOf("crash")
+        2 -> setOf("anr")
+        3 -> setOf("exit")
+        4 -> setOf("lifecycle")
+        5 -> setOf("performance", "memory", "snapshot")
+        6 -> setOf("log", "info", "start")
+        else -> null
+    }
+
+    private fun shownEvents(): List<Watched> {
+        val kinds = watchKinds(watchKind)
+        val needle = watchSieve.trim().lowercase(Locale.getDefault())
+        return synchronized(watchHeld) {
+            watchHeld.filter { one ->
+                (kinds == null || one.kind in kinds) &&
+                    (
+                        needle.isEmpty() ||
+                            one.tag.lowercase(Locale.getDefault()).contains(needle) ||
+                            one.text.lowercase(Locale.getDefault()).contains(needle)
+                        )
+            }
+        }
+    }
+
+    private fun watchedHead(one: Watched): String =
+        WATCH_TIME.format(Date(one.time)) + "  " + one.kind.uppercase(Locale.US) + "  " +
+            one.level + "/" + one.tag
+
+    private fun watchedText(events: List<Watched>, most: Int): String {
+        val out = StringBuilder()
+        for (one in events.asReversed()) {
+            val block = watchedHead(one) + "\n" + one.text + "\n\n"
+            if (out.isNotEmpty() && out.length + block.length > most) {
+                break
+            }
+            out.insert(0, block)
+        }
+        return out.toString().trimEnd()
+    }
+
+    private fun levelTint(level: Char): Int = when (level) {
+        'F', 'E', 'A' -> palette.error
+        'W' -> palette.warning
+        'D', 'V' -> palette.muted
+        else -> palette.foreground
+    }
+
+    private fun paintTheWatch() {
+        val shown = shownEvents()
+        val painted = SpannableStringBuilder()
+        var room = WATCH_PAINTED
+        val kept = ArrayDeque<Watched>()
+        for (one in shown.asReversed()) {
+            room -= one.text.length + one.tag.length + 32
+            if (room < 0 && kept.isNotEmpty()) {
+                break
+            }
+            kept.addFirst(one)
+        }
+        for (one in kept) {
+            val head = watchedHead(one)
+            val from = painted.length
+            painted.append(head).append('\n')
+            painted.setSpan(
+                ForegroundColorSpan(levelTint(one.level)),
+                from,
+                from + head.length,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            painted.setSpan(
+                StyleSpan(Typeface.BOLD),
+                from,
+                from + head.length,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            val body = painted.length
+            painted.append(one.text).append("\n\n")
+            if (one.level == 'F' || one.level == 'E') {
+                painted.setSpan(
+                    ForegroundColorSpan(palette.error),
+                    body,
+                    body + one.text.length,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+            }
+        }
+        watchView?.text = painted
+        watchView?.visibility = if (kept.isEmpty()) View.GONE else View.VISIBLE
+        watchHollow?.visibility = if (kept.isEmpty()) View.VISIBLE else View.GONE
+        watchCount?.text = said(
+            getString(if (watchReading) R.string.log_running else R.string.log_stopped),
+            getString(R.string.log_lines, shown.size),
         )
     }
 
-    private val logTick = object : Runnable {
-        override fun run() {
-            if (!logReading || screen !is Screen.Logcat || isFinishing || isDestroyed) {
-                return
-            }
-            paintTheLog()
-            content.postDelayed(this, LOG_TICK_MILLIS)
-        }
-    }
-
-    private fun readProperty(named: String): String = runCatching {
-        val asking = ProcessBuilder("getprop", named).redirectErrorStream(true).start()
-        val said = asking.inputStream.bufferedReader().use { it.readText() }.trim()
-        asking.waitFor()
-        said
-    }.getOrDefault("")
-
-    private fun globalFlag(named: String): Boolean = runCatching {
-        Settings.Global.getInt(contentResolver, named, 0)
-    }.getOrDefault(0) == 1
-
-    private fun logCommand(): List<String> {
-        val said = mutableListOf("logcat", "-v", "time")
-        if (logCrashes) {
-            said.add("-b")
-            said.add(LOG_CRASH_BUFFER)
-        }
-        val uid = uidOf(logPackage)
-        when {
-            uid > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> said.add("--uid=" + uid)
-            uid > 0 -> {
-                said.add("-v")
-                said.add(LOG_OWNER_FORMAT)
-            }
-            !logReadsAll() -> said.add("--pid=" + android.os.Process.myPid())
-        }
-        logArgs.trim().split(Regex("\\s+")).forEach { one ->
-            if (one.isNotEmpty()) {
-                said.add(one)
-            }
-        }
-        return said
-    }
-
-    private fun ownerName(uid: Int): String {
-        val user = uid / LOG_USER_RANGE
-        val app = uid % LOG_USER_RANGE
-        return if (app >= LOG_FIRST_APPLICATION) "u${user}_a${app - LOG_FIRST_APPLICATION}" else ""
-    }
-
-    private fun loggedBy(line: String, uid: Int): Boolean {
-        if (line.startsWith(LOG_BUFFER_BANNER)) {
-            return true
-        }
-        val open = line.indexOf('(')
-        val colon = if (open < 0) -1 else line.indexOf(':', open + 1)
-        if (colon < 0) {
-            return false
-        }
-        val who = line.substring(open + 1, colon).trim()
-        return who == uid.toString() || who == ownerName(uid)
-    }
-
-    private fun uidOf(named: String): Int {
-        if (named.isEmpty()) {
-            return -1
-        }
-        return runCatching {
-            packageManager.getApplicationInfo(named, 0).uid
-        }.getOrDefault(-1)
-    }
-
-    private fun installedApps(): List<Pair<String, String>> = runCatching {
-        val asked = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        packageManager.queryIntentActivities(asked, 0)
-            .mapNotNull { one ->
-                val held = one.activityInfo?.applicationInfo ?: return@mapNotNull null
-                packageManager.getApplicationLabel(held).toString() to held.packageName
-            }
-            .distinctBy { it.second }
-            .sortedBy { it.first.lowercase(Locale.getDefault()) }
-    }.getOrDefault(emptyList())
-
-    private fun chooseTheLoggedApp() {
-        val apps = installedApps()
+    private fun chooseTheWatchedApp() {
+        val apps = DebuggerHost.carriers(this)
         if (apps.isEmpty()) {
             results.removeAllViews()
-            results.addView(notice(getString(R.string.log_apps_none), palette.warning))
+            results.addView(notice(getString(R.string.debugger_app_none), palette.warning))
             return
         }
         pickAnApp(apps) { which ->
-            if (which == 0) {
-                logPackage = ""
-                logPackageShown = ""
-            } else {
-                logPackage = apps[which - 1].second
-                logPackageShown = apps[which - 1].first
-            }
-            if (logReading) {
-                stopTheLog()
-                startTheLog()
-            }
+            watchTheApp(apps[which].second, apps[which].first)
+            startWatching()
             render(false)
         }
     }
 
-    private fun logReadsAll(): Boolean =
-        checkSelfPermission(android.Manifest.permission.READ_LOGS) ==
-            PackageManager.PERMISSION_GRANTED
+    private fun watchTheApp(named: String, label: String) {
+        pauseTheWatch()
+        watchPackage = named
+        watchLabel = label
+        watchAbout = emptyMap()
+        watchRefused = ""
+        watchLinked = false
+        synchronized(watchHeld) {
+            watchHeld.clear()
+            watchCursor = 0L
+        }
+        Preferences.setWatchedApp(this, named)
+    }
 
-    private fun grantLine(): String =
-        "adb shell pm grant $packageName android.permission.READ_LOGS"
+    private fun watchTheRememberedApp() {
+        if (watchPackage.isNotEmpty()) {
+            return
+        }
+        val named = Preferences.watchedApp(this)
+        if (named.isEmpty()) {
+            return
+        }
+        val label = runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(named, 0))
+                .toString()
+        }.getOrNull() ?: return
+        watchTheApp(named, label)
+    }
+
+    private fun askToClearTheDebugger() {
+        dialogShell(
+            getString(R.string.log_wipe),
+            body(getString(R.string.debugger_clear_ask)),
+            listOf(
+                getString(R.string.action_cancel) to { it: AlertDialog -> it.dismiss() },
+                getString(R.string.log_wipe) to { it: AlertDialog ->
+                    it.dismiss()
+                    askTheDebugger("clear") {
+                        synchronized(watchHeld) { watchHeld.clear() }
+                        paintTheWatch()
+                        flash(getString(R.string.debugger_cleared), palette.ok, Mark.Shape.TICK)
+                    }
+                },
+            ),
+        )
+    }
+
+    private fun fetchTheWatchAgain() {
+        synchronized(watchHeld) {
+            watchHeld.clear()
+            watchCursor = 0L
+        }
+        paintTheWatch()
+        fetchOnce()
+    }
+
+    private fun takeASnapshot() {
+        askTheDebugger("snapshot") {
+            flash(getString(R.string.debugger_snapshot_done), palette.ok, Mark.Shape.TICK)
+            fetchOnce()
+        }
+    }
+
+    private fun openTheWatchedApp() {
+        val opening = packageManager.getLaunchIntentForPackage(watchPackage)
+        if (opening == null) {
+            flash(getString(R.string.debugger_gone), palette.error)
+            return
+        }
+        hand(opening.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    private fun analysisText(): String {
+        val all = synchronized(watchHeld) { watchHeld.toList() }
+        if (all.isEmpty()) {
+            return ""
+        }
+        val chosen = sortedMapOf<Long, Watched>()
+        all.lastOrNull { it.kind == "start" }?.let { chosen[it.seq] = it }
+        all.filter { it.kind == "crash" || it.kind == "anr" || it.kind == "exit" && it.level == 'E' }
+            .takeLast(WATCH_SERIOUS)
+            .forEach { chosen[it.seq] = it }
+        val serious = watchedText(chosen.values.toList(), WATCH_ASKED)
+        val room = (WATCH_ASKED - serious.length).coerceAtLeast(WATCH_ASKED / 6)
+        val recent = all.filter { it.seq !in chosen }
+            .takeLast(WATCH_RECENT)
+            .map { one -> watchedHead(one) + ": " + one.text.lineSequence().firstOrNull().orEmpty().take(WATCH_LINE) }
+        val tail = StringBuilder()
+        for (line in recent.asReversed()) {
+            if (tail.length + line.length + 1 > room) {
+                break
+            }
+            tail.insert(0, line + "\n")
+        }
+        return listOf(serious, tail.toString().trimEnd()).filter { it.isNotEmpty() }
+            .joinToString("\n\n")
+    }
+
+    private fun projectBuilding(named: String): ProjectSummary? {
+        val all = runCatching {
+            ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
+        }.getOrDefault(emptyList())
+        return all.firstOrNull { it.packageName == named }
+            ?: all.filter { named.startsWith(it.packageName + ".") }
+                .maxByOrNull { it.packageName.length }
+    }
+
+    private fun analyseWithTheAssistant() {
+        val log = analysisText()
+        if (log.isBlank()) {
+            flash(getString(R.string.debugger_analyse_empty), palette.warning)
+            return
+        }
+        val project = projectBuilding(watchPackage)
+        pauseTheWatch()
+        talkRoot = project?.root
+        Preferences.setAssistantAgent(this, project != null)
+        talkFailure = true
+        talkDraft = getString(
+            R.string.debugger_analyse_request,
+            project?.name ?: watchLabel,
+            watchPackage,
+            log,
+        )
+        go(Screen.Assistant)
+        if (project == null) {
+            flash(
+                getString(R.string.debugger_no_project, watchPackage),
+                palette.warning,
+                Mark.Shape.INFO,
+                4200L,
+            )
+        }
+        sendTyped()
+    }
 
     private fun askToNotify() {
         if (Bell.allowed(this)) {
@@ -10003,8 +10451,7 @@ class BuilderActivity : Activity() {
         val rows = mutableListOf<Pair<View, String>>()
         val icons = mutableListOf<Pair<ImageView, String>>()
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val choices = listOf(getString(R.string.log_apps_any) to "") + apps
-        choices.forEachIndexed { at, (label, named) ->
+        apps.forEachIndexed { at, (label, named) ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -10020,19 +10467,12 @@ class BuilderActivity : Activity() {
                     onPick(at)
                 }
             }
-            if (named.isEmpty()) {
-                row.addView(
-                    View(this).apply { foreground = Mark(Mark.Shape.DROID, palette.accent) },
-                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
-                )
-            } else {
-                val icon = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-                icons.add(icon to named)
-                row.addView(
-                    icon,
-                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
-                )
-            }
+            val icon = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+            icons.add(icon to named)
+            row.addView(
+                icon,
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+            )
             row.addView(
                 LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
@@ -10046,18 +10486,16 @@ class BuilderActivity : Activity() {
                             ellipsize = android.text.TextUtils.TruncateAt.END
                         }
                     )
-                    if (named.isNotEmpty()) {
-                        addView(
-                            TextView(context).apply {
-                                text = named
-                                setTextColor(palette.muted)
-                                typeface = Type.data
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                                maxLines = 1
-                                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                            }
-                        )
-                    }
+                    addView(
+                        TextView(context).apply {
+                            text = named
+                            setTextColor(palette.muted)
+                            typeface = Type.data
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                        }
+                    )
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
             )
@@ -10080,8 +10518,8 @@ class BuilderActivity : Activity() {
                         override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
                         override fun afterTextChanged(s: Editable?) {
                             val wanted = s?.toString().orEmpty().trim().lowercase(Locale.getDefault())
-                            rows.forEachIndexed { at, (row, known) ->
-                                row.visibility = if (at == 0 || wanted.isEmpty() || known.contains(wanted)) {
+                            rows.forEach { (row, known) ->
+                                row.visibility = if (wanted.isEmpty() || known.contains(wanted)) {
                                     View.VISIBLE
                                 } else {
                                     View.GONE
@@ -10106,225 +10544,6 @@ class BuilderActivity : Activity() {
                 runOnUiThread { view.setImageDrawable(drawn) }
             }
         }.start()
-    }
-
-    private fun developerOptionsOn(): Boolean = runCatching {
-        Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) != 0
-    }.getOrDefault(true)
-
-    private fun openDeveloperOptions() {
-        if (!developerOptionsOn()) {
-            dialogShell(
-                getString(R.string.log_developer_off),
-                body(getString(R.string.log_developer_off_note)),
-                listOf(
-                    getString(R.string.action_cancel) to { it: AlertDialog -> it.dismiss() },
-                    getString(R.string.log_developer_about) to { it: AlertDialog ->
-                        it.dismiss()
-                        hand(
-                            Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    },
-                ),
-            )
-            return
-        }
-        val pointed = Bundle().apply { putString(SETTINGS_HIGHLIGHT, WIRELESS_DEBUGGING_KEY) }
-        hand(
-            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
-                .putExtra(SETTINGS_HIGHLIGHT, WIRELESS_DEBUGGING_KEY)
-                .putExtra(SETTINGS_ARGUMENTS, pointed)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-    }
-
-    @Suppress("DEPRECATION")
-    private fun listenForPairing() {
-        if (listening != null) {
-            return
-        }
-        val manager = getSystemService(NsdManager::class.java) ?: return
-        val ears = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(service: String) = Unit
-
-            override fun onDiscoveryStopped(service: String) = Unit
-
-            override fun onStartDiscoveryFailed(service: String, why: Int) {
-                runOnUiThread { stopListeningForPairing() }
-            }
-
-            override fun onStopDiscoveryFailed(service: String, why: Int) = Unit
-
-            override fun onServiceLost(found: NsdServiceInfo) = Unit
-
-            override fun onServiceFound(found: NsdServiceInfo) {
-                runCatching {
-                    manager.resolveService(
-                        found,
-                        object : NsdManager.ResolveListener {
-                            override fun onResolveFailed(one: NsdServiceInfo, why: Int) = Unit
-
-                            override fun onServiceResolved(one: NsdServiceInfo) {
-                                val host = one.host?.hostAddress.orEmpty()
-                                val port = one.port
-                                runOnUiThread { pairingSeen(host, port) }
-                            }
-                        },
-                    )
-                }
-            }
-        }
-        val started = runCatching {
-            manager.discoverServices(PAIRING_SERVICE, NsdManager.PROTOCOL_DNS_SD, ears)
-        }.isSuccess
-        listening = if (started) ears else null
-    }
-
-    private fun stopListeningForPairing() {
-        val ears = listening ?: return
-        listening = null
-        runCatching { getSystemService(NsdManager::class.java)?.stopServiceDiscovery(ears) }
-    }
-
-    private fun pairingSeen(host: String, port: Int) {
-        if (isFinishing || isDestroyed || host.isEmpty() || port <= 0) {
-            return
-        }
-        if (logPairHost == host && logPairPort == port) {
-            return
-        }
-        logPairHost = host
-        logPairPort = port
-        Bell.say(
-            this,
-            Bell.PAIRING_NOTE,
-            getString(R.string.log_pair_found),
-            getString(R.string.log_pair_at, host, port),
-        )
-        flash(
-            getString(R.string.log_pair_at, host, port),
-            palette.ok,
-            Mark.Shape.LINK,
-            4200L,
-        )
-        if (screen is Screen.Logcat) {
-            render(false)
-        }
-    }
-
-    private fun seekTheDevice() {
-        if (logSeeking) {
-            return
-        }
-        askToNotify()
-        listenForPairing()
-        logSeeking = true
-        flash(getString(R.string.log_seeking), palette.accent, Mark.Shape.LINK, 0L)
-        Thread {
-            val wireless = globalFlag("adb_wifi_enabled")
-            val wired = globalFlag("adb_enabled")
-            val port = listOf("service.adb.tls.port", "service.adb.tcp.port")
-                .firstNotNullOfOrNull { readProperty(it).toIntOrNull()?.takeIf { open -> open > 0 } }
-                ?: 0
-            runOnUiThread {
-                logSeeking = false
-                if (isFinishing || isDestroyed) {
-                    return@runOnUiThread
-                }
-                logPort = port
-                logWireless = wireless
-                logWired = wired
-                if (screen is Screen.Logcat) {
-                    render(false)
-                }
-                when {
-                    logReadsAll() -> flash(
-                        getString(R.string.log_bound_note),
-                        palette.ok,
-                        Mark.Shape.TICK,
-                    )
-                    port > 0 -> flash(
-                        getString(R.string.log_seek_found, port.toString()),
-                        palette.ok,
-                        Mark.Shape.TICK,
-                        4200L,
-                    )
-                    wireless -> flash(
-                        getString(R.string.log_seek_hidden),
-                        palette.warning,
-                        Mark.Shape.INFO,
-                        4200L,
-                    ).also { openDeveloperOptions() }
-                    wired -> flash(
-                        getString(R.string.log_seek_wired),
-                        palette.warning,
-                        Mark.Shape.INFO,
-                        4200L,
-                    )
-                    else -> flash(
-                        getString(R.string.log_seek_off),
-                        palette.error,
-                        Mark.Shape.INFO,
-                        4200L,
-                    ).also { openDeveloperOptions() }
-                }
-            }
-        }.start()
-    }
-
-    private fun startTheLog() {
-        if (logReading) {
-            return
-        }
-        logRefused = ""
-        logReading = true
-        val spoken = logCommand()
-        val owner = if (spoken.contains(LOG_OWNER_FORMAT)) uidOf(logPackage) else -1
-        Thread {
-            val reading = runCatching {
-                ProcessBuilder(spoken).redirectErrorStream(true).start()
-            }.getOrElse { why ->
-                runOnUiThread {
-                    logReading = false
-                    logRefused = why.message ?: why.javaClass.simpleName
-                    AppLog.event(LogLevel.WARN, "logcat", "The device log would not open.")
-                    if (!isFinishing && !isDestroyed && screen is Screen.Logcat) {
-                        render(false)
-                    }
-                }
-                return@Thread
-            }
-            logProcess = reading
-            runCatching {
-                reading.inputStream.bufferedReader().use { reader ->
-                    while (logReading) {
-                        val line = reader.readLine() ?: break
-                        if (owner > 0 && !loggedBy(line, owner)) {
-                            continue
-                        }
-                        synchronized(logHeld) {
-                            logHeld.addLast(line)
-                            while (logHeld.size > LOG_HELD) {
-                                logHeld.removeFirst()
-                            }
-                        }
-                    }
-                }
-            }
-            runCatching { reading.destroy() }
-            logProcess = null
-        }.start()
-        content.postDelayed(logTick, LOG_TICK_MILLIS)
-    }
-
-    private fun stopTheLog() {
-        if (!logReading) {
-            return
-        }
-        logReading = false
-        runCatching { logProcess?.destroy() }
-        logProcess = null
     }
 
     private fun shellControl(shape: Mark.Shape, named: Int, press: () -> Unit): View =
@@ -12784,56 +13003,73 @@ class BuilderActivity : Activity() {
             getString(R.string.clone_auth_token),
             cloneToken,
         )
+        tokenField.hint = CLONE_KEY_EXAMPLE
         var branch = ""
         var reading = false
         val branchShown = TextView(this).apply {
             text = getString(R.string.clone_branch_default)
         }
-        sheet.addView(
-            pickerRow(getString(R.string.clone_branch), branchShown) {
-                if (reading) {
-                    return@pickerRow
-                }
-                val address = runCatching {
-                    Remote.address(whereField.text?.toString().orEmpty())
-                }.getOrElse { why ->
-                    branchShown.text = refusalOf(why)
-                    return@pickerRow
-                }
-                val token = tokenField.text?.toString().orEmpty().trim()
-                reading = true
-                branchShown.text = getString(R.string.clone_branch_reading)
-                Thread {
-                    val found = runCatching { Remote.advertise(address, token) }
-                    runOnUiThread {
-                        reading = false
-                        found.fold({ held ->
-                            val names = held.branches.map { it.first }
-                            val first = held.branch.ifEmpty { names.firstOrNull().orEmpty() }
-                            branchShown.text = branch.ifEmpty {
-                                getString(R.string.clone_branch_default_named, first)
-                            }
-                            if (names.isEmpty()) {
-                                return@fold
-                            }
-                            val shown = names.map { name ->
-                                if (name == held.branch) {
-                                    getString(R.string.clone_branch_default_named, name)
-                                } else {
-                                    name
-                                }
-                            }
-                            pickOne(getString(R.string.clone_branch), shown) { which ->
-                                branch = names[which]
-                                branchShown.text = shown[which]
-                            }
-                        }, { why ->
-                            branchShown.text = refusalOf(why)
-                        })
-                    }
-                }.apply { isDaemon = true }.start()
+        val branchRow = pickerRow(getString(R.string.clone_branch), branchShown) {
+            if (reading) {
+                return@pickerRow
             }
-        )
+            val address = runCatching {
+                Remote.address(whereField.text?.toString().orEmpty())
+            }.getOrElse { why ->
+                branchShown.text = refusalOf(why)
+                return@pickerRow
+            }
+            val token = tokenField.text?.toString().orEmpty().trim()
+            reading = true
+            branchShown.text = getString(R.string.clone_branch_reading)
+            Thread {
+                val found = runCatching { Remote.advertise(address, token) }
+                runOnUiThread {
+                    reading = false
+                    found.fold({ held ->
+                        val names = held.branches.map { it.first }
+                        val first = held.branch.ifEmpty { names.firstOrNull().orEmpty() }
+                        branchShown.text = branch.ifEmpty {
+                            getString(R.string.clone_branch_default_named, first)
+                        }
+                        if (names.isEmpty()) {
+                            return@fold
+                        }
+                        val shown = names.map { name ->
+                            if (name == held.branch) {
+                                getString(R.string.clone_branch_default_named, name)
+                            } else {
+                                name
+                            }
+                        }
+                        pickOne(getString(R.string.clone_branch), shown) { which ->
+                            branch = names[which]
+                            branchShown.text = shown[which]
+                        }
+                    }, { why ->
+                        branchShown.text = refusalOf(why)
+                    })
+                }
+            }.apply { isDaemon = true }.start()
+        }
+
+        fun showTheBranch() {
+            val linked = runCatching {
+                Remote.address(whereField.text?.toString().orEmpty())
+            }.isSuccess
+            branchRow.visibility = if (linked) View.VISIBLE else View.GONE
+            if (!linked) {
+                branch = ""
+                branchShown.text = getString(R.string.clone_branch_default)
+            }
+        }
+        whereField.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun afterTextChanged(s: Editable?) = showTheBranch()
+        })
+        sheet.addView(branchRow)
+        showTheBranch()
         tokenHolder.visibility = View.GONE
         sheet.addView(
             dropRow(
@@ -13211,7 +13447,7 @@ class BuilderActivity : Activity() {
                 getString(R.string.facts_span),
                 getString(
                     R.string.form_platforms_span,
-                    releaseNamed(summary?.minSdk ?: OLDEST_PLATFORM),
+                    releaseNamed(summary?.minSdk ?: DEFAULT_PLATFORM),
                     releaseNamed(summary?.targetSdk ?: NEWEST_PLATFORM),
                 ),
             )
@@ -13369,211 +13605,222 @@ class BuilderActivity : Activity() {
             rule(),
             LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(3) },
         )
+        watchTheRememberedApp()
+        val chosen = watchPackage.isNotEmpty()
 
-        val reading = logReadsAll()
         val bound = card()
         bound.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(
-                    View(context).apply {
-                        foreground = Mark(
-                            Mark.Shape.PHONE,
-                            if (reading) palette.ok else palette.accent,
-                        )
-                    },
-                    LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
-                )
+                if (chosen) {
+                    val icon = ImageView(context).apply {
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    runCatching { packageManager.getApplicationIcon(watchPackage) }
+                        .getOrNull()
+                        ?.let { icon.setImageDrawable(it) }
+                        ?: run { icon.foreground = Mark(Mark.Shape.BUG, palette.accent) }
+                    addView(
+                        icon,
+                        LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                    )
+                } else {
+                    addView(
+                        View(context).apply { foreground = Mark(Mark.Shape.BUG, palette.accent) },
+                        LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+                    )
+                }
                 addView(
                     LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         addView(
                             TextView(context).apply {
-                                text = getString(R.string.log_device)
+                                text = if (chosen) {
+                                    watchLabel
+                                } else {
+                                    getString(R.string.debugger_title)
+                                }
                                 setTextColor(palette.foreground)
                                 typeface = Type.strong
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            }
-                        )
-                        addView(
-                            LinearLayout(context).apply {
-                                orientation = LinearLayout.HORIZONTAL
-                                gravity = Gravity.CENTER_VERTICAL
-                                addView(
-                                    View(context).apply {
-                                        background = GradientDrawable().apply {
-                                            shape = GradientDrawable.OVAL
-                                            setColor(if (reading) palette.ok else palette.error)
-                                        }
-                                    },
-                                    LinearLayout.LayoutParams(gap(2), gap(2)).apply {
-                                        marginEnd = gap(2)
-                                    },
-                                )
-                                addView(
-                                    TextView(context).apply {
-                                        text = getString(
-                                            if (reading) {
-                                                R.string.log_bound
-                                            } else {
-                                                R.string.log_unbound
-                                            }
-                                        )
-                                        setTextColor(if (reading) palette.ok else palette.error)
-                                        typeface = Type.strong
-                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                                    }
-                                )
+                                maxLines = 1
+                                ellipsize = android.text.TextUtils.TruncateAt.END
                             }
                         )
                         addView(
                             TextView(context).apply {
-                                text = getString(
-                                    if (reading) {
-                                        R.string.log_bound_note
-                                    } else {
-                                        R.string.log_bind_note
-                                    }
-                                )
+                                text = if (chosen) {
+                                    watchPackage
+                                } else {
+                                    getString(R.string.debugger_app_pick)
+                                }
                                 setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                                setLineSpacing(gap(1).toFloat(), 1f)
+                                typeface = if (chosen) Type.data else typeface
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                maxLines = 1
+                                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
                             }
                         )
+                        if (chosen) {
+                            val linked = watchLinked && watchRefused.isEmpty()
+                            addView(
+                                LinearLayout(context).apply {
+                                    orientation = LinearLayout.HORIZONTAL
+                                    gravity = Gravity.CENTER_VERTICAL
+                                    setPadding(0, gap(1), 0, 0)
+                                    addView(
+                                        View(context).apply {
+                                            background = GradientDrawable().apply {
+                                                shape = GradientDrawable.OVAL
+                                                setColor(if (linked) palette.ok else palette.error)
+                                            }
+                                        },
+                                        LinearLayout.LayoutParams(gap(2), gap(2)).apply {
+                                            marginEnd = gap(2)
+                                        },
+                                    )
+                                    addView(
+                                        TextView(context).apply {
+                                            text = getString(
+                                                if (linked) {
+                                                    R.string.debugger_linked
+                                                } else {
+                                                    R.string.debugger_unlinked
+                                                }
+                                            )
+                                            setTextColor(if (linked) palette.ok else palette.error)
+                                            typeface = Type.strong
+                                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                        }
+                                    )
+                                }
+                            )
+                        }
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
-                if (!reading) {
-                    addView(
-                        logButton(Mark.Shape.LINK, R.string.log_bind, true) {
-                            seekTheDevice()
-                        },
-                        LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                            marginStart = gap(2)
-                        },
-                    )
-                }
+                addView(
+                    logButton(Mark.Shape.DROID, R.string.log_apps, !chosen) {
+                        chooseTheWatchedApp()
+                    },
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                        marginStart = gap(2)
+                    },
+                )
             }
         )
-        if (!reading && (logPort > 0 || logWireless || logWired)) {
+        if (watchRefused.isNotEmpty()) {
+            bound.addView(rule(), MATCH_PARENT, 1)
+            bound.addView(notice(watchRefused, palette.error))
+        }
+        val about = watchAbout
+        if (chosen && about.isNotEmpty()) {
             bound.addView(rule(), MATCH_PARENT, 1)
             bound.addView(
                 factRow(
-                    getString(R.string.log_seek_port),
-                    if (logPort > 0) {
-                        logPort.toString()
-                    } else {
-                        getString(R.string.log_seek_unknown)
-                    },
+                    getString(R.string.debugger_level),
+                    about["level"].orEmpty(),
                     onPress = null,
                 )
             )
             bound.addView(
                 factRow(
-                    getString(R.string.log_seek_switch),
-                    getString(
-                        when {
-                            logWireless -> R.string.log_seek_wifi
-                            logWired -> R.string.log_seek_cable
-                            else -> R.string.log_seek_shut
-                        }
-                    ),
+                    getString(R.string.debugger_profile),
+                    about["profile"].orEmpty(),
                     onPress = null,
                 )
             )
             bound.addView(
                 factRow(
-                    getString(R.string.log_notes),
-                    getString(
-                        if (Bell.allowed(this)) {
-                            R.string.log_notes_on
-                        } else {
-                            R.string.log_notes_off
-                        }
-                    ),
-                    Mark.Shape.SPEECH,
-                    R.string.log_notes,
-                ) { askToNotify() }
-            )
-            if (logPairHost.isNotEmpty()) {
-                bound.addView(
-                    factRow(
-                        getString(R.string.log_pair_found),
-                        getString(R.string.log_pair_at, logPairHost, logPairPort),
-                    ) {
-                        copyOut(
-                            logPairHost + ":" + logPairPort,
-                            getString(R.string.log_pair_found),
-                        )
-                    }
+                    getString(R.string.debugger_runtime),
+                    said(about["runtime"].orEmpty(), about["builder"].orEmpty()),
+                    onPress = null,
                 )
-            }
-            bound.addView(quiet(getString(R.string.log_seek_grant)))
-            bound.addView(
-                LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    background = sheet(palette.raised, palette.divider)
-                    setPaddingRelative(gap(3), gap(2), gap(2), gap(2))
-                    addView(
-                        HorizontalScrollView(context).apply {
-                            isHorizontalScrollBarEnabled = false
-                            addView(
-                                TextView(context).apply {
-                                    text = grantLine()
-                                    setTextColor(palette.marker)
-                                    typeface = Type.data
-                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                                    maxLines = 1
-                                }
-                            )
-                        },
-                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                    )
-                    addView(
-                        View(context).apply {
-                            foreground = Mark(Mark.Shape.COPY, palette.foreground)
-                            isClickable = true
-                            isFocusable = true
-                            contentDescription = getString(R.string.action_copy)
-                            readAs(Button::class.java.name)
-                            background = reacting(
-                                Color.TRANSPARENT,
-                                gap(5).toFloat(),
-                                palette.accent,
-                            )
-                            setOnClickListener {
-                                copyOut(grantLine(), getString(R.string.log_device))
-                            }
-                        },
-                        LinearLayout.LayoutParams(gap(7), gap(7)).apply { marginStart = gap(2) },
-                    )
-                },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                    topMargin = gap(1)
-                    bottomMargin = gap(2)
-                },
             )
         }
-        if (!reading) {
+        if (!Preferences.debuggerOn(this)) {
             bound.addView(rule(), MATCH_PARENT, 1)
             bound.addView(
                 factRow(
-                    getString(R.string.log_wireless),
-                    getString(
-                        if (developerOptionsOn()) {
-                            R.string.log_wireless_open
-                        } else {
-                            R.string.log_developer_off
-                        }
-                    ),
-                    Mark.Shape.LINK,
-                    R.string.log_wireless,
-                ) { openDeveloperOptions() }
+                    getString(R.string.settings_title),
+                    getString(R.string.debugger_off_note),
+                    Mark.Shape.GEAR,
+                    R.string.settings_title,
+                ) { go(Screen.Settings) }
             )
         }
         content.addView(bound)
+
+        val doing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+            }
+        }
+        doing.addView(
+            if (watchReading) {
+                logButton(Mark.Shape.STOP, R.string.log_stop, false) {
+                    stopWatching()
+                    render(false)
+                }
+            } else {
+                logButton(Mark.Shape.PLAY, R.string.log_start, chosen) {
+                    if (chosen) {
+                        startWatching()
+                        render(false)
+                    } else {
+                        chooseTheWatchedApp()
+                    }
+                }
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+        )
+        doing.addView(
+            logButton(Mark.Shape.UNDO, R.string.debugger_refetch, false) {
+                if (chosen) fetchTheWatchAgain() else chooseTheWatchedApp()
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                marginStart = gap(1)
+                marginEnd = gap(1)
+            },
+        )
+        doing.addView(
+            logButton(Mark.Shape.TRASH, R.string.log_wipe, false) {
+                if (chosen) askToClearTheDebugger() else chooseTheWatchedApp()
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        content.addView(doing)
+
+        val more = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+            }
+        }
+        more.addView(
+            logButton(Mark.Shape.CHART, R.string.debugger_snapshot, false) {
+                if (chosen) takeASnapshot() else chooseTheWatchedApp()
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+        )
+        more.addView(
+            logButton(Mark.Shape.PLAY, R.string.debugger_launch, false) {
+                if (chosen) openTheWatchedApp() else chooseTheWatchedApp()
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        content.addView(more)
+        content.addView(
+            logButton(Mark.Shape.BRAIN, R.string.debugger_analyse, true) {
+                if (chosen) analyseWithTheAssistant() else chooseTheWatchedApp()
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+                bottomMargin = gap(1)
+            },
+        )
 
         content.addView(
             LinearLayout(this).apply {
@@ -13586,7 +13833,7 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     TextView(context).apply {
-                        text = getString(R.string.menu_logcat)
+                        text = getString(R.string.log_written)
                         setTextColor(palette.accent)
                         typeface = Type.strong
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
@@ -13614,7 +13861,7 @@ class BuilderActivity : Activity() {
                 )
                 addView(
                     EditText(context).apply {
-                        setText(logSieve)
+                        setText(watchSieve)
                         hint = getString(R.string.log_sieve)
                         setHintTextColor(palette.muted)
                         setTextColor(palette.foreground)
@@ -13625,8 +13872,8 @@ class BuilderActivity : Activity() {
                             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
                             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
                             override fun afterTextChanged(s: Editable?) {
-                                logSieve = s?.toString().orEmpty()
-                                paintTheLog()
+                                watchSieve = s?.toString().orEmpty()
+                                paintTheWatch()
                             }
                         })
                     },
@@ -13635,102 +13882,22 @@ class BuilderActivity : Activity() {
             }
         )
         sieve.addView(rule(), MATCH_PARENT, 1)
+        val kinds = listOf(
+            R.string.debugger_kind_all,
+            R.string.debugger_kind_crash,
+            R.string.debugger_kind_anr,
+            R.string.debugger_kind_exit,
+            R.string.debugger_kind_lifecycle,
+            R.string.debugger_kind_performance,
+            R.string.debugger_kind_log,
+        )
         sieve.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(
-                    View(context).apply { foreground = Mark(Mark.Shape.CODE, palette.muted) },
-                    LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(2) },
-                )
-                addView(
-                    EditText(context).apply {
-                        setText(logArgs)
-                        hint = getString(R.string.log_args_hint)
-                        setHintTextColor(palette.muted)
-                        setTextColor(palette.foreground)
-                        typeface = Type.data
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        setBackgroundColor(Color.TRANSPARENT)
-                        isSingleLine = true
-                        addTextChangedListener(object : TextWatcher {
-                            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                            override fun afterTextChanged(s: Editable?) {
-                                logArgs = s?.toString().orEmpty()
-                            }
-                        })
-                    },
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-                )
+            chips(kinds.map { getString(it) }, { it == watchKind }) { picked ->
+                watchKind = picked
+                paintTheWatch()
             }
-        )
-        sieve.addView(rule(), MATCH_PARENT, 1)
-        sieve.addView(
-            factRow(
-                getString(R.string.log_apps),
-                logPackageShown.ifEmpty { getString(R.string.log_apps_any) },
-                Mark.Shape.DROID,
-                R.string.log_apps,
-            ) { chooseTheLoggedApp() }
-        )
-        sieve.addView(
-            factRow(
-                getString(R.string.log_crashes),
-                getString(
-                    if (logCrashes) {
-                        R.string.log_crashes_on
-                    } else {
-                        R.string.log_crashes_off
-                    }
-                ),
-                Mark.Shape.INFO,
-                R.string.log_crashes,
-            ) {
-                logCrashes = !logCrashes
-                if (logReading) {
-                    stopTheLog()
-                    startTheLog()
-                }
-                render(false)
-            }
-        )
-        sieve.addView(
-            quiet(logCommand().joinToString(" "))
         )
         content.addView(sieve)
-
-        val doing = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                topMargin = gap(2)
-            }
-        }
-        doing.addView(
-            logButton(Mark.Shape.PLAY, R.string.log_start, !logReading) {
-                startTheLog()
-                render(false)
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
-        )
-        doing.addView(
-            logButton(Mark.Shape.STOP, R.string.log_stop, false) {
-                stopTheLog()
-                render(false)
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                marginStart = gap(1)
-                marginEnd = gap(1)
-            },
-        )
-        doing.addView(
-            logButton(Mark.Shape.TRASH, R.string.log_wipe, false) {
-                synchronized(logHeld) { logHeld.clear() }
-                paintTheLog()
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
-        )
-        content.addView(doing)
 
         val shown = card()
         shown.addView(
@@ -13738,37 +13905,28 @@ class BuilderActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    LinearLayout(context).apply {
-                        orientation = LinearLayout.VERTICAL
-                        addView(
-                            TextView(context).apply {
-                                text = getString(R.string.log_written)
-                                setTextColor(palette.foreground)
-                                typeface = Type.strong
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            }
-                        )
-                        addView(
-                            TextView(context).apply {
-                                text = getString(R.string.log_scope)
-                                setTextColor(palette.muted)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                            }
-                        )
+                    TextView(context).apply {
+                        text = getString(R.string.debugger_title)
+                        setTextColor(palette.foreground)
+                        typeface = Type.strong
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                     },
                     LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
                 )
                 addView(
                     markControl(Mark.Shape.COPY, R.string.action_copy) {
-                        copyOut(heldLog(), getString(R.string.menu_logcat))
+                        copyOut(watchedText(shownEvents(), WATCH_COPIED), getString(R.string.menu_logcat))
                     },
                     LinearLayout.LayoutParams(gap(8), gap(8)),
                 )
                 addView(
                     markControl(Mark.Shape.WIDEN, R.string.log_written) {
-                        showNote(getString(R.string.log_written), heldLog().ifEmpty {
-                            getString(R.string.log_empty)
-                        })
+                        showNote(
+                            getString(R.string.log_written),
+                            watchedText(shownEvents(), WATCH_COPIED).ifEmpty {
+                                getString(R.string.log_empty)
+                            },
+                        )
                     },
                     LinearLayout.LayoutParams(gap(8), gap(8)),
                 )
@@ -13780,7 +13938,7 @@ class BuilderActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             setPadding(0, gap(1), 0, gap(1))
         }
-        logCount = counter
+        watchCount = counter
         val written = EditText(this).apply {
             setTextColor(palette.foreground)
             setBackgroundColor(Color.TRANSPARENT)
@@ -13792,16 +13950,16 @@ class BuilderActivity : Activity() {
             setTextIsSelectable(true)
             keyListener = null
             minLines = 10
-            maxLines = 30
+            maxLines = 40
             setPadding(gap(1))
         }
-        logView = written
+        watchView = written
         val hollow = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(gap(4), gap(10), gap(4), gap(10))
             addView(
-                View(context).apply { foreground = Mark(Mark.Shape.NOTE, palette.divider) },
+                View(context).apply { foreground = Mark(Mark.Shape.BUG, palette.divider) },
                 LinearLayout.LayoutParams(gap(14), gap(14)),
             )
             addView(
@@ -13824,7 +13982,7 @@ class BuilderActivity : Activity() {
                 }
             )
         }
-        logHollow = hollow
+        watchHollow = hollow
         shown.addView(counter)
         shown.addView(hollow)
         shown.addView(
@@ -13834,18 +13992,183 @@ class BuilderActivity : Activity() {
             }
         )
         content.addView(shown)
-        paintTheLog()
-        if (logReading) {
-            content.removeCallbacks(logTick)
-            content.postDelayed(logTick, LOG_TICK_MILLIS)
+        paintTheWatch()
+        if (chosen && watchWanted && !watchReading && watchRefused.isEmpty()) {
+            startWatching()
+        } else if (chosen && !watchReading && watchAbout.isEmpty() && watchRefused.isEmpty()) {
+            fetchOnce()
         }
+
+        val keeps = watchAbout["collected"].orEmpty().split(',').filter { it.isNotEmpty() }
+        val listed = DEBUGGER_COLLECTED
+            .filter { (key, _) -> keeps.isEmpty() || key in keeps }
+            .joinToString("\n") { (_, said) -> "• " + getString(said) }
         content.addView(
             noteCard(
                 getString(R.string.log_about),
-                getString(R.string.log_note_scope),
+                getString(R.string.debugger_privacy) + "\n\n" + listed,
                 logButton(Mark.Shape.BOOK, R.string.log_guide, false) { go(Screen.Help) },
             )
         )
+    }
+
+    private fun renderSettings() {
+        content.addView(
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(3) },
+        )
+        val building = card()
+        building.addView(
+            switchRow(
+                getString(R.string.settings_debugger),
+                getString(R.string.settings_debugger_note),
+                Preferences.debuggerOn(this),
+            ) { on ->
+                Preferences.setDebuggerOn(this, on)
+                DebuggerHost.configure(this)
+            }
+        )
+        building.addView(rule(), MATCH_PARENT, 1)
+        building.addView(
+            switchRow(
+                getString(R.string.settings_security),
+                getString(R.string.settings_security_note),
+                Preferences.securityOn(this),
+            ) { on ->
+                Preferences.setSecurityOn(this, on)
+                DebuggerHost.configure(this)
+            }
+        )
+        content.addView(building)
+
+        val other = card()
+        other.addView(
+            factRow(
+                getString(R.string.log_notes),
+                getString(
+                    if (Bell.allowed(this)) {
+                        R.string.log_notes_on
+                    } else {
+                        R.string.log_notes_off
+                    }
+                ),
+                Mark.Shape.SPEECH,
+                R.string.log_notes,
+            ) { askToNotify() }
+        )
+        other.addView(rule(), MATCH_PARENT, 1)
+        other.addView(
+            factRow(
+                getString(R.string.settings_theme),
+                getString(R.string.settings_open),
+                Mark.Shape.BRUSH,
+                R.string.settings_theme,
+            ) { go(Screen.Theme) }
+        )
+        other.addView(rule(), MATCH_PARENT, 1)
+        other.addView(
+            factRow(
+                getString(R.string.settings_language),
+                languageShown(),
+                Mark.Shape.GLOBE,
+                R.string.settings_language,
+            ) { go(Screen.Languages) }
+        )
+        other.addView(rule(), MATCH_PARENT, 1)
+        other.addView(
+            factRow(
+                getString(R.string.menu_docs),
+                getString(R.string.settings_open),
+                Mark.Shape.BOOK,
+                R.string.menu_docs,
+            ) { go(Screen.Help) }
+        )
+        content.addView(other)
+    }
+
+    private fun renderVirtualAndroid() {
+        content.addView(
+            rule(),
+            LinearLayout.LayoutParams(MATCH_PARENT, 1).apply { bottomMargin = gap(3) },
+        )
+        val promo = card()
+        promo.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    View(context).apply { foreground = Mark(Mark.Shape.PHONE, palette.accent) },
+                    LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(3) },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.virtual_title)
+                                setTextColor(palette.foreground)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                            }
+                        )
+                        addView(
+                            TextView(context).apply {
+                                text = getString(R.string.virtual_soon)
+                                setTextColor(palette.background)
+                                typeface = Type.strong
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                background = pill(palette.accent, gap(3).toFloat())
+                                setPadding(gap(2), gap(1) / 2, gap(2), gap(1) / 2)
+                            },
+                            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                                topMargin = gap(1)
+                            },
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                )
+            }
+        )
+        promo.addView(
+            TextView(this).apply {
+                text = getString(R.string.virtual_promo)
+                setTextColor(palette.foreground)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setLineSpacing(gap(1).toFloat(), 1f)
+                setPadding(0, gap(3), 0, gap(2))
+            }
+        )
+        for ((shape, named) in listOf(
+            Mark.Shape.PHONE to R.string.virtual_tests,
+            Mark.Shape.FILM to R.string.virtual_live,
+            Mark.Shape.GLOBE to R.string.virtual_offline,
+            Mark.Shape.SHIELD to R.string.virtual_root,
+            Mark.Shape.LINK to R.string.virtual_bridge,
+            Mark.Shape.LOG to R.string.virtual_terminal,
+        )) {
+            promo.addView(rule(), MATCH_PARENT, 1)
+            promo.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, gap(2), 0, gap(2))
+                    addView(
+                        View(context).apply { foreground = Mark(shape, palette.accent) },
+                        LinearLayout.LayoutParams(gap(6), gap(6)).apply { marginEnd = gap(3) },
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = getString(named)
+                            setTextColor(palette.foreground)
+                            typeface = Type.strong
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        },
+                        LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+                    )
+                }
+            )
+        }
+        content.addView(promo)
     }
 
     private fun techTile(
@@ -14006,9 +14329,15 @@ class BuilderActivity : Activity() {
         formVersionName = "1.0.0"
         formVersionCode = "1"
         formPackage = Preferences.newPackage(this, DEFAULT_PACKAGE)
-        formMinSdk = Preferences.newMinSdk(this, OLDEST_PLATFORM)
+        formMinSdk = Preferences.newMinSdk(this, DEFAULT_PLATFORM)
+            .coerceIn(OLDEST_PLATFORM, NEWEST_PLATFORM)
         formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
+        formAbis.clear()
+        formAbis.addAll(DEFAULT_ABIS)
     }
+
+    private fun chosenAbis(): List<String> =
+        PROJECT_ABIS.filter { it in formAbis }.ifEmpty { DEFAULT_ABIS }
 
     private fun showKinds() {
         val panel = LinearLayout(this).apply {
@@ -14201,7 +14530,7 @@ class BuilderActivity : Activity() {
         label = formLabel.trim(),
         versionName = formVersionName.trim(),
         versionCode = formVersionCode.trim().toIntOrNull() ?: 0,
-        abis = ONLY_ABI,
+        abis = chosenAbis(),
         minSdk = formMinSdk,
         targetSdk = formTargetSdk,
         languages = listOf("java"),
@@ -17545,7 +17874,7 @@ class BuilderActivity : Activity() {
         label = formLabel.trim(),
         versionName = formVersionName.trim(),
         versionCode = formVersionCode.trim().toIntOrNull() ?: 0,
-        abis = ONLY_ABI,
+        abis = chosenAbis(),
         minSdk = formMinSdk,
         targetSdk = formTargetSdk,
         languages = formLanguages.toList(),
@@ -22838,8 +23167,6 @@ internal object Bell {
     const val CHANNEL = "apk_builder"
 
     const val BUILD_NOTE = 1
-
-    const val PAIRING_NOTE = 2
 
     fun channelHere(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return

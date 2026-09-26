@@ -81,7 +81,7 @@ jobs:
           set -euo pipefail
           rustup toolchain install "$APK_BUILDER_RUST_VERSION" --profile minimal
           rustup default "$APK_BUILDER_RUST_VERSION"
-          rustup target add aarch64-linux-android
+          rustup target add aarch64-linux-android x86_64-linux-android
           rustc --version
 
       - name: Install the pinned Android SDK packages

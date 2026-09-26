@@ -1399,8 +1399,10 @@ pub mod compiler {
         }
     }
 
-    pub const OLDEST_API: u32 = 30;
+    pub const OLDEST_API: u32 = 28;
     pub const NEWEST_API: u32 = 37;
+
+    pub const DEFAULT_MIN_API: u32 = 30;
 
     pub const NEWEST_DESCRIBED_API: u32 = 37;
 
@@ -4394,7 +4396,7 @@ pub mod project {
                 id: id.into(),
                 version: "0.1.0".to_string(),
                 edition: None,
-                min_sdk: crate::compiler::OLDEST_API,
+                min_sdk: crate::compiler::DEFAULT_MIN_API,
 
                 target_sdk: crate::compiler::NEWEST_DESCRIBED_API,
                 compile_sdk: crate::compiler::NEWEST_DESCRIBED_API,
@@ -21301,7 +21303,7 @@ pub mod guard {
                 rule: "minimum-platform",
                 code: "EG006",
                 what: format!("The package does not require API {MINIMUM_SDK} or later."),
-                why: "Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.".to_string(),
+                why: "Below API 28 the platform permits cleartext by default and lacks the hardware-backed key protections the rules above assume.".to_string(),
                 remedy: "Declare a minimum platform that still receives fixes.".to_string(),
             }),
         }
@@ -29895,7 +29897,7 @@ public final class Watchdog extends Thread {
 
     private final boolean sampling;
 
-    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Handler main = Handler.createAsync(Looper.getMainLooper());
 
     private volatile long answered = SystemClock.uptimeMillis();
 
@@ -29977,15 +29979,26 @@ public final class Watchdog extends Thread {
         if (reported || now - answered < STALLED_MILLIS || Debug.isDebuggerConnected()) {
             return;
         }
-        reported = true;
         Thread thread = Looper.getMainLooper().getThread();
+        StackTraceElement[] frames = thread.getStackTrace();
+        if (waiting(frames)) {
+            asked = false;
+            return;
+        }
+        reported = true;
         StringBuilder out = new StringBuilder();
         out.append("The main thread has not answered for ").append(now - answered)
                 .append(" ms. This is what it is doing:\n\n");
-        Crashes.describe(out, thread, thread.getStackTrace());
+        Crashes.describe(out, thread, frames);
         out.append("--- ").append(Crashes.memory()).append(" ---\n\n");
         out.append("--- Other threads ---\n").append(Crashes.threads(thread));
         journal.recordNow("anr", 'E', "ApplicationNotResponding", out.toString());
+    }
+
+    static boolean waiting(StackTraceElement[] frames) {
+        return frames.length > 0
+                && "android.os.MessageQueue".equals(frames[0].getClassName())
+                && "nativePollOnce".equals(frames[0].getMethodName());
     }
 
     private void sample() {
@@ -30023,10 +30036,13 @@ import android.app.Application;
 import android.content.ComponentCallbacks2;
 import android.content.res.Configuration;
 import android.os.Bundle;
-import android.view.Choreographer;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.view.FrameMetrics;
+import android.view.Window;
 
 public final class ActivityTrail implements Application.ActivityLifecycleCallbacks,
-        ComponentCallbacks2, Choreographer.FrameCallback {
+        ComponentCallbacks2, Window.OnFrameMetricsAvailableListener {
 
     public static final long SLOW_NANOS = 32_000_000L;
 
@@ -30038,11 +30054,7 @@ public final class ActivityTrail implements Application.ActivityLifecycleCallbac
 
     private final boolean framing;
 
-    private int resumed;
-
-    private boolean watchingFrames;
-
-    private long lastFrame;
+    private Handler frames;
 
     private int slow;
 
@@ -30083,6 +30095,25 @@ public final class ActivityTrail implements Application.ActivityLifecycleCallbac
         }
     }
 
+    public synchronized void counted(long nanos) {
+        drawn++;
+        if (nanos >= FROZEN_NANOS) {
+            frozen++;
+        } else if (nanos >= SLOW_NANOS) {
+            slow++;
+        }
+    }
+
+    private Handler frames() {
+        if (frames == null) {
+            HandlerThread thread = new HandlerThread("debugger-frames",
+                    android.os.Process.THREAD_PRIORITY_BACKGROUND);
+            thread.start();
+            frames = new Handler(thread.getLooper());
+        }
+        return frames;
+    }
+
     private void note(Activity activity, String what) {
         journal.record("lifecycle", 'I', activity.getClass().getSimpleName(),
                 activity.getClass().getName() + " " + what);
@@ -30101,18 +30132,24 @@ public final class ActivityTrail implements Application.ActivityLifecycleCallbac
     @Override
     public void onActivityResumed(Activity activity) {
         note(activity, "resumed");
-        resumed++;
-        if (framing && !watchingFrames) {
-            watchingFrames = true;
-            lastFrame = 0;
-            Choreographer.getInstance().postFrameCallback(this);
+        if (framing && activity.getWindow() != null) {
+            try {
+                activity.getWindow().addOnFrameMetricsAvailableListener(this, frames());
+            } catch (RuntimeException refused) {
+                journal.record("info", 'W', Debugger.TAG, "Frames cannot be timed: " + refused);
+            }
         }
     }
 
     @Override
     public void onActivityPaused(Activity activity) {
         note(activity, "paused");
-        resumed = Math.max(0, resumed - 1);
+        if (framing && activity.getWindow() != null) {
+            try {
+                activity.getWindow().removeOnFrameMetricsAvailableListener(this);
+            } catch (RuntimeException notAdded) {
+            }
+        }
     }
 
     @Override
@@ -30130,24 +30167,8 @@ public final class ActivityTrail implements Application.ActivityLifecycleCallbac
     }
 
     @Override
-    public void doFrame(long frameTimeNanos) {
-        if (lastFrame != 0) {
-            long spent = frameTimeNanos - lastFrame;
-            synchronized (this) {
-                drawn++;
-                if (spent >= FROZEN_NANOS) {
-                    frozen++;
-                } else if (spent >= SLOW_NANOS) {
-                    slow++;
-                }
-            }
-        }
-        lastFrame = frameTimeNanos;
-        if (resumed > 0) {
-            Choreographer.getInstance().postFrameCallback(this);
-        } else {
-            watchingFrames = false;
-        }
+    public void onFrameMetricsAvailable(Window window, FrameMetrics metrics, int dropped) {
+        counted(metrics.getMetric(FrameMetrics.TOTAL_DURATION));
     }
 
     @Override
@@ -34526,7 +34547,7 @@ pub mod settings {
                 label: String::new(),
                 version_name: crate::scaffold::FIRST_VERSION_NAME.to_string(),
                 version_code: crate::scaffold::FIRST_VERSION_CODE,
-                min_sdk: crate::scaffold::OLDEST_SUPPORTED,
+                min_sdk: crate::scaffold::DEFAULT_MIN,
                 target_sdk: crate::scaffold::NEWEST_DESCRIBED,
                 compile_sdk: crate::scaffold::NEWEST_DESCRIBED,
                 languages: vec!["java".to_string()],
@@ -38438,6 +38459,8 @@ pub mod scaffold {
 
     pub const ARM64: &str = "arm64-v8a";
 
+    pub const ABIS: &[&str] = &["arm64-v8a", "x86_64", "armeabi-v7a", "x86"];
+
     pub const JAVA_FOLDER: &str = "Java";
 
     pub const ASSETS_FOLDER: &str = "Assets";
@@ -38485,6 +38508,8 @@ pub mod scaffold {
     pub const NEWEST_SUPPORTED: u32 = crate::compiler::NEWEST_API;
 
     pub const NEWEST_DESCRIBED: u32 = crate::compiler::NEWEST_DESCRIBED_API;
+
+    pub const DEFAULT_MIN: u32 = crate::compiler::DEFAULT_MIN_API;
 
     pub const DEFAULT_PACKAGE: &str = "com.my.app";
     pub const DEFAULT_LABEL: &str = "My App";
@@ -38593,7 +38618,7 @@ pub mod scaffold {
                 package: DEFAULT_PACKAGE.to_string(),
                 label: DEFAULT_LABEL.to_string(),
                 abis: vec![ARM64.to_string()],
-                min_sdk: OLDEST_SUPPORTED,
+                min_sdk: DEFAULT_MIN,
                 target_sdk: NEWEST_DESCRIBED,
                 languages: vec!["java".to_string()],
                 locales: LOCALES.iter().map(|(tag, _)| (*tag).to_string()).collect(),
@@ -38671,18 +38696,16 @@ pub mod scaffold {
                     "abis" => {
                         for abi in value.split(',').filter(|a| !a.trim().is_empty()) {
                             let abi = abi.trim();
-                            if abi != ARM64 {
+                            if !ABIS.contains(&abi) {
                                 return Err(fail(
                                     "EP003",
                                     "An architecture is not one this build knows.",
                                 )
                                 .with_context(format!("Value: {abi:?}"))
-                                .with_context(format!("Known: {ARM64}"))
+                                .with_context(format!("Known: {}", ABIS.join(", ")))
                                 .with_suggestion(
-                                    "This builds for sixty-four bit ARM and nothing else. \
-                                     A thirty-two bit or an emulator build is not produced \
-                                     here, so it is refused rather than written and left \
-                                     to fail somewhere further along.",
+                                    "Choose arm64-v8a or x86_64 for sixty-four bit devices and emulators, \
+                                     or armeabi-v7a or x86 for thirty-two bit ones.",
                                 ));
                             }
                             spec.abis.push(abi.to_string());
@@ -51098,7 +51121,13 @@ public final class R {{
         let produced = crate::compilers::java::compile_together(&read, &classpath)?;
         let min_sdk = crate::settings::held(root)?
             .map(|held| held.min_sdk)
-            .unwrap_or(crate::compiler::OLDEST_API);
+            .or_else(|| {
+                crate::scaffold::read_manifest(root)
+                    .ok()
+                    .and_then(|text| minimum_declared(&text))
+            })
+            .unwrap_or(crate::compiler::DEFAULT_MIN_API)
+            .max(crate::compiler::OLDEST_API);
         let produced = crate::desugar::lowered(produced, min_sdk)?;
         let mut out = Vec::new();
         for (name, bytes) in produced {
@@ -51713,6 +51742,35 @@ public final class R {{
         true
     }
 
+    pub fn minimum_declared(manifest: &str) -> Option<u32> {
+        let mut sink = Sink::new();
+        let root = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink)?;
+        let declared = root
+            .children_named("uses-sdk")
+            .next()
+            .and_then(|element| element.attribute("android:minSdkVersion"))
+            .and_then(|text| text.trim().parse::<u32>().ok());
+        declared
+    }
+
+    fn raise_the_floor(root: &mut crate::xml::Element) -> Option<u32> {
+        let floor = crate::compiler::OLDEST_API;
+        let uses = root
+            .children
+            .iter_mut()
+            .find(|child| child.name == "uses-sdk")?;
+        let held = uses
+            .attributes
+            .iter_mut()
+            .find(|one| one.name == "android:minSdkVersion")?;
+        let declared = held.value.trim().parse::<u32>().ok()?;
+        if declared >= floor {
+            return None;
+        }
+        held.value = floor.to_string();
+        Some(declared)
+    }
+
     pub fn package_of(manifest: &str) -> Option<String> {
         let mut sink = Sink::new();
         let root = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink)?;
@@ -52045,6 +52103,22 @@ public final class R {{
         }
         resolve_references(&mut root, icons.as_ref().map(|made| &made.compiled))?;
         export_what_answers_intents(&mut root);
+        if let Some(declared) = raise_the_floor(&mut root) {
+            sink.emit(
+                Diagnostic::new(
+                    "EB065",
+                    Severity::Info,
+                    FailureClass::Success,
+                    "core.builder",
+                    "The minimum platform was raised to Android 9, the oldest this builds for.",
+                )
+                .with_context(format!("Chosen: API {declared}"))
+                .with_context(format!(
+                    "Allowed: API {} and above",
+                    crate::compiler::OLDEST_API
+                )),
+            );
+        }
 
         if let Some(class) = &project.sealed {
             let package = if project.application_id.is_empty() {
