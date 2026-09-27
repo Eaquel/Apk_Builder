@@ -25966,17 +25966,18 @@ Viewbinding   = false
             adopted.unread
         );
         assert!(
-            adopted
-                .unread
-                .iter()
-                .any(|one| one == "buildFeatures { dataBinding true }"),
-            "a feature this does not carry is said out loud: {:?}",
+            !adopted.unread.iter().any(|one| one.contains("Binding")),
+            "view and data binding are carried, so neither is listed as left behind: {:?}",
             adopted.unread
         );
-        assert!(
-            !adopted.unread.iter().any(|one| one.contains("viewBinding")),
-            "view binding is carried, so it is not listed as left behind"
-        );
+        let settings = std::fs::read_to_string(directory.join("Builder.json")).unwrap();
+        assert!(settings.contains("\"dataBinding\": true"), "{settings}");
+        for artifact in crate::databinding::ARTIFACTS {
+            assert!(
+                settings.contains(artifact),
+                "{artifact} is brought along: {settings}"
+            );
+        }
         let tier = std::fs::read_to_string(directory.join("Java/com/demo/app/Tier.java")).unwrap();
         assert!(
             !tier.contains("paid"),
@@ -41121,5 +41122,801 @@ mod vibe_coding {
         w.end_array();
         let whole = w.finish();
         whole[1..whole.len() - 1].to_string()
+    }
+}
+
+mod databinding {
+    use crate::compilers::java::{compile_together, Classpath};
+    use crate::databinding::{generate, is_bound, Layout, Made};
+    use crate::diag::Diagnostic;
+
+    const RUNTIME: &[(&str, &str)] = &[
+        (
+            "androidx/viewbinding/ViewBinding.java",
+            "package androidx.viewbinding;
+public interface ViewBinding {
+    android.view.View getRoot();
+}
+",
+        ),
+        (
+            "androidx/databinding/Observable.java",
+            "package androidx.databinding;
+public interface Observable {
+}
+",
+        ),
+        (
+            "androidx/databinding/BaseObservable.java",
+            "package androidx.databinding;
+public class BaseObservable implements Observable {
+    public void notifyPropertyChanged(int fieldId) {
+    }
+    public void notifyChange() {
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/BaseObservableField.java",
+            "package androidx.databinding;
+public abstract class BaseObservableField extends BaseObservable {
+}
+",
+        ),
+        (
+            "androidx/databinding/ObservableField.java",
+            "package androidx.databinding;
+public class ObservableField<T> extends BaseObservableField {
+    private T held;
+    public ObservableField() {
+    }
+    public ObservableField(T value) {
+        held = value;
+    }
+    public T get() {
+        return held;
+    }
+    public void set(T value) {
+        held = value;
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/ObservableInt.java",
+            "package androidx.databinding;
+public class ObservableInt extends BaseObservableField {
+    private int held;
+    public ObservableInt() {
+    }
+    public ObservableInt(int value) {
+        held = value;
+    }
+    public int get() {
+        return held;
+    }
+    public void set(int value) {
+        held = value;
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/ObservableBoolean.java",
+            "package androidx.databinding;
+public class ObservableBoolean extends BaseObservableField {
+    private boolean held;
+    public boolean get() {
+        return held;
+    }
+    public void set(boolean value) {
+        held = value;
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/ObservableList.java",
+            "package androidx.databinding;
+public interface ObservableList<T> extends java.util.List<T> {
+}
+",
+        ),
+        (
+            "androidx/databinding/ObservableArrayList.java",
+            "package androidx.databinding;
+public class ObservableArrayList<T> extends java.util.ArrayList<T> implements ObservableList<T> {
+}
+",
+        ),
+        (
+            "androidx/databinding/ObservableMap.java",
+            "package androidx.databinding;
+public interface ObservableMap<K, V> extends java.util.Map<K, V> {
+}
+",
+        ),
+        (
+            "androidx/databinding/InverseBindingListener.java",
+            "package androidx.databinding;
+public interface InverseBindingListener {
+    void onChange();
+}
+",
+        ),
+        (
+            "androidx/databinding/Bindable.java",
+            "package androidx.databinding;
+public @interface Bindable {
+}
+",
+        ),
+        (
+            "androidx/databinding/BindingAdapter.java",
+            "package androidx.databinding;
+public @interface BindingAdapter {
+    String[] value();
+    boolean requireAll() default true;
+}
+",
+        ),
+        (
+            "androidx/databinding/BindingConversion.java",
+            "package androidx.databinding;
+public @interface BindingConversion {
+}
+",
+        ),
+        (
+            "androidx/databinding/ViewStubProxy.java",
+            "package androidx.databinding;
+public class ViewStubProxy {
+    public ViewStubProxy(android.view.ViewStub stub) {
+    }
+    public void setContainingBinding(ViewDataBinding binding) {
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/ViewDataBinding.java",
+            "package androidx.databinding;
+public abstract class ViewDataBinding extends BaseObservable implements androidx.viewbinding.ViewBinding {
+    protected final DataBindingComponent mBindingComponent;
+    private final android.view.View mRoot;
+    protected ViewDataBinding(Object bindingComponent, android.view.View root, int localFieldCount) {
+        mBindingComponent = (DataBindingComponent) bindingComponent;
+        mRoot = root;
+    }
+    public static class IncludedLayouts {
+        public IncludedLayouts(int count) {
+        }
+        public void setIncludes(int index, String[] layouts, int[] indexes, int[] layoutIds) {
+        }
+    }
+    protected abstract boolean onFieldChange(int localFieldId, Object object, int fieldId);
+    public abstract boolean setVariable(int variableId, Object value);
+    protected abstract void executeBindings();
+    public abstract void invalidateAll();
+    public abstract boolean hasPendingBindings();
+    public android.view.View getRoot() {
+        return mRoot;
+    }
+    public void setLifecycleOwner(androidx.lifecycle.LifecycleOwner owner) {
+    }
+    public void executePendingBindings() {
+        executeBindings();
+    }
+    protected void requestRebind() {
+    }
+    protected void setRootTag(android.view.View view) {
+    }
+    protected void setContainedBinding(ViewDataBinding binding) {
+    }
+    protected static void executeBindingsOn(ViewDataBinding other) {
+        other.executePendingBindings();
+    }
+    protected boolean updateRegistration(int localFieldId, Observable observable) {
+        return true;
+    }
+    protected boolean updateRegistration(int localFieldId, ObservableList observable) {
+        return true;
+    }
+    protected boolean updateRegistration(int localFieldId, ObservableMap observable) {
+        return true;
+    }
+    protected boolean updateLiveDataRegistration(int localFieldId, androidx.lifecycle.LiveData observable) {
+        return true;
+    }
+    protected static Object[] mapBindings(DataBindingComponent component, android.view.View root, int count, IncludedLayouts includes, android.util.SparseIntArray ids) {
+        return new Object[count];
+    }
+    protected static int safeUnbox(Integer value) {
+        return value == null ? 0 : value.intValue();
+    }
+    protected static boolean safeUnbox(Boolean value) {
+        return value != null && value.booleanValue();
+    }
+    protected static ViewDataBinding inflateInternal(android.view.LayoutInflater inflater, int layoutId, android.view.ViewGroup parent, boolean attach, Object component) {
+        return null;
+    }
+    protected static ViewDataBinding bind(Object component, android.view.View view, int layoutId) {
+        return null;
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/DataBinderMapper.java",
+            "package androidx.databinding;
+public abstract class DataBinderMapper {
+    public abstract ViewDataBinding getDataBinder(DataBindingComponent component, android.view.View view, int layoutId);
+    public abstract ViewDataBinding getDataBinder(DataBindingComponent component, android.view.View[] views, int layoutId);
+    public abstract int getLayoutId(String tag);
+    public abstract String convertBrIdToString(int id);
+    public java.util.List<DataBinderMapper> collectDependencies() {
+        return new java.util.ArrayList<DataBinderMapper>();
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/MergedDataBinderMapper.java",
+            "package androidx.databinding;
+public class MergedDataBinderMapper extends DataBinderMapper {
+    public void addMapper(DataBinderMapper mapper) {
+    }
+    public ViewDataBinding getDataBinder(DataBindingComponent component, android.view.View view, int layoutId) {
+        return null;
+    }
+    public ViewDataBinding getDataBinder(DataBindingComponent component, android.view.View[] views, int layoutId) {
+        return null;
+    }
+    public int getLayoutId(String tag) {
+        return 0;
+    }
+    public String convertBrIdToString(int id) {
+        return null;
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/DataBindingUtil.java",
+            "package androidx.databinding;
+public class DataBindingUtil {
+    public static DataBindingComponent getDefaultComponent() {
+        return null;
+    }
+}
+",
+        ),
+        (
+            "androidx/lifecycle/LifecycleOwner.java",
+            "package androidx.lifecycle;
+public interface LifecycleOwner {
+}
+",
+        ),
+        (
+            "androidx/lifecycle/LiveData.java",
+            "package androidx.lifecycle;
+public abstract class LiveData<T> {
+    T held;
+    public T getValue() {
+        return held;
+    }
+}
+",
+        ),
+        (
+            "androidx/lifecycle/MutableLiveData.java",
+            "package androidx.lifecycle;
+public class MutableLiveData<T> extends LiveData<T> {
+    public MutableLiveData(T value) {
+        held = value;
+    }
+    public void setValue(T value) {
+        held = value;
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/adapters/TextViewBindingAdapter.java",
+            "package androidx.databinding.adapters;
+public class TextViewBindingAdapter {
+    public interface BeforeTextChanged {
+        void beforeTextChanged(CharSequence s, int start, int count, int after);
+    }
+    public interface OnTextChanged {
+        void onTextChanged(CharSequence s, int start, int before, int count);
+    }
+    public interface AfterTextChanged {
+        void afterTextChanged(android.text.Editable s);
+    }
+    public static void setText(android.widget.TextView view, CharSequence text) {
+        view.setText(text);
+    }
+    public static String getTextString(android.widget.TextView view) {
+        return view.getText().toString();
+    }
+    public static void setTextWatcher(android.widget.TextView view, BeforeTextChanged before, OnTextChanged on, AfterTextChanged after, androidx.databinding.InverseBindingListener changed) {
+    }
+}
+",
+        ),
+        (
+            "androidx/databinding/adapters/CompoundButtonBindingAdapter.java",
+            "package androidx.databinding.adapters;
+public class CompoundButtonBindingAdapter {
+    public static void setChecked(android.widget.CompoundButton view, boolean checked) {
+        view.setChecked(checked);
+    }
+    public static void setListeners(android.widget.CompoundButton view, android.widget.CompoundButton.OnCheckedChangeListener listener, androidx.databinding.InverseBindingListener changed) {
+    }
+}
+",
+        ),
+    ];
+
+    const STORE: &str = r#"{
+  "useAndroidX": true,
+  "version": 5,
+  "adapterMethods": {
+    "android:text": [[{"viewType": "android.widget.TextView", "valueType": "java.lang.CharSequence"}, {"type": "androidx.databinding.adapters.TextViewBindingAdapter", "method": "setText", "requiresOldValue": false, "isStatic": true, "componentClass": null}]],
+    "android:checked": [[{"viewType": "android.widget.CompoundButton", "valueType": "boolean"}, {"type": "androidx.databinding.adapters.CompoundButtonBindingAdapter", "method": "setChecked", "requiresOldValue": false, "isStatic": true, "componentClass": null}]]
+  },
+  "renamedMethods": {
+    "android:onClick": {"android.view.View": {"type": "androidx.databinding.adapters.TextViewBindingAdapter", "method": "setOnClickListener", "requiresOldValue": false, "isStatic": true, "componentClass": null}},
+    "android:onLongClick": {"android.view.View": {"type": "androidx.databinding.adapters.TextViewBindingAdapter", "method": "setOnLongClickListener", "requiresOldValue": false, "isStatic": true, "componentClass": null}}
+  },
+  "conversionMethods": {},
+  "untaggableTypes": {},
+  "multiValueAdapters": [
+    [{"viewType": "android.widget.TextView", "attributes": ["android:beforeTextChanged", "android:onTextChanged", "android:afterTextChanged", "android:textAttrChanged"], "parameterTypes": ["androidx.databinding.adapters.TextViewBindingAdapter.BeforeTextChanged", "androidx.databinding.adapters.TextViewBindingAdapter.OnTextChanged", "androidx.databinding.adapters.TextViewBindingAdapter.AfterTextChanged", "androidx.databinding.InverseBindingListener"], "requireAll": false, "attributeIndices": {"android:afterTextChanged": 2, "android:beforeTextChanged": 0, "android:onTextChanged": 1, "android:textAttrChanged": 3}}, {"type": "androidx.databinding.adapters.TextViewBindingAdapter", "method": "setTextWatcher", "requiresOldValue": false, "isStatic": true, "componentClass": null}],
+    [{"viewType": "android.widget.CompoundButton", "attributes": ["android:onCheckedChanged", "android:checkedAttrChanged"], "parameterTypes": ["android.widget.CompoundButton.OnCheckedChangeListener", "androidx.databinding.InverseBindingListener"], "requireAll": false, "attributeIndices": {"android:checkedAttrChanged": 1, "android:onCheckedChanged": 0}}, {"type": "androidx.databinding.adapters.CompoundButtonBindingAdapter", "method": "setListeners", "requiresOldValue": false, "isStatic": true, "componentClass": null}]
+  ],
+  "inverseAdapters": {
+    "android:text": [[{"viewType": "android.widget.TextView", "valueType": "java.lang.String"}, {"event": "android:textAttrChanged", "type": "androidx.databinding.adapters.TextViewBindingAdapter", "method": "getTextString", "requiresOldValue": false, "isStatic": true, "componentClass": null}]]
+  },
+  "inverseMethods": {
+    "android:checked": {"android.widget.CompoundButton": {"event": "android:checkedAttrChanged", "type": "androidx.databinding.adapters.CompoundButtonBindingAdapter", "method": "", "requiresOldValue": false, "isStatic": true, "componentClass": null}}
+  },
+  "twoWayMethods": {}
+}"#;
+
+    const USER: &str = "package com.example.bound;
+
+import androidx.databinding.BaseObservable;
+import androidx.databinding.Bindable;
+
+public class User extends BaseObservable {
+    private String firstName;
+    private int age;
+    private boolean admin;
+
+    public User(String firstName, int age) {
+        this.firstName = firstName;
+        this.age = age;
+    }
+
+    @Bindable
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String value) {
+        firstName = value;
+        notifyPropertyChanged(BR.firstName);
+    }
+
+    @Bindable
+    public int getAge() {
+        return age;
+    }
+
+    @Bindable
+    public boolean isAdmin() {
+        return admin;
+    }
+}
+";
+
+    const MODEL: &str = "package com.example.bound;
+
+import androidx.databinding.ObservableArrayList;
+import androidx.databinding.ObservableBoolean;
+import androidx.databinding.ObservableField;
+import androidx.databinding.ObservableInt;
+import androidx.lifecycle.MutableLiveData;
+
+public class Model {
+    public final ObservableField<String> query = new ObservableField<>(\"\");
+    public final ObservableInt clicks = new ObservableInt(0);
+    public final ObservableBoolean accepted = new ObservableBoolean();
+    public final MutableLiveData<String> status = new MutableLiveData<>(\"idle\");
+    public final ObservableArrayList<String> items = new ObservableArrayList<>();
+    public final java.util.Map<String, String> labels = new java.util.HashMap<>();
+
+    public void click() {
+        clicks.set(clicks.get() + 1);
+    }
+
+    public void clickWith(android.view.View view) {
+    }
+
+    public boolean longPress() {
+        return true;
+    }
+
+    public String describe(int count) {
+        return \"count=\" + count;
+    }
+}
+";
+
+    const ADAPTERS: &str = "package com.example.bound;
+
+import android.widget.TextView;
+import androidx.databinding.BindingAdapter;
+import androidx.databinding.BindingConversion;
+
+public final class Adapters {
+    @BindingAdapter(\"tintColor\")
+    public static void setTintColor(TextView view, int color) {
+        view.setTextColor(color);
+    }
+
+    @BindingAdapter(value = {\"prefix\", \"suffix\"}, requireAll = false)
+    public static void setAffixes(TextView view, String prefix, String suffix) {
+        view.setHint(prefix + suffix);
+    }
+
+    @BindingConversion
+    public static CharSequence fromStamp(Stamp stamp) {
+        return stamp == null ? \"\" : \"stamp\";
+    }
+}
+";
+
+    const STAMP: &str = "package com.example.bound;
+
+public final class Stamp {
+}
+";
+
+    const R: &str = "package com.example.bound;
+
+public final class R {
+    public static final class layout {
+        public static final int main = 0x7f0b0001;
+        public static final int footer = 0x7f0b0002;
+    }
+    public static final class id {
+        public static final int full_name = 0x7f080001;
+        public static final int age = 0x7f080002;
+        public static final int query = 0x7f080003;
+        public static final int accept = 0x7f080004;
+        public static final int button = 0x7f080005;
+        public static final int footer = 0x7f080006;
+        public static final int footer_text = 0x7f080007;
+        public static final int plain = 0x7f080008;
+        public static final int stub = 0x7f080009;
+    }
+    public static final class string {
+        public static final int greeting = 0x7f100001;
+    }
+    public static final class plurals {
+        public static final int apples = 0x7f0f0001;
+    }
+    public static final class color {
+        public static final int accent = 0x7f050001;
+    }
+}
+";
+
+    const MAIN: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <data>
+        <import type="android.view.View" />
+        <variable name="user" type="com.example.bound.User" />
+        <variable name="vm" type="com.example.bound.Model" />
+        <variable name="count" type="int" />
+        <variable name="stamp" type="com.example.bound.Stamp" />
+    </data>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="match_parent">
+        <TextView android:id="@+id/full_name" android:text="@{user.firstName + ` (` + user.age + `)`}" />
+        <TextView android:id="@+id/age" android:text="@{String.valueOf(user.age)}"
+            android:visibility="@{user.admin ? View.VISIBLE : View.GONE}" />
+        <TextView android:text="@{@string/greeting(user.firstName, count)}" app:tintColor="@{@color/accent}" />
+        <TextView android:text="@{vm.describe(vm.clicks)}" />
+        <TextView android:text="@{vm.status ?? `none`}" />
+        <EditText android:id="@+id/query" android:text="@={vm.query}" />
+        <CheckBox android:id="@+id/accept" android:checked="@={vm.accepted}" />
+        <Button android:id="@+id/button" android:onClick="@{() -> vm.click()}"
+            android:onLongClick="@{() -> vm.longPress()}" />
+        <Button android:onClick="@{vm::clickWith}" />
+        <TextView android:text="@{vm.items.size() > 0 ? vm.items[0] : `empty`}" android:tag="kept" />
+        <TextView android:text='@{vm.labels["title"]}' app:prefix="@{`&lt;`}" />
+        <TextView android:text="@{@plurals/apples(count)}" />
+        <TextView android:text="@{stamp}" />
+        <TextView android:id="@+id/plain" />
+        <ViewStub android:id="@+id/stub" />
+        <include android:id="@+id/footer" layout="@layout/footer" app:user="@{user}" />
+    </LinearLayout>
+</layout>
+"#;
+
+    const FOOTER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android">
+    <data>
+        <variable name="user" type="com.example.bound.User" />
+    </data>
+    <TextView android:id="@+id/footer_text" android:text="@{`by ` + user.firstName}" />
+</layout>
+"#;
+
+    fn runtime() -> Classpath {
+        let sources: Vec<(String, String)> = RUNTIME
+            .iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect();
+        crate::compilers::java::declared_beside(&sources, &Classpath::new()).1
+    }
+
+    fn layout(name: &str, text: &str) -> Layout {
+        Layout {
+            folder: "layout".to_string(),
+            name: name.to_string(),
+            text: text.to_string(),
+            package: "com.example.bound".to_string(),
+        }
+    }
+
+    fn user_sources() -> Vec<(String, String)> {
+        [
+            ("com/example/bound/User.java", USER),
+            ("com/example/bound/Model.java", MODEL),
+            ("com/example/bound/Adapters.java", ADAPTERS),
+            ("com/example/bound/Stamp.java", STAMP),
+        ]
+        .iter()
+        .map(|(name, text)| (name.to_string(), text.to_string()))
+        .collect()
+    }
+
+    fn made_from(main: &str) -> Result<Made, Diagnostic> {
+        generate(
+            "com.example.bound",
+            &[layout("main", main), layout("footer", FOOTER)],
+            &user_sources(),
+            &runtime(),
+            &[STORE.to_string()],
+        )
+    }
+
+    fn source_of<'a>(made: &'a Made, path: &str) -> &'a str {
+        made.sources
+            .iter()
+            .find(|(name, _)| name == path)
+            .map(|(_, text)| text.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{path} was not made: {:?}",
+                    made.sources
+                        .iter()
+                        .map(|(name, _)| name)
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    #[test]
+    fn a_data_binding_layout_becomes_classes_that_compile_beside_the_runtime() {
+        let made = made_from(MAIN).expect("the layouts are understood");
+        let mut all: Vec<(String, String)> = RUNTIME
+            .iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect();
+        all.extend(user_sources());
+        all.push(("com/example/bound/R.java".to_string(), R.to_string()));
+        all.extend(made.sources.clone());
+        let compiled = compile_together(&all, &Classpath::new())
+            .unwrap_or_else(|why| panic!("the generated classes must compile: {why:?}"));
+        for wanted in [
+            "com/example/bound/databinding/MainBinding.class",
+            "com/example/bound/databinding/MainBindingImpl.class",
+            "com/example/bound/databinding/FooterBinding.class",
+            "com/example/bound/databinding/FooterBindingImpl.class",
+            "com/example/bound/DataBinderMapperImpl.class",
+            "com/example/bound/BR.class",
+            "androidx/databinding/DataBinderMapperImpl.class",
+            "androidx/databinding/DataBindingComponent.class",
+        ] {
+            assert!(
+                compiled.iter().any(|(name, _)| name == wanted),
+                "{wanted} is missing: {:?}",
+                compiled.iter().map(|(name, _)| name).collect::<Vec<_>>()
+            );
+        }
+
+        let br = source_of(&made, "com/example/bound/BR.java");
+        for (name, id) in [
+            ("_all", 0),
+            ("admin", 1),
+            ("age", 2),
+            ("count", 3),
+            ("firstName", 4),
+            ("stamp", 5),
+            ("user", 6),
+            ("vm", 7),
+        ] {
+            assert!(
+                br.contains(&format!("public static final int {name} = {id};")),
+                "{name} is {id}: {br}"
+            );
+        }
+
+        let binding = source_of(&made, "com/example/bound/databinding/MainBinding.java");
+        for field in [
+            "public final android.widget.TextView fullName;",
+            "public final android.widget.EditText query;",
+            "public final android.widget.CheckBox accept;",
+            "public final com.example.bound.databinding.FooterBinding footer;",
+            "public final androidx.databinding.ViewStubProxy stub;",
+            "protected int mCount;",
+            "public abstract void setUser(com.example.bound.User value);",
+        ] {
+            assert!(binding.contains(field), "{field} is missing: {binding}");
+        }
+
+        let bound = source_of(&made, "com/example/bound/databinding/MainBindingImpl.java");
+        for piece in [
+            "androidx.databinding.adapters.TextViewBindingAdapter.setText(",
+            "androidx.databinding.adapters.TextViewBindingAdapter.setTextWatcher(",
+            "androidx.databinding.adapters.CompoundButtonBindingAdapter.setListeners(",
+            "androidx.databinding.adapters.TextViewBindingAdapter.getTextString(",
+            "com.example.bound.Adapters.setTintColor(",
+            "com.example.bound.Adapters.setAffixes(",
+            "com.example.bound.Adapters.fromStamp(",
+            ".setOnClickListener(",
+            ".setOnLongClickListener(",
+            ".setVisibility(",
+            "updateLiveDataRegistration(",
+            "(androidx.databinding.ObservableList)",
+            "getQuantityString(com.example.bound.R.plurals.apples",
+            "getColor(com.example.bound.R.color.accent)",
+            "sIncludes.setIncludes(0, new java.lang.String[] {\"footer\"}",
+            "sViewsWithIds.put(com.example.bound.R.id.plain,",
+            "sViewsWithIds.put(com.example.bound.R.id.stub,",
+            "setTag(\"kept\")",
+            "executeBindingsOn(this.footer);",
+            "this.footer.setUser(",
+        ] {
+            assert!(bound.contains(piece), "{piece} is missing: {bound}");
+        }
+
+        let mapper = source_of(&made, "com/example/bound/DataBinderMapperImpl.java");
+        assert!(mapper.contains("\"layout/main_0\".equals(tag)"), "{mapper}");
+        assert!(
+            mapper.contains("new com.example.bound.databinding.MainBindingImpl(component, view)")
+        );
+
+        let (_, _, rewritten) = made
+            .layouts
+            .iter()
+            .find(|(folder, name, _)| folder == "layout" && name == "main")
+            .expect("the layout is rewritten");
+        assert!(!is_bound(rewritten), "the wrapper is gone: {rewritten}");
+        assert!(
+            !rewritten.contains("@{"),
+            "no expression is left: {rewritten}"
+        );
+        assert!(!rewritten.contains("<data"), "{rewritten}");
+        assert!(
+            rewritten.contains("android:tag=\"layout/main_0\""),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("android:tag=\"binding_1\""),
+            "{rewritten}"
+        );
+        assert!(rewritten.contains("xmlns:app="), "{rewritten}");
+        assert!(
+            rewritten.contains("layout=\"@layout/footer\""),
+            "{rewritten}"
+        );
+    }
+
+    fn refused(main: &str) -> Diagnostic {
+        made_from(main).expect_err("this layout is refused")
+    }
+
+    fn with_body(body: &str) -> String {
+        MAIN.replace(
+            "<TextView android:id=\"@+id/plain\" />",
+            &format!("<TextView android:id=\"@+id/plain\" />\n        {body}"),
+        )
+    }
+
+    #[test]
+    fn a_data_binding_mistake_is_named_with_the_attribute_that_holds_it() {
+        let unreadable = refused(&with_body("<TextView android:text=\"@{user.}\" />"));
+        assert_eq!(unreadable.code, "EH002", "{unreadable:?}");
+        assert!(unreadable
+            .context
+            .iter()
+            .any(|one| one == "Attribute: android:text"));
+        assert!(unreadable
+            .context
+            .iter()
+            .any(|one| one == "Layout: layout/main"));
+
+        let unknown = refused(&with_body("<TextView android:text=\"@{user.nickname}\" />"));
+        assert_eq!(unknown.code, "EH003", "{unknown:?}");
+        assert!(unknown
+            .context
+            .iter()
+            .any(|one| one == "Expression: user.nickname"));
+
+        let no_setter = refused(&with_body("<TextView app:sparkle=\"@{count}\" />"));
+        assert_eq!(no_setter.code, "EH004", "{no_setter:?}");
+        assert!(no_setter
+            .context
+            .iter()
+            .any(|one| one == "Attribute: app:sparkle"));
+        assert!(no_setter.context.iter().any(|one| one == "Value: int"));
+
+        let one_way_only = refused(&with_body("<TextView android:visibility=\"@={count}\" />"));
+        assert_eq!(one_way_only.code, "EH006", "{one_way_only:?}");
+
+        let strange = MAIN.replace(
+            "<variable name=\"count\" type=\"int\" />",
+            "<variable name=\"count\" type=\"com.example.Missing\" />",
+        );
+        let missing = refused(&strange);
+        assert_eq!(missing.code, "EH007", "{missing:?}");
+        assert!(missing
+            .context
+            .iter()
+            .any(|one| one == "Type: com.example.Missing"));
+
+        let bare = generate(
+            "com.example.bound",
+            &[layout("footer", FOOTER)],
+            &user_sources(),
+            &Classpath::new(),
+            &[],
+        )
+        .expect_err("there is no runtime to bind against");
+        assert_eq!(bare.code, "EH005");
+    }
+
+    #[test]
+    fn a_layout_without_data_binding_is_left_alone() {
+        let plain = "<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\">
+    <TextView android:id=\"@+id/hello\" />
+</LinearLayout>
+";
+        assert!(!is_bound(plain));
+        let made = generate(
+            "com.example.bound",
+            &[layout("plain", plain)],
+            &[],
+            &runtime(),
+            &[],
+        )
+        .expect("nothing to bind is not a failure");
+        assert!(made.layouts.is_empty());
+        let mapper = source_of(&made, "com/example/bound/DataBinderMapperImpl.java");
+        assert!(mapper.contains("return null;"));
+        assert!(made
+            .sources
+            .iter()
+            .any(|(name, _)| name == "com/example/bound/BR.java"));
     }
 }

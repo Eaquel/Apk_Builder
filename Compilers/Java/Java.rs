@@ -22837,6 +22837,37 @@ pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u
 
 type Declared = (Vec<(String, Unit)>, Classpath);
 
+pub fn declared_beside(
+    sources: &[(String, String)],
+    classpath: &Classpath,
+) -> (Vec<Unit>, Classpath) {
+    let mut units = Vec::new();
+    for (_, text) in sources {
+        if let Ok(held) = parse(text) {
+            units.extend(held);
+        }
+    }
+    let inside: Vec<Unit> = units.iter().flat_map(classes_written_inside).collect();
+    units.extend(inside);
+    let mut together = classpath.clone();
+    for unit in &units {
+        together.shell(unit);
+    }
+    for _ in 0..2 {
+        for unit in &units {
+            together.place(unit);
+        }
+    }
+    for unit in &units {
+        together.declare(unit);
+    }
+    (units, together)
+}
+
+pub fn resolve_in(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
+    resolve_written(classpath, unit, written)
+}
+
 fn parsed_and_declared(
     sources: &[(String, String)],
     classpath: &Classpath,

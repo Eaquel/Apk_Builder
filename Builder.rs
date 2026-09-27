@@ -32498,6 +32498,4759 @@ public interface ViewBinding {
     }
 }
 
+pub mod databinding {
+    use crate::compilers::java::{Annotated, Classpath, Expression, Signature, Type, Unit};
+    use crate::diag::{Diagnostic, Severity};
+    use crate::xml::{Attribute, Element};
+    use crate::FailureClass;
+
+    pub const RUNTIME: &str = "androidx/databinding/ViewDataBinding";
+    pub const ADAPTERS_MAPPER: &str =
+        "androidx/databinding/library/baseAdapters/DataBinderMapperImpl";
+    pub const ADAPTERS_PACKAGE: &str = "androidx.databinding.library.baseAdapters";
+    pub const VERSION: &str = "8.7.3";
+    pub const ARTIFACTS: &[&str] = &[
+        "androidx.databinding:databinding-runtime",
+        "androidx.databinding:databinding-adapters",
+        "androidx.databinding:databinding-common",
+    ];
+    pub const STORE_FOLDER: &str = "data-binding/";
+    pub const STORE_SUFFIX: &str = "-setter_store.json";
+    pub const LAYOUT_ROOT: &str = "layout";
+
+    const ANDROID: &str = "android:";
+    const ANDROID_URI: &str = "http://schemas.android.com/apk/res/android";
+    const OBSERVABLE: &str = "androidx/databinding/Observable";
+    const OBSERVABLE_LIST: &str = "androidx/databinding/ObservableList";
+    const OBSERVABLE_MAP: &str = "androidx/databinding/ObservableMap";
+    const OBSERVABLE_FIELD: &str = "androidx/databinding/BaseObservableField";
+    const LIVE_DATA: &str = "androidx/lifecycle/LiveData";
+    const OBJECT: &str = "java/lang/Object";
+    const STRING: &str = "java/lang/String";
+    const NOTHING: &str = "null";
+    const COMPONENT: &str = "androidx.databinding.DataBindingComponent";
+    const INVERSE: &str = "androidx/databinding/InverseBindingListener";
+    const STUB: &str = "android/view/ViewStub";
+    const STUB_PROXY: &str = "androidx.databinding.ViewStubProxy";
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.databinding",
+            message,
+        )
+    }
+
+    pub fn is_bound(text: &str) -> bool {
+        let mut quiet = crate::diag::Sink::new();
+        crate::xml::parse(text, "layout", &mut quiet).is_some_and(|root| root.name == LAYOUT_ROOT)
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Token {
+        Name(String),
+        Literal(Type, String),
+        Mark(&'static str),
+        Resource(String),
+        End,
+    }
+
+    const MARKS: &[&str] = &[
+        ">>>", "->", "::", "??", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "(", ")", "[",
+        "]", ".", ",", "?", ":", "!", "~", "+", "-", "*", "/", "%", "<", ">", "&", "^", "|", "=",
+    ];
+
+    fn quoted(text: &str) -> String {
+        let mut out = String::from("\"");
+        for one in text.chars() {
+            match one {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(one),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    fn tokens(text: &str) -> Result<Vec<Token>, String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < chars.len() {
+            let here = chars[at];
+            if here.is_whitespace() {
+                at += 1;
+                continue;
+            }
+            if here.is_alphabetic() || here == '_' || here == '$' {
+                let from = at;
+                while at < chars.len()
+                    && (chars[at].is_alphanumeric() || chars[at] == '_' || chars[at] == '$')
+                {
+                    at += 1;
+                }
+                let word: String = chars[from..at].iter().collect();
+                out.push(match word.as_str() {
+                    "true" | "false" => Token::Literal(Type::Boolean, word),
+                    "null" => Token::Literal(Type::Object(NOTHING.to_string(), Vec::new()), word),
+                    _ => Token::Name(word),
+                });
+                continue;
+            }
+            if here.is_ascii_digit()
+                || (here == '.' && chars.get(at + 1).is_some_and(|one| one.is_ascii_digit()))
+            {
+                let from = at;
+                let hex = here == '0' && matches!(chars.get(at + 1), Some('x' | 'X'));
+                if hex {
+                    at += 2;
+                    while at < chars.len() && (chars[at].is_ascii_hexdigit() || chars[at] == '_') {
+                        at += 1;
+                    }
+                } else {
+                    while at < chars.len()
+                        && (chars[at].is_ascii_digit()
+                            || chars[at] == '.'
+                            || chars[at] == '_'
+                            || ((chars[at] == 'e' || chars[at] == 'E')
+                                && chars.get(at + 1).is_some_and(|one| {
+                                    one.is_ascii_digit() || *one == '-' || *one == '+'
+                                }))
+                            || ((chars[at] == '-' || chars[at] == '+')
+                                && matches!(chars.get(at.wrapping_sub(1)), Some('e' | 'E'))))
+                    {
+                        at += 1;
+                    }
+                }
+                let mut spelled: String = chars[from..at].iter().collect();
+                let what = match chars.get(at) {
+                    Some('l' | 'L') => {
+                        at += 1;
+                        spelled.push('L');
+                        Type::Long
+                    }
+                    Some('f' | 'F') if !hex => {
+                        at += 1;
+                        spelled.push('f');
+                        Type::Float
+                    }
+                    Some('d' | 'D') if !hex => {
+                        at += 1;
+                        spelled.push('d');
+                        Type::Double
+                    }
+                    _ if !hex
+                        && (spelled.contains('.')
+                            || spelled.contains('e')
+                            || spelled.contains('E')) =>
+                    {
+                        Type::Double
+                    }
+                    _ => Type::Int,
+                };
+                out.push(Token::Literal(what, spelled));
+                continue;
+            }
+            if here == '`' || here == '"' {
+                let mut at_end = at + 1;
+                let mut held = String::new();
+                while at_end < chars.len() && chars[at_end] != here {
+                    if chars[at_end] == '\\' && at_end + 1 < chars.len() {
+                        at_end += 1;
+                        held.push(match chars[at_end] {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            other => other,
+                        });
+                    } else {
+                        held.push(chars[at_end]);
+                    }
+                    at_end += 1;
+                }
+                if at_end >= chars.len() {
+                    return Err("a string is not closed".to_string());
+                }
+                at = at_end + 1;
+                out.push(Token::Literal(
+                    Type::Object(STRING.to_string(), Vec::new()),
+                    quoted(&held),
+                ));
+                continue;
+            }
+            if here == '\'' {
+                let mut at_end = at + 1;
+                let mut held = String::new();
+                while at_end < chars.len() && chars[at_end] != '\'' {
+                    if chars[at_end] == '\\' && at_end + 1 < chars.len() {
+                        held.push('\\');
+                        at_end += 1;
+                    }
+                    held.push(chars[at_end]);
+                    at_end += 1;
+                }
+                if at_end >= chars.len() {
+                    return Err("a character is not closed".to_string());
+                }
+                at = at_end + 1;
+                let single = held.chars().count() == 1 || held.starts_with('\\');
+                if single {
+                    let spelled = if held == "'" {
+                        "'\\''".to_string()
+                    } else {
+                        format!("'{held}'")
+                    };
+                    out.push(Token::Literal(Type::Char, spelled));
+                } else {
+                    out.push(Token::Literal(
+                        Type::Object(STRING.to_string(), Vec::new()),
+                        quoted(&held),
+                    ));
+                }
+                continue;
+            }
+            if here == '@' {
+                let from = at + 1;
+                at += 1;
+                while at < chars.len()
+                    && (chars[at].is_alphanumeric()
+                        || chars[at] == '_'
+                        || chars[at] == '/'
+                        || chars[at] == ':'
+                        || chars[at] == '.')
+                {
+                    at += 1;
+                }
+                let spelled: String = chars[from..at].iter().collect();
+                if !spelled.contains('/') {
+                    return Err(format!("`@{spelled}` is not a resource"));
+                }
+                out.push(Token::Resource(spelled));
+                continue;
+            }
+            let rest: String = chars[at..chars.len().min(at + 3)].iter().collect();
+            let Some(mark) = MARKS.iter().find(|one| rest.starts_with(**one)) else {
+                return Err(format!("`{here}` is not something an expression holds"));
+            };
+            at += mark.chars().count();
+            out.push(Token::Mark(mark));
+        }
+        out.push(Token::End);
+        Ok(out)
+    }
+
+    #[derive(Clone, Debug)]
+    enum Expr {
+        Literal(Type, String),
+        Name(String),
+        Field(Box<Expr>, String),
+        Call(Box<Expr>, String, Vec<Expr>),
+        Index(Box<Expr>, Box<Expr>),
+        Unary(&'static str, Box<Expr>),
+        Binary(&'static str, Box<Expr>, Box<Expr>),
+        Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+        Coalesce(Box<Expr>, Box<Expr>),
+        Cast(String, Box<Expr>),
+        InstanceOf(Box<Expr>, String),
+        Resource(String, Option<Vec<Expr>>),
+        Lambda(Vec<String>, Box<Expr>),
+        Reference(Box<Expr>, String),
+    }
+
+    struct Reader {
+        tokens: Vec<Token>,
+        at: usize,
+    }
+
+    const LEVELS: &[&[&str]] = &[
+        &["||"],
+        &["&&"],
+        &["|"],
+        &["^"],
+        &["&"],
+        &["==", "!="],
+        &["instanceof"],
+        &["<", ">", "<=", ">="],
+        &["<<", ">>", ">>>"],
+        &["+", "-"],
+        &["*", "/", "%"],
+    ];
+
+    const PRIMITIVES: &[&str] = &[
+        "boolean", "byte", "short", "char", "int", "long", "float", "double",
+    ];
+
+    impl Reader {
+        fn here(&self) -> &Token {
+            &self.tokens[self.at.min(self.tokens.len() - 1)]
+        }
+
+        fn ahead(&self, by: usize) -> &Token {
+            &self.tokens[(self.at + by).min(self.tokens.len() - 1)]
+        }
+
+        fn is(&self, mark: &str) -> bool {
+            matches!(self.here(), Token::Mark(held) if *held == mark)
+        }
+
+        fn eat(&mut self, mark: &str) -> bool {
+            if self.is(mark) {
+                self.at += 1;
+                return true;
+            }
+            false
+        }
+
+        fn want(&mut self, mark: &str) -> Result<(), String> {
+            if self.eat(mark) {
+                return Ok(());
+            }
+            Err(format!("`{mark}` was expected"))
+        }
+
+        fn name(&mut self) -> Result<String, String> {
+            match self.here().clone() {
+                Token::Name(held) => {
+                    self.at += 1;
+                    Ok(held)
+                }
+                _ => Err("a name was expected".to_string()),
+            }
+        }
+
+        fn whole(&mut self) -> Result<Expr, String> {
+            if let Some(lambda) = self.lambda()? {
+                return Ok(lambda);
+            }
+            let held = self.coalesce()?;
+            if self.eat(",") {
+                if !matches!(self.here(), Token::Name(word) if word == "default") {
+                    return Err("only `default` may follow a comma".to_string());
+                }
+                self.at = self.tokens.len() - 1;
+            }
+            if *self.here() != Token::End {
+                return Err("the expression goes on after it should end".to_string());
+            }
+            Ok(held)
+        }
+
+        fn lambda(&mut self) -> Result<Option<Expr>, String> {
+            let start = self.at;
+            let mut parameters = Vec::new();
+            if let (Token::Name(word), Token::Mark("->")) =
+                (self.here().clone(), self.ahead(1).clone())
+            {
+                self.at += 2;
+                parameters.push(word);
+            } else if self.is("(") {
+                self.at += 1;
+                let mut shaped = true;
+                if !self.is(")") {
+                    loop {
+                        match self.here().clone() {
+                            Token::Name(word) => {
+                                self.at += 1;
+                                parameters.push(word);
+                            }
+                            _ => {
+                                shaped = false;
+                                break;
+                            }
+                        }
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                }
+                if !(shaped && self.eat(")") && self.eat("->")) {
+                    self.at = start;
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+            let body = self.coalesce()?;
+            if *self.here() != Token::End {
+                return Err("the lambda goes on after it should end".to_string());
+            }
+            Ok(Some(Expr::Lambda(parameters, Box::new(body))))
+        }
+
+        fn coalesce(&mut self) -> Result<Expr, String> {
+            let mut held = self.ternary()?;
+            while self.eat("??") {
+                let right = self.ternary()?;
+                held = Expr::Coalesce(Box::new(held), Box::new(right));
+            }
+            Ok(held)
+        }
+
+        fn ternary(&mut self) -> Result<Expr, String> {
+            let condition = self.binary(0)?;
+            if self.eat("?") {
+                let then = self.ternary()?;
+                self.want(":")?;
+                let otherwise = self.ternary()?;
+                return Ok(Expr::Ternary(
+                    Box::new(condition),
+                    Box::new(then),
+                    Box::new(otherwise),
+                ));
+            }
+            Ok(condition)
+        }
+
+        fn binary(&mut self, level: usize) -> Result<Expr, String> {
+            if level >= LEVELS.len() {
+                return self.unary();
+            }
+            let mut held = self.binary(level + 1)?;
+            loop {
+                if LEVELS[level] == ["instanceof"] {
+                    if matches!(self.here(), Token::Name(word) if word == "instanceof") {
+                        self.at += 1;
+                        let what = self.type_name()?;
+                        held = Expr::InstanceOf(Box::new(held), what);
+                        continue;
+                    }
+                    break;
+                }
+                let found = LEVELS[level].iter().find(|one| self.is(one)).copied();
+                let Some(operator) = found else {
+                    break;
+                };
+                self.at += 1;
+                let right = self.binary(level + 1)?;
+                held = Expr::Binary(operator, Box::new(held), Box::new(right));
+            }
+            Ok(held)
+        }
+
+        fn type_name(&mut self) -> Result<String, String> {
+            let mut out = self.name()?;
+            while self.is(".") && matches!(self.ahead(1), Token::Name(_)) {
+                self.at += 1;
+                out.push('.');
+                out.push_str(&self.name()?);
+            }
+            if self.is("<") {
+                let mut depth = 0usize;
+                loop {
+                    match self.here().clone() {
+                        Token::Mark("<") => {
+                            depth += 1;
+                            out.push('<');
+                        }
+                        Token::Mark(">") => {
+                            depth = depth.saturating_sub(1);
+                            out.push('>');
+                        }
+                        Token::Mark(">>") => {
+                            depth = depth.saturating_sub(2);
+                            out.push_str(">>");
+                        }
+                        Token::Mark(",") => out.push(','),
+                        Token::Mark(".") => out.push('.'),
+                        Token::Mark("?") => out.push('?'),
+                        Token::Name(word) => {
+                            if out.ends_with('?') {
+                                out.push(' ');
+                            }
+                            out.push_str(&word);
+                            if word == "extends" || word == "super" {
+                                out.push(' ');
+                            }
+                        }
+                        _ => return Err("a type is not closed".to_string()),
+                    }
+                    self.at += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            while self.is("[") && matches!(self.ahead(1), Token::Mark("]")) {
+                self.at += 2;
+                out.push_str("[]");
+            }
+            Ok(out)
+        }
+
+        fn looks_like_a_cast(&self) -> bool {
+            if !self.is("(") {
+                return false;
+            }
+            let Token::Name(first) = self.ahead(1) else {
+                return false;
+            };
+            let mut at = 2;
+            loop {
+                match self.ahead(at) {
+                    Token::Mark(".") if matches!(self.ahead(at + 1), Token::Name(_)) => at += 2,
+                    Token::Mark("[") if matches!(self.ahead(at + 1), Token::Mark("]")) => at += 2,
+                    _ => break,
+                }
+            }
+            if !matches!(self.ahead(at), Token::Mark(")")) {
+                return false;
+            }
+            let leads = matches!(
+                self.ahead(at + 1),
+                Token::Name(_)
+                    | Token::Literal(..)
+                    | Token::Resource(_)
+                    | Token::Mark("(" | "!" | "~")
+            );
+            leads
+                && (PRIMITIVES.contains(&first.as_str())
+                    || first.chars().next().is_some_and(char::is_uppercase)
+                    || at > 2)
+        }
+
+        fn unary(&mut self) -> Result<Expr, String> {
+            for operator in ["-", "+", "!", "~"] {
+                if self.eat(operator) {
+                    let of = self.unary()?;
+                    let operator: &'static str = match operator {
+                        "-" => "-",
+                        "+" => "+",
+                        "!" => "!",
+                        _ => "~",
+                    };
+                    return Ok(Expr::Unary(operator, Box::new(of)));
+                }
+            }
+            if self.looks_like_a_cast() {
+                self.at += 1;
+                let what = self.type_name()?;
+                self.want(")")?;
+                let of = self.unary()?;
+                return Ok(Expr::Cast(what, Box::new(of)));
+            }
+            self.postfix()
+        }
+
+        fn arguments(&mut self) -> Result<Vec<Expr>, String> {
+            self.want("(")?;
+            let mut out = Vec::new();
+            if !self.is(")") {
+                loop {
+                    out.push(self.coalesce()?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+            }
+            self.want(")")?;
+            Ok(out)
+        }
+
+        fn postfix(&mut self) -> Result<Expr, String> {
+            let mut held = self.primary()?;
+            loop {
+                if self.eat(".") {
+                    let name = self.name()?;
+                    if self.is("(") {
+                        let arguments = self.arguments()?;
+                        held = Expr::Call(Box::new(held), name, arguments);
+                    } else {
+                        held = Expr::Field(Box::new(held), name);
+                    }
+                    continue;
+                }
+                if self.eat("::") {
+                    let name = self.name()?;
+                    held = Expr::Reference(Box::new(held), name);
+                    continue;
+                }
+                if self.eat("[") {
+                    let at = self.coalesce()?;
+                    self.want("]")?;
+                    held = Expr::Index(Box::new(held), Box::new(at));
+                    continue;
+                }
+                break;
+            }
+            Ok(held)
+        }
+
+        fn primary(&mut self) -> Result<Expr, String> {
+            match self.here().clone() {
+                Token::Literal(what, spelled) => {
+                    self.at += 1;
+                    Ok(Expr::Literal(what, spelled))
+                }
+                Token::Name(word) => {
+                    self.at += 1;
+                    Ok(Expr::Name(word))
+                }
+                Token::Resource(spelled) => {
+                    self.at += 1;
+                    let arguments = if self.is("(") {
+                        Some(self.arguments()?)
+                    } else {
+                        None
+                    };
+                    Ok(Expr::Resource(spelled, arguments))
+                }
+                Token::Mark("(") => {
+                    self.at += 1;
+                    let held = self.coalesce()?;
+                    self.want(")")?;
+                    Ok(held)
+                }
+                Token::End => Err("the expression ends too soon".to_string()),
+                Token::Mark(mark) => Err(format!("`{mark}` cannot start a value")),
+            }
+        }
+    }
+
+    fn parse_expression(text: &str) -> Result<Expr, String> {
+        let mut reader = Reader {
+            tokens: tokens(text)?,
+            at: 0,
+        };
+        reader.whole()
+    }
+
+    fn binding_of(value: &str) -> Option<(String, bool)> {
+        let trimmed = value.trim();
+        if let Some(inner) = trimmed
+            .strip_prefix("@={")
+            .and_then(|held| held.strip_suffix('}'))
+        {
+            return Some((inner.to_string(), true));
+        }
+        trimmed
+            .strip_prefix("@{")
+            .and_then(|held| held.strip_suffix('}'))
+            .map(|inner| (inner.to_string(), false))
+    }
+
+    fn object(name: &str) -> Type {
+        Type::Object(name.to_string(), Vec::new())
+    }
+
+    fn is_null(what: &Type) -> bool {
+        matches!(what, Type::Object(name, _) if name == NOTHING)
+    }
+
+    fn named(what: &Type) -> Option<&str> {
+        match what {
+            Type::Object(name, _) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn primitive_named(word: &str) -> Option<Type> {
+        Some(match word {
+            "boolean" => Type::Boolean,
+            "byte" => Type::Byte,
+            "short" => Type::Short,
+            "char" => Type::Char,
+            "int" => Type::Int,
+            "long" => Type::Long,
+            "float" => Type::Float,
+            "double" => Type::Double,
+            "void" => Type::Void,
+            _ => return None,
+        })
+    }
+
+    fn box_of(what: &Type) -> Option<&'static str> {
+        Some(match what {
+            Type::Boolean => "java/lang/Boolean",
+            Type::Byte => "java/lang/Byte",
+            Type::Short => "java/lang/Short",
+            Type::Char => "java/lang/Character",
+            Type::Int => "java/lang/Integer",
+            Type::Long => "java/lang/Long",
+            Type::Float => "java/lang/Float",
+            Type::Double => "java/lang/Double",
+            _ => return None,
+        })
+    }
+
+    fn unboxed(what: &Type) -> Option<Type> {
+        let Type::Object(name, _) = what else {
+            return None;
+        };
+        Some(match name.as_str() {
+            "java/lang/Boolean" => Type::Boolean,
+            "java/lang/Byte" => Type::Byte,
+            "java/lang/Short" => Type::Short,
+            "java/lang/Character" => Type::Char,
+            "java/lang/Integer" => Type::Int,
+            "java/lang/Long" => Type::Long,
+            "java/lang/Float" => Type::Float,
+            "java/lang/Double" => Type::Double,
+            _ => return None,
+        })
+    }
+
+    fn default_of(what: &Type) -> &'static str {
+        match what {
+            Type::Boolean => "false",
+            Type::Char => "'\\u0000'",
+            Type::Long => "0L",
+            Type::Float => "0f",
+            Type::Double => "0d",
+            Type::Byte | Type::Short | Type::Int => "0",
+            _ => "null",
+        }
+    }
+
+    fn widens(from: &Type, to: &Type) -> bool {
+        matches!(
+            (from, to),
+            (
+                Type::Byte,
+                Type::Short | Type::Int | Type::Long | Type::Float | Type::Double
+            ) | (
+                Type::Short | Type::Char,
+                Type::Int | Type::Long | Type::Float | Type::Double
+            ) | (Type::Int, Type::Long | Type::Float | Type::Double)
+                | (Type::Long, Type::Float | Type::Double)
+                | (Type::Float, Type::Double)
+        )
+    }
+
+    fn capitalized(name: &str) -> String {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    }
+
+    fn decapitalized(name: &str) -> String {
+        let chars: Vec<char> = name.chars().collect();
+        if chars.len() > 1 && chars[0].is_uppercase() && chars[1].is_uppercase() {
+            return name.to_string();
+        }
+        let mut out = String::new();
+        if let Some(first) = chars.first() {
+            out.extend(first.to_lowercase());
+            out.extend(chars[1..].iter());
+        }
+        out
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Watch {
+        Observable,
+        List,
+        Map,
+        LiveData,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Member {
+        Getter(Signature),
+        Field(String, String, Type, bool),
+    }
+
+    struct Model<'a> {
+        classpath: &'a Classpath,
+        imports: Vec<(String, String)>,
+    }
+
+    impl Model<'_> {
+        fn known(&self, internal: &str) -> bool {
+            self.classpath.get(internal).is_some()
+        }
+
+        fn dotted_class(&self, dotted: &str) -> Option<String> {
+            let parts: Vec<&str> = dotted.split('.').filter(|one| !one.is_empty()).collect();
+            for split in (1..=parts.len()).rev() {
+                let package = parts[..split - 1].join("/");
+                let class = parts[split - 1..].join("$");
+                let candidate = if package.is_empty() {
+                    class
+                } else {
+                    format!("{package}/{class}")
+                };
+                if self.known(&candidate) {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+
+        fn class_named(&self, written: &str) -> Option<String> {
+            let written = written.trim();
+            let (head, rest) = match written.split_once('.') {
+                Some((head, rest)) => (head, Some(rest)),
+                None => (written, None),
+            };
+            if let Some((_, full)) = self.imports.iter().find(|(alias, _)| alias == head) {
+                let full = match rest {
+                    Some(rest) => format!("{full}.{rest}"),
+                    None => full.clone(),
+                };
+                if let Some(found) = self.dotted_class(&full) {
+                    return Some(found);
+                }
+            }
+            if rest.is_none() {
+                let lang = format!("java/lang/{written}");
+                if self.known(&lang) {
+                    return Some(lang);
+                }
+            } else {
+                let lang = format!("java.lang.{written}");
+                if let Some(found) = self.dotted_class(&lang) {
+                    return Some(found);
+                }
+            }
+            self.dotted_class(written)
+        }
+
+        fn type_named(&self, written: &str) -> Option<Type> {
+            let written = written.trim();
+            if let Some(of) = written.strip_suffix("[]") {
+                return Some(Type::Array(Box::new(self.type_named(of)?)));
+            }
+            if let Some(found) = primitive_named(written) {
+                return Some(found);
+            }
+            if let Some(rest) = written.strip_prefix('?') {
+                let rest = rest.trim();
+                if let Some(bound) = rest.strip_prefix("extends") {
+                    return self.type_named(bound);
+                }
+                return Some(object(OBJECT));
+            }
+            let (base, arguments) = match written.find('<') {
+                Some(at) if written.ends_with('>') => {
+                    (&written[..at], &written[at + 1..written.len() - 1])
+                }
+                _ => (written, ""),
+            };
+            let class = self.class_named(base)?;
+            let mut held = Vec::new();
+            let mut depth = 0i32;
+            let mut from = 0usize;
+            let bytes: Vec<char> = arguments.chars().collect();
+            for (at, one) in bytes.iter().enumerate() {
+                match one {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    ',' if depth == 0 => {
+                        let part: String = bytes[from..at].iter().collect();
+                        held.push(self.type_named(&part).unwrap_or_else(|| object(OBJECT)));
+                        from = at + 1;
+                    }
+                    _ => {}
+                }
+            }
+            if !arguments.trim().is_empty() {
+                let part: String = bytes[from..].iter().collect();
+                held.push(self.type_named(&part).unwrap_or_else(|| object(OBJECT)));
+            }
+            Some(Type::Object(class, held))
+        }
+
+        fn class_source(&self, internal: &str) -> String {
+            if let Some(known) = self.classpath.get(internal) {
+                if let (Some(outer), Some((_, simple))) = (&known.outer, internal.rsplit_once('$'))
+                {
+                    if self.known(outer)
+                        && !simple
+                            .chars()
+                            .next()
+                            .is_some_and(|one| one.is_ascii_digit())
+                    {
+                        return format!("{}.{simple}", self.class_source(outer));
+                    }
+                }
+            }
+            if let Some((outer, simple)) = internal.rsplit_once('$') {
+                if self.known(outer) {
+                    return format!("{}.{simple}", self.class_source(outer));
+                }
+            }
+            internal.replace('/', ".")
+        }
+
+        fn source(&self, what: &Type) -> String {
+            match what {
+                Type::Object(name, _) if name == NOTHING => "java.lang.Object".to_string(),
+                Type::Object(name, _) => self.class_source(name),
+                Type::Array(of) => format!("{}[]", self.source(of)),
+                other => other.readable(),
+            }
+        }
+
+        fn is_a(&self, internal: &str, ancestor: &str) -> bool {
+            internal == ancestor
+                || self
+                    .classpath
+                    .ancestors(internal)
+                    .iter()
+                    .any(|one| one == ancestor)
+        }
+
+        fn cost(&self, from: &Type, to: &Type) -> Option<u32> {
+            if is_null(from) {
+                return to.is_reference().then_some(1);
+            }
+            if from == to {
+                return Some(0);
+            }
+            match (from.is_reference(), to.is_reference()) {
+                (false, false) => widens(from, to).then_some(1),
+                (false, true) => {
+                    let boxed = box_of(from)?;
+                    let to_name = named(to)?;
+                    if boxed == to_name {
+                        Some(2)
+                    } else if self.is_a(boxed, to_name) {
+                        Some(3)
+                    } else {
+                        None
+                    }
+                }
+                (true, false) => {
+                    let inner = unboxed(from)?;
+                    if inner == *to {
+                        Some(2)
+                    } else if widens(&inner, to) {
+                        Some(3)
+                    } else {
+                        None
+                    }
+                }
+                (true, true) => match (from, to) {
+                    (Type::Object(here, _), Type::Object(there, _)) => {
+                        if there == OBJECT {
+                            return Some(20);
+                        }
+                        let ancestors = self.classpath.ancestors(here);
+                        ancestors
+                            .iter()
+                            .position(|one| one == there)
+                            .map(|at| 1 + at as u32)
+                    }
+                    (Type::Array(here), Type::Array(there)) => {
+                        if here.is_reference() && there.is_reference() {
+                            self.cost(here, there)
+                        } else {
+                            (here == there).then_some(0)
+                        }
+                    }
+                    (Type::Array(_), Type::Object(there, _)) => matches!(
+                        there.as_str(),
+                        "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+                    )
+                    .then_some(20),
+                    _ => None,
+                },
+            }
+        }
+
+        fn common(&self, left: &Type, right: &Type) -> Type {
+            if left == right {
+                return left.clone();
+            }
+            if is_null(left) {
+                return box_of(right).map(object).unwrap_or_else(|| right.clone());
+            }
+            if is_null(right) {
+                return box_of(left).map(object).unwrap_or_else(|| left.clone());
+            }
+            let left_plain = unboxed(left).unwrap_or_else(|| left.clone());
+            let right_plain = unboxed(right).unwrap_or_else(|| right.clone());
+            if !left_plain.is_reference() && !right_plain.is_reference() {
+                if left_plain == right_plain {
+                    return left_plain;
+                }
+                if let Some(found) = left_plain.promoted_with(&right_plain) {
+                    return found;
+                }
+            }
+            let left = box_of(left).map(object).unwrap_or_else(|| left.clone());
+            let right = box_of(right).map(object).unwrap_or_else(|| right.clone());
+            if let (Type::Object(here, _), Type::Object(there, _)) = (&left, &right) {
+                if self.is_a(here, there) {
+                    return right;
+                }
+                if self.is_a(there, here) {
+                    return left;
+                }
+                for one in self.classpath.ancestors(here) {
+                    if self.is_a(there, &one) {
+                        return object(&one);
+                    }
+                }
+            }
+            object(OBJECT)
+        }
+
+        fn watch(&self, what: &Type) -> Option<Watch> {
+            let name = named(what)?;
+            if name == NOTHING {
+                return None;
+            }
+            if self.is_a(name, OBSERVABLE_LIST) {
+                return Some(Watch::List);
+            }
+            if self.is_a(name, OBSERVABLE_MAP) {
+                return Some(Watch::Map);
+            }
+            if self.is_a(name, LIVE_DATA) {
+                return Some(Watch::LiveData);
+            }
+            if self.is_a(name, OBSERVABLE) {
+                return Some(Watch::Observable);
+            }
+            None
+        }
+
+        fn wrapped(&self, what: &Type) -> Option<(Type, &'static str, Option<&'static str>)> {
+            let name = named(what)?;
+            if name == NOTHING {
+                return None;
+            }
+            let (getter, setter) = if self.is_a(name, OBSERVABLE_FIELD) {
+                ("get", Some("set"))
+            } else if self.is_a(name, LIVE_DATA) {
+                (
+                    "getValue",
+                    self.is_a(name, "androidx/lifecycle/MutableLiveData")
+                        .then_some("setValue"),
+                )
+            } else {
+                return None;
+            };
+            let found = self
+                .classpath
+                .find_methods(name, getter, 0)
+                .into_iter()
+                .find(|one| !one.static_)?;
+            Some((self.returns(what, &found), getter, setter))
+        }
+
+        fn seen(&self, receiver: &Type, owner: &str) -> Vec<Type> {
+            match receiver {
+                Type::Object(name, arguments) => self.classpath.seen_from(name, arguments, owner),
+                _ => Vec::new(),
+            }
+        }
+
+        fn returns(&self, receiver: &Type, signature: &Signature) -> Type {
+            let held = self.seen(receiver, &signature.owner);
+            signature
+                .returns_stands_for
+                .as_seen(&signature.returns, &held)
+        }
+
+        fn parameter(&self, receiver: &Type, signature: &Signature, at: usize) -> Type {
+            let held = self.seen(receiver, &signature.owner);
+            let erased = signature.parameters[at].clone();
+            match signature.taken_stands_for.get(at) {
+                Some(standing) => standing.as_seen(&erased, &held),
+                None => erased,
+            }
+        }
+
+        fn property(&self, receiver: &Type, name: &str, statics: bool) -> Option<Member> {
+            let Type::Object(class, _) = receiver else {
+                return None;
+            };
+            let cap = capitalized(name);
+            for (candidate, boolean) in [
+                (format!("get{cap}"), false),
+                (format!("is{cap}"), true),
+                (name.to_string(), false),
+            ] {
+                let found = self
+                    .classpath
+                    .find_methods(class, &candidate, 0)
+                    .into_iter()
+                    .find(|one| {
+                        one.static_ == statics
+                            && one.returns != Type::Void
+                            && (!boolean
+                                || matches!(&one.returns, Type::Boolean)
+                                || named(&one.returns) == Some("java/lang/Boolean"))
+                    });
+                if let Some(found) = found {
+                    return Some(Member::Getter(found));
+                }
+            }
+            let (holder, (field, erased, static_)) = self.classpath.find_field(class, name)?;
+            if *static_ != statics {
+                return None;
+            }
+            let standing = holder
+                .field_standings
+                .iter()
+                .find(|(held, _)| held == field)
+                .map(|(_, standing)| standing.clone());
+            let seen = match standing {
+                Some(standing) => standing.as_seen(erased, &self.seen(receiver, &holder.name)),
+                None => erased.clone(),
+            };
+            Some(Member::Field(
+                holder.name.clone(),
+                field.clone(),
+                seen,
+                *static_,
+            ))
+        }
+
+        fn method(
+            &self,
+            receiver: &Type,
+            name: &str,
+            given: &[Type],
+            statics: bool,
+        ) -> Option<Signature> {
+            let class = named(receiver)?;
+            let mut best: Option<(u32, Signature)> = None;
+            for one in self.classpath.find_methods(class, name, given.len()) {
+                if statics && !one.static_ {
+                    continue;
+                }
+                let mut total = 0u32;
+                let mut fits = true;
+                for (at, argument) in given.iter().enumerate() {
+                    let wanted = self.parameter(receiver, &one, at);
+                    match self
+                        .cost(argument, &wanted)
+                        .or_else(|| self.cost(argument, &one.parameters[at]))
+                    {
+                        Some(cost) => total += cost,
+                        None => {
+                            fits = false;
+                            break;
+                        }
+                    }
+                }
+                if fits && best.as_ref().is_none_or(|(held, _)| total < *held) {
+                    best = Some((total, one));
+                }
+            }
+            best.map(|(_, one)| one)
+        }
+
+        fn sam(&self, what: &Type) -> Option<Signature> {
+            let class = named(what)?;
+            let known = self.classpath.get(class)?;
+            if !known.interface {
+                return None;
+            }
+            let mut found: Vec<Signature> = Vec::new();
+            for one in self.classpath.ancestors(class) {
+                if one == OBJECT {
+                    continue;
+                }
+                let Some(held) = self.classpath.get(&one) else {
+                    continue;
+                };
+                for method in &held.methods {
+                    if !method.abstract_ || method.static_ || method.name == "<clinit>" {
+                        continue;
+                    }
+                    if matches!(
+                        (method.name.as_str(), method.parameters.len()),
+                        ("equals", 1) | ("hashCode", 0) | ("toString", 0)
+                    ) {
+                        continue;
+                    }
+                    if found.iter().any(|before| {
+                        before.name == method.name && before.parameters == method.parameters
+                    }) {
+                        continue;
+                    }
+                    found.push(method.clone());
+                }
+            }
+            (found.len() == 1).then(|| found.remove(0))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Adapter {
+        view: String,
+        attributes: Vec<String>,
+        parameters: Vec<Type>,
+        owner: String,
+        method: String,
+        old: bool,
+        static_: bool,
+        require_all: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Renamed {
+        attribute: String,
+        view: String,
+        method: String,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Conversion {
+        from: Type,
+        to: Type,
+        owner: String,
+        method: String,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Inverse {
+        attribute: String,
+        view: String,
+        value: Option<Type>,
+        event: String,
+        owner: String,
+        method: String,
+        on_view: bool,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct Store {
+        single: Vec<Adapter>,
+        multi: Vec<Adapter>,
+        renamed: Vec<Renamed>,
+        conversions: Vec<Conversion>,
+        inverse: Vec<Inverse>,
+    }
+
+    fn attribute_key(written: &str) -> String {
+        match written.split_once(':') {
+            Some(("android", local)) => format!("{ANDROID}{local}"),
+            Some((_, local)) => local.to_string(),
+            None => written.to_string(),
+        }
+    }
+
+    fn text_of(held: &crate::json::Json, key: &str) -> String {
+        held.get(key)
+            .and_then(crate::json::Json::text)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn entries(held: Option<&crate::json::Json>) -> Vec<(String, crate::json::Json)> {
+        match held {
+            Some(crate::json::Json::Object(pairs)) => pairs.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    impl Store {
+        fn read(&mut self, model: &Model, text: &str) {
+            let Some(held) = crate::json::read(text) else {
+                return;
+            };
+            if held.get("useAndroidX").and_then(crate::json::Json::boolean) == Some(false) {
+                return;
+            }
+            let class = |dotted: &str| -> Option<String> {
+                let erased = dotted.split('<').next().unwrap_or(dotted).trim();
+                model.dotted_class(erased)
+            };
+            let value = |dotted: &str| -> Option<Type> {
+                let erased = dotted.split('<').next().unwrap_or(dotted).trim();
+                if let Some(found) = primitive_named(erased) {
+                    return Some(found);
+                }
+                if let Some(of) = erased.strip_suffix("[]") {
+                    return primitive_named(of)
+                        .or_else(|| model.dotted_class(of).map(|one| object(&one)))
+                        .map(|one| Type::Array(Box::new(one)));
+                }
+                model.dotted_class(erased).map(|one| object(&one))
+            };
+            for (attribute, list) in entries(held.get("adapterMethods")) {
+                for pair in list.list().unwrap_or_default() {
+                    let Some(pair) = pair.list() else {
+                        continue;
+                    };
+                    let (Some(key), Some(call)) = (pair.first(), pair.get(1)) else {
+                        continue;
+                    };
+                    let (Some(view), Some(taken), Some(owner)) = (
+                        class(&text_of(key, "viewType")),
+                        value(&text_of(key, "valueType")),
+                        class(&text_of(call, "type")),
+                    ) else {
+                        continue;
+                    };
+                    let old = call
+                        .get("requiresOldValue")
+                        .and_then(crate::json::Json::boolean)
+                        == Some(true);
+                    self.single.push(Adapter {
+                        view,
+                        attributes: vec![attribute.clone()],
+                        parameters: vec![taken],
+                        owner,
+                        method: text_of(call, "method"),
+                        old,
+                        static_: call.get("isStatic").and_then(crate::json::Json::boolean)
+                            != Some(false),
+                        require_all: true,
+                    });
+                }
+            }
+            for (attribute, views) in entries(held.get("renamedMethods")) {
+                for (view, call) in entries(Some(&views)) {
+                    let Some(view) = class(&view) else {
+                        continue;
+                    };
+                    self.renamed.push(Renamed {
+                        attribute: attribute.clone(),
+                        view,
+                        method: text_of(&call, "method"),
+                    });
+                }
+            }
+            for (from, targets) in entries(held.get("conversionMethods")) {
+                for (to, call) in entries(Some(&targets)) {
+                    let (Some(from), Some(to), Some(owner)) =
+                        (value(&from), value(&to), class(&text_of(&call, "type")))
+                    else {
+                        continue;
+                    };
+                    self.conversions.push(Conversion {
+                        from,
+                        to,
+                        owner,
+                        method: text_of(&call, "method"),
+                    });
+                }
+            }
+            for pair in held
+                .get("multiValueAdapters")
+                .and_then(crate::json::Json::list)
+                .unwrap_or_default()
+            {
+                let Some(pair) = pair.list() else {
+                    continue;
+                };
+                let (Some(key), Some(call)) = (pair.first(), pair.get(1)) else {
+                    continue;
+                };
+                let (Some(view), Some(owner)) = (
+                    class(&text_of(key, "viewType")),
+                    class(&text_of(call, "type")),
+                ) else {
+                    continue;
+                };
+                let attributes = key
+                    .get("attributes")
+                    .map(crate::json::Json::strings)
+                    .unwrap_or_default();
+                let written = key
+                    .get("parameterTypes")
+                    .map(crate::json::Json::strings)
+                    .unwrap_or_default();
+                let parameters: Vec<Type> = written.iter().filter_map(|one| value(one)).collect();
+                if parameters.len() != written.len() || attributes.is_empty() {
+                    continue;
+                }
+                let mut ordered = attributes.clone();
+                if let Some(indices) = key.get("attributeIndices") {
+                    let mut placed: Vec<(i64, String)> = attributes
+                        .iter()
+                        .map(|one| {
+                            (
+                                indices
+                                    .get(one)
+                                    .and_then(crate::json::Json::integer)
+                                    .unwrap_or(0),
+                                one.clone(),
+                            )
+                        })
+                        .collect();
+                    placed.sort();
+                    ordered = placed.into_iter().map(|(_, one)| one).collect();
+                }
+                let parameters = if parameters.len() == ordered.len() {
+                    parameters
+                } else {
+                    continue;
+                };
+                self.multi.push(Adapter {
+                    view,
+                    attributes: ordered,
+                    parameters,
+                    owner,
+                    method: text_of(call, "method"),
+                    old: call
+                        .get("requiresOldValue")
+                        .and_then(crate::json::Json::boolean)
+                        == Some(true),
+                    static_: call.get("isStatic").and_then(crate::json::Json::boolean)
+                        != Some(false),
+                    require_all: key.get("requireAll").and_then(crate::json::Json::boolean)
+                        != Some(false),
+                });
+            }
+            for (attribute, list) in entries(held.get("inverseAdapters")) {
+                for pair in list.list().unwrap_or_default() {
+                    let Some(pair) = pair.list() else {
+                        continue;
+                    };
+                    let (Some(key), Some(call)) = (pair.first(), pair.get(1)) else {
+                        continue;
+                    };
+                    let (Some(view), Some(owner)) = (
+                        class(&text_of(key, "viewType")),
+                        class(&text_of(call, "type")),
+                    ) else {
+                        continue;
+                    };
+                    self.inverse.push(Inverse {
+                        attribute: attribute.clone(),
+                        view,
+                        value: value(&text_of(key, "valueType")),
+                        event: text_of(call, "event"),
+                        owner,
+                        method: text_of(call, "method"),
+                        on_view: false,
+                    });
+                }
+            }
+            for (attribute, views) in entries(held.get("inverseMethods")) {
+                for (view, call) in entries(Some(&views)) {
+                    let (Some(view), Some(owner)) = (class(&view), class(&text_of(&call, "type")))
+                    else {
+                        continue;
+                    };
+                    self.inverse.push(Inverse {
+                        attribute: attribute.clone(),
+                        view,
+                        value: None,
+                        event: text_of(&call, "event"),
+                        owner,
+                        method: text_of(&call, "method"),
+                        on_view: true,
+                    });
+                }
+            }
+        }
+
+        fn learn(&mut self, model: &Model, units: &[Unit]) {
+            for unit in units {
+                let internal = unit.internal_name();
+                let Some(known) = model.classpath.get(&internal) else {
+                    continue;
+                };
+                for method in &unit.methods {
+                    let arity = method.parameters.len();
+                    let found = known
+                        .methods
+                        .iter()
+                        .find(|one| one.name == method.name && one.parameters.len() == arity);
+                    let Some(found) = found else {
+                        continue;
+                    };
+                    for annotation in &method.annotations {
+                        match simple(&annotation.name) {
+                            "BindingAdapter" => {
+                                let attributes: Vec<String> = strings(annotation, "value")
+                                    .iter()
+                                    .map(|one| attribute_key(one))
+                                    .collect();
+                                if attributes.is_empty() || arity < 2 {
+                                    continue;
+                                }
+                                let values = arity - 1;
+                                let old = values == attributes.len() * 2;
+                                if !old && values != attributes.len() {
+                                    continue;
+                                }
+                                let Some(view) = named(&found.parameters[0]).map(str::to_string)
+                                else {
+                                    continue;
+                                };
+                                let parameters: Vec<Type> = found.parameters
+                                    [1 + if old { attributes.len() } else { 0 }..]
+                                    .to_vec();
+                                let require_all = boolean(annotation, "requireAll").unwrap_or(true);
+                                let adapter = Adapter {
+                                    view,
+                                    attributes: attributes.clone(),
+                                    parameters,
+                                    owner: internal.clone(),
+                                    method: method.name.clone(),
+                                    old,
+                                    static_: found.static_,
+                                    require_all,
+                                };
+                                if attributes.len() == 1 {
+                                    self.single.insert(0, adapter);
+                                } else {
+                                    self.multi.insert(0, adapter);
+                                }
+                            }
+                            "BindingConversion" if found.static_ && arity == 1 => {
+                                self.conversions.insert(
+                                    0,
+                                    Conversion {
+                                        from: found.parameters[0].clone(),
+                                        to: found.returns.clone(),
+                                        owner: internal.clone(),
+                                        method: method.name.clone(),
+                                    },
+                                );
+                            }
+                            "InverseBindingAdapter" if found.static_ && arity == 1 => {
+                                let attribute = attribute_key(
+                                    &strings(annotation, "attribute")
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                );
+                                let event = strings(annotation, "event")
+                                    .first()
+                                    .map(|one| attribute_key(one))
+                                    .unwrap_or_else(|| format!("{attribute}AttrChanged"));
+                                let Some(view) = named(&found.parameters[0]).map(str::to_string)
+                                else {
+                                    continue;
+                                };
+                                self.inverse.insert(
+                                    0,
+                                    Inverse {
+                                        attribute,
+                                        view,
+                                        value: Some(found.returns.clone()),
+                                        event,
+                                        owner: internal.clone(),
+                                        method: method.name.clone(),
+                                        on_view: false,
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                for annotation in &unit.annotations {
+                    let inverse = match simple(&annotation.name) {
+                        "BindingMethods" => false,
+                        "InverseBindingMethods" => true,
+                        _ => continue,
+                    };
+                    for nested in nested_annotations(annotation) {
+                        let Some(view) = nested
+                            .iter()
+                            .find(|(key, _)| key == "type")
+                            .and_then(|(_, value)| match value {
+                                Expression::ClassLiteral { of, .. } => {
+                                    crate::compilers::java::resolve_in(model.classpath, unit, of)
+                                }
+                                _ => None,
+                            })
+                            .and_then(|found| named(&found).map(str::to_string))
+                        else {
+                            continue;
+                        };
+                        let text = |key: &str| {
+                            nested
+                                .iter()
+                                .find(|(held, _)| held == key)
+                                .and_then(|(_, value)| match value {
+                                    Expression::Str(text) => Some(text.clone()),
+                                    _ => None,
+                                })
+                        };
+                        let Some(attribute) = text("attribute").map(|one| attribute_key(&one))
+                        else {
+                            continue;
+                        };
+                        if inverse {
+                            self.inverse.insert(
+                                0,
+                                Inverse {
+                                    event: text("event")
+                                        .map(|one| attribute_key(&one))
+                                        .unwrap_or_else(|| format!("{attribute}AttrChanged")),
+                                    attribute,
+                                    view,
+                                    value: None,
+                                    owner: internal.clone(),
+                                    method: text("method").unwrap_or_default(),
+                                    on_view: true,
+                                },
+                            );
+                        } else {
+                            let method = text("method").unwrap_or_else(|| {
+                                format!("set{}", capitalized(attribute.trim_start_matches(ANDROID)))
+                            });
+                            self.renamed.insert(
+                                0,
+                                Renamed {
+                                    attribute,
+                                    view,
+                                    method,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn simple(name: &str) -> &str {
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
+    fn strings(annotation: &Annotated, key: &str) -> Vec<String> {
+        let Some((_, value)) = annotation.values.iter().find(|(held, _)| held == key) else {
+            return Vec::new();
+        };
+        match value {
+            Expression::Str(text) => vec![text.clone()],
+            Expression::ArrayOf { values, .. } => values
+                .iter()
+                .filter_map(|one| match one {
+                    Expression::Str(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn boolean(annotation: &Annotated, key: &str) -> Option<bool> {
+        annotation
+            .values
+            .iter()
+            .find(|(held, _)| held == key)
+            .and_then(|(_, value)| match value {
+                Expression::Boolean(held) => Some(*held),
+                _ => None,
+            })
+    }
+
+    fn nested_annotations(annotation: &Annotated) -> Vec<Vec<(String, Expression)>> {
+        let Some((_, value)) = annotation.values.iter().find(|(held, _)| held == "value") else {
+            return Vec::new();
+        };
+        let values = match value {
+            Expression::ArrayOf { values, .. } => values.clone(),
+            other => vec![other.clone()],
+        };
+        values
+            .into_iter()
+            .filter_map(|one| match one {
+                Expression::Call { arguments, .. } => Some(
+                    arguments
+                        .into_iter()
+                        .filter_map(|argument| match argument {
+                            Expression::Assign { target, value, .. } => match *target {
+                                Expression::Name(key) => Some((key, *value)),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Layout {
+        pub folder: String,
+        pub name: String,
+        pub text: String,
+        pub package: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Made {
+        pub sources: Vec<(String, String)>,
+        pub layouts: Vec<(String, String, String)>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Bound {
+        key: String,
+        written: String,
+        text: String,
+        expr: Expr,
+        two_way: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Included {
+        layout: String,
+        bound: bool,
+        passed: Vec<Bound>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct View {
+        index: usize,
+        class: String,
+        id: Option<String>,
+        bound: Vec<Bound>,
+        include: Option<Included>,
+        stub: bool,
+        tagged: bool,
+        user_tag: Option<String>,
+        parent: Option<usize>,
+        field: String,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Variant {
+        folder: String,
+        name: String,
+        package: String,
+        variables: Vec<(String, String)>,
+        imports: Vec<(String, String)>,
+        views: Vec<View>,
+        rewritten: String,
+        class_hint: Option<String>,
+    }
+
+    fn view_class_of(model: &Model, element: &Element) -> String {
+        let tag = element.name.as_str();
+        if tag == "view" {
+            if let Some(found) = element
+                .attribute("class")
+                .and_then(|named| model.dotted_class(named))
+            {
+                return found;
+            }
+            return "android/view/View".to_string();
+        }
+        if tag.contains('.') {
+            return model
+                .dotted_class(tag)
+                .unwrap_or_else(|| tag.replace('.', "/"));
+        }
+        for package in [
+            "android/widget",
+            "android/view",
+            "android/webkit",
+            "android/app",
+        ] {
+            let candidate = format!("{package}/{tag}");
+            if model.known(&candidate) {
+                return candidate;
+            }
+        }
+        format!("android/widget/{tag}")
+    }
+
+    fn id_of(element: &Element) -> Option<String> {
+        let said = element.attribute("android:id")?;
+        if let Some(platform) = said.strip_prefix("@android:id/") {
+            return Some(format!("{}{platform}", crate::bindings::PLATFORM_ID));
+        }
+        said.strip_prefix("@+id/")
+            .or_else(|| said.strip_prefix("@id/"))
+            .map(str::to_string)
+    }
+
+    fn id_reference(package: &str, id: &str) -> String {
+        match id.strip_prefix(crate::bindings::PLATFORM_ID) {
+            Some(platform) => format!("android.R.id.{platform}"),
+            None => format!("{package}.R.id.{}", id.replace('.', "_")),
+        }
+    }
+
+    fn unreadable(layout: &str, why: impl Into<String>) -> Diagnostic {
+        fail("EH001", "A data binding layout could not be read.")
+            .with_context(format!("Layout: {layout}"))
+            .with_context(format!("Reason: {}", why.into()))
+    }
+
+    fn bad_expression(layout: &str, attribute: &str, text: &str, why: &str) -> Diagnostic {
+        fail("EH002", "A data binding expression could not be read.")
+            .with_context(format!("Layout: {layout}"))
+            .with_context(format!("Attribute: {attribute}"))
+            .with_context(format!("Expression: {text}"))
+            .with_context(format!("Reason: {why}"))
+    }
+
+    const SKIPPED: &[&str] = &["requestFocus", "tag", "fragment", "merge", "data", "layout"];
+
+    fn read_variant(
+        model_classpath: &Classpath,
+        layout: &Layout,
+        bound_names: &[String],
+        roots_of: &[(String, String)],
+    ) -> Result<Variant, Diagnostic> {
+        let label = format!("{}/{}", layout.folder, layout.name);
+        let mut sink = crate::diag::Sink::new();
+        let whole = crate::xml::parse(&layout.text, &layout.name, &mut sink)
+            .ok_or_else(|| unreadable(&label, "it is not well-formed XML"))?;
+        let mut variables = Vec::new();
+        let mut imports = Vec::new();
+        let mut class_hint = None;
+        let mut roots: Vec<&Element> = Vec::new();
+        for child in &whole.children {
+            if child.name == "data" {
+                class_hint = child.attribute("class").map(str::to_string);
+                for held in &child.children {
+                    match held.name.as_str() {
+                        "variable" => {
+                            let (Some(name), Some(what)) =
+                                (held.attribute("name"), held.attribute("type"))
+                            else {
+                                return Err(unreadable(
+                                    &label,
+                                    "a variable needs a name and a type",
+                                ));
+                            };
+                            variables.push((name.to_string(), what.to_string()));
+                        }
+                        "import" => {
+                            let Some(what) = held.attribute("type") else {
+                                return Err(unreadable(&label, "an import needs a type"));
+                            };
+                            let alias =
+                                held.attribute("alias")
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| {
+                                        what.rsplit('.').next().unwrap_or(what).to_string()
+                                    });
+                            imports.push((alias, what.to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                roots.push(child);
+            }
+        }
+        let [root] = roots.as_slice() else {
+            return Err(unreadable(
+                &label,
+                "a data binding layout holds exactly one view besides its data",
+            ));
+        };
+        if root.name == "merge" {
+            return Err(unreadable(
+                &label,
+                "a data binding layout cannot start with merge",
+            ));
+        }
+        let model = Model {
+            classpath: model_classpath,
+            imports: imports.clone(),
+        };
+
+        let mut rewritten = (*root).clone();
+        for attribute in &whole.attributes {
+            if attribute.name.starts_with("xmlns:")
+                && rewritten.attribute(&attribute.name).is_none()
+            {
+                rewritten.attributes.push(attribute.clone());
+            }
+        }
+        if rewritten.attribute("xmlns:android").is_none() {
+            rewritten.attributes.push(Attribute {
+                name: "xmlns:android".to_string(),
+                value: ANDROID_URI.to_string(),
+                position: crate::xml::Position::default(),
+            });
+        }
+
+        let mut views: Vec<View> = Vec::new();
+        let tag = format!("{}/{}_0", layout.folder, layout.name);
+        walk(
+            &model,
+            &label,
+            &mut rewritten,
+            None,
+            true,
+            &tag,
+            bound_names,
+            roots_of,
+            &mut views,
+        )?;
+        let text = crate::xml::written(&rewritten);
+        Ok(Variant {
+            folder: layout.folder.clone(),
+            name: layout.name.clone(),
+            package: layout.package.clone(),
+            variables,
+            imports,
+            views,
+            rewritten: text,
+            class_hint,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        model: &Model,
+        label: &str,
+        element: &mut Element,
+        parent: Option<usize>,
+        top: bool,
+        root_tag: &str,
+        bound_names: &[String],
+        roots_of: &[(String, String)],
+        views: &mut Vec<View>,
+    ) -> Result<(), Diagnostic> {
+        let mut bound = Vec::new();
+        let mut kept = Vec::new();
+        for attribute in std::mem::take(&mut element.attributes) {
+            match binding_of(&attribute.value) {
+                Some((text, two_way)) => {
+                    let expr = parse_expression(&text)
+                        .map_err(|why| bad_expression(label, &attribute.name, &text, &why))?;
+                    bound.push(Bound {
+                        key: attribute_key(&attribute.name),
+                        written: attribute.name.clone(),
+                        text,
+                        expr,
+                        two_way,
+                    });
+                }
+                None => kept.push(attribute),
+            }
+        }
+        element.attributes = kept;
+        let name = element.name.clone();
+        let include = if name == "include" {
+            element
+                .attribute("layout")
+                .and_then(|held| held.strip_prefix("@layout/"))
+                .map(|layout| Included {
+                    layout: layout.to_string(),
+                    bound: bound_names.iter().any(|one| one == layout),
+                    passed: std::mem::take(&mut bound),
+                })
+        } else {
+            None
+        };
+        let id = id_of(element);
+        let holds_a_bound_include = element.children.iter().any(|child| {
+            child.name == "include"
+                && child
+                    .attribute("layout")
+                    .and_then(|held| held.strip_prefix("@layout/"))
+                    .is_some_and(|layout| bound_names.iter().any(|one| one == layout))
+        });
+        let skipped = SKIPPED.contains(&name.as_str()) && include.is_none();
+        let interesting = !skipped
+            && (top
+                || id.is_some()
+                || !bound.is_empty()
+                || include
+                    .as_ref()
+                    .is_some_and(|held| held.bound || id.is_some())
+                || holds_a_bound_include);
+        let mut mine = None;
+        if interesting {
+            let index = views.len();
+            let class = match &include {
+                Some(held) if held.bound => String::new(),
+                Some(held) => roots_of
+                    .iter()
+                    .find(|(layout, _)| *layout == held.layout)
+                    .map(|(_, root)| root.clone())
+                    .unwrap_or_else(|| "android/view/View".to_string()),
+                None => view_class_of(model, element),
+            };
+            let stub = class == STUB;
+            let tagged = include.is_none() && (top || !bound.is_empty() || holds_a_bound_include);
+            let user_tag = if tagged {
+                element.attribute("android:tag").map(str::to_string)
+            } else {
+                None
+            };
+            if tagged {
+                let tag = if top {
+                    root_tag.to_string()
+                } else {
+                    format!("binding_{index}")
+                };
+                match element
+                    .attributes
+                    .iter_mut()
+                    .find(|attribute| attribute.name == "android:tag")
+                {
+                    Some(held) => held.value = tag,
+                    None => element.attributes.push(Attribute {
+                        name: "android:tag".to_string(),
+                        value: tag,
+                        position: crate::xml::Position::default(),
+                    }),
+                }
+            }
+            if !bound.is_empty() && stub {
+                return Err(unreadable(
+                    label,
+                    "a ViewStub cannot take a binding expression",
+                ));
+            }
+            let field = match &id {
+                Some(held) => crate::bindings::field_name(held),
+                None => format!("mboundView{index}"),
+            };
+            views.push(View {
+                index,
+                class,
+                id: id.clone(),
+                bound,
+                include,
+                stub,
+                tagged,
+                user_tag,
+                parent,
+                field,
+            });
+            mine = Some(index);
+        }
+        let around = if interesting { mine } else { parent };
+        for child in &mut element.children {
+            walk(
+                model,
+                label,
+                child,
+                around,
+                false,
+                root_tag,
+                bound_names,
+                roots_of,
+                views,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn impl_suffix(folder: &str) -> String {
+        let mut out = String::new();
+        for part in folder.split('-').skip(1) {
+            out.push_str(&capitalized(part));
+        }
+        out.push_str("Impl");
+        out
+    }
+
+    fn binding_class(variant: &Variant) -> String {
+        let default_package = format!("{}{}", variant.package, crate::bindings::PACKAGE_SUFFIX);
+        match &variant.class_hint {
+            Some(hint) if hint.starts_with('.') => format!("{}{hint}", variant.package),
+            Some(hint) if hint.contains('.') => hint.clone(),
+            Some(hint) => format!("{default_package}.{hint}"),
+            None => format!(
+                "{default_package}.{}",
+                crate::bindings::class_name(&variant.name)
+            ),
+        }
+    }
+
+    fn split_class(dotted: &str) -> (String, String) {
+        match dotted.rsplit_once('.') {
+            Some((package, simple)) => (package.to_string(), simple.to_string()),
+            None => (String::new(), dotted.to_string()),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Held {
+        Value(String, Type),
+        Class(String),
+        Package(String),
+    }
+
+    #[derive(Clone, Debug)]
+    struct Variable {
+        name: String,
+        what: Type,
+        bit: usize,
+        local: Option<(usize, Watch)>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Node {
+        key: String,
+        local: usize,
+        bit: usize,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Plan {
+        variables: Vec<Variable>,
+        nodes: Vec<Node>,
+        bits: usize,
+        locals: usize,
+        fields: Vec<String>,
+        components: Vec<String>,
+        package: String,
+        owner: String,
+        fresh: usize,
+    }
+
+    impl Plan {
+        fn bit(&mut self) -> usize {
+            self.bits += 1;
+            self.bits - 1
+        }
+
+        fn node(&mut self, key: &str) -> (usize, usize) {
+            if let Some(found) = self.nodes.iter().find(|one| one.key == key) {
+                return (found.local, found.bit);
+            }
+            let local = self.locals;
+            self.locals += 1;
+            let bit = self.bit();
+            self.nodes.push(Node {
+                key: key.to_string(),
+                local,
+                bit,
+            });
+            (local, bit)
+        }
+
+        fn name(&mut self, stem: &str) -> String {
+            self.fresh += 1;
+            format!("{stem}{}", self.fresh)
+        }
+    }
+
+    fn registration(local: usize, watch: Watch, code: &str) -> String {
+        match watch {
+            Watch::Observable => {
+                format!("updateRegistration({local}, (androidx.databinding.Observable) {code});")
+            }
+            Watch::List => format!(
+                "updateRegistration({local}, (androidx.databinding.ObservableList) {code});"
+            ),
+            Watch::Map => {
+                format!("updateRegistration({local}, (androidx.databinding.ObservableMap) {code});")
+            }
+            Watch::LiveData => format!(
+                "updateLiveDataRegistration({local}, (androidx.lifecycle.LiveData) {code});"
+            ),
+        }
+    }
+
+    fn value_method(what: &Type) -> &'static str {
+        match what {
+            Type::Boolean => "booleanValue",
+            Type::Byte => "byteValue",
+            Type::Short => "shortValue",
+            Type::Char => "charValue",
+            Type::Long => "longValue",
+            Type::Float => "floatValue",
+            Type::Double => "doubleValue",
+            _ => "intValue",
+        }
+    }
+
+    fn convert(model: &Model, code: &str, from: &Type, to: &Type) -> Result<String, String> {
+        if *to == Type::Void {
+            return Ok(code.to_string());
+        }
+        if is_null(from) {
+            return if to.is_reference() {
+                Ok(format!("({}) null", model.source(to)))
+            } else {
+                Err(format!("null cannot be a {}", to.readable()))
+            };
+        }
+        if from == to {
+            return Ok(code.to_string());
+        }
+        let refuse = || {
+            Err(format!(
+                "a {} cannot be given where a {} is wanted",
+                from.readable(),
+                to.readable()
+            ))
+        };
+        match (from.is_reference(), to.is_reference()) {
+            (false, false) => {
+                if widens(from, to) {
+                    Ok(format!("({}) {code}", model.source(to)))
+                } else {
+                    refuse()
+                }
+            }
+            (false, true) => {
+                let Some(boxed) = box_of(from) else {
+                    return refuse();
+                };
+                if model.cost(from, to).is_some() {
+                    Ok(format!("{}.valueOf({code})", model.class_source(boxed)))
+                } else {
+                    refuse()
+                }
+            }
+            (true, false) => {
+                let Some(inner) = unboxed(from) else {
+                    return refuse();
+                };
+                if inner == *to || widens(&inner, to) {
+                    Ok(format!(
+                        "({code} == null ? {} : {code}.{}())",
+                        default_of(&inner),
+                        value_method(&inner)
+                    ))
+                } else {
+                    refuse()
+                }
+            }
+            (true, true) => {
+                if model.cost(from, to).is_some() {
+                    Ok(code.to_string())
+                } else {
+                    refuse()
+                }
+            }
+        }
+    }
+
+    fn cast_to(model: &Model, what: &Type, erased: &Type, code: String) -> String {
+        if what.is_reference() && what != erased && named(what) != Some(OBJECT) {
+            format!("({}) {code}", model.source(what))
+        } else {
+            code
+        }
+    }
+
+    struct Emit {
+        lines: Vec<String>,
+        bits: Vec<usize>,
+        listener: bool,
+        parameters: Vec<(String, String, Type)>,
+    }
+
+    impl Emit {
+        fn new(listener: bool) -> Emit {
+            Emit {
+                lines: Vec::new(),
+                bits: Vec::new(),
+                listener,
+                parameters: Vec::new(),
+            }
+        }
+
+        fn line(&mut self, text: impl Into<String>) {
+            self.lines.push(text.into());
+        }
+
+        fn nest(&mut self, lines: Vec<String>) {
+            for one in lines {
+                self.lines.push(format!("    {one}"));
+            }
+        }
+
+        fn this(&self, plan: &Plan) -> String {
+            if self.listener {
+                format!("{}.this", plan.owner)
+            } else {
+                "this".to_string()
+            }
+        }
+
+        fn root(&self, plan: &Plan) -> String {
+            format!("{}.getRoot()", self.this(plan))
+        }
+
+        fn declare(&mut self, model: &Model, plan: &mut Plan, what: &Type, code: &str) -> String {
+            let name = plan.name("db");
+            self.line(format!("{} {name} = {code};", model.source(what)));
+            name
+        }
+
+        fn guarded(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            receiver: &str,
+            receiver_type: &Type,
+            what: &Type,
+            access: &str,
+        ) -> String {
+            if !receiver_type.is_reference() {
+                return self.declare(model, plan, what, access);
+            }
+            let name = plan.name("db");
+            self.line(format!(
+                "{} {name} = {};",
+                model.source(what),
+                default_of(what)
+            ));
+            self.line(format!("if ({receiver} != null) {{"));
+            self.line(format!("    {name} = {access};"));
+            self.line("}");
+            name
+        }
+
+        fn watched(&mut self, model: &Model, plan: &mut Plan, key: &str, code: &str, what: &Type) {
+            if self.listener {
+                return;
+            }
+            let Some(watch) = model.watch(what) else {
+                return;
+            };
+            let (local, bit) = plan.node(key);
+            self.bits.push(bit);
+            self.line(registration(local, watch, code));
+        }
+
+        fn plain(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            code: &str,
+            what: &Type,
+        ) -> (String, Type) {
+            let Some((inner, getter, _)) = model.wrapped(what) else {
+                return (code.to_string(), what.clone());
+            };
+            let access = cast_to(model, &inner, &object(OBJECT), format!("{code}.{getter}()"));
+            let local = self.guarded(model, plan, code, what, &inner, &access);
+            (local, inner)
+        }
+
+        fn number(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            code: &str,
+            what: &Type,
+        ) -> (String, Type) {
+            let Some(inner) = unboxed(what) else {
+                return (code.to_string(), what.clone());
+            };
+            let access = format!(
+                "{code} == null ? {} : {code}.{}()",
+                default_of(&inner),
+                value_method(&inner)
+            );
+            let local = self.declare(model, plan, &inner, &access);
+            (local, inner)
+        }
+
+        fn settled(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            expr: &Expr,
+        ) -> Result<(String, Type), String> {
+            match self.value(model, plan, expr)? {
+                Held::Value(code, what) => {
+                    let (code, what) = self.plain(model, plan, &code, &what);
+                    Ok(self.number(model, plan, &code, &what))
+                }
+                Held::Class(name) => Err(format!(
+                    "`{}` is a class, not a value",
+                    name.replace('/', ".")
+                )),
+                Held::Package(name) => Err(format!("`{name}` is not anything this layout knows")),
+            }
+        }
+
+        fn captured<T>(
+            &mut self,
+            run: impl FnOnce(&mut Emit) -> Result<T, String>,
+        ) -> Result<(Vec<String>, T), String> {
+            let before = std::mem::take(&mut self.lines);
+            let held = run(self);
+            let taken = std::mem::replace(&mut self.lines, before);
+            held.map(|one| (taken, one))
+        }
+
+        fn value(&mut self, model: &Model, plan: &mut Plan, expr: &Expr) -> Result<Held, String> {
+            let key = format!("{expr:?}");
+            match expr {
+                Expr::Literal(what, spelled) => Ok(Held::Value(spelled.clone(), what.clone())),
+                Expr::Name(name) => {
+                    if let Some((_, java, what)) =
+                        self.parameters.iter().find(|(held, _, _)| held == name)
+                    {
+                        return Ok(Held::Value(java.clone(), what.clone()));
+                    }
+                    if let Some(variable) =
+                        plan.variables.iter().find(|one| one.name == *name).cloned()
+                    {
+                        if !self.listener {
+                            self.bits.push(variable.bit);
+                        }
+                        let code = format!("{}.m{}", self.this(plan), capitalized(name));
+                        let local = self.declare(model, plan, &variable.what, &code);
+                        return Ok(Held::Value(local, variable.what));
+                    }
+                    if name == "context" {
+                        let what = object("android/content/Context");
+                        let code = format!("{}.getContext()", self.root(plan));
+                        let local = self.declare(model, plan, &what, &code);
+                        return Ok(Held::Value(local, what));
+                    }
+                    if let Some(found) = model.class_named(name) {
+                        return Ok(Held::Class(found));
+                    }
+                    Ok(Held::Package(name.clone()))
+                }
+                Expr::Field(of, name) => match self.value(model, plan, of)? {
+                    Held::Package(package) => {
+                        let dotted = format!("{package}.{name}");
+                        match model.dotted_class(&dotted) {
+                            Some(found) => Ok(Held::Class(found)),
+                            None => Ok(Held::Package(dotted)),
+                        }
+                    }
+                    Held::Class(class) => {
+                        if name == "class" {
+                            let what =
+                                Type::Object("java/lang/Class".to_string(), vec![object(&class)]);
+                            let code = format!("{}.class", model.class_source(&class));
+                            let local = self.declare(model, plan, &what, &code);
+                            return Ok(Held::Value(local, what));
+                        }
+                        let nested = format!("{class}${name}");
+                        if model.known(&nested) {
+                            return Ok(Held::Class(nested));
+                        }
+                        let receiver = object(&class);
+                        let (code, what) = match model.property(&receiver, name, true) {
+                            Some(Member::Getter(signature)) => {
+                                let what = model.returns(&receiver, &signature);
+                                let call =
+                                    format!("{}.{}()", model.class_source(&class), signature.name);
+                                (cast_to(model, &what, &signature.returns, call), what)
+                            }
+                            Some(Member::Field(owner, field, what, _)) => {
+                                (format!("{}.{field}", model.class_source(&owner)), what)
+                            }
+                            None => {
+                                return Err(format!(
+                                    "`{}` has no static `{name}`",
+                                    class.replace('/', ".")
+                                ))
+                            }
+                        };
+                        let local = self.declare(model, plan, &what, &code);
+                        self.watched(model, plan, &key, &local, &what);
+                        Ok(Held::Value(local, what))
+                    }
+                    Held::Value(code, what) => self.member(model, plan, &key, &code, &what, name),
+                },
+                Expr::Call(of, name, arguments) => {
+                    let receiver = self.value(model, plan, of)?;
+                    let mut given = Vec::new();
+                    for argument in arguments {
+                        match self.value(model, plan, argument)? {
+                            Held::Value(code, what) => given.push((code, what)),
+                            _ => return Err(format!("an argument to `{name}` is not a value")),
+                        }
+                    }
+                    match receiver {
+                        Held::Class(class) => {
+                            let owner = object(&class);
+                            let (signature, arguments) =
+                                self.choose(model, plan, &owner, name, &given, true)?;
+                            let what = model.returns(&owner, &signature);
+                            let call = format!(
+                                "{}.{}({})",
+                                model.class_source(&class),
+                                signature.name,
+                                arguments.join(", ")
+                            );
+                            if what == Type::Void {
+                                self.line(format!("{call};"));
+                                return Ok(Held::Value(String::new(), Type::Void));
+                            }
+                            let call = cast_to(model, &what, &signature.returns, call);
+                            let local = self.declare(model, plan, &what, &call);
+                            self.watched(model, plan, &key, &local, &what);
+                            Ok(Held::Value(local, what))
+                        }
+                        Held::Package(package) => {
+                            Err(format!("`{package}` is not anything this layout knows"))
+                        }
+                        Held::Value(code, what) => {
+                            let (code, what) = if what.is_reference()
+                                && model
+                                    .method(
+                                        &what,
+                                        name,
+                                        &given
+                                            .iter()
+                                            .map(|(_, one)| one.clone())
+                                            .collect::<Vec<_>>(),
+                                        false,
+                                    )
+                                    .is_none()
+                                && model.wrapped(&what).is_some()
+                            {
+                                self.plain(model, plan, &code, &what)
+                            } else {
+                                (code, what)
+                            };
+                            if !what.is_reference() {
+                                return Err(format!("a {} has no methods", what.readable()));
+                            }
+                            let (signature, arguments) =
+                                self.choose(model, plan, &what, name, &given, false)?;
+                            let result = model.returns(&what, &signature);
+                            let call =
+                                format!("{code}.{}({})", signature.name, arguments.join(", "));
+                            if result == Type::Void {
+                                self.line(format!("if ({code} != null) {{"));
+                                self.line(format!("    {call};"));
+                                self.line("}");
+                                return Ok(Held::Value(String::new(), Type::Void));
+                            }
+                            let call = cast_to(model, &result, &signature.returns, call);
+                            let local = self.guarded(model, plan, &code, &what, &result, &call);
+                            self.watched(model, plan, &key, &local, &result);
+                            Ok(Held::Value(local, result))
+                        }
+                    }
+                }
+                Expr::Index(of, at) => {
+                    let (code, what) = match self.value(model, plan, of)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err("only a value can be indexed".to_string()),
+                    };
+                    let (index, index_type) = match self.value(model, plan, at)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err("an index has to be a value".to_string()),
+                    };
+                    let result;
+                    let access;
+                    let mut guard = format!("{code} != null");
+                    match &what {
+                        Type::Array(element) => {
+                            let (at, _) = self.number(model, plan, &index, &index_type);
+                            result = (**element).clone();
+                            guard = format!("{code} != null && {at} >= 0 && {at} < {code}.length");
+                            access = format!("{code}[{at}]");
+                        }
+                        Type::Object(class, _) if model.is_a(class, "java/util/List") => {
+                            let (at, _) = self.number(model, plan, &index, &index_type);
+                            result = model
+                                .seen(&what, "java/util/List")
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| object(OBJECT));
+                            guard = format!("{code} != null && {at} >= 0 && {at} < {code}.size()");
+                            access = cast_to(
+                                model,
+                                &result,
+                                &object(OBJECT),
+                                format!("{code}.get({at})"),
+                            );
+                        }
+                        Type::Object(class, _) if model.is_a(class, "java/util/Map") => {
+                            result = model
+                                .seen(&what, "java/util/Map")
+                                .get(1)
+                                .cloned()
+                                .unwrap_or_else(|| object(OBJECT));
+                            let key_code = convert(model, &index, &index_type, &object(OBJECT))?;
+                            access = cast_to(
+                                model,
+                                &result,
+                                &object(OBJECT),
+                                format!("{code}.get({key_code})"),
+                            );
+                        }
+                        Type::Object(class, arguments)
+                            if class == "android/util/SparseArray"
+                                || class == "android/util/LongSparseArray" =>
+                        {
+                            let (at, _) = self.number(model, plan, &index, &index_type);
+                            result = arguments.first().cloned().unwrap_or_else(|| object(OBJECT));
+                            access = cast_to(
+                                model,
+                                &result,
+                                &object(OBJECT),
+                                format!("{code}.get({at})"),
+                            );
+                        }
+                        Type::Object(class, _)
+                            if matches!(
+                                class.as_str(),
+                                "android/util/SparseIntArray"
+                                    | "android/util/SparseBooleanArray"
+                                    | "android/util/SparseLongArray"
+                            ) =>
+                        {
+                            let (at, _) = self.number(model, plan, &index, &index_type);
+                            result = match class.as_str() {
+                                "android/util/SparseIntArray" => Type::Int,
+                                "android/util/SparseBooleanArray" => Type::Boolean,
+                                _ => Type::Long,
+                            };
+                            access = format!("{code}.get({at})");
+                        }
+                        other => return Err(format!("a {} cannot be indexed", other.readable())),
+                    }
+                    let name = plan.name("db");
+                    self.line(format!(
+                        "{} {name} = {};",
+                        model.source(&result),
+                        default_of(&result)
+                    ));
+                    self.line(format!("if ({guard}) {{"));
+                    self.line(format!("    {name} = {access};"));
+                    self.line("}");
+                    self.watched(model, plan, &key, &name, &result);
+                    Ok(Held::Value(name, result))
+                }
+                Expr::Unary(operator, of) => {
+                    let (code, what) = self.settled(model, plan, of)?;
+                    let result = match *operator {
+                        "!" if what == Type::Boolean => Type::Boolean,
+                        "!" => return Err("`!` needs a boolean".to_string()),
+                        "~" if what.is_int_like() && what != Type::Boolean => Type::Int,
+                        "~" if what == Type::Long => Type::Long,
+                        _ if what.is_numeric() => {
+                            what.promoted_with(&Type::Int).unwrap_or(what.clone())
+                        }
+                        _ => return Err(format!("`{operator}` needs a number")),
+                    };
+                    let local = self.declare(model, plan, &result, &format!("{operator}{code}"));
+                    Ok(Held::Value(local, result))
+                }
+                Expr::Binary(operator, left, right) if *operator == "&&" || *operator == "||" => {
+                    let (code, what) = self.settled(model, plan, left)?;
+                    if what != Type::Boolean {
+                        return Err(format!("`{operator}` needs booleans"));
+                    }
+                    let name = plan.name("db");
+                    self.line(format!("boolean {name} = {code};"));
+                    let (lines, (other, other_type)) =
+                        self.captured(|inner| inner.settled(model, plan, right))?;
+                    if other_type != Type::Boolean {
+                        return Err(format!("`{operator}` needs booleans"));
+                    }
+                    if *operator == "&&" {
+                        self.line(format!("if ({name}) {{"));
+                    } else {
+                        self.line(format!("if (!{name}) {{"));
+                    }
+                    self.nest(lines);
+                    self.line(format!("    {name} = {other};"));
+                    self.line("}");
+                    Ok(Held::Value(name, Type::Boolean))
+                }
+                Expr::Binary(operator, left, right) => {
+                    let (left_code, left_type) = match self.value(model, plan, left)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err(format!("`{operator}` needs values")),
+                    };
+                    let (right_code, right_type) = match self.value(model, plan, right)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err(format!("`{operator}` needs values")),
+                    };
+                    let text =
+                        named(&left_type) == Some(STRING) || named(&right_type) == Some(STRING);
+                    if *operator == "+" && text {
+                        let string = object(STRING);
+                        let local = self.declare(
+                            model,
+                            plan,
+                            &string,
+                            &format!("\"\" + {left_code} + {right_code}"),
+                        );
+                        return Ok(Held::Value(local, string));
+                    }
+                    if matches!(*operator, "==" | "!=")
+                        && left_type.is_reference()
+                        && right_type.is_reference()
+                    {
+                        let local = self.declare(
+                            model,
+                            plan,
+                            &Type::Boolean,
+                            &format!("{left_code} {operator} {right_code}"),
+                        );
+                        return Ok(Held::Value(local, Type::Boolean));
+                    }
+                    let (left_code, left_type) = self.number(model, plan, &left_code, &left_type);
+                    let (right_code, right_type) =
+                        self.number(model, plan, &right_code, &right_type);
+                    if left_type.is_reference() || right_type.is_reference() {
+                        return Err(format!(
+                            "`{operator}` cannot join a {} and a {}",
+                            left_type.readable(),
+                            right_type.readable()
+                        ));
+                    }
+                    let result = match *operator {
+                        "==" | "!=" | "<" | ">" | "<=" | ">=" => Type::Boolean,
+                        "<<" | ">>" | ">>>" => {
+                            left_type.promoted_with(&Type::Int).unwrap_or(Type::Int)
+                        }
+                        "&" | "|" | "^"
+                            if left_type == Type::Boolean && right_type == Type::Boolean =>
+                        {
+                            Type::Boolean
+                        }
+                        _ => left_type
+                            .promoted_with(&right_type)
+                            .ok_or_else(|| format!("`{operator}` needs numbers"))?,
+                    };
+                    let local = self.declare(
+                        model,
+                        plan,
+                        &result,
+                        &format!("{left_code} {operator} {right_code}"),
+                    );
+                    Ok(Held::Value(local, result))
+                }
+                Expr::Ternary(condition, then, otherwise) => {
+                    let (code, what) = self.settled(model, plan, condition)?;
+                    if what != Type::Boolean {
+                        return Err("a condition has to be a boolean".to_string());
+                    }
+                    let (first_lines, first) =
+                        self.captured(|inner| match inner.value(model, plan, then)? {
+                            Held::Value(code, what) => Ok(inner.plain(model, plan, &code, &what)),
+                            _ => Err("a branch has to be a value".to_string()),
+                        })?;
+                    let (second_lines, second) =
+                        self.captured(|inner| match inner.value(model, plan, otherwise)? {
+                            Held::Value(code, what) => Ok(inner.plain(model, plan, &code, &what)),
+                            _ => Err("a branch has to be a value".to_string()),
+                        })?;
+                    let result = model.common(&first.1, &second.1);
+                    let name = plan.name("db");
+                    self.line(format!(
+                        "{} {name} = {};",
+                        model.source(&result),
+                        default_of(&result)
+                    ));
+                    self.line(format!("if ({code}) {{"));
+                    self.nest(first_lines);
+                    self.line(format!(
+                        "    {name} = {};",
+                        convert(model, &first.0, &first.1, &result)?
+                    ));
+                    self.line("} else {");
+                    self.nest(second_lines);
+                    self.line(format!(
+                        "    {name} = {};",
+                        convert(model, &second.0, &second.1, &result)?
+                    ));
+                    self.line("}");
+                    Ok(Held::Value(name, result))
+                }
+                Expr::Coalesce(left, right) => {
+                    let (code, what) = match self.value(model, plan, left)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err("`??` needs values".to_string()),
+                    };
+                    if !what.is_reference() {
+                        return Ok(Held::Value(code, what));
+                    }
+                    let (lines, (other, other_type)) =
+                        self.captured(|inner| match inner.value(model, plan, right)? {
+                            Held::Value(code, what) => Ok(inner.plain(model, plan, &code, &what)),
+                            _ => Err("`??` needs values".to_string()),
+                        })?;
+                    let common = model.common(&what, &other_type);
+                    let result = box_of(&common).map(object).unwrap_or(common);
+                    let name = plan.name("db");
+                    self.line(format!(
+                        "{} {name} = {};",
+                        model.source(&result),
+                        convert(model, &code, &what, &result)?
+                    ));
+                    self.line(format!("if ({name} == null) {{"));
+                    self.nest(lines);
+                    self.line(format!(
+                        "    {name} = {};",
+                        convert(model, &other, &other_type, &result)?
+                    ));
+                    self.line("}");
+                    Ok(Held::Value(name, result))
+                }
+                Expr::Cast(written, of) => {
+                    let target = model
+                        .type_named(written)
+                        .ok_or_else(|| format!("`{written}` is not a type this layout knows"))?;
+                    let (code, what) = match self.value(model, plan, of)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err("only a value can be cast".to_string()),
+                    };
+                    let access = if target.is_reference() && !what.is_reference() {
+                        convert(model, &code, &what, &target)?
+                    } else if !target.is_reference() && what.is_reference() {
+                        let (code, _) = self.number(model, plan, &code, &what);
+                        format!("({}) {code}", model.source(&target))
+                    } else {
+                        format!("({}) {code}", model.source(&target))
+                    };
+                    let local = self.declare(model, plan, &target, &access);
+                    Ok(Held::Value(local, target))
+                }
+                Expr::InstanceOf(of, written) => {
+                    let target = model
+                        .type_named(written)
+                        .ok_or_else(|| format!("`{written}` is not a type this layout knows"))?;
+                    let (code, _) = match self.value(model, plan, of)? {
+                        Held::Value(code, what) => self.plain(model, plan, &code, &what),
+                        _ => return Err("only a value can be tested".to_string()),
+                    };
+                    let local = self.declare(
+                        model,
+                        plan,
+                        &Type::Boolean,
+                        &format!("{code} instanceof {}", model.source(&target)),
+                    );
+                    Ok(Held::Value(local, Type::Boolean))
+                }
+                Expr::Resource(spelled, arguments) => {
+                    self.resource(model, plan, spelled, arguments.as_deref())
+                }
+                Expr::Lambda(..) | Expr::Reference(..) => Err(
+                    "a lambda or a method reference can only be handed to a listener".to_string(),
+                ),
+            }
+        }
+
+        fn member(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            key: &str,
+            code: &str,
+            what: &Type,
+            name: &str,
+        ) -> Result<Held, String> {
+            if let Type::Array(_) = what {
+                if name == "length" {
+                    let local = self.guarded(
+                        model,
+                        plan,
+                        code,
+                        what,
+                        &Type::Int,
+                        &format!("{code}.length"),
+                    );
+                    return Ok(Held::Value(local, Type::Int));
+                }
+            }
+            if !what.is_reference() || is_null(what) {
+                return Err(format!("a {} has no `{name}`", what.readable()));
+            }
+            let (access, result) = match model.property(what, name, false) {
+                Some(Member::Getter(signature)) => {
+                    let result = model.returns(what, &signature);
+                    (
+                        cast_to(
+                            model,
+                            &result,
+                            &signature.returns,
+                            format!("{code}.{}()", signature.name),
+                        ),
+                        result,
+                    )
+                }
+                Some(Member::Field(_, field, result, _)) => (format!("{code}.{field}"), result),
+                None => {
+                    if model.wrapped(what).is_some() {
+                        let (inner_code, inner) = self.plain(model, plan, code, what);
+                        return self.member(model, plan, key, &inner_code, &inner, name);
+                    }
+                    return Err(format!("`{}` has no `{name}`", what.readable()));
+                }
+            };
+            let local = self.guarded(model, plan, code, what, &result, &access);
+            self.watched(model, plan, key, &local, &result);
+            Ok(Held::Value(local, result))
+        }
+
+        fn choose(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            owner: &Type,
+            name: &str,
+            given: &[(String, Type)],
+            statics: bool,
+        ) -> Result<(Signature, Vec<String>), String> {
+            let raw: Vec<Type> = given.iter().map(|(_, what)| what.clone()).collect();
+            let mut plain_given = Vec::new();
+            for (code, what) in given {
+                plain_given.push(self.plain(model, plan, code, what));
+            }
+            let plain_types: Vec<Type> = plain_given.iter().map(|(_, what)| what.clone()).collect();
+            let (signature, chosen) = match model.method(owner, name, &plain_types, statics) {
+                Some(found) => (found, plain_given),
+                None => match model.method(owner, name, &raw, statics) {
+                    Some(found) => (found, given.to_vec()),
+                    None => {
+                        return Err(format!(
+                            "`{}` has no `{name}` taking {}",
+                            owner.readable(),
+                            if raw.is_empty() {
+                                "nothing".to_string()
+                            } else {
+                                raw.iter()
+                                    .map(Type::readable)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            }
+                        ))
+                    }
+                },
+            };
+            let mut arguments = Vec::new();
+            for (at, (code, what)) in chosen.iter().enumerate() {
+                let wanted = signature.parameters[at].clone();
+                arguments.push(convert(model, code, what, &wanted)?);
+            }
+            Ok((signature, arguments))
+        }
+
+        fn resource(
+            &mut self,
+            model: &Model,
+            plan: &mut Plan,
+            spelled: &str,
+            arguments: Option<&[Expr]>,
+        ) -> Result<Held, String> {
+            let (package, rest) = match spelled.strip_prefix("android:") {
+                Some(rest) => ("android".to_string(), rest),
+                None => (plan.package.clone(), spelled),
+            };
+            let (package, rest) = match rest.split_once(':') {
+                Some((named, rest)) => (named.to_string(), rest),
+                None => (package, rest),
+            };
+            let Some((kind, name)) = rest.split_once('/') else {
+                return Err(format!("`@{spelled}` is not a resource"));
+            };
+            let folder = match kind {
+                "text" => "string",
+                "colorStateList" => "color",
+                "stringArray" | "intArray" | "typedArray" => "array",
+                "dimenOffset" | "dimenSize" => "dimen",
+                "stateListAnimator" => "animator",
+                other => other,
+            };
+            let id = format!("{package}.R.{folder}.{}", name.replace('.', "_"));
+            let root = self.root(plan);
+            let mut given = Vec::new();
+            for argument in arguments.unwrap_or_default() {
+                match self.value(model, plan, argument)? {
+                    Held::Value(code, what) => given.push(self.plain(model, plan, &code, &what)),
+                    _ => return Err("a resource takes values".to_string()),
+                }
+            }
+            let boxed = |given: &[(String, Type)]| -> Result<Vec<String>, String> {
+                given
+                    .iter()
+                    .map(|(code, what)| convert(model, code, what, &object(OBJECT)))
+                    .collect()
+            };
+            let (code, what) = match kind {
+                "string" if given.is_empty() => (format!("{root}.getResources().getString({id})"), object(STRING)),
+                "string" => (
+                    format!("{root}.getResources().getString({id}, {})", boxed(&given)?.join(", ")),
+                    object(STRING),
+                ),
+                "text" => (format!("{root}.getResources().getText({id})"), object("java/lang/CharSequence")),
+                "plurals" => {
+                    let Some((count, count_type)) = given.first().cloned() else {
+                        return Err("a plural needs a count".to_string());
+                    };
+                    let (count, count_type) = self.number(model, plan, &count, &count_type);
+                    let quantity = convert(model, &count, &count_type, &Type::Int)?;
+                    let rest = if given.len() == 1 {
+                        vec![convert(model, &count, &count_type, &object(OBJECT))?]
+                    } else {
+                        boxed(&given[1..])?
+                    };
+                    (
+                        format!(
+                            "{root}.getResources().getQuantityString({id}, {quantity}, {})",
+                            rest.join(", ")
+                        ),
+                        object(STRING),
+                    )
+                }
+                "color" => (format!("{root}.getContext().getColor({id})"), Type::Int),
+                "colorStateList" => (
+                    format!("{root}.getContext().getColorStateList({id})"),
+                    object("android/content/res/ColorStateList"),
+                ),
+                "drawable" => (
+                    format!("{root}.getContext().getDrawable({id})"),
+                    object("android/graphics/drawable/Drawable"),
+                ),
+                "dimen" => (format!("{root}.getResources().getDimension({id})"), Type::Float),
+                "dimenOffset" => (format!("{root}.getResources().getDimensionPixelOffset({id})"), Type::Int),
+                "dimenSize" => (format!("{root}.getResources().getDimensionPixelSize({id})"), Type::Int),
+                "bool" => (format!("{root}.getResources().getBoolean({id})"), Type::Boolean),
+                "integer" => (format!("{root}.getResources().getInteger({id})"), Type::Int),
+                "fraction" => {
+                    let base = match given.first() {
+                        Some((code, what)) => convert(model, code, what, &Type::Int)?,
+                        None => "1".to_string(),
+                    };
+                    let parent = match given.get(1) {
+                        Some((code, what)) => convert(model, code, what, &Type::Int)?,
+                        None => "1".to_string(),
+                    };
+                    (
+                        format!("{root}.getResources().getFraction({id}, {base}, {parent})"),
+                        Type::Float,
+                    )
+                }
+                "stringArray" => (
+                    format!("{root}.getResources().getStringArray({id})"),
+                    Type::Array(Box::new(object(STRING))),
+                ),
+                "intArray" => (
+                    format!("{root}.getResources().getIntArray({id})"),
+                    Type::Array(Box::new(Type::Int)),
+                ),
+                "typedArray" => (
+                    format!("{root}.getResources().obtainTypedArray({id})"),
+                    object("android/content/res/TypedArray"),
+                ),
+                "animator" => (
+                    format!("android.animation.AnimatorInflater.loadAnimator({root}.getContext(), {id})"),
+                    object("android/animation/Animator"),
+                ),
+                "stateListAnimator" => (
+                    format!("android.animation.AnimatorInflater.loadStateListAnimator({root}.getContext(), {id})"),
+                    object("android/animation/StateListAnimator"),
+                ),
+                _ => (id, Type::Int),
+            };
+            let local = self.declare(model, plan, &what, &code);
+            Ok(Held::Value(local, what))
+        }
+    }
+
+    fn listener_code(
+        model: &Model,
+        plan: &mut Plan,
+        interface: &Type,
+        sam: &Signature,
+        parameters: &[String],
+        body: &Expr,
+    ) -> Result<String, String> {
+        if !parameters.is_empty() && parameters.len() != sam.parameters.len() {
+            return Err(format!(
+                "`{}` hands over {} values and the lambda names {}",
+                interface.readable(),
+                sam.parameters.len(),
+                parameters.len()
+            ));
+        }
+        let mut inner = Emit::new(true);
+        let mut declared = Vec::new();
+        for (at, erased) in sam.parameters.iter().enumerate() {
+            let java = plan.name("dbArg");
+            declared.push(format!("{} {java}", model.source(erased)));
+            if let Some(name) = parameters.get(at) {
+                let seen = model.parameter(interface, sam, at);
+                let local =
+                    if seen != *erased && seen.is_reference() && named(&seen) != Some(OBJECT) {
+                        inner.declare(
+                            model,
+                            plan,
+                            &seen,
+                            &format!("({}) {java}", model.source(&seen)),
+                        )
+                    } else {
+                        java.clone()
+                    };
+                inner.parameters.push((name.clone(), local, seen));
+            }
+        }
+        let returns = sam.returns.clone();
+        match inner.value(model, plan, body)? {
+            Held::Value(code, what) => {
+                if returns != Type::Void {
+                    if what == Type::Void {
+                        inner.line(format!("return {};", default_of(&returns)));
+                    } else {
+                        let (code, what) = inner.plain(model, plan, &code, &what);
+                        inner.line(format!(
+                            "return {};",
+                            convert(model, &code, &what, &returns)?
+                        ));
+                    }
+                }
+            }
+            _ => return Err("a lambda has to do something".to_string()),
+        }
+        let mut out = format!(
+            "new {}() {{\n        @Override\n        public {} {}({}) {{\n",
+            model.source(interface),
+            model.source(&returns),
+            sam.name,
+            declared.join(", ")
+        );
+        for one in &inner.lines {
+            out.push_str(&format!("            {one}\n"));
+        }
+        out.push_str("        }\n    }");
+        Ok(out)
+    }
+
+    fn reference_code(
+        model: &Model,
+        plan: &mut Plan,
+        receiver: Option<&str>,
+        receiver_type: &Type,
+        name: &str,
+        interface: &Type,
+        sam: &Signature,
+    ) -> Result<String, String> {
+        let statics = receiver.is_none();
+        let given: Vec<Type> = (0..sam.parameters.len())
+            .map(|at| model.parameter(interface, sam, at))
+            .collect();
+        let found = model
+            .method(receiver_type, name, &given, statics)
+            .or_else(|| model.method(receiver_type, name, &sam.parameters, statics))
+            .ok_or_else(|| {
+                format!(
+                    "`{}` has no `{name}` that `{}` could call",
+                    receiver_type.readable(),
+                    interface.readable()
+                )
+            })?;
+        let mut declared = Vec::new();
+        let mut arguments = Vec::new();
+        for (at, erased) in sam.parameters.iter().enumerate() {
+            let java = plan.name("dbArg");
+            declared.push(format!("{} {java}", model.source(erased)));
+            let wanted = found.parameters[at].clone();
+            let passed = if model.cost(erased, &wanted).is_some() {
+                convert(model, &java, erased, &wanted)?
+            } else {
+                format!("({}) {java}", model.source(&wanted))
+            };
+            arguments.push(passed);
+        }
+        let target = match receiver {
+            Some(code) => code.to_string(),
+            None => model.source(receiver_type),
+        };
+        let call = format!("{target}.{}({})", found.name, arguments.join(", "));
+        let result = model.returns(receiver_type, &found);
+        let body = if sam.returns == Type::Void {
+            format!("{call};")
+        } else if result == Type::Void {
+            format!("{call};\n            return {};", default_of(&sam.returns))
+        } else {
+            format!("return {};", convert(model, &call, &result, &sam.returns)?)
+        };
+        Ok(format!(
+            "new {}() {{\n        @Override\n        public {} {}({}) {{\n            {body}\n        }}\n    }}",
+            model.source(interface),
+            model.source(&sam.returns),
+            sam.name,
+            declared.join(", ")
+        ))
+    }
+
+    #[derive(Clone, Debug)]
+    enum Given {
+        Value {
+            lines: Vec<String>,
+            code: String,
+            what: Type,
+            bits: Vec<usize>,
+        },
+        Lambda {
+            parameters: Vec<String>,
+            body: Expr,
+        },
+        Reference {
+            lines: Vec<String>,
+            code: Option<String>,
+            what: Type,
+            name: String,
+            bits: Vec<usize>,
+        },
+        Listener {
+            code: String,
+            what: Type,
+        },
+    }
+
+    #[derive(Clone, Debug)]
+    struct Entry {
+        key: String,
+        written: String,
+        given: Given,
+        text: String,
+        missed: Option<String>,
+    }
+
+    fn accepts(model: &Model, given: &Given, wanted: &Type) -> Option<u32> {
+        match given {
+            Given::Value { what, .. } => {
+                if *what == Type::Void {
+                    return None;
+                }
+                let direct = model.cost(what, wanted).map(|cost| cost + 1);
+                let inner = model
+                    .wrapped(what)
+                    .and_then(|(inner, _, _)| model.cost(&inner, wanted));
+                match (direct, inner) {
+                    (Some(one), Some(other)) => Some(one.min(other)),
+                    (one, other) => one.or(other),
+                }
+            }
+            Given::Lambda { parameters, .. } => {
+                let sam = model.sam(wanted)?;
+                (parameters.is_empty() || parameters.len() == sam.parameters.len()).then_some(0)
+            }
+            Given::Reference {
+                what, name, code, ..
+            } => {
+                let sam = model.sam(wanted)?;
+                let statics = code.is_none();
+                model
+                    .classpath
+                    .find_methods(named(what)?, name, sam.parameters.len())
+                    .iter()
+                    .any(|one| one.static_ == statics)
+                    .then_some(0)
+            }
+            Given::Listener { what, .. } => model.cost(what, wanted),
+        }
+    }
+
+    fn realize(
+        emit: &mut Emit,
+        model: &Model,
+        plan: &mut Plan,
+        given: &Given,
+        wanted: &Type,
+    ) -> Result<String, String> {
+        match given {
+            Given::Value {
+                lines, code, what, ..
+            } => {
+                emit.lines.extend(lines.iter().cloned());
+                let direct = model.cost(what, wanted);
+                let inner = model
+                    .wrapped(what)
+                    .and_then(|(inner, _, _)| model.cost(&inner, wanted));
+                let unwrap = match (direct, inner) {
+                    (Some(one), Some(other)) => other <= one,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                if unwrap {
+                    let (code, what) = emit.plain(model, plan, code, what);
+                    convert(model, &code, &what, wanted)
+                } else {
+                    convert(model, code, what, wanted)
+                }
+            }
+            Given::Lambda { parameters, body } => {
+                let sam = model
+                    .sam(wanted)
+                    .ok_or_else(|| format!("`{}` is not a listener", wanted.readable()))?;
+                let text = listener_code(model, plan, wanted, &sam, parameters, body)?;
+                let name = plan.name("dbListener");
+                plan.fields
+                    .push(format!("final {} {name} = {text};", model.source(wanted)));
+                Ok(format!("this.{name}"))
+            }
+            Given::Reference {
+                lines,
+                code,
+                what,
+                name,
+                ..
+            } => {
+                emit.lines.extend(lines.iter().cloned());
+                let sam = model
+                    .sam(wanted)
+                    .ok_or_else(|| format!("`{}` is not a listener", wanted.readable()))?;
+                let local = plan.name("db");
+                emit.line(format!("{} {local} = null;", model.source(wanted)));
+                match code {
+                    Some(code) => {
+                        let held = plan.name("db");
+                        emit.line(format!("if ({code} != null) {{"));
+                        emit.line(format!("    final {} {held} = {code};", model.source(what)));
+                        let text =
+                            reference_code(model, plan, Some(&held), what, name, wanted, &sam)?;
+                        emit.line(format!("    {local} = {text};"));
+                        emit.line("}");
+                    }
+                    None => {
+                        let text = reference_code(model, plan, None, what, name, wanted, &sam)?;
+                        emit.line(format!("{local} = {text};"));
+                    }
+                }
+                Ok(local)
+            }
+            Given::Listener { code, what } => convert(model, code, what, wanted),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Target {
+        Static(String, String),
+        Instance(String, String),
+        OnView(String),
+    }
+
+    #[derive(Clone, Debug)]
+    struct Call {
+        target: Target,
+        parameters: Vec<Type>,
+        taken: Vec<Option<usize>>,
+        old: bool,
+        conversion: Option<Conversion>,
+    }
+
+    fn depth(model: &Model, class: &str) -> usize {
+        model.classpath.ancestors(class).len()
+    }
+
+    fn adapter_target(adapter: &Adapter) -> Target {
+        if adapter.static_ {
+            Target::Static(adapter.owner.clone(), adapter.method.clone())
+        } else {
+            Target::Instance(adapter.owner.clone(), adapter.method.clone())
+        }
+    }
+
+    fn single(
+        model: &Model,
+        store: &Store,
+        view: &str,
+        entry: &Entry,
+        conversions: bool,
+    ) -> Option<Call> {
+        let mut best: Option<(usize, u32, &Adapter)> = None;
+        for adapter in &store.single {
+            if adapter.attributes[0] != entry.key || !model.is_a(view, &adapter.view) {
+                continue;
+            }
+            let Some(cost) = accepts(model, &entry.given, &adapter.parameters[0]) else {
+                continue;
+            };
+            let deep = depth(model, &adapter.view);
+            let better = match &best {
+                None => true,
+                Some((held_deep, held_cost, _)) => {
+                    deep > *held_deep || (deep == *held_deep && cost < *held_cost)
+                }
+            };
+            if better {
+                best = Some((deep, cost, adapter));
+            }
+        }
+        if let Some((_, _, adapter)) = best {
+            return Some(Call {
+                target: adapter_target(adapter),
+                parameters: adapter.parameters.clone(),
+                taken: vec![Some(0)],
+                old: adapter.old,
+                conversion: None,
+            });
+        }
+        let local = entry.key.strip_prefix(ANDROID).unwrap_or(&entry.key);
+        let mut names: Vec<String> = store
+            .renamed
+            .iter()
+            .filter(|one| one.attribute == entry.key && model.is_a(view, &one.view))
+            .map(|one| one.method.clone())
+            .collect();
+        names.push(format!("set{}", capitalized(local)));
+        let view_type = object(view);
+        for name in names {
+            let mut chosen: Option<(u32, Signature)> = None;
+            for signature in model.classpath.find_methods(view, &name, 1) {
+                if signature.static_ {
+                    continue;
+                }
+                let wanted = model.parameter(&view_type, &signature, 0);
+                let Some(cost) = accepts(model, &entry.given, &wanted)
+                    .or_else(|| accepts(model, &entry.given, &signature.parameters[0]))
+                else {
+                    continue;
+                };
+                if chosen.as_ref().is_none_or(|(held, _)| cost < *held) {
+                    chosen = Some((cost, signature));
+                }
+            }
+            if let Some((_, signature)) = chosen {
+                return Some(Call {
+                    target: Target::OnView(name),
+                    parameters: vec![signature.parameters[0].clone()],
+                    taken: vec![Some(0)],
+                    old: false,
+                    conversion: None,
+                });
+            }
+        }
+        if !conversions {
+            return None;
+        }
+        if let Given::Value { .. } = &entry.given {
+            for conversion in &store.conversions {
+                if accepts(model, &entry.given, &conversion.from).is_none() {
+                    continue;
+                }
+                let probe = Entry {
+                    key: entry.key.clone(),
+                    written: entry.written.clone(),
+                    given: Given::Listener {
+                        code: String::new(),
+                        what: conversion.to.clone(),
+                    },
+                    text: entry.text.clone(),
+                    missed: None,
+                };
+                if let Some(mut call) = single(model, store, view, &probe, false) {
+                    call.conversion = Some(conversion.clone());
+                    return Some(call);
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve(
+        model: &Model,
+        store: &Store,
+        view: &str,
+        entries: &[Entry],
+    ) -> Result<Vec<Call>, usize> {
+        let mut used = vec![false; entries.len()];
+        let mut calls = Vec::new();
+        let mut candidates: Vec<(usize, usize, &Adapter, Vec<Option<usize>>)> = Vec::new();
+        for adapter in &store.multi {
+            if !model.is_a(view, &adapter.view) {
+                continue;
+            }
+            let taken: Vec<Option<usize>> = adapter
+                .attributes
+                .iter()
+                .map(|attribute| entries.iter().position(|one| one.key == *attribute))
+                .collect();
+            let present = taken.iter().flatten().count();
+            if present == 0 || (adapter.require_all && present != taken.len()) {
+                continue;
+            }
+            let fits = taken.iter().enumerate().all(|(at, held)| match held {
+                Some(index) => {
+                    accepts(model, &entries[*index].given, &adapter.parameters[at]).is_some()
+                }
+                None => true,
+            });
+            if !fits {
+                continue;
+            }
+            candidates.push((present, depth(model, &adapter.view), adapter, taken));
+        }
+        candidates.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.cmp(&left.1)));
+        for (_, _, adapter, taken) in candidates {
+            if taken.iter().flatten().any(|index| used[*index]) {
+                continue;
+            }
+            for index in taken.iter().flatten() {
+                used[*index] = true;
+            }
+            calls.push(Call {
+                target: adapter_target(adapter),
+                parameters: adapter.parameters.clone(),
+                taken,
+                old: adapter.old,
+                conversion: None,
+            });
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            if used[index] {
+                continue;
+            }
+            match single(model, store, view, entry, true) {
+                Some(mut call) => {
+                    call.taken = vec![Some(index)];
+                    calls.push(call);
+                }
+                None => return Err(index),
+            }
+        }
+        Ok(calls)
+    }
+
+    fn condition(bits: &[usize]) -> String {
+        let mut words: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
+        for bit in bits {
+            *words.entry(bit / 64).or_insert(0) |= 1u64 << (bit % 64);
+        }
+        words
+            .iter()
+            .map(|(word, mask)| format!("(dirty[{word}] & 0x{mask:x}L) != 0"))
+            .collect::<Vec<_>>()
+            .join(" || ")
+    }
+
+    fn marking(bit: usize) -> String {
+        format!("mDirtyFlags[{}] |= 0x{:x}L;", bit / 64, 1u64 << (bit % 64))
+    }
+
+    fn words(bits: usize) -> usize {
+        bits.div_ceil(64).max(1)
+    }
+
+    fn everything(bits: usize) -> String {
+        let mut out = Vec::new();
+        for word in 0..words(bits) {
+            let held = bits.saturating_sub(word * 64).min(64);
+            if held == 64 {
+                out.push("-1L".to_string());
+            } else {
+                out.push(format!("0x{:x}L", (1u64 << held) - 1));
+            }
+        }
+        out.join(", ")
+    }
+
+    fn inverse_for(
+        model: &Model,
+        store: &Store,
+        view: &str,
+        key: &str,
+    ) -> Option<(String, Type, String)> {
+        for inverse in &store.inverse {
+            if inverse.attribute != key || !model.is_a(view, &inverse.view) {
+                continue;
+            }
+            if !inverse.on_view {
+                let value = inverse.value.clone()?;
+                let owner = model.class_source(&inverse.owner);
+                return Some((
+                    format!("{owner}.{}({{view}})", inverse.method),
+                    value,
+                    inverse.event.clone(),
+                ));
+            }
+            let local = key.strip_prefix(ANDROID).unwrap_or(key);
+            let names = if inverse.method.is_empty() {
+                vec![
+                    format!("get{}", capitalized(local)),
+                    format!("is{}", capitalized(local)),
+                ]
+            } else {
+                vec![inverse.method.clone()]
+            };
+            for name in names {
+                if let Some(found) = model
+                    .classpath
+                    .find_methods(view, &name, 0)
+                    .into_iter()
+                    .find(|one| !one.static_ && one.returns != Type::Void)
+                {
+                    let value = model.returns(&object(view), &found);
+                    return Some((format!("{{view}}.{name}()"), value, inverse.event.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    fn assignment(
+        model: &Model,
+        plan: &mut Plan,
+        emit: &mut Emit,
+        target: &Expr,
+        code: &str,
+        what: &Type,
+    ) -> Result<(), String> {
+        match target {
+            Expr::Name(name) => {
+                let variable = plan
+                    .variables
+                    .iter()
+                    .find(|one| one.name == *name)
+                    .cloned()
+                    .ok_or_else(|| format!("`{name}` is not a variable"))?;
+                let value = convert(model, code, what, &variable.what)?;
+                emit.line(format!(
+                    "{}.set{}({value});",
+                    emit.this(plan),
+                    capitalized(name)
+                ));
+                Ok(())
+            }
+            Expr::Field(of, name) => {
+                let (receiver, receiver_type) = match emit.value(model, plan, of)? {
+                    Held::Value(code, what) => (code, what),
+                    _ => return Err("only a value's property can be written".to_string()),
+                };
+                let (receiver, receiver_type) =
+                    if model.property(&receiver_type, name, false).is_none()
+                        && model.wrapped(&receiver_type).is_some()
+                    {
+                        emit.plain(model, plan, &receiver, &receiver_type)
+                    } else {
+                        (receiver, receiver_type)
+                    };
+                if let Some(member) = model.property(&receiver_type, name, false) {
+                    let (access, held) = match &member {
+                        Member::Getter(signature) => {
+                            let held = model.returns(&receiver_type, signature);
+                            (
+                                cast_to(
+                                    model,
+                                    &held,
+                                    &signature.returns,
+                                    format!("{receiver}.{}()", signature.name),
+                                ),
+                                held,
+                            )
+                        }
+                        Member::Field(_, field, held, _) => {
+                            (format!("{receiver}.{field}"), held.clone())
+                        }
+                    };
+                    if let Some((inner, _, Some(setter))) = model.wrapped(&held) {
+                        let local =
+                            emit.guarded(model, plan, &receiver, &receiver_type, &held, &access);
+                        let value = convert(model, code, what, &inner)?;
+                        emit.line(format!("if ({local} != null) {{"));
+                        emit.line(format!("    {local}.{setter}({value});"));
+                        emit.line("}");
+                        return Ok(());
+                    }
+                }
+                let setter = format!("set{}", capitalized(name));
+                let found = model
+                    .classpath
+                    .find_methods(named(&receiver_type).unwrap_or(OBJECT), &setter, 1)
+                    .into_iter()
+                    .find(|one| !one.static_);
+                if let Some(found) = found {
+                    let wanted = model.parameter(&receiver_type, &found, 0);
+                    let value = convert(model, code, what, &wanted)
+                        .or_else(|_| convert(model, code, what, &found.parameters[0]))?;
+                    emit.line(format!("if ({receiver} != null) {{"));
+                    emit.line(format!("    {receiver}.{setter}({value});"));
+                    emit.line("}");
+                    return Ok(());
+                }
+                if let Some(Member::Field(_, field, held, false)) =
+                    model.property(&receiver_type, name, false)
+                {
+                    let value = convert(model, code, what, &held)?;
+                    emit.line(format!("if ({receiver} != null) {{"));
+                    emit.line(format!("    {receiver}.{field} = {value};"));
+                    emit.line("}");
+                    return Ok(());
+                }
+                Err(format!("`{name}` cannot be written back"))
+            }
+            _ => Err("only a variable or a property can be bound both ways".to_string()),
+        }
+    }
+
+    fn unknown(layout: &str, attribute: &str, text: &str, why: &str) -> Diagnostic {
+        fail(
+            "EH003",
+            "A data binding expression names something this layout does not know.",
+        )
+        .with_context(format!("Layout: {layout}"))
+        .with_context(format!("Attribute: {attribute}"))
+        .with_context(format!("Expression: {text}"))
+        .with_context(format!("Reason: {why}"))
+    }
+
+    fn java_string(text: &str) -> String {
+        quoted(text)
+    }
+
+    #[derive(Clone, Debug)]
+    struct Public {
+        field: String,
+        what: String,
+    }
+
+    struct Shared<'a> {
+        store: &'a Store,
+        classes: &'a [(String, String)],
+        variables_of: &'a [(String, Vec<(String, Type)>)],
+    }
+
+    fn view_type_source(model: &Model, shared: &Shared, view: &View) -> String {
+        if view.stub {
+            return STUB_PROXY.to_string();
+        }
+        match &view.include {
+            Some(held) if held.bound => shared
+                .classes
+                .iter()
+                .find(|(layout, _)| *layout == held.layout)
+                .map(|(_, class)| class.clone())
+                .unwrap_or_else(|| "androidx.databinding.ViewDataBinding".to_string()),
+            _ => model.class_source(&view.class),
+        }
+    }
+
+    fn user_tag(package: &str, said: &str) -> String {
+        if let Some(name) = said.strip_prefix("@string/") {
+            return format!("getRoot().getResources().getString({package}.R.string.{name})");
+        }
+        if said.starts_with('@') {
+            return "null".to_string();
+        }
+        java_string(said)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn impl_source(
+        model: &Model,
+        shared: &Shared,
+        variant: &Variant,
+        binding: &str,
+        simple: &str,
+        publics: &[Public],
+        variables: &[(String, Type)],
+        components: &mut Vec<String>,
+    ) -> Result<String, Diagnostic> {
+        let label = format!("{}/{}", variant.folder, variant.name);
+        let (package, binding_simple) = split_class(binding);
+        let mut plan = Plan {
+            variables: Vec::new(),
+            nodes: Vec::new(),
+            bits: 0,
+            locals: 0,
+            fields: Vec::new(),
+            components: Vec::new(),
+            package: variant.package.clone(),
+            owner: simple.to_string(),
+            fresh: 0,
+        };
+        for (name, what) in variables {
+            let bit = plan.bit();
+            let local = model.watch(what).map(|watch| {
+                plan.locals += 1;
+                (plan.locals - 1, watch)
+            });
+            plan.variables.push(Variable {
+                name: name.clone(),
+                what: what.clone(),
+                bit,
+                local,
+            });
+        }
+        let init = plan.bit();
+        let mut body: Vec<String> = Vec::new();
+
+        for view in &variant.views {
+            if view.include.is_some() || view.bound.is_empty() {
+                continue;
+            }
+            let view_code = format!("this.{}", view.field);
+            let mut entries: Vec<Entry> = Vec::new();
+            for bound in &view.bound {
+                let mut missed = None;
+                let given = match &bound.expr {
+                    Expr::Lambda(parameters, body) => Given::Lambda {
+                        parameters: parameters.clone(),
+                        body: (**body).clone(),
+                    },
+                    Expr::Reference(receiver, name) => {
+                        let mut emit = Emit::new(false);
+                        match emit
+                            .value(model, &mut plan, receiver)
+                            .map_err(|why| unknown(&label, &bound.written, &bound.text, &why))?
+                        {
+                            Held::Value(code, what) => Given::Reference {
+                                lines: emit.lines,
+                                code: Some(code),
+                                what,
+                                name: name.clone(),
+                                bits: emit.bits,
+                            },
+                            Held::Class(class) => Given::Reference {
+                                lines: Vec::new(),
+                                code: None,
+                                what: object(&class),
+                                name: name.clone(),
+                                bits: Vec::new(),
+                            },
+                            Held::Package(package) => {
+                                return Err(unknown(
+                                    &label,
+                                    &bound.written,
+                                    &bound.text,
+                                    &format!("`{package}` is not anything this layout knows"),
+                                ))
+                            }
+                        }
+                    }
+                    other => {
+                        let mut emit = Emit::new(false);
+                        match emit.value(model, &mut plan, other) {
+                            Ok(Held::Value(code, what)) => Given::Value {
+                                lines: emit.lines,
+                                code,
+                                what,
+                                bits: emit.bits,
+                            },
+                            Ok(_) => {
+                                return Err(unknown(
+                                    &label,
+                                    &bound.written,
+                                    &bound.text,
+                                    "it names a class, not a value",
+                                ))
+                            }
+                            Err(why) => {
+                                let fallback = match other {
+                                    Expr::Field(receiver, name) => {
+                                        let mut again = Emit::new(false);
+                                        match again.value(model, &mut plan, receiver) {
+                                            Ok(Held::Value(code, what)) => Some(Given::Reference {
+                                                lines: again.lines,
+                                                code: Some(code),
+                                                what,
+                                                name: name.clone(),
+                                                bits: again.bits,
+                                            }),
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                                match fallback {
+                                    Some(given) => {
+                                        missed = Some(why);
+                                        given
+                                    }
+                                    None => {
+                                        return Err(unknown(
+                                            &label,
+                                            &bound.written,
+                                            &bound.text,
+                                            &why,
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                entries.push(Entry {
+                    key: bound.key.clone(),
+                    written: bound.written.clone(),
+                    given,
+                    text: bound.text.clone(),
+                    missed,
+                });
+                if bound.two_way {
+                    let Some((getter, value, event)) =
+                        inverse_for(model, shared.store, &view.class, &bound.key)
+                    else {
+                        return Err(fail(
+                            "EH006",
+                            "A two-way binding has nothing to read its value back from.",
+                        )
+                        .with_context(format!("Layout: {label}"))
+                        .with_context(format!("Attribute: {}", bound.written))
+                        .with_context(format!("View: {}", view.class.replace('/', "."))));
+                    };
+                    let mut inner = Emit::new(true);
+                    let read = getter.replace("{view}", &format!("{simple}.this.{}", view.field));
+                    let local = inner.declare(model, &mut plan, &value, &read);
+                    assignment(model, &mut plan, &mut inner, &bound.expr, &local, &value)
+                        .map_err(|why| unknown(&label, &bound.written, &bound.text, &why))?;
+                    let name = plan.name("dbInverse");
+                    let mut text = format!(
+                        "final androidx.databinding.InverseBindingListener {name} = new androidx.databinding.InverseBindingListener() {{\n        @Override\n        public void onChange() {{\n"
+                    );
+                    for one in &inner.lines {
+                        text.push_str(&format!("            {one}\n"));
+                    }
+                    text.push_str("        }\n    };");
+                    plan.fields.push(text);
+                    entries.push(Entry {
+                        key: event.clone(),
+                        written: event,
+                        given: Given::Listener {
+                            code: format!("this.{name}"),
+                            what: object(INVERSE),
+                        },
+                        text: bound.text.clone(),
+                        missed: None,
+                    });
+                }
+            }
+            let calls = resolve(model, shared.store, &view.class, &entries).map_err(|index| {
+                let entry = &entries[index];
+                if let Some(why) = &entry.missed {
+                    return unknown(&label, &entry.written, &entry.text, why);
+                }
+                let given = match &entry.given {
+                    Given::Value { what, .. } => what.readable(),
+                    Given::Lambda { .. } => "lambda".to_string(),
+                    Given::Reference { .. } => "method reference".to_string(),
+                    Given::Listener { what, .. } => what.readable(),
+                };
+                fail("EH004", "No setter takes this value for this attribute.")
+                    .with_context(format!("Layout: {label}"))
+                    .with_context(format!("Attribute: {}", entry.written))
+                    .with_context(format!("View: {}", view.class.replace('/', ".")))
+                    .with_context(format!("Value: {given}"))
+            })?;
+            for call in calls {
+                let mut bits: Vec<usize> = Vec::new();
+                for index in call.taken.iter().flatten() {
+                    match &entries[*index].given {
+                        Given::Value { bits: held, .. } => bits.extend(held.iter().copied()),
+                        Given::Reference { bits: held, .. } => {
+                            bits.extend(held.iter().copied());
+                            bits.push(init);
+                        }
+                        _ => bits.push(init),
+                    }
+                }
+                bits.sort_unstable();
+                bits.dedup();
+                if bits.is_empty() {
+                    bits.push(init);
+                }
+                let mut block = Emit::new(false);
+                let mut arguments = Vec::new();
+                for (at, taken) in call.taken.iter().enumerate() {
+                    let wanted = call.parameters[at].clone();
+                    let code = match taken {
+                        Some(index) => {
+                            let entry = &entries[*index];
+                            let realized = match &call.conversion {
+                                Some(conversion) => {
+                                    let raw = realize(
+                                        &mut block,
+                                        model,
+                                        &mut plan,
+                                        &entry.given,
+                                        &conversion.from,
+                                    )
+                                    .map_err(|why| unknown(&label, &entry.written, "", &why))?;
+                                    let converted = format!(
+                                        "{}.{}({raw})",
+                                        model.class_source(&conversion.owner),
+                                        conversion.method
+                                    );
+                                    convert(model, &converted, &conversion.to, &wanted)
+                                        .map_err(|why| unknown(&label, &entry.written, "", &why))?
+                                }
+                                None => {
+                                    realize(&mut block, model, &mut plan, &entry.given, &wanted)
+                                        .map_err(|why| unknown(&label, &entry.written, "", &why))?
+                                }
+                            };
+                            block.declare(model, &mut plan, &wanted, &realized)
+                        }
+                        None => default_of(&wanted).to_string(),
+                    };
+                    arguments.push(code);
+                }
+                let mut olds = Vec::new();
+                if call.old {
+                    for wanted in &call.parameters {
+                        let name = plan.name("dbOld");
+                        plan.fields
+                            .push(format!("{} {name};", model.source(wanted)));
+                        olds.push(format!("this.{name}"));
+                    }
+                }
+                let mut given: Vec<String> = olds.clone();
+                given.extend(arguments.iter().cloned());
+                let joined = given.join(", ");
+                let invoked = match &call.target {
+                    Target::Static(owner, method) => {
+                        format!(
+                            "{}.{method}({view_code}, {joined});",
+                            model.class_source(owner)
+                        )
+                    }
+                    Target::Instance(owner, method) => {
+                        if !components.contains(owner) {
+                            components.push(owner.clone());
+                        }
+                        format!(
+                            "this.mBindingComponent.get{}().{method}({view_code}, {joined});",
+                            owner.rsplit(['/', '$']).next().unwrap_or(owner)
+                        )
+                    }
+                    Target::OnView(method) => format!("{view_code}.{method}({joined});"),
+                };
+                block.line(invoked);
+                for (old, new) in olds.iter().zip(arguments.iter()) {
+                    block.line(format!("{old} = {new};"));
+                }
+                body.push(format!("if ({}) {{", condition(&bits)));
+                for one in block.lines {
+                    body.push(format!("    {one}"));
+                }
+                body.push("}".to_string());
+            }
+        }
+
+        let mut includes: Vec<String> = Vec::new();
+        for view in &variant.views {
+            let Some(held) = &view.include else {
+                continue;
+            };
+            if !held.bound {
+                continue;
+            }
+            includes.push(view.field.clone());
+            let theirs = shared
+                .variables_of
+                .iter()
+                .find(|(layout, _)| *layout == held.layout)
+                .map(|(_, variables)| variables.clone())
+                .unwrap_or_default();
+            for passed in &held.passed {
+                let Some((_, wanted)) = theirs.iter().find(|(name, _)| *name == passed.key) else {
+                    return Err(unknown(
+                        &label,
+                        &passed.written,
+                        &passed.text,
+                        &format!("`{}` has no variable `{}`", held.layout, passed.key),
+                    ));
+                };
+                let mut emit = Emit::new(false);
+                let (code, what) = match emit
+                    .value(model, &mut plan, &passed.expr)
+                    .map_err(|why| unknown(&label, &passed.written, &passed.text, &why))?
+                {
+                    Held::Value(code, what) => (code, what),
+                    _ => {
+                        return Err(unknown(
+                            &label,
+                            &passed.written,
+                            &passed.text,
+                            "it names a class, not a value",
+                        ))
+                    }
+                };
+                let direct = model.cost(&what, wanted).is_some();
+                let (code, what) = if !direct && model.wrapped(&what).is_some() {
+                    emit.plain(model, &mut plan, &code, &what)
+                } else {
+                    (code, what)
+                };
+                let value = convert(model, &code, &what, wanted)
+                    .map_err(|why| unknown(&label, &passed.written, &passed.text, &why))?;
+                let mut bits = emit.bits.clone();
+                if bits.is_empty() {
+                    bits.push(init);
+                }
+                bits.sort_unstable();
+                bits.dedup();
+                body.push(format!("if ({}) {{", condition(&bits)));
+                for one in emit.lines {
+                    body.push(format!("    {one}"));
+                }
+                body.push(format!(
+                    "    this.{}.set{}({value});",
+                    view.field,
+                    capitalized(&passed.key)
+                ));
+                body.push("}".to_string());
+            }
+        }
+        for field in &includes {
+            body.push(format!("executeBindingsOn(this.{field});"));
+        }
+
+        let words_used = words(plan.bits);
+        let mut out = String::new();
+        out.push_str(&format!("package {package};\n\n"));
+        out.push_str(&format!(
+            "public class {simple} extends {binding_simple} {{\n"
+        ));
+        out.push_str("    private static final androidx.databinding.ViewDataBinding.IncludedLayouts sIncludes;\n");
+        out.push_str("    private static final android.util.SparseIntArray sViewsWithIds;\n\n");
+        out.push_str("    static {\n");
+        let mut grouped: Vec<(usize, Vec<&View>)> = Vec::new();
+        for view in &variant.views {
+            if view.include.as_ref().is_some_and(|held| held.bound) {
+                let parent = view.parent.unwrap_or(0);
+                match grouped.iter_mut().find(|(held, _)| *held == parent) {
+                    Some((_, list)) => list.push(view),
+                    None => grouped.push((parent, vec![view])),
+                }
+            }
+        }
+        if grouped.is_empty() {
+            out.push_str("        sIncludes = null;\n");
+        } else {
+            out.push_str(&format!(
+                "        sIncludes = new androidx.databinding.ViewDataBinding.IncludedLayouts({});\n",
+                variant.views.len()
+            ));
+            for (parent, list) in &grouped {
+                let names: Vec<String> = list
+                    .iter()
+                    .map(|one| {
+                        java_string(
+                            &one.include
+                                .as_ref()
+                                .map(|held| held.layout.clone())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                let indexes: Vec<String> = list.iter().map(|one| one.index.to_string()).collect();
+                let ids: Vec<String> = list
+                    .iter()
+                    .map(|one| {
+                        format!(
+                            "{}.R.layout.{}",
+                            variant.package,
+                            one.include
+                                .as_ref()
+                                .map(|held| held.layout.clone())
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "        sIncludes.setIncludes({parent}, new java.lang.String[] {{{}}}, new int[] {{{}}}, new int[] {{{}}});\n",
+                    names.join(", "),
+                    indexes.join(", "),
+                    ids.join(", ")
+                ));
+            }
+        }
+        out.push_str("        sViewsWithIds = new android.util.SparseIntArray();\n");
+        for view in &variant.views {
+            if view.tagged || view.include.as_ref().is_some_and(|held| held.bound) {
+                continue;
+            }
+            if let Some(id) = &view.id {
+                out.push_str(&format!(
+                    "        sViewsWithIds.put({}, {});\n",
+                    id_reference(&variant.package, id),
+                    view.index
+                ));
+            }
+        }
+        out.push_str("    }\n\n");
+        for view in &variant.views {
+            if view.id.is_none() {
+                out.push_str(&format!(
+                    "    final {} {};\n",
+                    view_type_source(model, shared, view),
+                    view.field
+                ));
+            }
+        }
+        out.push_str(&format!(
+            "    private long[] mDirtyFlags = new long[{words_used}];\n"
+        ));
+        for field in &plan.fields {
+            out.push_str(&format!("    {field}\n"));
+        }
+        out.push('\n');
+        out.push_str(&format!(
+            "    public {simple}(androidx.databinding.DataBindingComponent bindingComponent, android.view.View root) {{\n        this(bindingComponent, root, mapBindings(bindingComponent, root, {}, sIncludes, sViewsWithIds));\n    }}\n\n",
+            variant.views.len()
+        ));
+        let mut arguments = vec![
+            "bindingComponent".to_string(),
+            "root".to_string(),
+            plan.locals.to_string(),
+        ];
+        for public in publics {
+            match variant
+                .views
+                .iter()
+                .find(|one| one.field == public.field && one.id.is_some())
+            {
+                Some(view) if view.stub => arguments.push(format!(
+                    "new {STUB_PROXY}((android.view.ViewStub) bindings[{}])",
+                    view.index
+                )),
+                Some(view) => arguments.push(format!("({}) bindings[{}]", public.what, view.index)),
+                None => arguments.push("null".to_string()),
+            }
+        }
+        out.push_str(&format!(
+            "    private {simple}(androidx.databinding.DataBindingComponent bindingComponent, android.view.View root, java.lang.Object[] bindings) {{\n        super({});\n",
+            arguments.join(", ")
+        ));
+        for view in &variant.views {
+            if view.id.is_none() {
+                out.push_str(&format!(
+                    "        this.{} = ({}) bindings[{}];\n",
+                    view.field,
+                    view_type_source(model, shared, view),
+                    view.index
+                ));
+            }
+        }
+        for view in &variant.views {
+            if view.tagged {
+                let restored = view
+                    .user_tag
+                    .as_deref()
+                    .map(|said| user_tag(&variant.package, said))
+                    .unwrap_or_else(|| "null".to_string());
+                out.push_str(&format!(
+                    "        this.{}.setTag({restored});\n",
+                    view.field
+                ));
+            }
+            if view.include.as_ref().is_some_and(|held| held.bound) {
+                out.push_str(&format!(
+                    "        setContainedBinding(this.{});\n",
+                    view.field
+                ));
+            }
+            if view.stub && view.id.is_some() {
+                out.push_str(&format!(
+                    "        this.{}.setContainingBinding(this);\n",
+                    view.field
+                ));
+            }
+        }
+        out.push_str("        setRootTag(root);\n        invalidateAll();\n    }\n\n");
+
+        out.push_str(
+            "    @Override\n    public void invalidateAll() {\n        synchronized (this) {\n",
+        );
+        out.push_str(&format!(
+            "            mDirtyFlags = new long[] {{{}}};\n        }}\n",
+            everything(plan.bits)
+        ));
+        for field in &includes {
+            out.push_str(&format!("        this.{field}.invalidateAll();\n"));
+        }
+        out.push_str("        requestRebind();\n    }\n\n");
+
+        out.push_str("    @Override\n    public boolean hasPendingBindings() {\n        synchronized (this) {\n            for (int at = 0; at < mDirtyFlags.length; at++) {\n                if (mDirtyFlags[at] != 0) {\n                    return true;\n                }\n            }\n        }\n");
+        for field in &includes {
+            out.push_str(&format!(
+                "        if (this.{field}.hasPendingBindings()) {{\n            return true;\n        }}\n"
+            ));
+        }
+        out.push_str("        return false;\n    }\n\n");
+
+        out.push_str("    @Override\n    public boolean setVariable(int variableId, java.lang.Object variable) {\n");
+        for variable in &plan.variables {
+            let taken = match box_of(&variable.what) {
+                Some(boxed) => format!("safeUnbox(({}) variable)", model.class_source(boxed)),
+                None => format!("({}) variable", model.source(&variable.what)),
+            };
+            out.push_str(&format!(
+                "        if ({}.BR.{} == variableId) {{\n            set{}({taken});\n            return true;\n        }}\n",
+                variant.package,
+                variable.name,
+                capitalized(&variable.name)
+            ));
+        }
+        out.push_str("        return false;\n    }\n\n");
+
+        for variable in &plan.variables {
+            out.push_str(&format!(
+                "    @Override\n    public void set{}({} value) {{\n",
+                capitalized(&variable.name),
+                model.source(&variable.what)
+            ));
+            if let Some((local, watch)) = variable.local {
+                out.push_str(&format!(
+                    "        {}\n",
+                    registration(local, watch, "value")
+                ));
+            }
+            out.push_str(&format!(
+                "        this.m{} = value;\n        synchronized (this) {{\n            {}\n        }}\n        notifyPropertyChanged({}.BR.{});\n        super.requestRebind();\n    }}\n\n",
+                capitalized(&variable.name),
+                marking(variable.bit),
+                variant.package,
+                variable.name
+            ));
+        }
+
+        if !includes.is_empty() {
+            out.push_str("    @Override\n    public void setLifecycleOwner(androidx.lifecycle.LifecycleOwner lifecycleOwner) {\n        super.setLifecycleOwner(lifecycleOwner);\n");
+            for field in &includes {
+                out.push_str(&format!(
+                    "        this.{field}.setLifecycleOwner(lifecycleOwner);\n"
+                ));
+            }
+            out.push_str("    }\n\n");
+        }
+
+        out.push_str("    @Override\n    protected boolean onFieldChange(int localFieldId, java.lang.Object object, int fieldId) {\n");
+        let mut locals: Vec<(usize, usize)> = plan
+            .variables
+            .iter()
+            .filter_map(|one| one.local.map(|(local, _)| (local, one.bit)))
+            .collect();
+        locals.extend(plan.nodes.iter().map(|one| (one.local, one.bit)));
+        locals.sort_unstable();
+        for (local, bit) in locals {
+            out.push_str(&format!(
+                "        if (localFieldId == {local}) {{\n            synchronized (this) {{\n                {}\n            }}\n            return true;\n        }}\n",
+                marking(bit)
+            ));
+        }
+        out.push_str("        return false;\n    }\n\n");
+
+        out.push_str(&format!(
+            "    @Override\n    protected void executeBindings() {{\n        long[] dirty;\n        synchronized (this) {{\n            dirty = mDirtyFlags;\n            mDirtyFlags = new long[{words_used}];\n        }}\n"
+        ));
+        for one in &body {
+            out.push_str(&format!("        {one}\n"));
+        }
+        out.push_str("    }\n}\n");
+        let _ = &plan.components;
+        Ok(out)
+    }
+
+    fn abstract_source(
+        model: &Model,
+        binding: &str,
+        package: &str,
+        layout: &str,
+        publics: &[Public],
+        variables: &[(String, Type)],
+    ) -> String {
+        let (own_package, simple) = split_class(binding);
+        let mut out = format!("package {own_package};\n\n");
+        out.push_str(&format!(
+            "public abstract class {simple} extends androidx.databinding.ViewDataBinding {{\n"
+        ));
+        for public in publics {
+            out.push_str(&format!(
+                "    public final {} {};\n",
+                public.what, public.field
+            ));
+        }
+        for (name, what) in variables {
+            out.push_str(&format!(
+                "    protected {} m{};\n",
+                model.source(what),
+                capitalized(name)
+            ));
+        }
+        let mut parameters = vec![
+            "java.lang.Object _bindingComponent".to_string(),
+            "android.view.View _root".to_string(),
+            "int _localFieldCount".to_string(),
+        ];
+        for public in publics {
+            parameters.push(format!("{} {}", public.what, public.field));
+        }
+        out.push_str(&format!(
+            "\n    protected {simple}({}) {{\n        super(_bindingComponent, _root, _localFieldCount);\n",
+            parameters.join(", ")
+        ));
+        for public in publics {
+            out.push_str(&format!("        this.{0} = {0};\n", public.field));
+        }
+        out.push_str("    }\n\n");
+        for (name, what) in variables {
+            out.push_str(&format!(
+                "    public abstract void set{}({} value);\n\n    public {} get{}() {{\n        return m{};\n    }}\n\n",
+                capitalized(name),
+                model.source(what),
+                model.source(what),
+                capitalized(name),
+                capitalized(name)
+            ));
+        }
+        let id = format!("{package}.R.layout.{layout}");
+        out.push_str(&format!(
+            "    public static {simple} inflate(android.view.LayoutInflater inflater, android.view.ViewGroup root, boolean attachToRoot) {{\n        return inflate(inflater, root, attachToRoot, androidx.databinding.DataBindingUtil.getDefaultComponent());\n    }}\n\n"
+        ));
+        out.push_str(&format!(
+            "    public static {simple} inflate(android.view.LayoutInflater inflater, android.view.ViewGroup root, boolean attachToRoot, java.lang.Object component) {{\n        return ({simple}) androidx.databinding.ViewDataBinding.inflateInternal(inflater, {id}, root, attachToRoot, component);\n    }}\n\n"
+        ));
+        out.push_str(&format!(
+            "    public static {simple} inflate(android.view.LayoutInflater inflater) {{\n        return inflate(inflater, androidx.databinding.DataBindingUtil.getDefaultComponent());\n    }}\n\n"
+        ));
+        out.push_str(&format!(
+            "    public static {simple} inflate(android.view.LayoutInflater inflater, java.lang.Object component) {{\n        return ({simple}) androidx.databinding.ViewDataBinding.inflateInternal(inflater, {id}, null, false, component);\n    }}\n\n"
+        ));
+        out.push_str(&format!(
+            "    public static {simple} bind(android.view.View view) {{\n        return bind(view, androidx.databinding.DataBindingUtil.getDefaultComponent());\n    }}\n\n"
+        ));
+        out.push_str(&format!(
+            "    public static {simple} bind(android.view.View view, java.lang.Object component) {{\n        return ({simple}) androidx.databinding.ViewDataBinding.bind(component, view, {id});\n    }}\n}}\n"
+        ));
+        out
+    }
+
+    fn bindables(units: &[Unit]) -> Vec<String> {
+        let mut out = Vec::new();
+        for unit in units {
+            for method in &unit.methods {
+                if !method
+                    .annotations
+                    .iter()
+                    .any(|one| simple(&one.name) == "Bindable")
+                {
+                    continue;
+                }
+                let name = &method.name;
+                let property = if let Some(rest) =
+                    name.strip_prefix("get").filter(|rest| !rest.is_empty())
+                {
+                    decapitalized(rest)
+                } else if let Some(rest) = name.strip_prefix("is").filter(|rest| !rest.is_empty()) {
+                    decapitalized(rest)
+                } else {
+                    name.clone()
+                };
+                out.push(property);
+            }
+            for field in &unit.fields {
+                if !field
+                    .annotations
+                    .iter()
+                    .any(|one| simple(&one.name) == "Bindable")
+                {
+                    continue;
+                }
+                let name = &field.name;
+                let chars: Vec<char> = name.chars().collect();
+                let property = if chars.len() > 1 && chars[0] == 'm' && chars[1].is_uppercase() {
+                    decapitalized(&name[1..])
+                } else if let Some(rest) = name.strip_prefix('_').filter(|rest| !rest.is_empty()) {
+                    rest.to_string()
+                } else {
+                    name.clone()
+                };
+                out.push(property);
+            }
+        }
+        out
+    }
+
+    fn path_of(dotted: &str) -> String {
+        format!("{}.java", dotted.replace('.', "/"))
+    }
+
+    type Lookup = (String, String, Vec<(String, String)>);
+
+    pub fn generate(
+        package: &str,
+        layouts: &[Layout],
+        sources: &[(String, String)],
+        classpath: &Classpath,
+        stores: &[String],
+    ) -> Result<Made, Diagnostic> {
+        if classpath.get(RUNTIME).is_none() {
+            return Err(fail("EH005", "Data binding needs its runtime library.").with_suggestion(
+                "Add androidx.databinding:databinding-runtime and androidx.databinding:databinding-adapters to the dependencies.",
+            ));
+        }
+        let (units, together) = crate::compilers::java::declared_beside(sources, classpath);
+        let base = Model {
+            classpath: &together,
+            imports: Vec::new(),
+        };
+        let mut store = Store::default();
+        for text in stores {
+            store.read(&base, text);
+        }
+        store.learn(&base, &units);
+
+        let mut bound_names: Vec<String> = Vec::new();
+        let mut roots_of: Vec<(String, String)> = Vec::new();
+        for layout in layouts {
+            let mut quiet = crate::diag::Sink::new();
+            let Some(root) = crate::xml::parse(&layout.text, &layout.name, &mut quiet) else {
+                continue;
+            };
+            if root.name == LAYOUT_ROOT {
+                bound_names.push(layout.name.clone());
+            } else if root.name != "merge" && !roots_of.iter().any(|(name, _)| *name == layout.name)
+            {
+                roots_of.push((layout.name.clone(), view_class_of(&base, &root)));
+            }
+        }
+        bound_names.sort();
+        bound_names.dedup();
+
+        let mut variants: Vec<Variant> = Vec::new();
+        for layout in layouts {
+            if !bound_names.contains(&layout.name) || !is_bound(&layout.text) {
+                continue;
+            }
+            variants.push(read_variant(&together, layout, &bound_names, &roots_of)?);
+        }
+        variants.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then((left.folder != "layout").cmp(&(right.folder != "layout")))
+                .then(left.folder.cmp(&right.folder))
+        });
+
+        let mut classes: Vec<(String, String)> = Vec::new();
+        let mut variables_of: Vec<(String, Vec<(String, Type)>)> = Vec::new();
+        for variant in &variants {
+            if classes.iter().any(|(name, _)| *name == variant.name) {
+                continue;
+            }
+            classes.push((variant.name.clone(), binding_class(variant)));
+        }
+        for (name, _) in &classes {
+            let mut held: Vec<(String, Type)> = Vec::new();
+            for variant in variants.iter().filter(|one| one.name == *name) {
+                let model = Model {
+                    classpath: &together,
+                    imports: variant.imports.clone(),
+                };
+                for (variable, written) in &variant.variables {
+                    if held.iter().any(|(known, _)| known == variable) {
+                        continue;
+                    }
+                    let what = model.type_named(written).ok_or_else(|| {
+                        fail(
+                            "EH007",
+                            "A layout's variable names a type this build does not know.",
+                        )
+                        .with_context(format!("Layout: {}/{}", variant.folder, variant.name))
+                        .with_context(format!("Variable: {variable}"))
+                        .with_context(format!("Type: {written}"))
+                    })?;
+                    held.push((variable.clone(), what));
+                }
+            }
+            variables_of.push((name.clone(), held));
+        }
+
+        let mut names: Vec<String> = variants
+            .iter()
+            .flat_map(|one| one.variables.iter().map(|(name, _)| name.clone()))
+            .collect();
+        names.extend(bindables(&units));
+        names.sort();
+        names.dedup();
+        names.retain(|one| one != "_all");
+
+        let shared = Shared {
+            store: &store,
+            classes: &classes,
+            variables_of: &variables_of,
+        };
+        let mut made = Made::default();
+        let mut components: Vec<String> = Vec::new();
+        let mut lookups: Vec<Lookup> = Vec::new();
+        for (name, binding) in &classes {
+            let group: Vec<&Variant> = variants.iter().filter(|one| one.name == *name).collect();
+            let variables = variables_of
+                .iter()
+                .find(|(held, _)| held == name)
+                .map(|(_, held)| held.clone())
+                .unwrap_or_default();
+            let mut publics: Vec<Public> = Vec::new();
+            for variant in &group {
+                let model = Model {
+                    classpath: &together,
+                    imports: variant.imports.clone(),
+                };
+                for view in &variant.views {
+                    if view.id.is_none() {
+                        continue;
+                    }
+                    let what = view_type_source(&model, &shared, view);
+                    match publics.iter_mut().find(|one| one.field == view.field) {
+                        Some(held) if held.what != what => {
+                            held.what = "android.view.View".to_string()
+                        }
+                        Some(_) => {}
+                        None => publics.push(Public {
+                            field: view.field.clone(),
+                            what,
+                        }),
+                    }
+                }
+            }
+            let package_of_layout = group[0].package.clone();
+            made.sources.push((
+                path_of(binding),
+                abstract_source(
+                    &base,
+                    binding,
+                    &package_of_layout,
+                    name,
+                    &publics,
+                    &variables,
+                ),
+            ));
+            let mut tags = Vec::new();
+            for variant in &group {
+                let model = Model {
+                    classpath: &together,
+                    imports: variant.imports.clone(),
+                };
+                let (own_package, simple_name) = split_class(binding);
+                let simple = format!("{simple_name}{}", impl_suffix(&variant.folder));
+                let text = impl_source(
+                    &model,
+                    &shared,
+                    variant,
+                    binding,
+                    &simple,
+                    &publics,
+                    &variables,
+                    &mut components,
+                )?;
+                let dotted = if own_package.is_empty() {
+                    simple.clone()
+                } else {
+                    format!("{own_package}.{simple}")
+                };
+                made.sources.push((path_of(&dotted), text));
+                tags.push((format!("{}/{}_0", variant.folder, variant.name), dotted));
+                made.layouts.push((
+                    variant.folder.clone(),
+                    variant.name.clone(),
+                    variant.rewritten.clone(),
+                ));
+            }
+            lookups.push((name.clone(), package_of_layout, tags));
+        }
+
+        let mut mapper = format!(
+            "package {package};\n\npublic class DataBinderMapperImpl extends androidx.databinding.DataBinderMapper {{\n    private static final android.util.SparseIntArray INTERNAL_LAYOUT_ID_LOOKUP = new android.util.SparseIntArray({});\n\n    static {{\n",
+            lookups.len()
+        );
+        for (at, (name, owner, _)) in lookups.iter().enumerate() {
+            mapper.push_str(&format!(
+                "        INTERNAL_LAYOUT_ID_LOOKUP.put({owner}.R.layout.{name}, {});\n",
+                at + 1
+            ));
+        }
+        mapper.push_str("    }\n\n    @Override\n    public androidx.databinding.ViewDataBinding getDataBinder(androidx.databinding.DataBindingComponent component, android.view.View view, int layoutId) {\n        int localizedLayoutId = INTERNAL_LAYOUT_ID_LOOKUP.get(layoutId);\n        if (localizedLayoutId > 0) {\n            java.lang.Object tag = view.getTag();\n            if (tag == null) {\n                throw new java.lang.RuntimeException(\"view must have a tag\");\n            }\n");
+        for (at, (name, _, tags)) in lookups.iter().enumerate() {
+            mapper.push_str(&format!(
+                "            if (localizedLayoutId == {}) {{\n",
+                at + 1
+            ));
+            for (tag, dotted) in tags {
+                mapper.push_str(&format!(
+                    "                if ({}.equals(tag)) {{\n                    return new {dotted}(component, view);\n                }}\n",
+                    java_string(tag)
+                ));
+            }
+            mapper.push_str(&format!(
+                "                throw new java.lang.IllegalArgumentException({} + tag);\n            }}\n",
+                java_string(&format!("The tag for {name} is invalid. Received: "))
+            ));
+        }
+        mapper.push_str("        }\n        return null;\n    }\n\n    @Override\n    public androidx.databinding.ViewDataBinding getDataBinder(androidx.databinding.DataBindingComponent component, android.view.View[] views, int layoutId) {\n        return null;\n    }\n\n    @Override\n    public int getLayoutId(java.lang.String tag) {\n        if (tag == null) {\n            return 0;\n        }\n");
+        for (name, owner, tags) in &lookups {
+            for (tag, _) in tags {
+                mapper.push_str(&format!(
+                    "        if ({}.equals(tag)) {{\n            return {owner}.R.layout.{name};\n        }}\n",
+                    java_string(tag)
+                ));
+            }
+        }
+        mapper.push_str("        return 0;\n    }\n\n    @Override\n    public java.lang.String convertBrIdToString(int localId) {\n        if (localId == 0) {\n            return \"_all\";\n        }\n");
+        for (at, name) in names.iter().enumerate() {
+            mapper.push_str(&format!(
+                "        if (localId == {}) {{\n            return {};\n        }}\n",
+                at + 1,
+                java_string(name)
+            ));
+        }
+        mapper.push_str("        return null;\n    }\n\n    @Override\n    public java.util.List<androidx.databinding.DataBinderMapper> collectDependencies() {\n        java.util.ArrayList<androidx.databinding.DataBinderMapper> result = new java.util.ArrayList<androidx.databinding.DataBinderMapper>();\n");
+        if classpath.get(ADAPTERS_MAPPER).is_some() {
+            mapper.push_str(&format!(
+                "        result.add(new {}());\n",
+                ADAPTERS_MAPPER.replace('/', ".")
+            ));
+        }
+        mapper.push_str("        return result;\n    }\n}\n");
+        made.sources
+            .push((path_of(&format!("{package}.DataBinderMapperImpl")), mapper));
+
+        if classpath
+            .get("androidx/databinding/DataBinderMapperImpl")
+            .is_none()
+        {
+            made.sources.push((
+                path_of("androidx.databinding.DataBinderMapperImpl"),
+                format!(
+                    "package androidx.databinding;\n\npublic class DataBinderMapperImpl extends MergedDataBinderMapper {{\n    DataBinderMapperImpl() {{\n        addMapper(new {package}.DataBinderMapperImpl());\n    }}\n}}\n"
+                ),
+            ));
+        }
+        if classpath
+            .get("androidx/databinding/DataBindingComponent")
+            .is_none()
+        {
+            let mut text =
+                "package androidx.databinding;\n\npublic interface DataBindingComponent {\n"
+                    .to_string();
+            for owner in &components {
+                text.push_str(&format!(
+                    "    {} get{}();\n",
+                    base.class_source(owner),
+                    owner.rsplit(['/', '$']).next().unwrap_or(owner)
+                ));
+            }
+            text.push_str("}\n");
+            made.sources.push((path_of(COMPONENT), text));
+        }
+
+        let mut packages: Vec<String> = vec![package.to_string()];
+        for variant in &variants {
+            if !packages.contains(&variant.package) {
+                packages.push(variant.package.clone());
+            }
+        }
+        if classpath.get(ADAPTERS_MAPPER).is_some()
+            && classpath
+                .get(&format!("{}/BR", ADAPTERS_PACKAGE.replace('.', "/")))
+                .is_none()
+        {
+            packages.push(ADAPTERS_PACKAGE.to_string());
+        }
+        for owner in packages {
+            if classpath
+                .get(&format!("{}/BR", owner.replace('.', "/")))
+                .is_some()
+            {
+                continue;
+            }
+            let mut text = format!(
+                "package {owner};\n\npublic class BR {{\n    public static final int _all = 0;\n"
+            );
+            for (at, name) in names.iter().enumerate() {
+                text.push_str(&format!(
+                    "    public static final int {name} = {};\n",
+                    at + 1
+                ));
+            }
+            text.push_str("}\n");
+            made.sources.push((path_of(&format!("{owner}.BR")), text));
+        }
+        Ok(made)
+    }
+}
+
 pub mod desugar {
     use crate::diag::{Diagnostic, Severity};
     use crate::FailureClass;
@@ -34843,6 +39596,7 @@ pub mod settings {
         pub shrink: bool,
         pub seal_resources: bool,
         pub view_binding: bool,
+        pub data_binding: bool,
         pub key_alias: String,
         pub java: Java,
         pub variants: Vec<Variant>,
@@ -34877,6 +39631,7 @@ pub mod settings {
                 shrink: true,
                 seal_resources: false,
                 view_binding: false,
+                data_binding: false,
                 key_alias: String::new(),
                 java: Java::default(),
                 variants: vec![Variant::debug(), Variant::release()],
@@ -35062,6 +39817,7 @@ pub mod settings {
             w.field_bool("shrink", self.shrink);
             w.field_bool("sealResources", self.seal_resources);
             w.field_bool("viewBinding", self.view_binding);
+            w.field_bool("dataBinding", self.data_binding);
             w.end_object();
 
             w.blank();
@@ -35349,6 +40105,9 @@ pub mod settings {
                 }
                 if let Some(found) = build.get("viewBinding").and_then(|one| one.boolean()) {
                     out.view_binding = found;
+                }
+                if let Some(found) = build.get("dataBinding").and_then(|one| one.boolean()) {
+                    out.data_binding = found;
                 }
             }
             if let Some(debugger) = held.get("debugger") {
@@ -37027,7 +41786,28 @@ pub mod gradle {
         {
             found.settings.view_binding = true;
         }
-        for feature in ["dataBinding", "compose", "renderScript", "mlModelBinding"] {
+        let old_data = block(&android, "dataBinding").unwrap_or_default();
+        if flag(&features, &["dataBinding"]) == Some(true)
+            || flag(&android, &["dataBinding.enabled", "dataBinding.isEnabled"]) == Some(true)
+            || flag(&old_data, &["enabled", "isEnabled"]) == Some(true)
+        {
+            found.settings.data_binding = true;
+            for artifact in crate::databinding::ARTIFACTS {
+                if !found
+                    .settings
+                    .dependencies
+                    .iter()
+                    .any(|one| one.name == *artifact)
+                {
+                    found.settings.dependencies.push(Dependency {
+                        name: artifact.to_string(),
+                        version: crate::databinding::VERSION.to_string(),
+                        file: String::new(),
+                    });
+                }
+            }
+        }
+        for feature in ["compose", "renderScript", "mlModelBinding"] {
             if flag(&features, &[feature]) == Some(true)
                 || flag(&android, &[&format!("{feature}.enabled")]) == Some(true)
             {
@@ -50745,6 +55525,12 @@ pub mod builder {
         project.library_packages = brought.packages;
         project.keep_rules = keep_rules_of(root, held.as_ref(), &brought.rules);
 
+        let (bound_sources, bound_layouts) = if held.as_ref().is_some_and(|one| one.data_binding) {
+            bind_the_data(root, &namespace, &mut project)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         let mut sink = crate::diag::Sink::new();
         let table = compile_resources(&project, &mut sink)?;
         let mut sources = Vec::new();
@@ -50827,6 +55613,11 @@ pub mod builder {
             let layouts: Vec<(String, String, String)> = project
                 .resources
                 .iter()
+                .filter(|one| {
+                    !bound_layouts
+                        .iter()
+                        .any(|(folder, name)| *folder == one.folder && *name == one.name)
+                })
                 .map(|one| {
                     (
                         one.folder.clone(),
@@ -50875,6 +55666,7 @@ pub mod builder {
             }
             sources.extend(made);
         }
+        sources.extend(bound_sources);
 
         if let Some(made_by) = fingerprint.filter(|_| host.is_none_or(|one| one.seal)) {
             let mut named = crate::diag::Sink::new();
@@ -51955,6 +56747,128 @@ public final class R {{
         }
         out.carried.extend(java_resources(root)?);
         Ok(out)
+    }
+
+    type Bound = (Vec<(String, String)>, Vec<(String, String)>);
+
+    fn bind_the_data(
+        root: &str,
+        namespace: &str,
+        project: &mut Project,
+    ) -> Result<Bound, Diagnostic> {
+        let mut owners: Vec<(String, String, String)> = Vec::new();
+        for (folder, manifest) in local_modules(root) {
+            let Some(package) = manifest.as_deref().and_then(package_of) else {
+                continue;
+            };
+            for kind in std::fs::read_dir(folder.join("res"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let folder_name = kind.file_name().to_string_lossy().to_string();
+                if !folder_name.starts_with(crate::databinding::LAYOUT_ROOT) {
+                    continue;
+                }
+                for file in std::fs::read_dir(kind.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    owners.push((
+                        folder_name.clone(),
+                        file.file_name().to_string_lossy().to_string(),
+                        package.clone(),
+                    ));
+                }
+            }
+        }
+        let mut layouts = Vec::new();
+        let mine = project
+            .resources
+            .iter()
+            .map(|one| (one, namespace.to_string()));
+        let theirs = project.library_resources.iter().filter_map(|one| {
+            owners
+                .iter()
+                .find(|(folder, name, _)| *folder == one.folder && *name == one.name)
+                .map(|(_, _, package)| (one, package.clone()))
+        });
+        for (one, package) in mine.chain(theirs) {
+            if !(one.folder == crate::databinding::LAYOUT_ROOT || one.folder.starts_with("layout-"))
+                || !one.name.ends_with(".xml")
+            {
+                continue;
+            }
+            layouts.push(crate::databinding::Layout {
+                folder: one.folder.clone(),
+                name: one.name.trim_end_matches(".xml").to_string(),
+                text: String::from_utf8_lossy(&one.bytes).to_string(),
+                package,
+            });
+        }
+        let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
+        let mut paths = Vec::new();
+        gather_java(&folder, &mut paths);
+        paths.sort();
+        let sources: Vec<(String, String)> = paths
+            .iter()
+            .filter_map(|path| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .map(|text| (path.display().to_string(), text))
+            })
+            .collect();
+        let classpath = what_it_may_call_into(root)?;
+        let stores = binding_stores(root);
+        let made =
+            crate::databinding::generate(namespace, &layouts, &sources, &classpath, &stores)?;
+        let mut rewritten = Vec::new();
+        for (folder, name, text) in made.layouts {
+            let file = format!("{name}.xml");
+            let found = project
+                .resources
+                .iter_mut()
+                .chain(project.library_resources.iter_mut())
+                .find(|one| one.folder == folder && one.name == file);
+            if let Some(held) = found {
+                held.bytes = text.into_bytes();
+            }
+            rewritten.push((folder, file));
+        }
+        Ok((made.sources, rewritten))
+    }
+
+    fn binding_stores(root: &str) -> Vec<String> {
+        let folder = std::path::Path::new(root).join(crate::scaffold::LIBRARY_FOLDER);
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|held| held == "aar"))
+            .collect();
+        paths.sort();
+        let mut out = Vec::new();
+        for path in paths {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let mut sink = Sink::new();
+            let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+                continue;
+            };
+            for entry in archive.entries() {
+                if entry.name.starts_with(crate::databinding::STORE_FOLDER)
+                    && entry.name.ends_with(crate::databinding::STORE_SUFFIX)
+                {
+                    if let Ok(held) = entry_bytes(&bytes, entry, &path.display().to_string()) {
+                        out.push(String::from_utf8_lossy(&held).to_string());
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn local_modules(root: &str) -> Vec<(std::path::PathBuf, Option<String>)> {
