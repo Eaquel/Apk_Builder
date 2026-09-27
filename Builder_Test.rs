@@ -321,7 +321,9 @@ mod core {
                 .execute(&mut ctx)
                 .expect_err("nothing compiles through the plugin surface");
             assert!(
-                error.code == "E0001" || error.code.starts_with("EJ"),
+                error.code == "E0001"
+                    || error.code.starts_with("EJ")
+                    || error.code.starts_with("EK"),
                 "{}: {}",
                 plugin.contract().id,
                 error.code
@@ -16411,8 +16413,8 @@ public final class App extends Activity {
                 .iter()
                 .map(|(language, _)| *language)
                 .collect::<Vec<&str>>(),
-            vec!["kotlin"],
-            "only the Kotlin is named as what this build cannot compile: {ignored:?}"
+            Vec::<&str>::new(),
+            "the Kotlin is compiled with the Java, so nothing is left out: {ignored:?}"
         );
 
         eprintln!(
@@ -18589,7 +18591,7 @@ dependencies {
     }
 
     #[test]
-    fn only_java_gets_a_folder_because_only_java_is_built() {
+    fn only_java_gets_a_folder_and_kotlin_written_in_is_built() {
         let directory = temp_directory("builder-scaffold-one");
         let root = directory.join("OnlyRust");
         let spec = crate::scaffold::Spec {
@@ -18647,10 +18649,14 @@ dependencies {
         std::fs::create_dir_all(root.join("Kotlin")).unwrap();
         std::fs::write(root.join("Kotlin/App.kt"), "package com.tr.yt\n").unwrap();
         assert!(
-            crate::builder::uncompiled_source(root.to_str().unwrap())
+            crate::builder::holds_kotlin(root.to_str().unwrap()),
+            "once it is written in, it counts"
+        );
+        assert!(
+            !crate::builder::uncompiled_source(root.to_str().unwrap())
                 .iter()
                 .any(|(language, _)| *language == "kotlin"),
-            "once it is written in, it counts"
+            "Kotlin written in is built with the Java, not left out"
         );
 
         std::fs::remove_dir_all(&directory).ok();
@@ -20902,18 +20908,18 @@ dependencies {
 
         crate::workspace::write_text(
             &root,
-            "Kotlin/com/tr/yt/Screen.kt",
-            "package com.tr.yt
-
-class Screen
+            "Native/screen.cpp",
+            "int screen() {
+    return 1;
+}
 ",
         )
         .unwrap();
 
         let found = crate::builder::uncompiled_source(&root);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].0, "kotlin");
-        assert_eq!(found[0].1, "Kotlin/com/tr/yt/Screen.kt");
+        assert_eq!(found[0].0, "cpp");
+        assert_eq!(found[0].1, "Native/screen.cpp");
 
         let refused = crate::builder::check(&root);
         let refusal = refused.refusal.expect("it must refuse");
@@ -20922,7 +20928,7 @@ class Screen
             refusal
                 .context
                 .iter()
-                .any(|line| line.contains("Kotlin/com/tr/yt/Screen.kt")),
+                .any(|line| line.contains("Native/screen.cpp")),
             "the refusal names the file: {:?}",
             refusal.context
         );
@@ -20943,7 +20949,7 @@ class Screen
         );
 
         let bin = directory.join("bin").to_str().unwrap().to_string();
-        crate::workspace::remove(&root, "Kotlin/com/tr/yt/Screen.kt", &bin, 1_800_000_000).unwrap();
+        crate::workspace::remove(&root, "Native/screen.cpp", &bin, 1_800_000_000).unwrap();
         assert!(crate::builder::check(&root).refusal.is_none());
 
         std::fs::remove_dir_all(&directory).ok();
@@ -20957,7 +20963,7 @@ class Screen
         let compiled: Vec<&str> = crate::scaffold::compiled_languages().collect();
         assert_eq!(
             compiled,
-            vec!["java"],
+            vec!["java", "kotlin"],
             "a language named as compiled that is not one is the fake this refuses to be"
         );
 
@@ -21474,8 +21480,7 @@ class Screen
 
         crate::workspace::write_text(&root, "Kotlin/Screen.kt", "class Screen\n").unwrap();
         let mixed = crate::health::of(&root).unwrap();
-        assert_eq!(mixed.uncompiled.len(), 1);
-        assert_eq!(mixed.uncompiled[0].0, "kotlin");
+        assert!(mixed.uncompiled.is_empty(), "{:?}", mixed.uncompiled);
         assert!(mixed.code_files > whole.code_files, "it counts as code");
 
         std::fs::remove_dir_all(&directory).ok();
@@ -23442,7 +23447,7 @@ class Screen
             .add(Node::new(
                 NodeId::new("dex").unwrap(),
                 NodeKind::Dex,
-                "plugin.kotlin",
+                "plugin.cpp",
                 digests(),
             ))
             .unwrap();
@@ -40785,6 +40790,7 @@ mod cpp {
 
 mod kotlin {
     use crate::caps::Policy;
+    use crate::compilers::java::Classpath;
     use crate::compilers::kotlin::*;
     use crate::diag::Sink;
     use crate::plugin::Context;
@@ -40803,7 +40809,7 @@ mod kotlin {
     }
 
     #[test]
-    fn executing_reports_the_truth_instead_of_a_result() {
+    fn executing_points_at_the_build_instead_of_pretending() {
         let mut policy = Policy::new("test");
         let mut sink = Sink::new();
         let mut ctx = Context {
@@ -40813,13 +40819,12083 @@ mod kotlin {
 
         let error = PLUGIN
             .execute(&mut ctx)
-            .expect_err("a plugin that produces nothing must never report success");
+            .expect_err("the plugin surface has nothing to compile");
 
-        assert_eq!(error.code, "E0001");
+        assert_eq!(error.code, "EK300");
         assert_eq!(error.origin, "plugin.kotlin");
-        assert!(error.message.contains("not implemented"));
         assert!(error.suggestion.is_some());
     }
+
+    #[test]
+    fn the_catalogue_is_in_order_and_names_every_code() {
+        let catalogue = crate::compilers::kotlin_diagnostic::CATALOGUE;
+        for pair in catalogue.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for (code, english) in catalogue {
+            assert!(code.starts_with("EK"), "{code}");
+            assert!(crate::compilers::kotlin_diagnostic::known(code));
+            assert!(english.ends_with('.'), "{code}: {english}");
+        }
+        assert!(crate::compilers::kotlin_diagnostic::explain("EK999").is_none());
+    }
+
+    #[test]
+    fn the_library_it_carries_parses_whole() {
+        let files = parse_prelude().expect("the library this compiler carries must parse");
+        let declarations: usize = files.iter().map(|(_, file)| file.declarations.len()).sum();
+        assert!(
+            declarations > 2000,
+            "only {declarations} library declarations"
+        );
+    }
+
+    #[test]
+    fn every_program_in_the_battery_parses() {
+        for (name, file, text) in BATTERY {
+            if let Err(why) = parse::file(text, file) {
+                panic!("{name}: [{}] {}", why.code, why.message);
+            }
+        }
+    }
+
+    #[test]
+    fn a_broken_program_is_refused_by_line_with_a_repair() {
+        let refused = parse::file("fun main() {\n    val x = 1\n", "Main.kt")
+            .expect_err("an unclosed block is refused");
+        assert!(refused.code.starts_with("EK"), "{}", refused.code);
+        assert!(crate::compilers::kotlin_diagnostic::known(&refused.code));
+    }
+
+    fn standard_library() -> Option<(std::path::PathBuf, Vec<u8>)> {
+        if let Ok(named) = std::env::var("APK_BUILDER_KOTLIN_STDLIB") {
+            let path = std::path::PathBuf::from(named);
+            let bytes = std::fs::read(&path).ok()?;
+            return Some((path, bytes));
+        }
+        let home = std::env::var("HOME").ok()?;
+        let base = std::path::Path::new(&home)
+            .join(".gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib");
+        let mut found: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for version in std::fs::read_dir(&base).ok()?.flatten() {
+            let named = version.file_name().to_string_lossy().to_string();
+            let wanted = format!("kotlin-stdlib-{named}.jar");
+            for hash in std::fs::read_dir(version.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let jar = hash.path().join(&wanted);
+                if jar.is_file() {
+                    found.push((named.clone(), jar));
+                }
+            }
+        }
+        found.sort_by(|left, right| crate::maven::newer(&left.0, &right.0));
+        let (_, path) = found.pop()?;
+        let bytes = std::fs::read(&path).ok()?;
+        Some((path, bytes))
+    }
+
+    fn facade_of(file: &str, text: &str) -> String {
+        let package = text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("package ")
+                .map(|rest| rest.trim().trim_end_matches(';').replace('.', "/"))
+        });
+        let stem = file.trim_end_matches(".kt");
+        let mut letters = stem.chars();
+        let first: String = letters
+            .next()
+            .map(|one| one.to_uppercase().collect())
+            .unwrap_or_default();
+        let rest: String = letters
+            .map(|one| {
+                if one.is_alphanumeric() || one == '_' {
+                    one
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let simple = text
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("@file:JvmName(\"")
+                    .map(|held| held.trim_end_matches("\")").to_string())
+            })
+            .unwrap_or(format!("{first}{rest}Kt"));
+        match package {
+            Some(held) if !held.is_empty() => format!("{held}/{simple}"),
+            _ => simple,
+        }
+    }
+
+    fn java_release(java: &std::path::Path) -> Option<u32> {
+        let done = std::process::Command::new(java)
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .arg("-version")
+            .output()
+            .ok()?;
+        let said = String::from_utf8_lossy(&done.stderr).to_string();
+        let quoted = said.split('"').nth(1)?;
+        let first = quoted.split(['.', '-', '+']).next()?;
+        first.parse().ok()
+    }
+
+    fn find_java() -> Option<std::path::PathBuf> {
+        let mut places: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(home) = std::env::var("JAVA_HOME") {
+            places.push(std::path::Path::new(&home).join("bin").join("java"));
+        }
+        if let Ok(path) = std::env::var("PATH") {
+            places.extend(
+                path.split(':')
+                    .map(|one| std::path::Path::new(one).join("java")),
+            );
+        }
+        if let Ok(entries) = std::fs::read_dir("/usr/lib/jvm") {
+            places.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path().join("bin").join("java")),
+            );
+        }
+        places
+            .into_iter()
+            .filter(|held| held.is_file())
+            .find(|held| java_release(held).is_some_and(|release| release >= 25))
+    }
+
+    fn compiled(
+        kotlin: &[(String, String)],
+        java: &[(String, String)],
+        library: &[u8],
+    ) -> Result<Vec<(String, Vec<u8>)>, crate::diag::Diagnostic> {
+        let mut classpath = Classpath::new();
+        classpath.learn_jar(library)?;
+        compile_mixed(kotlin, java, &classpath, vec![library.to_vec()])
+    }
+
+    fn written(directory: &std::path::Path, classes: &[(String, Vec<u8>)]) {
+        for (name, bytes) in classes {
+            let file = directory.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+        }
+    }
+
+    fn answer(
+        java: &std::path::Path,
+        directory: &std::path::Path,
+        library: &std::path::Path,
+    ) -> String {
+        let done = std::process::Command::new(java)
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .arg("-cp")
+            .arg(format!("{}:{}", directory.display(), library.display()))
+            .arg("BoxMain")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&done.stdout).to_string();
+        let said = match said.rsplit_once("\n=") {
+            Some((_, answer)) => answer.to_string(),
+            None => said,
+        };
+        if done.status.success() {
+            said
+        } else {
+            let trouble = String::from_utf8_lossy(&done.stderr);
+            format!(
+                "{said} {}",
+                trouble.lines().take(3).collect::<Vec<_>>().join(" | ")
+            )
+        }
+    }
+
+    #[test]
+    fn kotlin_programs_compile_and_answer_ok() {
+        let Some((library_path, library)) = standard_library() else {
+            assert!(
+                std::env::var("APK_BUILDER_REQUIRE_KOTLIN_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_KOTLIN_CONFORMANCE is set but no kotlin-stdlib is here"
+            );
+            eprintln!("kotlin battery: no kotlin-stdlib to compile against");
+            return;
+        };
+        let java = find_java();
+        let directory = std::env::temp_dir().join(format!(
+            "builder-kotlin-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|held| held.as_nanos())
+                .unwrap_or_default()
+        ));
+        let refused = std::sync::Mutex::new(Vec::new());
+        let wrong = std::sync::Mutex::new(Vec::new());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((name, file, text)) = BATTERY.get(index) else {
+                        break;
+                    };
+                    let facade = facade_of(file, text).replace('/', ".");
+                    let mut kotlin = vec![(file.to_string(), text.to_string())];
+                    if text.contains("kotlin.test") {
+                        kotlin.push(("Test.kt".to_string(), KOTLIN_TEST.to_string()));
+                    }
+                    let runner = format!(
+                        "public class BoxMain {{\n    public static void main(String[] args) {{\n        System.out.print(\"\\n=\" + {facade}.box());\n    }}\n}}\n"
+                    );
+                    let made = match compiled(&kotlin, &[("BoxMain.java".to_string(), runner)], &library) {
+                        Ok(made) => made,
+                        Err(why) => {
+                            refused.lock().unwrap().push(format!("{name}: [{}] {}", why.code, why.message));
+                            continue;
+                        }
+                    };
+                    let Some(java) = &java else { continue };
+                    let here = directory.join(index.to_string());
+                    written(&here, &made);
+                    let said = answer(java, &here, &library_path);
+                    if said != "OK" {
+                        wrong.lock().unwrap().push(format!("{name}: {said}"));
+                    }
+                });
+            }
+        });
+        std::fs::remove_dir_all(&directory).ok();
+        let refused = refused.into_inner().unwrap();
+        let wrong = wrong.into_inner().unwrap();
+        assert!(
+            refused.is_empty(),
+            "{} refused:\n{}",
+            refused.len(),
+            refused.join("\n")
+        );
+        assert!(
+            wrong.is_empty(),
+            "{} answered wrong:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+        eprintln!(
+            "kotlin battery: {} programs compile{}",
+            BATTERY.len(),
+            if java.is_some() {
+                " and answer OK"
+            } else {
+                "; no java to run them"
+            }
+        );
+    }
+
+    #[test]
+    fn kotlin_and_java_reach_each_other_in_one_build() {
+        let Some((library_path, library)) = standard_library() else {
+            eprintln!("kotlin and java: no kotlin-stdlib to compile against");
+            return;
+        };
+        let kotlin = vec![("Shop.kt".to_string(), MIXED_KOTLIN.to_string())];
+        let java = vec![
+            ("Ledger.java".to_string(), MIXED_JAVA.to_string()),
+            ("BoxMain.java".to_string(), MIXED_MAIN.to_string()),
+        ];
+        let made = compiled(&kotlin, &java, &library).expect("the mixed project compiles");
+        let names: Vec<&str> = made.iter().map(|(name, _)| name.as_str()).collect();
+        for wanted in [
+            "shop/Item.class",
+            "shop/Ledger.class",
+            "shop/ShopKt.class",
+            "BoxMain.class",
+        ] {
+            assert!(
+                names.contains(&wanted),
+                "{wanted} is missing from {names:?}"
+            );
+        }
+        let Some(java) = find_java() else {
+            return;
+        };
+        let directory =
+            std::env::temp_dir().join(format!("builder-kotlin-mixed-{}", std::process::id()));
+        written(&directory, &made);
+        let said = answer(&java, &directory, &library_path);
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(said, "OK");
+    }
+
+    const MIXED_KOTLIN: &str = r####"package shop
+
+data class Item(val name: String, val cents: Long, val tags: List<String> = emptyList())
+
+fun Ledger.total(): Long = items().sumOf { it.cents }
+
+fun Ledger.cheapest(): Item? = items().minByOrNull { it.cents }
+
+object Pricing {
+    @JvmStatic
+    fun discounted(item: Item, percent: Int): Item = item.copy(cents = item.cents * (100 - percent) / 100)
+}
+
+fun describe(ledger: Ledger): String {
+    val names = ledger.items().filter { "fresh" in it.tags }.map { it.name.uppercase() }
+    return when {
+        names.isEmpty() -> "none"
+        else -> names.joinToString(",")
+    }
+}
+"####;
+
+    const MIXED_JAVA: &str = r####"package shop;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Ledger {
+    private final List<Item> items = new ArrayList<>();
+
+    public Ledger add(String name, long cents, List<String> tags) {
+        items.add(new Item(name, cents, tags));
+        return this;
+    }
+
+    public List<Item> items() {
+        return items;
+    }
+
+    public long totalFromJava() {
+        return ShopKt.total(this);
+    }
+
+    public Item discountedFirst() {
+        return Pricing.discounted(items.get(0), 50);
+    }
+}
+"####;
+
+    const MIXED_MAIN: &str = r####"import shop.Ledger;
+import shop.ShopKt;
+import java.util.Arrays;
+import java.util.Collections;
+
+public class BoxMain {
+    public static void main(String[] args) {
+        Ledger ledger = new Ledger()
+            .add("apple", 120, Arrays.asList("fresh", "red"))
+            .add("bread", 300, Collections.emptyList())
+            .add("pear", 80, Arrays.asList("fresh"));
+        boolean total = ledger.totalFromJava() == 500;
+        boolean cheapest = ShopKt.cheapest(ledger).getName().equals("pear");
+        boolean discount = ledger.discountedFirst().getCents() == 60;
+        boolean described = ShopKt.describe(ledger).equals("APPLE,PEAR");
+        boolean copied = ledger.items().get(0).equals(ledger.items().get(0).copy("apple", 120, Arrays.asList("fresh", "red")));
+        System.out.print(total && cheapest && discount && described && copied ? "OK" : "fail " + total + cheapest + discount + described + copied);
+    }
+}
+"####;
+
+    const KOTLIN_TEST: &str = r####"package kotlin.test
+
+fun assertEquals(expected: Any?, actual: Any?, message: String? = null) {
+    if (expected != actual) throw AssertionError((if (message == null) "" else message + ". ") + "Expected <" + expected + ">, actual <" + actual + ">.")
+}
+fun assertNotEquals(illegal: Any?, actual: Any?, message: String? = null) {
+    if (illegal == actual) throw AssertionError((if (message == null) "" else message + ". ") + "Illegal value: <" + actual + ">.")
+}
+fun assertSame(expected: Any?, actual: Any?, message: String? = null) {
+    if (expected !== actual) throw AssertionError((if (message == null) "" else message + ". ") + "Expected same.")
+}
+fun assertNotSame(illegal: Any?, actual: Any?, message: String? = null) {
+    if (illegal === actual) throw AssertionError("Expected not same.")
+}
+fun assertTrue(actual: Boolean, message: String? = null) {
+    if (!actual) throw AssertionError(message ?: "Expected value to be true.")
+}
+fun assertFalse(actual: Boolean, message: String? = null) {
+    if (actual) throw AssertionError(message ?: "Expected value to be false.")
+}
+fun assertNull(actual: Any?, message: String? = null) {
+    if (actual != null) throw AssertionError(message ?: "Expected value to be null.")
+}
+fun <T : Any> assertNotNull(actual: T?, message: String? = null): T {
+    if (actual == null) throw AssertionError(message ?: "Expected value to be not null.")
+    return actual
+}
+fun fail(message: String? = null): Nothing {
+    throw AssertionError(message)
+}
+fun assertContentEquals(expected: Iterable<*>?, actual: Iterable<*>?, message: String? = null) {
+    if (expected?.toList() != actual?.toList()) throw AssertionError(message ?: "Content not equal.")
+}
+fun assertContentEquals(expected: IntArray?, actual: IntArray?, message: String? = null) {
+    if (!java.util.Arrays.equals(expected, actual)) throw AssertionError(message ?: "Content not equal.")
+}
+fun <T> assertContentEquals(expected: Array<T>?, actual: Array<T>?, message: String? = null) {
+    if (!java.util.Arrays.equals(expected, actual)) throw AssertionError(message ?: "Content not equal.")
+}
+inline fun assertFails(block: () -> Unit): Throwable {
+    try {
+        block()
+    } catch (e: Throwable) {
+        return e
+    }
+    throw AssertionError("Expected an exception to be thrown, but was completed successfully.")
+}
+inline fun <reified T : Throwable> assertFailsWith(message: String? = null, block: () -> Unit): T {
+    try {
+        block()
+    } catch (e: Throwable) {
+        if (e is T) return e
+        throw AssertionError("Expected an exception of " + T::class.java + " to be thrown, but was " + e)
+    }
+    throw AssertionError("Expected an exception of " + T::class.java + " to be thrown, but was completed successfully.")
+}
+inline fun <reified T> assertIs(value: Any?, message: String? = null): T {
+    if (value !is T) throw AssertionError(message ?: "Expected value to be of type " + T::class.java)
+    return value
+}
+"####;
+
+    const BATTERY: &[(&str, &str, &str)] = &[
+        (
+            "arithmetic/basic_charCornerCases",
+            "basic_charCornerCases.kt",
+            r####"import kotlin.test.*
+
+private fun charCornersMinus(): Int {
+    val a: Char = 0xFFFF.toChar()
+    val b: Char = 0.toChar()
+    return a - b
+}
+
+private fun charCornersComparison(): Boolean {
+    val a = 0xFFFF.toChar()
+    val b = 0.toChar()
+    return a < b
+}
+
+fun box(): String {
+    assertEquals(65535, charCornersMinus())
+    assertFalse(charCornersComparison())
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arithmetic/basic_compareIntToFloat",
+            "basic_compareIntToFloat.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    assertEquals(1, 0.compareTo(-0.0f))
+    assertEquals(0, 0.compareTo(+0.0f))
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arithmetic/basic_kt37412",
+            "basic_kt37412.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val two = 2.0
+    assertEquals(2, two.toInt())
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arithmetic/basic_selfComparison",
+            "basic_selfComparison.kt",
+            r####"import kotlin.test.*
+
+fun selfCmp1(x: Int) = x + 1 > x
+
+fun selfCmp2(x: Int) = x - 1 < x
+
+fun box(): String {
+    assertFalse(selfCmp1(Int.MAX_VALUE))
+    assertFalse(selfCmp2(Int.MIN_VALUE))
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arithmetic/github1856",
+            "github1856.kt",
+            r####"import kotlin.test.*
+
+object RGBA {
+    fun packFast(r: Int, g: Int, b: Int, a: Int) = (r shl 0) or (g shl 8) or (b shl 16) or (a shl 24)
+
+    fun getFastR(v: Int): Int = (v ushr 0) and 0xFF
+    fun getFastG(v: Int): Int = (v ushr 8) and 0xFF
+    fun getFastB(v: Int): Int = (v ushr 16) and 0xFF
+    fun getFastA(v: Int): Int = (v ushr 24) and 0xFF
+
+    fun premultiplyFastInt(v: Int): Int {
+        val A = getFastA(v) + 1
+        val RB = (((v and 0x00FF00FF) * A) ushr 8) and 0x00FF00FF
+        val G = (((v and 0x0000FF00) * A) ushr 8) and 0x0000FF00
+        return (v and 0x00FFFFFF.inv()) or RB or G
+    }
+}
+
+fun box(): String {
+    val source = listOf(0xFFFFFFFF.toInt(), 0xFFFFFF77.toInt(), 0x777777FF.toInt(), 0x77777777.toInt())
+    val expect = listOf(-1, -137, 2000107383, 2000107319)
+    assertEquals(expect, source.map { RGBA.premultiplyFastInt(it) })
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/arrayConstructorsSimple",
+            "arrayConstructorsSimple.kt",
+            r####"import kotlin.test.assertEquals
+
+fun simpleIntArray(): Array<Int> = Array(3) { it }
+fun simpleDoubleArray(): Array<Double> = Array(3) { it.toDouble() + 0.1 }
+fun simpleStringArray(): Array<String> = Array(3) { it.toString() }
+
+fun box(): String {
+    val ia = simpleIntArray()
+    assertEquals(0, ia[0])
+    assertEquals(1, ia[1])
+    assertEquals(2, ia[2])
+
+    val da = simpleDoubleArray()
+    assertEquals(0.1, da[0])
+    assertEquals(1.1, da[1])
+    assertEquals(2.1, da[2])
+
+    val sa = simpleStringArray()
+    assertEquals("0", sa[0])
+    assertEquals("1", sa[1])
+    assertEquals("2", sa[2])
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/arrayPlusAssign",
+            "arrayPlusAssign.kt",
+            r####"fun box(): String {
+    val s = IntArray(1)
+    s[0] = 5
+    s[0] += 7
+    return if (s[0] == 12) "OK" else "Fail ${s[0]}"
+}
+"####,
+        ),
+        (
+            "arrays/clonePrimitiveArrays",
+            "clonePrimitiveArrays.kt",
+            r####"fun box(): String {
+    val i = intArrayOf(1, 2)
+    if (!(i contentEquals i.clone())) return "Fail int"
+    if (i.clone() === i) return "Fail int identity"
+
+    val j = longArrayOf(1L, 2L)
+    if (!(j contentEquals j.clone())) return "Fail long"
+    if (j.clone() === j) return "Fail long identity"
+
+    val s = shortArrayOf(1.toShort(), 2.toShort())
+    if (!(s contentEquals s.clone())) return "Fail short"
+    if (s.clone() === s) return "Fail short identity"
+
+    val b = byteArrayOf(1.toByte(), 2.toByte())
+    if (!(b contentEquals b.clone())) return "Fail byte"
+    if (b.clone() === b) return "Fail byte identity"
+
+    val c = charArrayOf('a', 'b')
+    if (!(c contentEquals c.clone())) return "Fail char"
+    if (c.clone() === c) return "Fail char identity"
+
+    val d = doubleArrayOf(1.0, -1.0)
+    if (!(d contentEquals d.clone())) return "Fail double"
+    if (d.clone() === d) return "Fail double identity"
+
+    val f = floatArrayOf(1f, -1f)
+    if (!(f contentEquals f.clone())) return "Fail float"
+    if (f.clone() === f) return "Fail float identity"
+
+    val z = booleanArrayOf(true, false)
+    if (!(z contentEquals z.clone())) return "Fail boolean"
+    if (z.clone() === z) return "Fail boolean identity"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/forEachBooleanArray",
+            "forEachBooleanArray.kt",
+            r####"fun box(): String {
+    for (x in BooleanArray(5)) {
+        if (x != false) return "Fail $x"
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/forEachFloatArray",
+            "forEachFloatArray.kt",
+            r####"fun box(): String {
+    for (x in FloatArray(5)) {
+        if (x != 0.toFloat()) return "Fail $x"
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/forInReversed/reversedArrayOriginalUpdatedInLoopBody",
+            "reversedArrayOriginalUpdatedInLoopBody.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val arr = intArrayOf(1, 2, 3, 4)
+    var sum = 0
+    var index = 0
+    for (i in arr.reversedArray()) {
+        arr[index++] = 0
+        sum = sum * 10 + i
+    }
+    assertEquals(4321, sum)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/hashMap",
+            "hashMap.kt",
+            r####"operator fun HashMap<String, Int?>.set(index: String, elem: Int?) {
+    this.put(index, elem)
+}
+
+fun box(): String {
+    val s = HashMap<String, Int?>()
+    s["239"] = 239
+    return if (s["239"] == 239) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "arrays/inlineInitializer",
+            "inlineInitializer.kt",
+            r####"class Foo(
+    val width: Int,
+    val height: Int,
+    init: (Int, Int) -> String
+) {
+    val live: Array<Array<String>> = Array(height) { i -> Array(width) { j -> init(i, j) } }
+}
+
+fun box(): String {
+
+    val foo = Foo(2, 2) { i, j -> if (i == j) (if (i == 0) "O" else "K") else "Fail@[$i, $j]" }
+
+    return foo.live[0][0] + foo.live[1][1]
+}
+"####,
+        ),
+        (
+            "arrays/iteratorCharArray",
+            "iteratorCharArray.kt",
+            r####"fun box(): String {
+    val a = CharArray(5)
+    val x = a.iterator()
+    var i = 0
+    while (x.hasNext()) {
+        if (a[i] != x.next()) return "Fail $i"
+        i++
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/iteratorLongArray",
+            "iteratorLongArray.kt",
+            r####"fun box(): String {
+    val a = LongArray(5)
+    val x = a.iterator()
+    var i = 0
+    while (x.hasNext()) {
+        if (a[i] != x.next()) return "Fail $i"
+        i++
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/kt2997",
+            "kt2997.kt",
+            r####"fun foo(a: Any): Int {
+    if (a is IntArray) {
+        a.get(0)
+        a.set(0, 1)
+        a.iterator()
+        return a.size
+    }
+    if (a is ShortArray) {
+        a.get(0)
+        a.set(0, 1)
+        a.iterator()
+        return a.size
+    }
+    if (a is ByteArray) {
+        a.get(0)
+        a.set(0, 1)
+        a.iterator()
+        return a.size
+    }
+    if (a is FloatArray) {
+        a.get(0)
+        a.set(0, 1.toFloat())
+        a.iterator()
+        return a.size
+    }
+    if (a is DoubleArray) {
+        a.get(0)
+        a.set(0, 1.0)
+        a.iterator()
+        return a.size
+    }
+    if (a is BooleanArray) {
+        a.get(0)
+        a.set(0, false)
+        a.iterator()
+        return a.size
+    }
+    if (a is CharArray) {
+        a.get(0)
+        a.set(0, 'a')
+        a.iterator()
+        return a.size
+    }
+    if (a is Array<*>) {
+        if (a.size > 0) a.get(0)
+        a.iterator()
+        return a.size
+    }
+
+    return 0
+}
+
+fun box(): String {
+    if ((intArrayOf() as Any) is Array<*>) return "OK"
+
+    val iA = IntArray(1)
+    if (foo(iA) != 1) return "fail int[]"
+    val sA = ShortArray(1)
+    if (foo(sA) != 1) return "fail short[]"
+    val bA = ByteArray(1)
+    if (foo(bA) != 1) return "fail byte[]"
+    val fA = FloatArray(1)
+    if (foo(fA) != 1) return "fail float[]"
+    val dA = DoubleArray(1)
+    if (foo(dA) != 1) return "fail double[]"
+    val boolA = BooleanArray(1)
+    if (foo(boolA) != 1) return "fail boolean[]"
+    val cA = CharArray(1)
+    if (foo(cA) != 1) return "fail char[]"
+    val oA = arrayOfNulls<Int>(1)
+    if (foo(oA) != 1) return "fail Any[]"
+
+    val sArray = arrayOfNulls<String>(0)
+    if (foo(sArray) != 0) return "fail String[]"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "arrays/kt4357",
+            "kt4357.kt",
+            r####"fun box(): String {
+    val array = intArrayOf(11, 12, 13)
+    val p = array.get(0)
+    if (p != 11) return "fail 1: $p"
+
+    val stringArray = arrayOf("OK", "FAIL")
+    return stringArray.get(0)
+}
+"####,
+        ),
+        (
+            "arrays/kt7009",
+            "kt7009.kt",
+            r####"fun box() : String {
+    val value = (1 to doubleArrayOf(1.0)).second[0]
+    return if (value == 1.0) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "arrays/kt950",
+            "kt950.kt",
+            r####"operator fun <K, V> MutableMap<K, V>.set(k : K, v : V) = put(k, v)
+
+fun box() : String {
+    val map = HashMap<String,String>()
+    map["239"] = "932"
+    return if(map["239"] == "932") "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "basics/array_to_any",
+            "array_to_any.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    foo().hashCode()
+
+    return "OK"
+}
+
+fun foo(): Any {
+    return Array<Any?>(0, { i -> null })
+}
+"####,
+        ),
+        (
+            "basics/cast_null",
+            "cast_null.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    testCast(null, false)
+    testCastToNullable(null, true)
+    testCastToNullable(TestKlass(), true)
+    testCastToNullable("", false)
+    testCastNotNullableToNullable(TestKlass(), true)
+    testCastNotNullableToNullable("", false)
+
+    return "OK"
+}
+
+class TestKlass
+
+fun ensure(b: Boolean) {
+    if (!b) {
+        throw Error("Error")
+    }
+}
+
+fun testCast(x: Any?, expectSuccess: Boolean) {
+    try {
+        x as TestKlass
+    } catch (e: Throwable) {
+        ensure(!expectSuccess)
+        return
+    }
+    ensure(expectSuccess)
+}
+
+fun testCastToNullable(x: Any?, expectSuccess: Boolean) {
+    try {
+        x as TestKlass?
+    } catch (e: Throwable) {
+        ensure(!expectSuccess)
+        return
+    }
+    ensure(expectSuccess)
+}
+
+fun testCastNotNullableToNullable(x: Any, expectSuccess: Boolean) {
+    try {
+        x as TestKlass?
+    } catch (e: Throwable) {
+        ensure(!expectSuccess)
+        return
+    }
+    ensure(expectSuccess)
+}
+"####,
+        ),
+        (
+            "basics/check_type",
+            "check_type.kt",
+            r####"import kotlin.test.*
+
+interface I
+class A() : I {}
+class B() {}
+
+
+fun isTypeOf(a: Any?) : Boolean {
+  return a is A
+}
+
+
+fun isTypeNullableOf(a: Any?) : Boolean {
+  return a is A?
+}
+
+
+fun isNotTypeOf(a: Any) : Boolean {
+  return a !is A
+}
+
+
+fun isTypeOfInterface(a: Any) : Boolean {
+  return a is I
+}
+
+
+fun box(): String {
+  if (!isTypeOf(A())) return "FAIL !isTypeOf(A())"
+  if (isTypeOf(null)) return "FAIL isTypeOf(null)"
+  if (!isTypeNullableOf(A())) return "FAIL !isTypeNullableOf(A())"
+  if (!isTypeNullableOf(null)) return "FAIL !isTypeNullableOf(null)"
+  if (!isNotTypeOf(B())) return "FAIL !isNotTypeOf(B())"
+  if (!isTypeOfInterface(A())) return "FAIL !isTypeOfInterface(A())"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "basics/concatenation",
+            "concatenation.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val s = "world"
+    val i = 1
+    val res1 = "Hello $s $i ${2 * i}"
+    if (res1 != "Hello world 1 2") return "FAIL 1: $res1"
+
+    val a = "a"
+    val res2 = "Hello, $a"
+    if (res2 != "Hello, a") return "FAIL 2: $res2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "basics/expression_as_statement",
+            "expression_as_statement.kt",
+            r####"import kotlin.test.*
+
+fun foo() {
+    Any() as String
+}
+
+fun box(): String {
+    try {
+        foo()
+    } catch (e: Throwable) {
+        return "OK"
+    }
+
+    return "Fail"
+}
+"####,
+        ),
+        (
+            "basics/kt75483",
+            "kt75483.kt",
+            r####"interface FeatureFlag<OptionType : Any> {
+    val default: OptionType
+}
+
+abstract class BooleanFeatureFlag(
+    override val default: Boolean,
+) : FeatureFlag<Boolean>
+
+fun <T : Any> currentValueOf(flag: FeatureFlag<T>): String {
+    if (flag !is BooleanFeatureFlag) return "Fail 1"
+    val default: Boolean = flag.default
+    return if (default) "OK" else "Fail 2"
+}
+
+class BooleanFeatureFlagImpl: BooleanFeatureFlag(true)
+
+fun box(): String {
+    return currentValueOf<Boolean>(BooleanFeatureFlagImpl())
+}
+"####,
+        ),
+        (
+            "basics/null_check",
+            "null_check.kt",
+            r####"import kotlin.test.*
+
+
+fun check_eqeq(a: Any?) = a == null
+
+fun null_check_eqeq1() : Boolean {
+  return check_eqeq(Any())
+}
+
+fun null_check_eqeq2() : Boolean {
+  return check_eqeq(null)
+}
+
+
+fun check_eqeqeq(a: Any?) = a === null
+
+fun null_check_eqeqeq1() : Boolean {
+  return check_eqeqeq(Any())
+}
+
+fun null_check_eqeqeq2() : Boolean {
+  return check_eqeqeq(null)
+}
+
+fun box(): String {
+  if (null_check_eqeq1())    return "FAIL null_check_eqeq1()"
+  if (!null_check_eqeq2())   return "FAIL !null_check_eqeq2()"
+  if (null_check_eqeqeq1())  return "FAIL null_check_eqeqeq1()"
+  if (!null_check_eqeqeq2()) return "FAIL !null_check_eqeqeq2()"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "basics/spread_operator_0",
+            "spread_operator_0.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+  val list0 = _arrayOf("K", "o", "t", "l", "i", "n")
+  val list1 = _arrayOf("l", "a","n", "g", "u", "a", "g", "e")
+  val list = foo(list0, list1)
+
+  val expected = listOf("K", "o", "t", "l", "i", "n", " ", "i", "s", " ", "c", "o", "o", "l", " ", "l", "a", "n", "g", "u", "a", "g", "e")
+  if (list != expected)
+    return "FAIL: $list"
+  return "OK"
+}
+
+
+fun foo(a:Array<out String>, b:Array<out String>) = listOf(*a," ", "i", "s", " ", "c", "o", "o", "l", " ", *b)
+
+
+fun _arrayOf(vararg arg:String) = arg
+"####,
+        ),
+        (
+            "basics/superFunCall",
+            "superFunCall.kt",
+            r####"import kotlin.test.*
+
+open class C {
+    open fun f() = "<fun:C>"
+}
+
+class C1: C() {
+    override fun f() = super<C>.f() + "<fun:C1>"
+}
+
+open class C2: C() {
+}
+
+class C3: C2() {
+    override fun f() = super<C2>.f() + "<fun:C3>"
+}
+
+fun box(): String {
+    val c1f = C1().f()
+    if (c1f != "<fun:C><fun:C1>") return "FAIL 1: $c1f"
+    val c3f = C3().f()
+    if (c3f != "<fun:C><fun:C3>") return "FAIL 2: $c3f"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "basics/superSetterCall",
+            "superSetterCall.kt",
+            r####"import kotlin.test.*
+
+open class C {
+    open var p2 = "<prop:C>"
+        set(value)  { field = "<prop:C>" + value }
+}
+
+class C1: C() {
+    override var p2 = super<C>.p2 + "<prop:C1>"
+        set(value) {
+            super<C>.p2 = value
+            field = "<prop:C1>" + super<C>.p2
+        }
+}
+
+open class C2: C() {
+}
+
+class C3: C2() {
+    override var p2 = super<C2>.p2 + "<prop:C3>"
+        set(value) {
+            super<C2>.p2 = value
+            field = "<prop:C3>" + super<C2>.p2
+        }
+}
+
+fun box(): String {
+    val c1 = C1()
+    val c3 = C3()
+    c1.p2 = "zzz"
+    c3.p2 = "zzz"
+    val c1p2 = c1.p2
+    if (c1p2 != "<prop:C1><prop:C>zzz") return "FAIL 1: "
+    val c3p2 = c3.p2
+    if (c3p2 != "<prop:C3><prop:C>zzz") return "FAIL 2: "
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "basics/unchecked_cast1",
+            "unchecked_cast1.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    foo<String>("17")
+    bar<String>("17")
+    foo<String>(42)
+    bar<String>(42)
+
+    assertEquals("17\n17\n42\n42\n", sb.toString())
+    return "OK"
+}
+
+fun <T> foo(x: Any?) {
+    val y = x as T
+    sb.appendLine(y.toString())
+}
+
+fun <T> bar(x: Any?) {
+    val y = x as? T
+    sb.appendLine(y.toString())
+}
+"####,
+        ),
+        (
+            "basics/unchecked_cast3",
+            "unchecked_cast3.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    testCast<TestKlass>(TestKlass(), true)
+    testCast<TestKlass>(null, false)
+    testCastToNullable<TestKlass>(null, true)
+
+    return "OK"
+}
+
+class TestKlass
+
+fun ensure(b: Boolean) {
+    if (!b) {
+        println("Error")
+    }
+}
+
+fun <T : Any> testCast(x: Any?, expectSuccess: Boolean) {
+    try {
+        x as T
+    } catch (e: Throwable) {
+        ensure(!expectSuccess)
+        return
+    }
+    ensure(expectSuccess)
+}
+
+fun <T : Any> testCastToNullable(x: Any?, expectSuccess: Boolean) {
+    try {
+        x as T?
+    } catch (e: Throwable) {
+        ensure(!expectSuccess)
+        return
+    }
+    ensure(expectSuccess)
+}
+"####,
+        ),
+        (
+            "basics/unit1",
+            "unit1.kt",
+            r####"fun myPrintln(a: Any): Unit {}
+
+fun box(): String {
+    val unit = myPrintln("First")
+    if (unit.toString() != "kotlin.Unit") return "FAIL 1: $unit"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "basics/unit3",
+            "unit3.kt",
+            r####"fun box(): String {
+    val actual = foo(Unit)
+    if (actual != "kotlin.Unit") return "FAIL: $actual"
+    return "OK"
+}
+
+fun foo(x: Any): String {
+    return x.toString()
+}
+"####,
+        ),
+        (
+            "binaryOp/callAny",
+            "callAny.kt",
+            r####"fun box(): String {
+    val a1: Any = 1.toByte().plus(1)
+    val a2: Any = 1.toShort().plus(1)
+    val a3: Any = 1.plus(1)
+    val a4: Any = 1L.plus(1)
+    val a5: Any = 1.0.plus(1)
+    val a6: Any = 1f.plus(1)
+    val a7: Any = 'A'.plus(1)
+    val a8: Any = 'B'.minus('A')
+
+    if (a1 !is Int || a1 != 2) return "fail 1"
+    if (a2 !is Int || a2 != 2) return "fail 2"
+    if (a3 !is Int || a3 != 2) return "fail 3"
+    if (a4 !is Long || a4 != 2L) return "fail 4"
+    if (a5 !is Double || a5 != 2.0) return "fail 5"
+    if (a6 !is Float || a6 != 2f) return "fail 6"
+    if (a7 !is Char || a7 != 'B') return "fail 7"
+    if (a8 !is Int || a8 != 1) return "fail 8"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/compareBoxedChars",
+            "compareBoxedChars.kt",
+            r####"fun <T> id(x: T) = x
+
+fun box(): String {
+    if (id('a') > id('b')) return "fail 1"
+    if (id('a') >= id('b')) return "fail 2"
+    if (id('b') < id('a')) return "fail 3"
+    if (id('b') <= id('a')) return "fail 4"
+
+    val x = id('a').compareTo('b')
+    if (x != -1) return "fail 5"
+
+    val y = id('b').compareTo('a')
+    if (y != 1) return "fail 6"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/eqNullableShortToShort",
+            "eqNullableShortToShort.kt",
+            r####"class C(val x: Short)
+
+fun box(): String {
+    val a: C = C(1)
+    val b: C? = C(1)
+    return if (b?.x == a.x) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "binaryOp/intrinsicAny",
+            "intrinsicAny.kt",
+            r####"fun box(): String {
+    val a1: Any = 1.toByte() + 1
+    val a2: Any = 1.toShort() + 1
+    val a3: Any = 1 + 1
+    val a4: Any = 1L + 1
+    val a5: Any = 1.0 + 1
+    val a6: Any = 1f + 1
+    val a7: Any = 'A' + 1
+    val a8: Any = 'B' - 'A'
+
+    if (a1 !is Int || a1 != 2) return "fail 1"
+    if (a2 !is Int || a2 != 2) return "fail 2"
+    if (a3 !is Int || a3 != 2) return "fail 3"
+    if (a4 !is Long || a4 != 2L) return "fail 4"
+    if (a5 !is Double || a5 != 2.0) return "fail 5"
+    if (a6 !is Float || a6 != 2f) return "fail 6"
+    if (a7 !is Char || a7 != 'B') return "fail 7"
+    if (a8 !is Int || a8 != 1) return "fail 8"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/kt44402",
+            "kt44402.kt",
+            r####"fun <A: Double, B: A> f(a: Double, b: B) = a == b
+
+fun box(): String {
+    if (f(0.1, 0.2)) return "FAIL"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/kt6747_identityEquals",
+            "kt6747_identityEquals.kt",
+            r####"class Test {
+    fun check(a: Any?): String {
+        if (this === a) return "Fail 1"
+        if (!(this !== a)) return "Fail 2"
+        return "OK"
+    }
+}
+
+fun box(): String = Test().check("String")
+"####,
+        ),
+        (
+            "binaryOp/overflowChar",
+            "overflowChar.kt",
+            r####"fun box(): String {
+    val c1: Char = Char.MIN_VALUE
+    val c2 = c1 - 1
+    if (c2 < c1) return "fail: Char.MIN_VALUE - 1 should overflow to positive."
+
+    val c3: Char = Char.MAX_VALUE
+    val c4 = c3 + 1
+    if (c4 > c3) return "fail: Char.MAX_VALUE + 1 should overflow to zero."
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/overflowInt",
+            "overflowInt.kt",
+            r####"fun box(): String {
+    val i1: Int = Int.MAX_VALUE
+    val i2 = i1 + 1
+    if (i2 > i1) return "fail: Int.MAX_VALUE + 1 should overflow to negative."
+
+    val i3: Int = Int.MIN_VALUE
+    val i4 = i3 - 1
+    if (i4 < i3) return "fail: Int.MIN_VALUE - 1 should overflow to positive."
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/overflowLong",
+            "overflowLong.kt",
+            r####"fun box(): String {
+    val a: Long = 2147483647 + 1
+    if (a != -2147483648L) return "fail: in this case we should add to ints and than cast the result to long - overflow expected"
+
+    val l1 = Long.MAX_VALUE
+    val l2 = l1 + 1
+    if (l2 > l1) return "fail: Long.MAX_VALUE + 1 should overflow to negative."
+
+    val l3 = Long.MIN_VALUE
+    val l4 = l3 - 1
+    if (l4 < l3) return "fail: Long.MIN_VALUE - 1 should overflow to positive."
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "binaryOp/primitiveEqualsSafeCall",
+            "primitiveEqualsSafeCall.kt",
+            r####"class C(val x: Short)
+
+fun box(): String {
+    val a: Short = 1
+    val b: C? = C(1)
+    return if (a.equals(b?.x)) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "boxing/boxBoolean",
+            "boxBoolean.kt",
+            r####"fun box(): String {
+    val lhs: Any? = true
+    val rhs: Any? = false
+    if (lhs is Boolean && rhs is Boolean) {
+        if (lhs.compareTo(rhs) == 1) return "OK"
+    }
+    return "Fail"
+}
+"####,
+        ),
+        (
+            "boxing/box_cache0",
+            "box_cache0.kt",
+            r####"import kotlin.test.*
+
+fun <T> areSame(arg1: T, arg2: T): Boolean {
+    return arg1 === arg2
+}
+
+fun Boolean.oneIfTrueElseZero(): Int {
+    return if (this) 1 else 0
+}
+
+fun box(): String {
+    var acc = 0
+    val range = 1000
+
+    for (i in arrayOf(false, true)) {
+        for (j in arrayOf(false, true)) {
+            acc += areSame(i, j).oneIfTrueElseZero()
+        }
+    }
+    if (acc != 2) "FAIL 1: $acc"
+
+    acc = 0
+    for (i in Byte.MIN_VALUE..Byte.MAX_VALUE) {
+        acc += areSame(i, i).oneIfTrueElseZero()
+    }
+    if (acc != 256) "FAIL 2: $acc"
+
+    acc = 0
+    for (i in Short.MIN_VALUE..Short.MAX_VALUE) {
+        acc += areSame(i, i).oneIfTrueElseZero()
+    }
+    if (acc != 256) "FAIL 3: $acc"
+
+    acc = 0
+    for (i in 0.toChar()..range.toChar()) {
+        acc += areSame(i, i).oneIfTrueElseZero()
+    }
+    if (acc != 256) "FAIL 4: $acc"
+
+    acc = 0
+    for (i in -range..range) {
+        acc += areSame(i, i).oneIfTrueElseZero()
+    }
+    if (acc != 256) "FAIL 5: $acc"
+
+    acc = 0
+    for (i in -range.toLong()..range.toLong()) {
+        acc += areSame(i, i).oneIfTrueElseZero()
+    }
+    if (acc != 256) "FAIL 6: $acc"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing1",
+            "boxing1.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun foo(arg: Any) {
+    sb.appendLine(arg.toString())
+}
+
+fun box(): String {
+    foo(1)
+    foo(2u)
+    foo(false)
+    foo("Hello")
+    val nonConstInt = 1
+    val nonConstUInt = 2u
+    val nonConstBool = false
+    val nonConstString = "Hello"
+    foo(nonConstInt)
+    foo(nonConstUInt)
+    foo(nonConstBool)
+    foo(nonConstString)
+
+    assertEquals("""
+        1
+        2
+        false
+        Hello
+        1
+        2
+        false
+        Hello
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing10",
+            "boxing10.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val FALSE: Boolean? = false
+
+    if (FALSE != null) {
+        do {
+            return "OK"
+        } while (FALSE)
+    }
+    return "FAIL"
+}
+"####,
+        ),
+        (
+            "boxing/boxing12",
+            "boxing12.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun foo(x: Number) {
+    sb.appendLine(x.toByte())
+}
+
+fun box(): String {
+    foo(18)
+    val nonConst = 18
+    foo(nonConst)
+
+    assertEquals("18\n18\n", sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing13",
+            "boxing13.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun is42(x: Any?) {
+    sb.appendLine(x == 42)
+    sb.appendLine(42 == x)
+}
+
+fun box(): String {
+    is42(16)
+    is42(42)
+    is42("42")
+    val nonConst16 = 16
+    val nonConst42 = 42
+    val nonConst42String = "42"
+    is42(nonConst16)
+    is42(nonConst42)
+    is42(nonConst42String)
+
+    assertEquals("""
+        false
+        false
+        true
+        true
+        false
+        false
+        false
+        false
+        true
+        true
+        false
+        false
+        
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing14",
+            "boxing14.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    42.println()
+    val nonConst = 42
+    nonConst.println()
+
+    assertEquals("42\n42\n", sb.toString())
+    return "OK"
+}
+
+fun <T> T.println() = sb.appendLine(this)
+"####,
+        ),
+        (
+            "boxing/boxing15",
+            "boxing15.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val res1 = foo(17)
+    if (res1 != 17) return "FAIL 1: $res1"
+
+    val nonConst = 17
+    val res2 = foo(nonConst)
+    if (res2 != 17) return "FAIL 2: $res2"
+
+    return "OK"
+}
+
+fun <T : Int> foo(x: T): Int = x
+"####,
+        ),
+        (
+            "boxing/boxing3",
+            "boxing3.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun printInt(x: Int) = sb.appendLine(x)
+
+fun foo(arg: Int?) {
+    if (arg != null)
+        printInt(arg)
+}
+
+fun box(): String {
+    foo(42)
+    val nonConst = 42
+    foo(nonConst)
+
+    assertEquals("42\n42\n", sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing4",
+            "boxing4.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun printInt(x: Int) = sb.appendLine(x)
+
+fun foo(arg: Any?) {
+    if (arg is Int? && arg != null)
+        printInt(arg)
+}
+
+fun box(): String {
+    foo(16)
+    val nonConst = 16
+    foo(nonConst)
+
+    assertEquals("16\n16\n", sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing6",
+            "boxing6.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun printInt(x: Int) = sb.appendLine(x)
+
+fun foo(arg: Any) {
+    printInt(arg as? Int ?: 16)
+}
+
+fun box(): String {
+    foo(42)
+    foo("Hello")
+    val nonConstInt = 42
+    val nonConstString = "Hello"
+    foo(nonConstInt)
+    foo(nonConstString)
+
+    assertEquals("42\n16\n42\n16\n", sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing7",
+            "boxing7.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun printInt(x: Int) = sb.appendLine(x)
+
+fun foo(arg: Any) {
+    val argAsInt = try {
+        arg as Int
+    } catch (e: ClassCastException) {
+        0
+    }
+    printInt(argAsInt)
+}
+
+fun box(): String {
+    foo(1)
+    foo("Hello")
+    val nonConstInt = 1
+    val nonConstString = "Hello"
+    foo(nonConstInt)
+    foo(nonConstString)
+
+    assertEquals("1\n0\n1\n0\n", sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing8",
+            "boxing8.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun foo(vararg args: Any?) {
+    for (arg in args) {
+        sb.appendLine(arg.toString())
+    }
+}
+
+fun box(): String {
+    foo(1, null, true, "Hello")
+    val nonConstInt = 1
+    val nonConstNull = null
+    val nonConstBool = true
+    val nonConstString = "Hello"
+    foo(nonConstInt, nonConstNull, nonConstBool, nonConstString)
+
+    assertEquals("""
+        1
+        null
+        true
+        Hello
+        1
+        null
+        true
+        Hello
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "boxing/boxing9",
+            "boxing9.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun foo(vararg args: Any?) {
+    for (arg in args) {
+        sb.appendLine(arg.toString())
+    }
+}
+
+fun bar(vararg args: Any?) {
+    foo(1, *args, 2, *args, 3)
+}
+
+fun box(): String {
+    bar(null, true, "Hello")
+
+    assertEquals("""
+        1
+        null
+        true
+        Hello
+        2
+        null
+        true
+        Hello
+        3
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "branching/advanced_when2",
+            "advanced_when2.kt",
+            r####"import kotlin.test.*
+
+fun advanced_when2(i: Int): Int {
+  var value = 1
+  when (i) {
+    10 -> {val v = 42; value = v}
+    11 -> {val v = 43; value = v}
+    12 -> {val v = 44; value = v}
+  }
+
+  return value
+}
+
+fun box(): String {
+  val res = advanced_when2(10)
+  if (res != 42) return "FAIL $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/advanced_when5",
+            "advanced_when5.kt",
+            r####"import kotlin.test.*
+
+fun advanced_when5(i: Int): Int {
+  when (i) {
+    0 -> { val v = 42; return v}
+    1 -> { val v = 42; return v}
+    2 -> { val v = 42; return v}
+    3 -> { val v = 42; return v}
+    4 -> { val v = 42; return v}
+    else -> return 24
+  }
+}
+
+fun box(): String {
+  val res = advanced_when5(5)
+  if (res != 24) return "FAIL $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/if_else",
+            "if_else.kt",
+            r####"import kotlin.test.*
+
+fun if_else(b: Boolean): Int {
+  if (b) return 42
+  else   return 24
+}
+
+fun box(): String {
+  val res = if_else(false)
+  if (res != 24) return "FAIL: $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/when2",
+            "when2.kt",
+            r####"import kotlin.test.*
+
+fun when2(i: Int): Int {
+  when (i) {
+    0 -> return 42
+    else -> return 24
+  }
+}
+
+fun box(): String {
+  val res = when2(0)
+  if (res != 42) return "FAIL $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/when4",
+            "when4.kt",
+            r####"import kotlin.test.*
+
+fun when5(i: Int): Int {
+  when (i) {
+    0 -> return 42
+    1 -> return 4
+    2 -> return 3
+    3 -> return 2
+    4 -> return 1
+  }
+  return 24
+}
+
+fun box(): String {
+  val res = when5(5)
+  if (res != 24) return "FAIL $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/when5",
+            "when5.kt",
+            r####"import kotlin.test.*
+
+fun when5(i: Int): Int {
+  when (i) {
+    0 -> return 42
+    1 -> return 4
+    2 -> return 3
+    3 -> return 2
+    4 -> return 1
+    else -> return 24
+  }
+}
+
+fun box(): String {
+  val res = when5(2)
+  if (res != 3) return "FAIL $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/when6",
+            "when6.kt",
+            r####"import kotlin.test.*
+
+fun foo() {
+}
+
+fun box(): String {
+    if (true) foo() else foo()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "branching/when8",
+            "when8.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    when (true) {
+        true -> return "OK"
+        false -> return "FAIL"
+    }
+}
+"####,
+        ),
+        (
+            "branching/when9",
+            "when9.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    foo(0)
+    return "OK"
+}
+
+fun foo(x: Int) {
+    when (x) {
+        0 -> 0
+    }
+}
+"####,
+        ),
+        (
+            "branching/when_through",
+            "when_through.kt",
+            r####"import kotlin.test.*
+
+fun when_through(i: Int): Int {
+  var value = 1
+  when (i) {
+    10 -> value = 42
+    11 -> value = 43
+    12 -> value = 44
+  }
+
+  return value
+}
+
+fun box(): String {
+  val res = when_through(2)
+  if (res != 1) return "FAIL $res"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "branching/when_with_try1",
+            "when_with_try1.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val res1 = foo(Any())
+    if (res1 != null) return "FAIL 1: $res1"
+    val res2 = foo("zzz")
+    if (res2 != null) return "FAIL 2: $res2"
+    val res3 = foo("42")
+    if (res3 != 42)  return "FAIL 3: $res3"
+
+    return "OK"
+}
+
+fun foo(value: Any): Int? {
+    if (value is CharSequence) {
+        try {
+            return value.toString().toInt()
+        } catch (e: NumberFormatException) {
+            return null
+        }
+    }
+    else {
+        return null
+    }
+}
+"####,
+        ),
+        (
+            "bridges/abstractOverrideBridge",
+            "abstractOverrideBridge.kt",
+            r####"open class Base<T> {
+    open fun f(x: T): String {
+        return "Fail"
+    }
+}
+
+abstract class Derived : Base<String>() {
+    abstract override fun f(x: String): String
+}
+
+class Implementation : Derived() {
+    override fun f(x: String): String {
+        return x
+    }
+}
+
+fun box(): String {
+    val base = Implementation() as Base<String>
+    return base.f("OK")
+}
+"####,
+        ),
+        (
+            "bridges/delegationComplex",
+            "delegationComplex.kt",
+            r####"open class Content() {
+    override fun toString() = "OK"
+}
+
+interface Box<E> {
+    fun get(): E
+}
+
+interface ContentBox<T : Content> : Box<T>
+
+object Impl : ContentBox<Content> {
+    override fun get(): Content = Content()
+}
+
+class ContentBoxDelegate<T : Content>() : ContentBox<T> by (Impl as ContentBox<T>)
+
+fun box() = ContentBoxDelegate<Content>().get().toString()
+"####,
+        ),
+        (
+            "bridges/fakeOverride/diamondFakeOverrideAbstractOverridesConcrete",
+            "diamondFakeOverrideAbstractOverridesConcrete.kt",
+            r####"open class A {
+    open fun foo(): Any = "FAIL"
+}
+
+open class B : A() {
+    override fun foo(): CharSequence = "FAIL"
+}
+
+interface IC {
+    fun foo(): String
+}
+
+class D : B(), IC {
+    override fun foo(): String = "OK"
+}
+
+fun box(): String {
+    val a: A = D()
+    val b: B = D()
+    val c: IC = D()
+    val d = D()
+
+    if (a.foo() != "OK") return "FAIL: A"
+    if (b.foo() != "OK") return "FAIL: B"
+    if (c.foo() != "OK") return "FAIL: IC"
+    if (d.foo() != "OK") return "FAIL: D"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "bridges/fakeOverride/fakeOverrideShouldNotInheritBridgeFromAbstractFakeOverride",
+            "fakeOverrideShouldNotInheritBridgeFromAbstractFakeOverride.kt",
+            r####"open class A {
+    open fun foo(): CharSequence = "OK"
+}
+
+interface IB {
+    fun foo(): String
+}
+
+abstract class C : A(), IB {
+    override abstract fun foo(): String
+}
+
+class D : C() {
+    override fun foo(): String = "OK"
+}
+
+fun box(): String {
+    val a: A = D()
+    val b: IB = D()
+    val c: C = D()
+    val d = D()
+
+    if (a.foo() != "OK") return "FAIL: A"
+    if (b.foo() != "OK") return "FAIL: IB"
+    if (c.foo() != "OK") return "FAIL: C"
+    if (d.foo() != "OK") return "FAIL: D"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "bridges/fakeOverrideDifferentSignature/simpleConcreteDeclarationOverridesConcreteThroughFakeOverride",
+            "simpleConcreteDeclarationOverridesConcreteThroughFakeOverride.kt",
+            r####"open class A {
+    open fun foo(): Any = "FAIL"
+}
+
+abstract class B : A()
+
+class C : B() {
+    override fun foo(): String = "OK"
+}
+
+fun box(): String {
+    val a: A = C()
+    val b: B = C()
+
+    if (a.foo() != "OK") return "FAIL: A"
+    if (b.foo() != "OK") return "FAIL: B"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "bridges/kt2833",
+            "kt2833.kt",
+            r####"package test
+
+public interface FunDependencyEdge {
+    val from: FunctionNode
+}
+
+public interface FunctionNode
+
+public class FunctionNodeImpl : FunctionNode
+
+class FunDependencyEdgeImpl(override val from: FunctionNodeImpl): FunDependencyEdge {
+}
+
+fun box(): String {
+    (FunDependencyEdgeImpl(FunctionNodeImpl()) as FunDependencyEdge).from
+    return "OK"
+}
+"####,
+        ),
+        (
+            "bridges/methodFromTrait",
+            "methodFromTrait.kt",
+            r####"interface A<T, U> {
+    fun foo(t: T, u: U) = "A"
+}
+
+class Z<T> : A<T, Int> {
+    override fun foo(t: T, u: Int) = "Z"
+}
+
+fun box(): String {
+    val z = Z<Int>()
+    val a: A<Int, Int> = z
+    return when {
+        z.foo(0, 0) != "Z" -> "Fail #1"
+        a.foo(0, 0) != "Z" -> "Fail #2"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "bridges/noBridges/simpleAbstractDeclarationOverridesConcreteSameSignature",
+            "simpleAbstractDeclarationOverridesConcreteSameSignature.kt",
+            r####"open class A {
+    open fun foo(): String = "A"
+}
+
+abstract class B : A() {
+    override abstract fun foo(): String
+}
+
+fun box(): String {
+    return "OK"
+}
+"####,
+        ),
+        (
+            "bridges/overrideWithValueClassReturn",
+            "overrideWithValueClassReturn.kt",
+            r####"interface I<E> {
+    public fun foo(): VC<E>
+}
+
+@Suppress("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
+@kotlin.jvm.JvmInline
+public value class VC<out T>(val holder: String)
+
+abstract class AC<E>(val vc: VC<E>) : I<E> {
+    override fun foo(): VC<E> {
+        return vc
+    }
+}
+
+fun box(): String {
+    return object : AC<String>(VC("OK")) {}.foo().holder
+}
+"####,
+        ),
+        (
+            "bridges/simple",
+            "simple.kt",
+            r####"open class A<T> {
+    open fun foo(t: T) = "A"
+}
+
+class Z : A<String>() {
+    override fun foo(t: String) = "Z"
+}
+
+
+fun box(): String {
+    val z = Z()
+    val a: A<String> = z
+    return when {
+        z.foo("") != "Z" -> "Fail #1"
+        a.foo("") != "Z" -> "Fail #2"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "bridges/simpleUpperBound",
+            "simpleUpperBound.kt",
+            r####"open class A<T : Number> {
+    open fun foo(t: T) = "A"
+}
+
+class Z : A<Int>() {
+    override fun foo(t: Int) = "Z"
+}
+
+
+fun box(): String {
+    val z = Z()
+    val a: A<Int> = z
+    return when {
+        z.foo(0) != "Z" -> "Fail #1"
+        a.foo(0) != "Z" -> "Fail #2"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "bridges/substitutionInSuperClass/object",
+            "object.kt",
+            r####"open class A<T> {
+    open fun foo(t: T) = "A"
+}
+
+open class B : A<String>()
+
+object Z : B() {
+    override fun foo(t: String) = "Z"
+}
+
+
+fun box(): String {
+    val o = object : B() {
+        override fun foo(t: String) = "o"
+    }
+    val zb: B = Z
+    val ob: B = o
+    val za: A<String> = Z
+    val oa: A<String> = o
+
+    return when {
+        Z.foo("")  != "Z" -> "Fail #1"
+        o.foo("")  != "o" -> "Fail #2"
+        zb.foo("") != "Z" -> "Fail #3"
+        ob.foo("") != "o" -> "Fail #4"
+        za.foo("") != "Z" -> "Fail #5"
+        oa.foo("") != "o" -> "Fail #6"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "bridges/test10",
+            "test10.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+open class A<T> {
+    open fun foo(x: T) {
+        sb.appendLine(x.toString())
+    }
+}
+
+interface I {
+    fun foo(x: Int)
+}
+
+class B : A<Int>(), I {
+    var z: Int = 5
+    override fun foo(x: Int) {
+        z = x
+    }
+}
+
+fun zzz(a: A<Int>) {
+    a.foo(42)
+}
+
+fun box(): String {
+    val b = B()
+    zzz(b)
+    val a = A<Int>()
+    zzz(a)
+    sb.appendLine(b.z.toString())
+
+    assertEquals("42\n42\n", sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "bridges/test2",
+            "test2.kt",
+            r####"import kotlin.test.*
+
+open class A {
+    open fun foo(): Any = "A"
+}
+
+open class C : A() {
+    override fun foo(): Int = 42
+}
+
+open class D: C()
+
+fun box(): String {
+    val c = D()
+    val a: A = c
+    val res1 = c.foo().toString()
+    if (res1 != "42") return "FAIL 1: $res1"
+    val res2 = a.foo().toString()
+    if (res2 != "42") return "FAIL 2: $res2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "casts/as",
+            "as.kt",
+            r####"fun foo(x: Any) = x as Runnable
+
+fun box(): String {
+	val r = object : Runnable {
+		override fun run() {}
+	}
+	return if (foo(r) === r) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "casts/asSafe",
+            "asSafe.kt",
+            r####"fun foo(x: Any) = x as? Runnable
+
+fun box(): String {
+	val r = object : Runnable {
+		override fun run() {}
+	}
+	return if (foo(r) === r) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "casts/asSafeFail",
+            "asSafeFail.kt",
+            r####"class A
+class B
+
+fun box(): String {
+    val a = A()
+    a as? B
+    a as? B ?: "fail"
+
+    if ((A() as? B) != null) return "fail1"
+    if ((a as? B) != null) return "fail2"
+
+    val v = a as? B ?: "fail"
+    if (v != "fail") return "fail4"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "casts/asUnit",
+            "asUnit.kt",
+            r####"fun box() = if (4 as? Unit != null) "Fail" else "OK"
+"####,
+        ),
+        (
+            "casts/dontCreateInconsistentTypeDuringStarProjectionSubstitution",
+            "dontCreateInconsistentTypeDuringStarProjectionSubstitution.kt",
+            r####"interface I
+
+interface Foo<in L : I, in M>
+
+interface Bar<T> {
+    fun test(x: Foo<*, T>)
+}
+
+fun foo(x: Any) {
+    if (x is Bar<*>) {
+        x::test
+    }
+}
+
+fun box(): String = "OK"
+"####,
+        ),
+        (
+            "casts/genericReturnCast",
+            "genericReturnCast.kt",
+            r####"fun <T : Any?> someFunc(a: T, arg: T? = null): T = arg ?: a
+
+fun box(): String {
+    var key: String? = null
+    key = someFunc("a")
+    if (key != "a") return "FAIL1"
+    key = someFunc("a", "b")
+    if (key != "b") return "FAIL2"
+
+    var key1: Int? = null
+    key1 = someFunc(42)
+    if (key1 != 42) return "FAIL3"
+    key1 = someFunc(42, 24)
+    if (key1 != 24) return "FAIL3"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "casts/intersectionTypeMultipleBoundsImplicitReceiver",
+            "intersectionTypeMultipleBoundsImplicitReceiver.kt",
+            r####"interface FirstTrait
+interface SecondTrait
+
+fun <T> T.doSomething(): String where T : FirstTrait, T : SecondTrait {
+    return "OK"
+}
+
+class Foo : FirstTrait, SecondTrait {
+    fun bar(): String {
+        return doSomething()
+    }
+}
+
+fun box(): String {
+    return Foo().bar()
+}
+"####,
+        ),
+        (
+            "casts/intersectionTypeSmartcast",
+            "intersectionTypeSmartcast.kt",
+            r####"interface A {
+    fun foo(): Any?
+}
+
+interface B {
+    fun foo(): String
+}
+
+fun bar(x: Any?): String {
+    if (x is A) {
+        val k = x.foo()
+        if (k != "OK") return "fail 1"
+    }
+
+    if (x is B) {
+        val k = x.foo()
+        if (k.length != 2) return "fail 2"
+    }
+
+    if (x is A && x is B) {
+        return x.foo()
+    }
+
+    return "fail 4"
+}
+
+fun box(): String = bar(object : A, B { override fun foo() = "OK" })
+"####,
+        ),
+        (
+            "casts/intersectionTypeWithMultipleBoundsAsReceiver",
+            "intersectionTypeWithMultipleBoundsAsReceiver.kt",
+            r####"interface Foo<T>
+interface Bar<T>
+
+class Baz<T> : Foo<T>, Bar<T>
+
+fun <T, S> S.bip(): String where S : Foo<T>, S: Bar<T> {
+    return "OK"
+}
+
+fun box(): String {
+    val baz = Baz<String>()
+    return baz.bip()
+}
+"####,
+        ),
+        (
+            "casts/intersectionTypeWithoutGenericsAsReceiver",
+            "intersectionTypeWithoutGenericsAsReceiver.kt",
+            r####"interface A
+interface B
+
+class C : A, B
+
+fun <T> T.foo(): String where T : A, T : B {
+    return "OK"
+}
+
+fun box(): String {
+    return C().foo()
+}
+"####,
+        ),
+        (
+            "casts/is",
+            "is.kt",
+            r####"fun foo(x: Any) = x is Runnable
+
+fun box(): String {
+	val r = object : Runnable {
+		override fun run() {}
+	}
+	return if (foo(r) && !foo(42)) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "casts/isNullablePrimitive",
+            "isNullablePrimitive.kt",
+            r####"fun box(): String {
+    val n: Any? = null
+
+    val intV: Any? = 23
+    val floatV: Any? = 23.4F
+    val doubleV: Any? = 23.45
+    val longV: Any? = 234L
+    val stringV: Any? = "foo"
+    val booleanV: Any? = true
+    val functionV: Any? = { x: Int -> x + 1 }
+
+    if (n !is Int?) return "fail: null !is Int?"
+    if (n !is Float?) return "fail: null !is Float?"
+    if (n !is Double?) return "fail: null !is Double?"
+    if (n !is String?) return "fail: null !is String?"
+    if (n !is Boolean?) return "fail: null !is Boolean?"
+    if (n !is Function1<*, *>?) return "fail: null !is Function?"
+
+    if (n is Int) return "fail: null is Int"
+    if (n is Float) return "fail: null is Float"
+    if (n is Double) return "fail: null is Double"
+    if (n is String) return "fail: null is String"
+    if (n is Boolean) return "fail: null is Boolean"
+    if (n is Function1<*, *>) return "fail: null is Function"
+
+    if (intV !is Int?) return "fail: 23 !is Int?"
+    if (intV is String?) return "fail: 23 is String?"
+
+    if (floatV !is Float?) return "fail: 23.4F !is Float?"
+    if (floatV is String?) return "fail: 23.4F is String?"
+
+    if (doubleV !is Double?) return "fail: 23.45 !is Double?"
+    if (doubleV is String?) return "fail: 23.45 is String?"
+
+    if (longV !is Long?) return "fail: 234L !is Long?"
+    if (longV is String?) return "fail: 234L is String?"
+
+    if (stringV !is String?) return "fail: 'foo' !is String?"
+    if (stringV is Double?) return "fail: 'foo' is Double?"
+
+    if (booleanV !is Boolean?) return "fail: true !is Boolean?"
+    if (booleanV is Double?) return "fail: true is Double?"
+
+    if (functionV !is Function1<*, *>?) return "fail: <function> !is Function?"
+    if (functionV is String?) return "fail: <function> is String?"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "casts/kt22714",
+            "kt22714.kt",
+            r####"fun <T> Array<T>.getLength(): Int {
+    return this.size
+}
+
+fun Any.getLength() =
+    if (this is Array<*>) size else -1
+
+fun box(): String {
+    val array1: Array<String> = arrayOf("1", "2", "3")
+    val array2: Any = arrayOf("1", "2", "3")
+    if (array1.getLength() + array2.getLength() != 6)
+        return "FAILURE"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "casts/kt48927_privateMethodOnDerivedCastToBase",
+            "kt48927_privateMethodOnDerivedCastToBase.kt",
+            r####"abstract class Base {
+    private fun test(): String = "OK"
+
+    fun test(d: Derived): String = (d as Base).test()
+
+    fun test(d: Array<out Derived>) = (d as Array<out Base>)[0].test()
+}
+
+class Derived : Base()
+
+fun box(): String {
+    Derived().test(arrayOf(Derived()))
+    return Derived().test(Derived())
+}
+"####,
+        ),
+        (
+            "classes/boxPrimitiveTypeInClinitOfClassObject",
+            "boxPrimitiveTypeInClinitOfClassObject.kt",
+            r####"class A {
+  companion object {
+    var xi = 0
+    var xin : Int? = 0
+    var xinn : Int? = null
+
+    var xl = 0.toLong()
+    var xln : Long? = 0.toLong()
+    var xlnn : Long? = null
+
+    var xb = 0.toByte()
+    var xbn : Byte? = 0.toByte()
+    var xbnn : Byte? = null
+
+    var xf = 0.toFloat()
+    var xfn : Float? = 0.toFloat()
+    var xfnn : Float? = null
+
+    var xd = 0.toDouble()
+    var xdn : Double? = 0.toDouble()
+    var xdnn : Double? = null
+
+    var xs = 0.toShort()
+    var xsn : Short? = 0.toShort()
+    var xsnn : Short? = null
+  }
+}
+
+fun box() : String {
+    return "OK"
+}
+"####,
+        ),
+        (
+            "classes/classObjectField",
+            "classObjectField.kt",
+            r####"class A() {
+    companion object {
+        val value = 10
+    }
+}
+
+fun box() = if (A.value == 10) "OK" else "Fail ${A.value}"
+"####,
+        ),
+        (
+            "classes/delegateConstructorCallWithKeywords",
+            "delegateConstructorCallWithKeywords.kt",
+            r####"open class A(val x: String) {
+    constructor(`in`: String, y: String) : this(`in` + y)
+
+    constructor(`in`: Int = 23) : this(`in`.toString())
+}
+
+class B(`in`: String) : A(`in`)
+
+class C : A {
+    constructor(`in`: String) : super(`in`)
+}
+
+fun box(): String {
+    val a1 = A("a", "b")
+    if (a1.x != "ab") return "fail1: ${a1.x}"
+
+    val a2 = A(42)
+    if (a2.x != "42") return "fail2: ${a2.x}"
+
+    val a3 = A()
+    if (a3.x != "23") return "fail3: ${a3.x}"
+
+    val b = B("q")
+    if (b.x != "q") return "fail4: ${b.x}"
+
+    val c = C("w")
+    if (c.x != "w") return "fail5: ${c.x}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "classes/delegationGenericArgUpperBound",
+            "delegationGenericArgUpperBound.kt",
+            r####"interface A<T: Number> {
+    fun foo(t: T): String
+}
+
+class Derived(a: A<Int>) : A<Int> by a
+
+fun box(): String {
+    val o = object : A<Int> {
+        override fun foo(t: Int) = if (t == 42) "OK" else "Fail $t"
+    }
+    return Derived(o).foo(42)
+}
+"####,
+        ),
+        (
+            "classes/funDelegation",
+            "funDelegation.kt",
+            r####"open class Base() {
+    fun n(n : Int) : Int = n + 1
+}
+
+interface Abstract {}
+
+class Derived1() : Base(), Abstract {}
+class Derived2() : Abstract, Base() {}
+
+fun test(s : Base) : Boolean = s.n(238) == 239
+
+fun box() : String {
+    if (!test(Base())) return "Fail #1"
+    if (!test(Derived1())) return "Fail #2"
+    if (!test(Derived2())) return "Fail #3"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "classes/initializerBlock",
+            "initializerBlock.kt",
+            r####"class C() {
+  public var f: Int
+
+  init {
+    f = 610
+  }
+}
+
+fun box(): String {
+  val c = C()
+  if (c.f != 610) return "fail"
+  return "OK"
+}
+"####,
+        ),
+        (
+            "classes/kt1439",
+            "kt1439.kt",
+            r####"class MyClass(var fnc : () -> String) {
+
+    fun test(): String {
+        return fnc()
+    }
+
+}
+
+fun printtest() : String {
+    return "OK"
+}
+
+fun box(): String {
+    var c = MyClass({ printtest() })
+
+    return c.test()
+}
+"####,
+        ),
+        (
+            "classes/kt1726",
+            "kt1726.kt",
+            r####"class Foo(
+        var state : Int,
+        val f : (Int) -> Int){
+
+    fun next() : Int {
+        val nextState = f(state)
+        state = nextState
+        return state
+    }
+}
+
+fun box(): String {
+    val f = Foo(23, {x -> 2 * x})
+    return if (f.next() == 46) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "classes/kt2390",
+            "kt2390.kt",
+            r####"class JsonObject() {
+}
+
+class JsonArray() {
+}
+
+public interface Formatter<in IN: Any, out OUT: Any> {
+    public fun format(source: IN?): OUT
+}
+
+public interface MultiFormatter <in IN: Any, out OUT: Any> {
+    public fun format(source: Collection<IN>): OUT
+}
+
+public class Project() {
+}
+
+public interface JsonFormatter<in IN: Any>: Formatter<IN, JsonObject>, MultiFormatter<IN, JsonArray> {
+    public override fun format(source: Collection<IN>): JsonArray {
+        return JsonArray();
+    }
+}
+
+public class ProjectJsonFormatter(): JsonFormatter<Project> {
+   public override fun format(source: Project?): JsonObject {
+        return JsonObject()
+    }
+}
+
+
+fun box(): String {
+  val formatter = ProjectJsonFormatter()
+  return if (formatter.format(Project()) != null) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "classes/kt2485",
+            "kt2485.kt",
+            r####"fun f1(a : Any?) {}
+fun f2(a : Boolean?) {}
+fun f3(a : Any) {}
+fun f4(a : Boolean) {}
+
+fun box() : String {
+    f1(1 == 1)
+    f2(1 == 1)
+    f3(1 == 1)
+    f4(1 == 1)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "classes/kt2711",
+            "kt2711.kt",
+            r####"class IntRange {
+    operator fun contains(a: Int) = (1..2).contains(a)
+}
+
+class C() {
+    operator fun rangeTo(i: Int) = IntRange()
+}
+
+
+fun box(): String {
+    if (2 in C()..2) {
+        2 == 2
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "classes/kt3414",
+            "kt3414.kt",
+            r####"interface A {
+    fun foo(): Int
+}
+
+interface B {
+    fun foo(): Int
+}
+
+class Z(val a: A) : A by a, B
+
+fun box(): String {
+    val s = Z(object : A {
+        override fun foo(): Int {
+            return 1;
+        }
+    });
+    return if (s.foo() == 1) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "classes/kt48",
+            "kt48.kt",
+            r####"class A() {
+    var xi = 0
+    var xin : Int? = 0
+    var xinn : Int? = null
+
+    var xl = 0.toLong()
+    var xln : Long? = 0.toLong()
+    var xlnn : Long? = null
+
+    var xb = 0.toByte()
+    var xbn : Byte? = 0.toByte()
+    var xbnn : Byte? = null
+
+    var xf = 0.toFloat()
+    var xfn : Float? = 0.toFloat()
+    var xfnn : Float? = null
+
+    var xd = 0.toDouble()
+    var xdn : Double? = 0.toDouble()
+    var xdnn : Double? = null
+
+    var xs = 0.toShort()
+    var xsn : Short? = 0.toShort()
+    var xsnn : Short? = null
+}
+
+fun box() : String {
+    return "OK"
+}
+"####,
+        ),
+        (
+            "classes/kt6136",
+            "kt6136.kt",
+            r####"interface Id<T> {
+    val id: T
+}
+
+data class Actor (
+        override val id: Int,
+        val firstName: String,
+        val lastName: String
+) : Id<Int>
+
+fun box(): String {
+    val a1 = Actor(1, "Jeff", "Bridges")
+
+    val a1c = a1.copy()
+    if (a1c.id != a1.id) return "Failed: a1.copy().id==${a1c.id}"
+
+    val a2 = Actor(2, "Jeff", "Bridges")
+    if (a2 == a1) return "Failed: a2==a1"
+
+    if (a2.hashCode() == a1.hashCode()) return "Failed: a2.hashCode()==a1.hashCode()"
+
+    a1.toString()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "closures/capturedLocalGenericFun",
+            "capturedLocalGenericFun.kt",
+            r####"fun box() : String {
+
+    fun <T> local(s : T) : T {
+        return s;
+    }
+
+    fun test(s : Int) : Int {
+        return local(s)
+    }
+
+    if (test(10) != 10) return "fail1"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "closures/capturedVarsOptimization/capturedInInlineOnlyCAO",
+            "capturedInInlineOnlyCAO.kt",
+            r####"fun box(): String {
+    var x = ""
+    run {
+        x += "O"
+        x += "K"
+    }
+    return x
+}
+"####,
+        ),
+        (
+            "closures/capturedVarsOptimization/capturedInInlineOnlyIndexedCAO",
+            "capturedInInlineOnlyIndexedCAO.kt",
+            r####"class Host(var value: String) {
+    operator fun get(i: Int, j: Int, k: Int) = value
+
+    operator fun set(i: Int, j: Int, k: Int, newValue: String) {
+        value = newValue
+    }
+}
+
+fun box(): String {
+    var x = Host("")
+    run {
+        x[0, 0, 0] += "O"
+        x[0, 0, 0] += "K"
+    }
+    return x.value
+}
+"####,
+        ),
+        (
+            "closures/capturedVarsOptimization/kt17588",
+            "kt17588.kt",
+            r####"class Test {
+
+    data class Style(
+            val color: Int? = null,
+            val underlined: Boolean? = null,
+            val separator: String = ""
+    )
+
+    init {
+        var flag: Boolean? = null
+
+        val receiver: String = "123"
+        try {
+            receiver.let { a2 ->
+                flag = false
+            }
+        } finally {
+            receiver.hashCode()
+        }
+        val style = Style(null, flag, "123")
+    }
+}
+
+
+fun box(): String {
+    Test()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "closures/capturedVarsOptimization/sharedSlotsWithCapturedVars",
+            "sharedSlotsWithCapturedVars.kt",
+            r####"fun box(): String {
+    run {
+        run {
+            var x = 0
+            run { ++x }
+            if (x == 0) return "fail"
+        }
+
+        run {
+            var x = 0
+            run { x++ }
+            if (x == 0) return "fail"
+        }
+    }
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "closures/closureInsideClosure/localFunInsideLocalFun",
+            "localFunInsideLocalFun.kt",
+            r####"fun box(): String {
+    fun rec(n : Int) {
+        fun x(m : Int) {
+            if (n > 0) rec(n - 1)
+        }
+
+        x(0)
+    }
+
+    rec(5)
+    
+    return "OK"
+}
+"####,
+        ),
+        (
+            "closures/closureInsideClosure/propertyAndFunctionNameClash",
+            "propertyAndFunctionNameClash.kt",
+            r####"package d
+
+fun box(): String {
+    ListTag().test(listOf("a", "b"))
+    return "OK"
+}
+
+fun ListTag.test(list: List<String>) {
+    for (item in list) {
+        item() {
+            a {
+                text = item
+            }
+        }
+    }
+}
+
+open class HtmlTag
+open class ListTag : HtmlTag() {}
+class LI : ListTag() {}
+
+public fun ListTag.item(body: LI.() -> Unit): Unit {}
+fun HtmlTag.a(contents: A.() -> Unit) {}
+
+abstract class A : HtmlTag() {
+    public abstract var text: String
+}
+
+fun listOf(vararg strings: String): List<String> {
+    val list = ArrayList<String>()
+    for (s in strings) {
+        list.add(s)
+    }
+    return list
+}
+"####,
+        ),
+        (
+            "closures/closureInsideConstrucor",
+            "closureInsideConstrucor.kt",
+            r####"open class KModel {
+    val sourcesInfo: String
+    init {
+        fun relativePath(psiFile: String): String {
+            return psiFile;
+        }
+        sourcesInfo = relativePath("OK")
+    }
+}
+
+fun box():String {
+  return KModel().sourcesInfo;
+}
+"####,
+        ),
+        (
+            "closures/closureWithParameterAndBoxing",
+            "closureWithParameterAndBoxing.kt",
+            r####"fun box() : String {
+    return if (apply( 5, {arg: Int -> arg + 13 } ) == 18) "OK" else "fail"
+}
+
+fun apply(arg : Int, f :  (p:Int) -> Int) : Int {
+    return f(arg)
+}
+"####,
+        ),
+        (
+            "closures/extensionClosure",
+            "extensionClosure.kt",
+            r####"class Point(val x : Int, val y : Int)
+
+fun box() : String {
+    val answer = apply(Point(3, 5), { scalar : Int ->
+        Point(x * scalar, y * scalar)
+    })
+
+    return if (answer.x == 6 && answer.y == 10) "OK" else "FAIL"
+}
+
+fun apply(arg:Point, f :  Point.(scalar : Int) -> Point) : Point {
+    return arg.f(2)
+}
+"####,
+        ),
+        (
+            "closures/kt19389_set",
+            "kt19389_set.kt",
+            r####"var result = "fail"
+
+public fun <T, R> myWith(receiver: T, block: T.() -> R): R {
+    return receiver.block()
+}
+
+object Foo2 {
+    operator fun Any?.get(key: String) = "OK"
+    operator fun Any?.set(key: String, value: String)  {
+        result = value
+    }
+}
+
+object Main {
+    fun bar() = myWith(Foo2) {
+        val x = object {
+            init {
+                38["Hello!"] = "OK"
+            }
+        }
+        result
+    }
+}
+
+fun box(): String {
+    return Main.bar()
+}
+"####,
+        ),
+        (
+            "closures/kt3738",
+            "kt3738.kt",
+            r####"class A {
+    fun foo() {}
+    fun bar(f: A.() -> Unit = {}) {}
+}
+
+class B {
+    class D {
+        init {
+            A().bar {
+                this.foo()
+            }
+        }
+    }
+}
+
+fun box(): String {
+    B.D()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "closures/kt5589",
+            "kt5589.kt",
+            r####"fun box(): String {
+    val x = "OK"
+    fun bar(y: String = x): String = y
+    return bar()
+}
+"####,
+        ),
+        (
+            "closures/localFunctionInFunction",
+            "localFunctionInFunction.kt",
+            r####"fun box(): String {
+
+  fun local():Int {
+    return 10;
+  }
+
+  class A {
+      fun test(): Int {
+          return local()
+      }
+  }
+
+  return if (A().test() == 10) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "controlStructures/bottles",
+            "bottles.kt",
+            r####"fun box(): String {
+    var bottles = 99
+    while (bottles > 0) {
+        bottles -= 1
+        bottles--
+    }
+    return if (bottles == -1) "OK" else "Fail $bottles"
+}
+"####,
+        ),
+        (
+            "controlStructures/breakContinueInExpressions/innerLoopWithStack",
+            "innerLoopWithStack.kt",
+            r####"fun box(): String {
+    var x = "OK"
+    do {
+        while (true) {
+            x = x + break
+        }
+    } while (false)
+    return x
+}
+"####,
+        ),
+        (
+            "controlStructures/breakContinueInExpressions/tryFinally1",
+            "tryFinally1.kt",
+            r####"fun box(): String {
+    var x = "OK"
+    while (true) {
+        try {
+            x = x + continue
+        }
+        finally {
+            x = x + break
+        }
+    }
+    return x
+}
+"####,
+        ),
+        (
+            "controlStructures/conditionOfEmptyIf",
+            "conditionOfEmptyIf.kt",
+            r####"var result = "Fail"
+
+fun setOK(): Boolean {
+    result = "OK"
+    return true
+}
+
+fun box(): String {
+    if (setOK()) {
+    } else {
+    }
+    return result
+}
+"####,
+        ),
+        (
+            "controlStructures/doWhileWithContinue",
+            "doWhileWithContinue.kt",
+            r####"fun box(): String {
+    var i = 0
+    do {
+        if (i++ > 100) break;
+        continue;
+    } while(false)
+    if (i != 1) return "Fail 1, expected 1, but $i"
+
+    i = 0
+    do {
+        if (i++ > 100) break;
+        continue;
+    } while(i<10)
+    if (i != 10) return "Fail 2, expected 10, but $i"
+
+    i = 0
+    do continue while(i++<10)
+    if (i != 11) return "Fail 3, expected 11, but $i"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "controlStructures/forInArray/forInDoubleArrayWithUpcast",
+            "forInDoubleArrayWithUpcast.kt",
+            r####"fun box(): String {
+    testForInFloatArrayWithUpcastToAny()
+    testForInDoubleArrayWithUpcastToAny()
+    testForInDoubleArrayWithUpcastToComparable()
+
+    return "OK"
+}
+
+
+private fun testForInFloatArrayWithUpcastToAny() {
+    var test = ""
+    for (x: Any in floatArrayOf(1.0f, 2.0f, 3.0f)) {
+        test = "$test$x;"
+        useFloatAsAny(x)
+    }
+    if (test != "1.0;2.0;3.0;" && test != "1;2;3;") throw AssertionError(test)
+}
+
+private fun testForInDoubleArrayWithUpcastToAny() {
+    var test = ""
+    for (x: Any in doubleArrayOf(1.0, 2.0, 3.0)) {
+        test = "$test$x;"
+        useDoubleAsAny(x)
+    }
+    if (test != "1.0;2.0;3.0;" && test != "1;2;3;") throw AssertionError(test)
+}
+
+private fun testForInDoubleArrayWithUpcastToComparable() {
+    var test = ""
+    for (x: Comparable<*> in doubleArrayOf(1.0, 2.0, 3.0)) {
+        test = "$test$x;"
+        useDoubleAsComparable(x)
+    }
+    if (test != "1.0;2.0;3.0;" && test != "1;2;3;") throw AssertionError(test)
+}
+
+private fun useFloatAsAny(a: Any) {
+    a as Float
+}
+
+private fun useDoubleAsAny(a: Any) {
+    a as Double
+}
+
+private fun useDoubleAsComparable(a: Comparable<*>) {
+    a as Double
+}
+"####,
+        ),
+        (
+            "controlStructures/forInSmartCastToArray",
+            "forInSmartCastToArray.kt",
+            r####"fun f(x: Any?): Any? {
+    if (x is Array<*>) {
+        for (i in x) {
+            return i
+        }
+    }
+    return "FAIL"
+}
+
+fun box(): String {
+    val a = arrayOfNulls<String>(1) as Array<String>
+    a[0] = "OK"
+    return f(a) as String
+}
+"####,
+        ),
+        (
+            "controlStructures/inRangeConditionsInWhen",
+            "inRangeConditionsInWhen.kt",
+            r####"operator fun Int.contains(i : Int) = true
+
+fun box(): String {
+    when (1) {
+        in 2 -> return "OK"
+        else -> return "fail"
+    }
+}
+"####,
+        ),
+        (
+            "controlStructures/kt1899",
+            "kt1899.kt",
+            r####"fun box(): String {
+  if (1 != 0) {
+  }
+  return "OK"
+}
+"####,
+        ),
+        (
+            "controlStructures/kt3087",
+            "kt3087.kt",
+            r####"fun putNumberCompareAsUnit() {
+    if (1 == 1) {
+    }
+    else if (1 == 1) {
+    }
+}
+
+fun putNumberCompareAsVoid() {
+    if (1 == 1) {
+        1 == 1
+    } else {
+    }
+}
+
+fun putInvertAsUnit(b: Boolean) {
+    if (1 == 1) {
+    } else if (!b) {
+    }
+}
+
+fun box(): String {
+    putNumberCompareAsUnit()
+    putNumberCompareAsVoid()
+    putInvertAsUnit(true)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "controlStructures/kt47245",
+            "kt47245.kt",
+            r####"fun box(): String {
+    for (i in 0..0) fun () {}
+    return "OK"
+}
+"####,
+        ),
+        (
+            "controlStructures/kt8148_continue",
+            "kt8148_continue.kt",
+            r####"class A(var value: String)
+
+fun box(): String {
+    val a = A("start")
+
+    try {
+        test(a)
+    } catch(e: RuntimeException) {
+
+    }
+
+    if (a.value != "start, try, finally1, finally2") return "fail: ${a.value}"
+
+    return "OK"
+}
+
+fun test(a: A) : String {
+    while (a.value == "start") {
+        try {
+            try {
+                a.value += ", try"
+                continue
+            }
+            finally {
+                a.value += ", finally1"
+            }
+        }
+        finally {
+            a.value += ", finally2"
+            throw RuntimeException("fail")
+        }
+    }
+    return "fail"
+}
+"####,
+        ),
+        (
+            "controlStructures/longRange",
+            "longRange.kt",
+            r####"fun box(): String {
+  val r = 1.toLong()..2
+  var s = ""
+  for (l in r) {
+    s += l
+  }
+  return if (s == "12") "OK" else "fail: $s"
+}
+"####,
+        ),
+        (
+            "controlStructures/tryCatchExpression",
+            "tryCatchExpression.kt",
+            r####"var log = ""
+
+fun foo() {
+    try {
+        log += "1"
+        mightThrow()
+        log += "2"
+    } catch (e: Throwable) {
+        log += "3"
+        return
+    }
+
+    val t = try {
+        log += "4"
+        mightThrow2()
+        log += "5"
+    } catch (e: Throwable) {
+        log += "6"
+        return
+    }
+
+    val x = try {
+        log += "7"
+        mightThrow3()
+        log += "8"
+    } catch (e: Throwable) {
+        log += "9"
+        return
+    }
+}
+
+var throw1 = false
+var throw2 = false
+var throw3 = false
+
+fun mightThrow() {
+    if (throw1) throw Exception()
+}
+
+fun mightThrow2() {
+    if (throw2) throw Exception()
+}
+
+fun mightThrow3(): Int {
+    if (throw3) throw Exception()
+    return 42
+}
+
+fun box(): String {
+    log += "a"
+    foo()
+    throw3 = true
+    log += " b"
+    foo()
+    throw2 = true
+    log += " c"
+    foo()
+    throw1 = true
+    log += " d"
+    foo()
+
+    if (log != "a124578 b124579 c1246 d13")
+        return "Failed: $log"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "dataClasses/arrayParams",
+            "arrayParams.kt",
+            r####"data class A(val x: Array<Int>, val y: IntArray)
+
+fun foo(x: Array<Int>, y: IntArray) = A(x, y)
+
+fun box(): String {
+    val a = Array<Int>(0, {0})
+    val b = IntArray(0)
+    val (x, y) = foo(a, b)
+    return if (a == x && b == y) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "dataClasses/copy/constructorWithDefaultParam",
+            "constructorWithDefaultParam.kt",
+            r####"data class A(val a: Int = 1, val b: String = "$a") {}
+
+fun box() : String {
+    var result = ""
+    val a = A()
+    val b = a.copy()
+    if (b.a == 1 && b.b == "1") {
+        result += "1"
+    }
+
+    val c = a.copy(a = 2)
+    if (c.a == 2 && c.b == "1") {
+        result += "2"
+    }
+
+    val d = a.copy(b = "2")
+    if (d.a == 1 && d.b == "2") {
+        result += "3"
+    }
+
+    val e = a.copy(a = 2, b = "2")
+    if (e.a == 2 && e.b == "2") {
+        result += "4"
+    }
+    if (result == "1234") {
+        return "OK"
+    }
+    return "fail"
+}
+"####,
+        ),
+        (
+            "dataClasses/copy/valInConstructorParams",
+            "valInConstructorParams.kt",
+            r####"data class A(val a: Int, val b: String) {}
+
+fun box() : String {
+    var result = ""
+    val a = A(1, "a")
+    val b = a.copy()
+    if (b.a == 1 && b.b == "a") {
+        result += "1"
+    }
+
+    val c = a.copy(a = 2)
+    if (c.a == 2 && c.b == "a") {
+        result += "2"
+    }
+
+    val d = a.copy(b = "b")
+    if (d.a == 1 && d.b == "b") {
+        result += "3"
+    }
+
+    val e = a.copy(a = 2, b = "b")
+    if (e.a == 2 && e.b == "b") {
+        result += "4"
+    }
+    if (result == "1234") {
+        return "OK"
+    }
+    return "fail"
+}
+"####,
+        ),
+        (
+            "dataClasses/copy/withGenericParameter",
+            "withGenericParameter.kt",
+            r####"data class A(val a: Foo<String>) {}
+
+class Foo<T>(val a: T) { }
+
+fun box() : String {
+    val f1 = Foo("a")
+    val f2 = Foo("b")
+    val a = A(f1)
+    val b = a.copy(f2)
+    if (b.a.a == "b") {
+        return "OK"
+    }
+    return "fail"
+}
+"####,
+        ),
+        (
+            "dataClasses/equalityChecksPrimitiveUnboxed",
+            "equalityChecksPrimitiveUnboxed.kt",
+            r####"data class VBoolean(val value: Boolean)
+
+data class VByte(val value: Byte)
+
+data class VChar(val value: Char)
+
+data class VShort(val value: Short)
+
+data class VInt(val value: Int)
+
+data class VLong(val value: Long)
+
+data class VFloat(val value: Float)
+
+data class VDouble(val value: Double)
+
+fun box(): String {
+    if (VBoolean(true) == VBoolean(false)) return "Fail 0"
+    if (VByte(0) == VByte(1)) return "Fail 1"
+    if (VChar('a') == VChar('b')) return "Fail 2"
+    if (VShort(0) == VShort(1)) return "Fail 3"
+    if (VInt(0) == VInt(1)) return "Fail 4"
+    if (VLong(0L) == VLong(1L)) return "Fail 5"
+    if (VFloat(0f) == VFloat(1f)) return "Fail 6"
+    if (VDouble(0.0) == VDouble(1.0)) return "Fail 7"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "dataClasses/equals/genericarray",
+            "genericarray.kt",
+            r####"data class A(val v: Array<Int>)
+
+fun box() : String {
+  val myArray = arrayOf(0, 1, 2)
+  if(A(myArray) == A(arrayOf(0, 1, 2))) return "fail"
+  if(A(myArray) != A(myArray)) return "fail 2"
+  return "OK"
+}
+"####,
+        ),
+        (
+            "dataClasses/equals/null",
+            "null.kt",
+            r####"data class A(val v: Any?)
+
+data class B<T>(val v: T)
+
+fun box(): String {
+    val a1 = A(null)
+    val a2 = A("")
+    if (a1 == a2 || a2 == a1) return "Fail 1"
+
+    val b1 = B(null)
+    val b2 = B("")
+    if (b1 == b2 || b2 == b1) return "Fail 2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "dataClasses/equals/sameinstance",
+            "sameinstance.kt",
+            r####"data class A(val arg: Any? = null)
+
+fun box() : String {
+  val a = A()
+  val b = a
+  return if(b == a) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "dataClasses/hashCode/alreadyDeclared",
+            "alreadyDeclared.kt",
+            r####"data class A(val x: Int) {
+  override fun hashCode(): Int = -3
+}
+
+fun box(): String {
+  return if (A(0).hashCode() == -3) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "dataClasses/hashCode/byte",
+            "byte.kt",
+            r####"data class A(val a: Byte)
+
+fun box() : String {
+   val v1 = A(10.toByte()).hashCode()
+   val v2 = (10.toByte() as Byte?)!!.hashCode()
+   return if( v1 == v2 ) "OK" else "$v1 $v2"
+}
+"####,
+        ),
+        (
+            "dataClasses/hashCode/double",
+            "double.kt",
+            r####"data class A(val a: Double)
+
+fun box() : String {
+   val v1 = A(-10.toDouble()).hashCode()
+   val v2 = (-10.toDouble() as Double?)!!.hashCode()
+   return if( v1 == v2 ) "OK" else "$v1 $v2"
+}
+"####,
+        ),
+        (
+            "dataClasses/hashCode/genericNull",
+            "genericNull.kt",
+            r####"data class A<T>(val t: T)
+
+fun box(): String {
+    val h = A<String?>(null).hashCode()
+    if (h != 0) return "Fail $h"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "dataClasses/hashCode/long",
+            "long.kt",
+            r####"data class A(val a: Long)
+
+fun box() : String {
+   val v1 = A(-10.toLong()).hashCode()
+   val v2 = (-10.toLong() as Long?)!!.hashCode()
+   return if( v1 == v2 ) "OK" else "$v1 $v2"
+}
+"####,
+        ),
+        (
+            "dataClasses/hashCode/short",
+            "short.kt",
+            r####"data class A(val a: Short)
+
+fun box() : String {
+   val v1 = A(10.toShort()).hashCode()
+   val v2 = (10.toShort() as Short?)!!.hashCode()
+   return if( v1 == v2 ) "OK" else "$v1 $v2"
+}
+"####,
+        ),
+        (
+            "defaultArguments/callDefaultFromInitializer",
+            "callDefaultFromInitializer.kt",
+            r####"fun foo(x: Int = 42) = x
+
+class C {
+    val s: String
+    init {
+        val x = foo()
+        if (x == 42)
+            s = "OK"
+        else
+            s = "fail"
+    }
+}
+
+fun box(): String {
+    return C().s
+}
+"####,
+        ),
+        (
+            "defaultArguments/constructor/annotation",
+            "annotation.kt",
+            r####"annotation class A(val a: Int = 0)
+
+@A fun test1() = 1
+@A(2) fun test2() = 1
+
+fun box(): String {
+   if ((test1() + test2()) == 2) {
+      return "OK"
+   }
+   return "fail"
+}
+"####,
+        ),
+        (
+            "defaultArguments/constructor/defArgs1",
+            "defArgs1.kt",
+            r####"class A(val a: Int = 0)
+
+fun box(): String {
+   if (A().a == 0 && A(1).a == 1) {
+      return "OK"
+   }
+   return "fail"
+}
+"####,
+        ),
+        (
+            "defaultArguments/constructor/enum",
+            "enum.kt",
+            r####"enum class A(val a: Int = 1) {
+  FIRST(),
+  SECOND(2)
+}
+
+fun box(): String {
+   if (A.FIRST.a == 1 && A.SECOND.a == 2) {
+      return "OK"
+   }
+   return "fail"
+}
+"####,
+        ),
+        (
+            "defaultArguments/constructor/enumWithTwoDefArgs",
+            "enumWithTwoDefArgs.kt",
+            r####"enum class Foo(val a: Int = 1, val b: String = "a") {
+  A(),
+  B(2, "b"),
+  C(b = "b"),
+  D(a = 2)
+}
+
+fun box(): String {
+   if (Foo.A.a != 1 || Foo.A.b != "a") return "fail"
+   if (Foo.B.a != 2 || Foo.B.b != "b") return "fail"
+   if (Foo.C.a != 1 || Foo.C.b != "b") return "fail"
+   if (Foo.D.a != 2 || Foo.D.b != "a") return "fail"
+   return "OK"
+}
+"####,
+        ),
+        (
+            "defaultArguments/constructor/kt3060",
+            "kt3060.kt",
+            r####"class Foo private constructor(val param: String = "OK") {
+    companion object {
+        val s = Foo()
+    }
+}
+
+fun box(): String {
+    Foo.s.param
+    return "OK"
+}
+"####,
+        ),
+        (
+            "defaultArguments/convention/kt9140",
+            "kt9140.kt",
+            r####"class X {
+    operator fun get(name: String, type: String = "none") = name + type
+}
+
+fun box(): String {
+    if (X().get("a") != "anone") return "fail 1: ${X().get("a")}"
+
+    if (X()["a"] != "anone") return "fail 2: ${X()["a"]}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "defaultArguments/function/extentionFunction",
+            "extentionFunction.kt",
+            r####"fun Int.foo(a: Int = 1): Int {
+    return a
+}
+
+fun box(): String  {
+    if (1.foo() != 1) return "fail"
+    if (1.foo(2) != 2) return "fail"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "defaultArguments/function/extentionFunctionDoubleTwoArgs",
+            "extentionFunctionDoubleTwoArgs.kt",
+            r####"fun Double.foo(a: Double = 1.0, b: Double = 1.0): Double {
+    return a + b
+}
+
+fun box(): String  {
+    if (1.0.foo() != 2.0) return "fail"
+    if (1.0.foo(2.0, 2.0) != 4.0) return "fail"
+    if (1.0.foo(a = 2.0) != 3.0) return "fail"
+    if (1.0.foo(b = 2.0) != 3.0) return "fail"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "defaultArguments/function/extentionFunctionInObject",
+            "extentionFunctionInObject.kt",
+            r####"object A {
+  fun Int.foo(a: Int = 1): Int {
+      return a
+  }
+
+  fun test(): String {
+      if (1.foo() != 1) return "fail"
+      if (1.foo(2) != 2) return "fail"
+      return "OK"
+  }
+}
+
+fun box(): String  {
+   return A.test()
+}
+"####,
+        ),
+        (
+            "defaultArguments/function/innerExtentionFunction",
+            "innerExtentionFunction.kt",
+            r####"class A {
+  fun Int.foo(a: Int = 1): Int {
+      return a
+  }
+
+  fun test(): String {
+      if (1.foo() != 1) return "fail"
+      if (1.foo(2) != 2) return "fail"
+      return "OK"
+  }
+}
+
+fun box(): String  {
+   return A().test()
+}
+"####,
+        ),
+        (
+            "defaultArguments/function/innerExtentionFunctionDoubleTwoArgs",
+            "innerExtentionFunctionDoubleTwoArgs.kt",
+            r####"class A {
+    fun Double.foo(a: Double = 1.0, b: Double = 1.0): Double {
+        return a + b
+    }
+
+    fun test(): String {
+        if (1.0.foo() != 2.0) return "fail"
+        if (1.0.foo(2.0, 2.0) != 4.0) return "fail"
+        if (1.0.foo(a = 2.0) != 3.0) return "fail"
+        if (1.0.foo(b = 2.0) != 3.0) return "fail"
+        return "OK"
+    }
+}
+
+fun box(): String  {
+    return A().test()
+}
+"####,
+        ),
+        (
+            "defaultArguments/inheritedFromInterfaceViaAbstractSuperclass",
+            "inheritedFromInterfaceViaAbstractSuperclass.kt",
+            r####"interface I {
+    fun foo(x: Int = 23): String
+}
+
+abstract class Base : I
+
+class C : Base(), I {
+    override fun foo(x: Int) = "C:$x"
+}
+
+fun box(): String {
+    val x: I = C()
+    val r = x.foo() + ";" + x.foo(42)
+    if (r != "C:23;C:42") return "fail: $r"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "defaultArguments/kt36853_nestedObject",
+            "kt36853_nestedObject.kt",
+            r####"interface IFoo {
+    fun foo(): String
+}
+
+tailrec fun tailrecDefault(
+    fake: Int,
+    x: IFoo = object : IFoo {
+        tailrec fun tailrecDefaultNested(
+            b: Boolean,
+            y: IFoo = object: IFoo {
+                override fun foo() = "OK"
+            }
+        ): String {
+            return if (b)
+                tailrecDefaultNested(false)
+            else
+                y.foo()
+        }
+
+        override fun foo(): String {
+            return tailrecDefaultNested(true)
+        }
+    }
+): String {
+    return if (fake == 0)
+        tailrecDefault(1)
+    else
+        x.foo()
+}
+
+fun box(): String = tailrecDefault(0)
+"####,
+        ),
+        (
+            "elvis/genericElvisWithMoreSpecificLHS",
+            "genericElvisWithMoreSpecificLHS.kt",
+            r####"fun test(foo: MutableList<String>?): List<String> {
+    val bar = foo ?: listOf()
+    return bar
+}
+
+fun box(): String {
+    val a = test(null)
+    if (a.isNotEmpty()) return "Fail 1"
+
+    val b = test(mutableListOf("a"))
+    if (b.size != 1) return "Fail 2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "elvis/genericElvisWithNullLHS",
+            "genericElvisWithNullLHS.kt",
+            r####"fun test() {
+    fun returnMutableList(): MutableList<Int>? = null
+    fun returnsList(): List<Int>? = null
+
+    var mutableList: MutableList<Int>? = null
+    var list: List<Int>? = null
+
+    mutableListOf<Int>().addAll(returnMutableList() ?: emptyList<Int>())
+    mutableListOf<Int>().addAll(returnsList() ?: emptyList())
+    mutableListOf<Int>().addAll(list ?: emptyList())
+
+    mutableListOf<Int>().addAll(returnMutableList() ?: emptyList())
+    mutableListOf<Int>().addAll(mutableList ?: emptyList())
+    mutableListOf<Int>().addAll(null ?: emptyList())
+}
+
+fun box(): String {
+    test()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "elvis/kt6694ExactAnnotationForElvis",
+            "kt6694ExactAnnotationForElvis.kt",
+            r####"interface PsiElement {
+    fun <T: PsiElement> findChildByType(i: Int): T? =
+            if (i == 42) JetOperationReferenceExpression() as T else throw Exception()
+}
+interface JetSimpleNameExpression : PsiElement {
+    fun getReferencedNameElement(): PsiElement
+}
+class JetOperationReferenceExpression : JetSimpleNameExpression {
+    override fun getReferencedNameElement() = this
+}
+class JetLabelReferenceExpression : JetSimpleNameExpression {
+    public override fun getReferencedNameElement(): PsiElement =
+            findChildByType(42) ?: this
+}
+
+fun box(): String {
+    val element = JetLabelReferenceExpression().getReferencedNameElement()
+    return if (element is JetOperationReferenceExpression) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "elvis/kt87816",
+            "kt87816.kt",
+            r####"interface Interface
+
+interface AstNode
+
+class CompositeNode : AstNode
+
+class LeafNode : AstNode
+
+fun classify(node: AstNode): String {
+  return node.takeIf { false }?.let {
+    "fail: unreachable"
+  } ?: node.takeIf { it is CompositeNode }?.let {
+    "fail: composite"
+  } ?: "OK"
+}
+
+fun box(): String {
+    val node = LeafNode()
+    return classify(node)
+}
+"####,
+        ),
+        (
+            "elvis/nullNullOk",
+            "nullNullOk.kt",
+            r####"fun box() = null ?: null ?: "OK"
+"####,
+        ),
+        (
+            "elvis/ofNonNullableResultType",
+            "ofNonNullableResultType.kt",
+            r####"fun <T> f(): T? = "OK" as? T
+
+fun g(): Nothing = throw RuntimeException("fail")
+
+fun <T : Any> h(): T = run<T?> { f() } ?: run { g() }
+
+fun box(): String = h<String>()
+"####,
+        ),
+        (
+            "elvis/primitive",
+            "primitive.kt",
+            r####"fun box(): String {
+    if ((42 ?: 239) != 42) return "Fail Int"
+    if ((42.toLong() ?: 239.toLong()) != 42.toLong()) return "Fail Long"
+    
+    return "OK"
+}
+"####,
+        ),
+        (
+            "elvis/withNothingConstraintAndExpectedType",
+            "withNothingConstraintAndExpectedType.kt",
+            r####"fun <T> bar(t: T, r: Any?): T = r as T
+fun foo(): String? = bar(null, "OK") ?: bar(null, "fail")
+
+fun box(): String {
+    return foo()!!
+}
+"####,
+        ),
+        (
+            "elvis/withReturn",
+            "withReturn.kt",
+            r####"fun problematic(s: String): String {
+    return s.toNullable()?.id() ?: return "fail"
+}
+
+fun String.toNullable(): String? = this
+
+fun String.id() = this
+
+fun box() = problematic("OK")
+"####,
+        ),
+        (
+            "enum/abstractMethodInEnum",
+            "abstractMethodInEnum.kt",
+            r####"enum class A() {
+    ENTRY(){ override fun t() = "OK"};
+
+    abstract fun t(): String
+}
+
+fun f(a: A) = a.t()
+
+fun box()= f(A.ENTRY)
+"####,
+        ),
+        (
+            "enum/constructorWithReordering",
+            "constructorWithReordering.kt",
+            r####"fun f(): String = "O"
+fun g(): String = "K"
+
+enum class E(val x: String, val y: String) {
+    A(y = g(), x = f())
+}
+
+fun box(): String = E.A.x + E.A.y
+"####,
+        ),
+        (
+            "enum/defaultCtor/noPrimaryConstructor",
+            "noPrimaryConstructor.kt",
+            r####"enum class Test {
+    A(0),
+    B;
+
+    val n: Int
+
+    constructor(n: Int) { this.n = n }
+    constructor() : this(0)
+}
+
+fun box(): String =
+    if (Test.A.n == Test.B.n)
+        "OK"
+    else
+        "Fail"
+"####,
+        ),
+        (
+            "enum/emptyConstructor",
+            "emptyConstructor.kt",
+            r####"package test
+
+enum class My(val s: String) {
+    ENTRY;
+    constructor(): this("OK")
+}
+
+fun box() = My.ENTRY.s
+"####,
+        ),
+        (
+            "enum/enumEntryHashCode",
+            "enumEntryHashCode.kt",
+            r####"enum class E {
+    A, B
+}
+
+fun box() = if (E.A.hashCode() == E.A.ordinal && E.B.hashCode() == E.B.ordinal) "FAIL" else "OK"
+"####,
+        ),
+        (
+            "enum/enumWithLambdaParameter",
+            "enumWithLambdaParameter.kt",
+            r####"enum class Sign(val str: String, val func: (x: Int, y: Int) -> Int){
+    plus("+", { x, y -> x + y }),
+
+    mult("*", { x, y -> x * y }) {
+        override fun toString() = "${func(4,5)}"
+    }
+}
+
+fun box(): String {
+    val sum = Sign.plus.func(2, 3)
+    if (sum != 5) return "Fail 1: $sum"
+
+    val product = Sign.mult.toString()
+    if (product != "20") return "Fail 2: $product"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "enum/inclassobj",
+            "inclassobj.kt",
+            r####"fun box() = if(Context.operatingSystemType == Context.Companion.OsType.OTHER) "OK" else "fail"
+
+public class Context
+{
+        companion object
+        {
+                public enum class OsType {
+                        LINUX,
+                        OTHER;
+                }
+
+                public val operatingSystemType: OsType
+                        get() = OsType.OTHER
+        }
+}
+"####,
+        ),
+        (
+            "enum/interfaceCallNoEntryClass",
+            "interfaceCallNoEntryClass.kt",
+            r####"import kotlin.test.*
+
+interface A {
+    fun foo(): String
+}
+
+enum class Zzz(val zzz: String, val x: Int) : A {
+    Z1("z1", 1),
+    Z2("z2", 2),
+    Z3("z3", 3);
+
+    override fun foo(): String{
+        return "('$zzz', $x)"
+    }
+}
+
+fun box(): String {
+    assertEquals("('z3', 3)", Zzz.Z3.foo())
+    val a: A = Zzz.Z3
+    assertEquals("('z3', 3)", a.foo())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "enum/kt18731",
+            "kt18731.kt",
+            r####"enum class Bar {
+    ONE,
+    TWO
+}
+
+fun isOne(i: Bar) = i == Bar.ONE
+
+fun box(): String {
+    return when (isOne(Bar.ONE) && !isOne(Bar.TWO) && Bar.ONE != Bar.TWO) {
+        true -> "OK"
+        else -> "Failure"
+    }
+}
+"####,
+        ),
+        (
+            "enum/kt2350",
+            "kt2350.kt",
+            r####"enum class A(val b: String) {
+    E1("OK"){ override fun t() = b };
+
+    abstract fun t(): String
+}
+
+fun box()= A.E1.t()
+"####,
+        ),
+        (
+            "enum/manyDefaultParameters",
+            "manyDefaultParameters.kt",
+            r####"enum class ClassTemplate(
+        var code: Int,
+        var nameTemplate: Int = 1,
+
+        val parent: Int  = 1,
+        val previous: Int  = 1,
+        val progressionEquivalent: Int  = 1,
+
+        var idDiscipline: Int = 1,
+        var strictRunningOrder: Int = 1,
+        var pointsMethod: Int = 1,
+
+        var noTimeFaults: Int = 1,
+        var combineHeights: Int = 1,
+
+        var column: Int = 1,
+        var runningOrderSort: Int = 1,
+        var programme: Int = 1,
+        var eliminationTime: Int = 1,
+        var courseTimeCode: Int = 1,
+        var teamSize: Int = 1,
+        var sponsor: Int = 1,
+        var lateEntryCredits: Int = 1,
+        var lateEntryFee: Int = 1,
+
+        var courseLengthNeeded: Int = 1,
+
+        var discretionaryCourseTime: Int = 1,
+        var isRelay: Int = 1,
+        var isQualifier: Int = 1,
+        var generateChildren: Int = 1,
+        var feedFromParent: Int = 1,
+
+        var isNfcAllowed: Int = 1,
+        var isAddOnAllowed: Int = 1,
+        var isSpecialEntry: Int = 1,
+        var isUkaProgression: Int = 1,
+        var canEnterDirectly: Int = 1,
+        var isPointRanked: Int = 1,
+        var isPointRankedDesc: Int = 1
+) {
+    UNDEFINED(code = 56, nameTemplate = 3),
+    BLAH(code = 57, nameTemplate = 4)
+}
+
+fun box(): String {
+    val x = ClassTemplate.UNDEFINED
+    val y = ClassTemplate.BLAH
+
+    if (x.code != 56 || x.nameTemplate != 3 || x.isAddOnAllowed != 1) return "fail 1"
+    if (y.code != 57 || y.nameTemplate != 4 || y.isAddOnAllowed != 1) return "fail 2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "enum/overloadedEnumValues",
+            "overloadedEnumValues.kt",
+            r####"enum class E {
+    A;
+
+    fun values(b: Boolean) {}
+    fun E.values(): Array<E> = arrayOf(A)
+}
+
+fun f(e: E) = when (e) {
+    E.A -> "OK"
+}
+
+fun box(): String {
+    return f(E.A)
+}
+"####,
+        ),
+        (
+            "enum/simple",
+            "simple.kt",
+            r####"enum class Season {
+    WINTER,
+    SPRING,
+    SUMMER,
+    AUTUMN
+}
+
+fun foo(): Season = Season.SPRING
+
+fun box() =
+    if (foo() == Season.SPRING) "OK"
+    else "fail"
+"####,
+        ),
+        (
+            "enum/toString",
+            "toString.kt",
+            r####"enum class State {
+  O,
+  K
+}
+
+fun box() = "${State.O}${State.K}"
+"####,
+        ),
+        (
+            "extensionFunctions/executionOrder",
+            "executionOrder.kt",
+            r####"var result = ""
+
+fun getReceiver() : Int {
+    result += "getReceiver->"
+    return 1
+}
+
+fun getFun(b : Int.(Int)->Unit): Int.(Int)->Unit {
+    result += "getFun()->"
+    return b
+}
+
+fun box(): String {
+    getReceiver().(getFun({ result +="End" }))(1)
+
+    if(result != "getFun()->getReceiver->End") return "fail $result"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionFunctions/extensionFunctionAsAnExpression",
+            "extensionFunctionAsAnExpression.kt",
+            r####"fun box(): String {
+    return "O".(fun String.(y: String): String = this + y)("K")
+}
+"####,
+        ),
+        (
+            "extensionFunctions/extensionFunctionClassLevelLocal",
+            "extensionFunctionClassLevelLocal.kt",
+            r####"fun foo(): String {
+    class Local<T> {
+        fun Local<String>.bar(): String {
+            return "OK"
+        }
+    }
+    with(Local<String>()){
+        return Local<String>().bar()
+    }
+}
+
+fun box(): String = foo()
+"####,
+        ),
+        (
+            "extensionFunctions/extensionFunctionInNestedClass",
+            "extensionFunctionInNestedClass.kt",
+            r####"class A {
+    val a: String = "O"
+
+    class B {
+        val b: String = "K"
+
+        fun A.foo(): String {
+            return this.a + this@B.b
+        }
+
+        fun test() = A().foo()
+    }
+}
+
+fun box(): String {
+    return A.B().test()
+}
+"####,
+        ),
+        (
+            "extensionFunctions/extensionFunctionLocal",
+            "extensionFunctionLocal.kt",
+            r####"fun foo(): String {
+    class Local
+    fun Local.bar(): String {
+        return "O"
+    }
+
+    class Local2<T>
+    fun Local2<String>.bar(): String {
+        return "K"
+    }
+    return Local().bar() + Local2<String>().bar()
+}
+
+fun box(): String = foo()
+"####,
+        ),
+        (
+            "extensionFunctions/extensionFunctionWithExtensionAsAReceiver",
+            "extensionFunctionWithExtensionAsAReceiver.kt",
+            r####"var result1 = "failed"
+var result2 = "failed"
+
+fun (Int.()-> String).foo(a: Int.()-> String){
+    result1 = "O"
+}
+
+fun <T> (Int.()-> T).bar(a: Int.()-> T) {
+    result2 = "K"
+}
+
+fun <T> test(): Int.() -> T {
+    return { 1 as T }
+}
+
+fun box(): String {
+    test<String>().foo(test())
+    test<Int>().bar(test())
+    return result1+result2
+}
+"####,
+        ),
+        (
+            "extensionFunctions/functionWithTheSameDispatchAndExtensionReceiver",
+            "functionWithTheSameDispatchAndExtensionReceiver.kt",
+            r####"class A(val a: Int) {
+    fun A.foo(): Boolean {
+        return this.a == this@A.a
+    }
+}
+
+fun box(): String {
+    with(A(1)) {
+        return if (A(2).foo()) "fail"
+        else "OK"
+    }
+}
+"####,
+        ),
+        (
+            "extensionFunctions/kt1249",
+            "kt1249.kt",
+            r####"class TestClass(val body : () -> Unit) : Any() {
+    fun run() {
+        body()
+    }
+}
+
+fun box() : String {
+    TestClass({}).run()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionFunctions/kt13312",
+            "kt13312.kt",
+            r####"fun test1(f: (Int) -> Int) = f(1)
+
+fun test2(f: Int.() -> Int) = 2.f()
+
+class A(val foo: Int.() -> Int)
+
+fun box(): String {
+    val a: (Int) -> Int = { it }
+    val b: Int.() -> Int = { this }
+
+    if (test1(a) != 1) return "fail 1a"
+    if (test1(b) != 1) return "fail 1b"
+    if (test2(a) != 2) return "fail 2a"
+    if (test2(b) != 2) return "fail 2b"
+
+    val x = A({ this })
+
+    if (x.foo(3) != 3) return "fail 3"
+    if (with(x) { foo(4) } != 4) return "fail 4"
+    if (with(x) { 5.foo() } != 5) return "fail 5"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionFunctions/kt1953",
+            "kt1953.kt",
+            r####"fun box(): String {
+    val sb = StringBuilder()
+    operator fun String.unaryPlus() {
+        sb.append(this)
+    }
+
+    +"OK"
+    return sb.toString()!!
+}
+"####,
+        ),
+        (
+            "extensionFunctions/kt3298",
+            "kt3298.kt",
+            r####"var result = ""
+fun result(r: String) { result = r }
+
+object Foo {
+    private operator fun String.unaryPlus() = "(" + this + ")"
+
+    fun foo() = { result(+"Stuff") }.let { it() }
+}
+
+fun box(): String {
+    Foo.foo()
+    return if (result == "(Stuff)") "OK" else "Fail $result"
+}
+"####,
+        ),
+        (
+            "extensionFunctions/kt3969",
+            "kt3969.kt",
+            r####"var result = "Fail"
+
+class A
+
+operator fun A.inc(s: String = "OK"): A {
+    result = s
+    return this
+}
+
+fun box(): String {
+    var a = A()
+    a++
+    if (result != "OK") return "Fail 1"
+
+    result = "Fail"
+    ++a
+
+    return result
+}
+"####,
+        ),
+        (
+            "extensionFunctions/kt475",
+            "kt475.kt",
+            r####"fun box() : String {
+  val array = ArrayList<String>()
+  array.add("0")
+  array.add("1")
+  array.add("2")
+  array.last1 = "5"
+  return if(array.length == 3 && array.last1 == "5") "OK" else "fail"
+}
+
+var <T> ArrayList<T>.length : Int
+    get() = size
+    set(value: Int) = throw Error()
+
+var <T> ArrayList<T>.last1 : T
+    get() = get(size-1)!!
+    set(el : T) { set(size-1, el) }
+"####,
+        ),
+        (
+            "extensionFunctions/kt606",
+            "kt606.kt",
+            r####"package kt606
+
+
+class StandardPipelineFactory(val config : ChannelPipeline.() -> Unit) : ChannelPipelineFactory {
+    override fun getPipeline() : ChannelPipeline {
+        val pipeline : ChannelPipeline = DefaultChannelPipeline()
+        pipeline.config()
+        return pipeline
+    }
+}
+
+interface ChannelPipeline  {
+  fun print(any: Any)
+}
+
+var result = "FAIL"
+
+class DefaultChannelPipeline : ChannelPipeline {
+  override fun print(any: Any) {
+      result = any as String
+  }
+
+}
+
+interface ChannelPipelineFactory {
+    fun getPipeline() : ChannelPipeline
+}
+
+fun box() : String {
+    StandardPipelineFactory({ print("OK") }).getPipeline()
+    return result
+}
+"####,
+        ),
+        (
+            "extensionProperties/extensionPropertyDifferentReceiver",
+            "extensionPropertyDifferentReceiver.kt",
+            r####"val Unit.foo: Boolean
+    get() = true
+
+val Nothing.bar: Boolean
+    get() = true
+
+class A
+val A?.baz: Boolean
+    get() = true
+
+fun box(): String {
+    return if ({ }().foo && (null?.bar ==null) && null.baz) "OK"
+    else "FAIL"
+}
+"####,
+        ),
+        (
+            "extensionProperties/extensionPropertyWithExtensionAsReceiver",
+            "extensionPropertyWithExtensionAsReceiver.kt",
+            r####"val (Int.()-> String).valProp: String
+    get() = this(1)
+
+val <T> (Int.()-> T).valPropT: T
+    get() = this(1)
+
+fun <T> foo(): Int.() -> T {
+    return { 1 as T }
+}
+
+fun bar(): Int.() -> String {
+    return { with(this) { this.toString() }}
+}
+
+fun box(): String {
+    foo<Int>().valPropT
+    bar().valProp
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionProperties/extensionProperyWithExtensionType",
+            "extensionProperyWithExtensionType.kt",
+            r####"var <T> T.varProp: T.()-> String
+    get() = { "1" }
+    set(value: T.()-> String) {}
+
+var Int.intProp: Int.(String)-> String
+    get() = { y: String -> y }
+    set(value: Int.(String) -> String) { }
+
+fun test(){
+    val funFromVarProp = 1.varProp
+    funFromVarProp(1)
+    1.funFromVarProp()
+    1.varProp = { "2" }
+
+    val funFromIntProp = 1.intProp
+    funFromIntProp(1, "")
+    1.funFromIntProp("")
+    1.intProp = { y: String -> y }
+}
+
+fun box(): String {
+    test()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionProperties/genericValForPrimitiveType",
+            "genericValForPrimitiveType.kt",
+            r####"val <T> T.valProp: T
+    get() = this
+
+class A {
+    val int: Int = 0
+    val long: Long = 0.toLong()
+    val short: Short = 0.toShort()
+    val byte: Byte = 0.toByte()
+    val double: Double = 0.0
+    val float: Float = 0.0f
+    val char: Char = '0'
+    val bool: Boolean = false
+
+    operator fun invoke() {
+        int.valProp
+        long.valProp
+        short.valProp
+        byte.valProp
+        double.valProp
+        float.valProp
+        char.valProp
+        bool.valProp
+    }
+}
+
+fun box(): String {
+    0.valProp
+    false.valProp
+    '0'.valProp
+    0.0.valProp
+    0.0f.valProp
+    0.toByte().valProp
+    0.toShort().valProp
+    0.toLong().valProp
+
+    A()()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionProperties/genericVarForPrimitiveType",
+            "genericVarForPrimitiveType.kt",
+            r####"var <T> T.varProp: T
+    get() = this
+    set(value: T) {}
+
+class A {
+    var int: Int = 0
+    var long: Long = 0.toLong()
+    var short: Short = 0.toShort()
+    var byte: Byte = 0.toByte()
+    var double: Double = 0.0
+    var float: Float = 0.0f
+    var char: Char = '0'
+    var bool: Boolean = false
+
+    operator fun invoke() {
+        int.varProp = int
+        long.varProp = long
+        short.varProp = short
+        byte.varProp = byte
+        double.varProp = double
+        float.varProp = float
+        char.varProp = char
+        bool.varProp = bool
+    }
+}
+
+fun box(): String {
+    0.varProp = 0
+    false.varProp = false
+    '0'.varProp = '0'
+    0.0.varProp = 0.0
+    0.0f.varProp = 0.0f
+    0.toByte().varProp = 0.toByte()
+    0.toShort().varProp = 0.toShort()
+    0.toLong().varProp = 0.toLong()
+
+    A()()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionProperties/kt46952",
+            "kt46952.kt",
+            r####"inline class C(val s: String)
+
+fun f(g: () -> C): C = g()
+
+val C.foo: C
+    get() = f { this }
+
+fun box() = C("OK").foo.s
+"####,
+        ),
+        (
+            "extensionProperties/kt9897_topLevel",
+            "kt9897_topLevel.kt",
+            r####"var z = "0"
+var l = 0L
+
+fun changeObject(): String {
+    "1".someProperty += 1
+    return z
+}
+
+fun changeLong(): Long {
+    2L.someProperty -= 1
+    return l
+}
+
+var String.someProperty: Int
+    get() {
+        return this.length
+    }
+    set(left) {
+        z += this + left
+    }
+
+var Long.someProperty: Long
+    get() {
+        return l
+    }
+    set(left) {
+        l += this + left
+    }
+
+fun box(): String {
+    val changeObject = changeObject()
+    if (changeObject != "012") return "fail 1: $changeObject"
+
+    val changeLong = changeLong()
+    if (changeLong != 1L) return "fail 1: $changeLong"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "extensionProperties/propertyWithExtensionNestedType",
+            "propertyWithExtensionNestedType.kt",
+            r####"class A(val a: String)
+
+val x : A.(A.() -> String) -> String = { lambda: A.()-> String ->
+    A("OK").lambda()
+}
+
+fun box(): String {
+    return A("FAIL").x { this.a }
+}
+"####,
+        ),
+        (
+            "extensionProperties/topLevel",
+            "topLevel.kt",
+            r####"val Int.foo: String
+        get() = "OK"
+
+fun box(): String {
+    return 1.foo
+}
+"####,
+        ),
+        (
+            "extensionProperties/topLevelLongTypeInReceiver",
+            "topLevelLongTypeInReceiver.kt",
+            r####"var fooStorage = "Fail"
+var barStorage = "Fail"
+
+var Double.foo: String
+    get() = fooStorage
+    set(value) {
+        fooStorage = value
+    }
+
+var Long.bar: String
+    get() = barStorage
+    set(value) {
+        barStorage = value
+    }
+
+fun box(): String {
+    val d = 1.0
+    d.foo = "O"
+    val l = 1L
+    l.bar = "K"
+    return d.foo + l.bar
+}
+"####,
+        ),
+        (
+            "finally/breakAndOuterFinally",
+            "breakAndOuterFinally.kt",
+            r####"var result = ""
+
+fun test() {
+    try {
+        for (z in 1..2) {
+
+            try {
+                result += "try"
+                break
+            } catch (fail: Throwable) {
+                result += " catch"
+            }
+        }
+        result += " after loop"
+    } finally {
+        result += " finally"
+        throw RuntimeException()
+    }
+}
+
+fun box(): String {
+    try {
+        test()
+        return "fail: expected exception"
+    } catch (e: RuntimeException) {
+
+    }
+
+    return if (result == "try after loop finally") "OK" else "fail: $result"
+}
+"####,
+        ),
+        (
+            "finally/continueAndOuterFinally",
+            "continueAndOuterFinally.kt",
+            r####"var result = ""
+
+fun test() {
+    try {
+        for (z in 1..2) {
+
+            try {
+                result += "try "
+                continue
+            } catch (fail: Throwable) {
+                result += " catch"
+            }
+        }
+        result += "after loop"
+    } finally {
+        result += " finally"
+        throw RuntimeException()
+    }
+}
+
+fun box(): String {
+    try {
+        test()
+        return "fail: expected exception"
+    } catch (e: RuntimeException) {
+
+    }
+
+    return if (result == "try try after loop finally") "OK" else "fail: $result"
+}
+"####,
+        ),
+        (
+            "finally/decrementInFinally",
+            "decrementInFinally.kt",
+            r####"fun box(): String {
+    var variable = 0
+    try {
+        try {
+            null!!
+        } finally {
+            variable--
+        }
+    } catch (e: NullPointerException) {
+        return if (variable == -1) "OK" else "Fail"
+    }
+}
+"####,
+        ),
+        (
+            "finally/finallyAndFinally",
+            "finallyAndFinally.kt",
+            r####"class MyString {
+    var s = ""
+    operator fun plus(x : String) : MyString {
+        s += x
+        return this
+    }
+
+    override fun toString(): String {
+        return s
+    }
+}
+
+
+fun test1() : MyString {
+    var r = MyString()
+    try {
+        r + "Try1"
+
+        try {
+            r + "Try2"
+            if (true)
+                return r
+        } finally {
+            r + "Finally2"
+            if (true) {
+                return r
+            }
+        }
+
+        return r
+    } finally {
+        r + "Finally1"
+    }
+}
+
+
+fun box(): String {
+  return if (test1().toString() == "Try1Try2Finally2Finally1") "OK" else "fail: ${test1()}"
+}
+"####,
+        ),
+        (
+            "finally/kt31923_break",
+            "kt31923_break.kt",
+            r####"var result = ""
+
+fun test() {
+    for (z in 1..2) {
+        try {
+            try {
+                result += "try"
+                break
+            } catch (fail: Throwable) {
+                result += " catch"
+            }
+        } finally {
+            result += " finally"
+            throw RuntimeException()
+        }
+    }
+}
+
+fun box(): String {
+    try {
+        test()
+        return "fail: expected exception"
+    } catch (e: RuntimeException) {
+
+    }
+
+    return if (result == "try finally") "OK" else "fail: $result"
+}
+"####,
+        ),
+        (
+            "finally/kt31923_continue",
+            "kt31923_continue.kt",
+            r####"var result = ""
+
+fun test() {
+    for (z in 1..2) {
+        try {
+            try {
+                result += "try"
+                continue
+            } catch (fail: Throwable) {
+                result += "catch"
+            }
+        } finally {
+            result += " finally"
+            throw RuntimeException()
+        }
+    }
+}
+
+fun box(): String {
+    try {
+        test()
+        return "fail: expected exception"
+    } catch (e: RuntimeException) {
+
+    }
+
+    return if (result == "try finally") "OK" else "fail: $result"
+}
+"####,
+        ),
+        (
+            "finally/kt31923_return",
+            "kt31923_return.kt",
+            r####"var result = ""
+
+fun test() {
+    try {
+        try {
+            result += "try"
+            return
+        } catch (fail: Throwable) {
+            result += " catch"
+        }
+    } finally {
+        result += " finally"
+        throw RuntimeException()
+    }
+}
+
+fun box(): String {
+    try {
+        test()
+        return "fail: expected exception"
+    } catch (e: RuntimeException) {
+
+    }
+
+    return if (result == "try finally") "OK" else "fail: $result"
+}
+"####,
+        ),
+        (
+            "finally/kt3549",
+            "kt3549.kt",
+            r####"fun test1() : String {
+    var s = "";
+    try {
+        try {
+            s += "Try";
+            throw Exception()
+        } catch (x : Exception) {
+            s += "Catch";
+            throw x
+        } finally {
+            s += "Finally";
+        }
+    } catch (x : Exception) {
+        return s
+    }
+}
+
+fun test2() : String {
+    var s = "";
+
+    try {
+        s += "Try";
+        throw Exception()
+    } catch (x : Exception) {
+        s += "Catch";
+    } finally {
+        s += "Finally";
+    }
+
+    return s
+}
+
+
+
+fun box() : String {
+    if (test1() != "TryCatchFinally") return "fail1: ${test1()}"
+
+    if (test2() != "TryCatchFinally") return "fail2: ${test2()}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "finally/kt3706",
+            "kt3706.kt",
+            r####"fun f(): Int {
+    try {
+        return 0
+    }
+    finally {
+        try { // culprit ?? remove this try-catch and it works.
+        } catch (ignore: Exception) {
+        }
+    }
+}
+
+fun box(): String {
+    if (f() != 0)  return "fail1"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "finally/kt3874",
+            "kt3874.kt",
+            r####"fun test1(): String {
+    var r = ""
+    for (i in 1..2)  {
+        try {
+            r += "O"
+            continue
+        } finally {
+            r += "K"
+            break
+        }
+    }
+    return r
+}
+
+fun test2(): String {
+    var r = ""
+    for (i in 1..2)  {
+        try {
+            r += "O"
+            break
+        } finally {
+            r += "K"
+            continue
+        }
+    }
+    return r
+}
+
+fun box(): String {
+  if (test1() != "OK") return "fail1: ${test1()}"
+
+  if (test2() != "OKOK") return "fail2: ${test2()}"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "finally/kt3894",
+            "kt3894.kt",
+            r####"class MyString {
+    var s = ""
+    operator fun plus(x : String) : MyString {
+        s += x
+        return this
+    }
+
+    override fun toString(): String {
+        return s
+    }
+}
+
+fun test1() : MyString {
+    var r = MyString()
+    while (true) {
+      try {
+          r + "Try"
+
+          if (true) {
+              r + "Break"
+              break
+          }
+
+      } finally {
+          return r + "Finally"
+      }
+    }
+}
+
+
+
+fun box(): String {
+    if (test1().toString() != "TryBreakFinally") return "fail1: ${test1().toString()}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "finally/kt4134",
+            "kt4134.kt",
+            r####"fun <T, R> io(s: R, a: (R) -> T): T {
+    try {
+        return a(s)
+    } finally {
+        try {
+            s.toString()
+        } catch(e: Exception) {
+        }
+    }
+}
+
+fun box() : String {
+    return io(("OK"), {it})
+}
+"####,
+        ),
+        (
+            "finally/loopAndFinally",
+            "loopAndFinally.kt",
+            r####"class MyString {
+    var s = ""
+    operator fun plus(x : String) : MyString {
+        s += x
+        return this
+    }
+
+    override fun toString(): String {
+        return s
+    }
+}
+
+fun test1() : MyString {
+    var r = MyString()
+    try {
+        r + "Try"
+
+        while(r.toString() != "") {
+            return r + "Loop"
+        }
+
+        return r + "Fail"
+    } finally {
+        r + "Finally"
+    }
+}
+
+fun test2() : MyString {
+    var r = MyString()
+    try {
+        r + "Try"
+
+        do {
+            if (r.toString() != "") {
+                return r + "Loop"
+            }
+        } while (r.toString() != "")
+
+        return r + "Fail"
+    } finally {
+        r + "Finally"
+    }
+}
+
+fun test3() : MyString {
+    var r = MyString()
+    try {
+        r + "Try"
+
+        for(i in 1..2) {
+            r + "Loop"
+            return r
+        }
+
+        return r + "Fail"
+    } finally {
+        r + "Finally"
+    }
+}
+
+fun box(): String {
+    if (test1().toString() != "TryLoopFinally") return "fail1: ${test1()}"
+    if (test2().toString() != "TryLoopFinally") return "fail2: ${test2()}"
+    if (test3().toString() != "TryLoopFinally") return "fail3: ${test3()}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "finally/nestedFinallyAndNonFinallyTry4",
+            "nestedFinallyAndNonFinallyTry4.kt",
+            r####"var result = ""
+
+fun test() {
+    try {
+        try {
+            try {
+                try {
+                    result += "try"
+                    return
+                } catch (fail: Throwable) {
+                    result += " catch"
+                }
+            } finally {
+                result += " finally 1"
+            }
+        } catch (e: Throwable) {
+            result += " catch 2"
+            result += e.message
+        }
+    } finally {
+        result += " finally 2"
+        throw RuntimeException("Fail 2")
+    }
+}
+
+fun box(): String {
+    try {
+        test()
+        return "fail: expected exception"
+    } catch (e: RuntimeException) {
+        if (e.message != "Fail 2") return "wrong exception: ${e.message}"
+    }
+
+    return if (result == "try finally 1 finally 2") "OK" else "fail: $result"
+}
+"####,
+        ),
+        (
+            "functions/coerceVoidToArray",
+            "coerceVoidToArray.kt",
+            r####"fun a(): IntArray? = null
+
+fun b(): Nothing = throw Exception()
+
+fun foo(): IntArray = a() ?: b()
+
+
+fun box(): String {
+    try {
+        foo()
+    } catch (e: Exception) {
+        return "OK"
+    }
+
+    return "Fail"
+}
+"####,
+        ),
+        (
+            "functions/defaultargs2",
+            "defaultargs2.kt",
+            r####"class T4(
+  val c1: Boolean,
+  val c2: Boolean,
+  val c3: Boolean,
+  val c4: String
+) {
+  override fun equals(o: Any?): Boolean {
+    if (o !is T4) return false;
+    return c1 == o.c1 &&
+      c2 == o.c2 &&
+      c3 == o.c3 &&
+      c4 == o.c4
+  }
+}
+
+fun reformat(
+  str : String,
+  normalizeCase : Boolean = true,
+  uppercaseFirstLetter : Boolean = true,
+  divideByCamelHumps : Boolean = true,
+  wordSeparator : String = " "
+) =
+  T4(normalizeCase, uppercaseFirstLetter, divideByCamelHumps, wordSeparator)
+
+
+fun box() : String {
+    val expected = T4(true, true, true, " ")
+    if(reformat("", true, true, true, " ") != expected) return "fail"
+    if(reformat("", true, true, true) != expected) return "fail"
+    if(reformat("", true, true) != expected) return "fail"
+    if(reformat("", true) != expected) return "fail"
+    if(reformat("") != expected) return "fail"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "functions/delegatedPropertyWithMultipleOverriddens_noGenerics",
+            "delegatedPropertyWithMultipleOverriddens_noGenerics.kt",
+            r####"interface MyCollection {
+    fun foo(): String
+    val bar: String
+}
+
+interface MyList : MyCollection {
+    override fun foo(): String
+    override val bar: String
+}
+
+interface MyMutableCollection : MyCollection
+interface MyMutableList : MyList, MyMutableCollection
+
+abstract class MyAbstractCollection protected constructor() : MyCollection {
+    abstract override fun foo(): String
+    abstract override val bar: String
+}
+
+class MyArrayList : MyMutableList, MyAbstractCollection() {
+    override fun foo(): String = "O"
+    override val bar: String = "K"
+}
+
+class MC : MyMutableCollection by MyArrayList()
+
+fun box(): String {
+    val x = MC()
+    return x.foo() + x.bar
+}
+"####,
+        ),
+        (
+            "functions/functionExpression/insideGenericLambda",
+            "insideGenericLambda.kt",
+            r####"fun <T> block(block: () -> T): T = block()
+fun foo() {}
+
+fun test(): () -> Unit = block { fun() = foo() }
+
+fun box(): String {
+    test()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "functions/invoke/extensionInvokeOnExpr",
+            "extensionInvokeOnExpr.kt",
+            r####"class A
+
+class B {
+    operator fun A.invoke() = "##"
+    operator fun A.invoke(i: Int) = "#${i}"
+}
+
+fun foo() = A()
+
+fun B.test(): String {
+    if (A()() != "##") return "fail1"
+    if (A()(1) != "#1") return "fail2"
+    if (foo()() != "##") return "fail3"
+    if (foo()(42) != "#42") return "fail4"
+    if ((foo())(42) != "#42") return "fail5"
+    if ({ -> A()}.let { it() }() != "##") return "fail6"
+    if ({ -> A()}.let { it() }(37) != "#37") return "fail7"
+    return "OK"
+}
+
+fun box(): String = B().test()
+"####,
+        ),
+        (
+            "functions/invoke/kt3297",
+            "kt3297.kt",
+            r####"infix fun <R> Function0<R>.or(alt: () -> R): R {
+    try {
+        return this()
+    } catch (e: Exception) {
+        return alt()
+    }
+}
+
+fun box(): String {
+    return {
+        throw RuntimeException("fail")
+    } or {
+        "OK"
+    }
+}
+"####,
+        ),
+        (
+            "functions/kt1649_1",
+            "kt1649_1.kt",
+            r####"interface A {
+    val method : (() -> Unit)?
+}
+
+fun test(a : A) {
+    if (a.method != null) {
+        a.method!!()
+    }
+}
+
+class B : A {
+    override val method = { }
+}
+
+fun box(): String {
+    test(B())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "functions/kt2271",
+            "kt2271.kt",
+            r####"fun foo(i: Int, j: Int = i) = j
+
+fun box() = if (foo(1) == 1) "OK" else "fail"
+"####,
+        ),
+        (
+            "functions/kt2739",
+            "kt2739.kt",
+            r####"fun <T> foo(vararg ts: T): T? = null
+
+class Pair<A>(a: A)
+
+fun box(): String {
+    val v = foo(Pair(1))
+    return if (v == null) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "functions/kt3573",
+            "kt3573.kt",
+            r####"class Data
+
+fun newInit(f: Data.() -> Data) = Data().f()
+
+class TestClass {
+    val test: Data = newInit()  { this }
+}
+
+fun box() : String {
+    TestClass()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "functions/localFunction",
+            "localFunction.kt",
+            r####"fun IntRange.forEach(body : (Int) -> Unit) {
+    for(i in this) {
+        body(i)
+    }
+}
+
+fun box() : String {
+    var seed = 0
+
+    fun local(x: Int) {
+        fun deep() {
+            seed += x
+        }
+        fun deep2(x : Int) {
+            seed += x
+        }
+        fun Int.iter() {
+                seed += this
+        }
+
+        deep()
+        deep2(-x)
+        x.iter()
+        seed += x
+    }
+
+    for(i in 1..5) {
+        fun Int.iter() {
+            seed += this
+        }
+
+        local(i)
+        (-i).iter()
+    }
+
+    fun local2(y: Int) {
+        seed += y
+    }
+
+    (1..5).forEach {
+            local2(it)
+    }
+
+
+    return if(seed == 30) "OK" else seed.toString()
+}
+"####,
+        ),
+        (
+            "functions/localFunctions/kt2895",
+            "kt2895.kt",
+            r####"fun outer() {
+    fun inner(i: Int) {
+        if (i > 0){
+            {
+                it: Int -> inner(0) // <- invocation of literal itself is generated instead
+            }.let { it.invoke(1) }
+        }
+    }
+    inner(1)
+}
+
+fun box(): String {
+    outer()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "functions/localFunctions/kt4777",
+            "kt4777.kt",
+            r####"var result = "Fail"
+
+val p = object : Runnable {
+    override fun run() {
+        fun <T : Any> T.id() = this
+
+        result = "OK".id()
+    }
+}
+
+fun box(): String {
+    p.run()
+    return result
+}
+"####,
+        ),
+        (
+            "functions/localFunctions/nameClash",
+            "nameClash.kt",
+            r####"fun test(b: Boolean): String {
+    if (b) {
+        fun result() = "OK"
+        return result()
+    } else {
+        fun result() = "Fail"
+        return result()
+    }
+}
+fun box(): String = test(true)
+"####,
+        ),
+        (
+            "increment/arrayElement",
+            "arrayElement.kt",
+            r####"fun box(): String {
+    val aByte: Array<Byte> = arrayOf<Byte>(1)
+    val bByte: ByteArray = byteArrayOf(1)
+    
+    val aShort: Array<Short> = arrayOf<Short>(1)
+    val bShort: ShortArray = shortArrayOf(1)
+    
+    val aInt: Array<Int> = arrayOf<Int>(1)
+    val bInt: IntArray = intArrayOf(1)
+    
+    val aLong: Array<Long> = arrayOf<Long>(1)
+    val bLong: LongArray = longArrayOf(1)
+
+    val aFloat: Array<Float> = arrayOf<Float>(1.0f)
+    val bFloat: FloatArray = floatArrayOf(1.0f)
+    
+    val aDouble: Array<Double> = arrayOf<Double>(1.0)
+    val bDouble: DoubleArray = doubleArrayOf(1.0)
+
+    aByte[0]--
+    bByte[0]--
+    if (aByte[0] != bByte[0]) return "Failed post-decrement Byte: ${aByte[0]} != ${bByte[0]}"
+
+    aByte[0]++
+    bByte[0]++
+    if (aByte[0] != bByte[0]) return "Failed post-increment Byte: ${aByte[0]} != ${bByte[0]}"
+    
+    aShort[0]--
+    bShort[0]--
+    if (aShort[0] != bShort[0]) return "Failed post-decrement Short: ${aShort[0]} != ${bShort[0]}"
+
+    aShort[0]++
+    bShort[0]++
+    if (aShort[0] != bShort[0]) return "Failed post-increment Short: ${aShort[0]} != ${bShort[0]}"
+    
+    aInt[0]--
+    bInt[0]--
+    if (aInt[0] != bInt[0]) return "Failed post-decrement Int: ${aInt[0]} != ${bInt[0]}"
+
+    aInt[0]++
+    bInt[0]++
+    if (aInt[0] != bInt[0]) return "Failed post-increment Int: ${aInt[0]} != ${bInt[0]}"
+
+    aLong[0]--
+    bLong[0]--
+    if (aLong[0] != bLong[0]) return "Failed post-decrement Long: ${aLong[0]} != ${bLong[0]}"
+
+    aLong[0]++
+    bLong[0]++
+    if (aLong[0] != bLong[0]) return "Failed post-increment Long: ${aLong[0]} != ${bLong[0]}"
+
+    aFloat[0]++
+    bFloat[0]++
+    if (aFloat[0] != bFloat[0]) return "Failed post-increment Float: ${aFloat[0]} != ${bFloat[0]}"
+
+    aFloat[0]--
+    bFloat[0]--
+    if (aFloat[0] != bFloat[0]) return "Failed post-decrement Float: ${aFloat[0]} != ${bFloat[0]}"
+
+    aDouble[0]++
+    bDouble[0]++
+    if (aDouble[0] != bDouble[0]) return "Failed post-increment Double: ${aDouble[0]} != ${bDouble[0]}"
+
+    aDouble[0]--
+    bDouble[0]--
+    if (aDouble[0] != bDouble[0]) return "Failed post-decrement Double: ${aDouble[0]} != ${bDouble[0]}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "increment/assignPlusOnSmartCast",
+            "assignPlusOnSmartCast.kt",
+            r####"fun box() : String {
+    var i : Int?
+    i = 10
+    i += 1
+
+    return if (11 == i) "OK" else "fail i = $i"
+}
+"####,
+        ),
+        (
+            "increment/augmentedAssignmentWithComplexRhs",
+            "augmentedAssignmentWithComplexRhs.kt",
+            r####"import kotlin.test.*
+
+var log = ""
+var result = 20
+var doubleResult = 40.0
+
+fun <T> id(value: T) = value
+
+fun box(): String {
+    result += if (id("true") == "true") {
+        result += 10
+        log += "true chosen;"
+        3
+    }
+    else {
+        4
+    }
+
+    assertEquals(23, result)
+
+    doubleResult += if (id("true") == "true") {
+        doubleResult += 100
+        log += "true chosen;"
+        2
+    }
+    else {
+        5
+    }
+
+    assertEquals(42, (doubleResult + 0.1).toInt())
+    assertEquals("true chosen;true chosen;", log)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "increment/classNaryGetSet",
+            "classNaryGetSet.kt",
+            r####"object A {
+    var x = 0
+
+    operator fun get(i1: Int, i2: Int, i3: Int): Int = x
+
+    operator fun set(i1: Int, i2: Int, i3: Int, value: Int) {
+        x = value
+    }
+}
+
+fun box(): String {
+    A.x = 0
+    val xx = A[1, 2, 3]++
+    return if (xx != 0 || A.x != 1) "Failed" else "OK"
+}
+"####,
+        ),
+        (
+            "increment/extOnLong",
+            "extOnLong.kt",
+            r####"operator fun Long.get(i: Int) = this
+operator fun Long.set(i: Int, newValue: Long) {}
+
+fun box(): String {
+    var x = 0L
+    val y = x[0]++
+    return if (y == 0L) "OK" else "Failed, y=$y"
+}
+"####,
+        ),
+        (
+            "increment/kt36956",
+            "kt36956.kt",
+            r####"class Cell(var x: Int) {
+    operator fun get(i: Int) = x
+    operator fun set(i: Int, v: Int) { x = v }
+}
+
+fun box(): String {
+    val c = Cell(0)
+    (c[0])++
+    if (c[0] != 1) return "Fail"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "increment/memberExtOnLong",
+            "memberExtOnLong.kt",
+            r####"object ExtProvider {
+    operator fun Long.get(i: Int) = this
+    operator fun Long.set(i: Int, newValue: Long) {}
+}
+
+fun box(): String {
+    with (ExtProvider) {
+        var x = 0L
+        val y = x[0]++
+        return if (y == 0L) "OK" else "Failed, y=$y"
+    }
+}
+"####,
+        ),
+        (
+            "increment/mutableListElement",
+            "mutableListElement.kt",
+            r####"fun box(): String {
+    val aByte = arrayListOf<Byte>(1)
+    var bByte: Byte = 1
+    
+    val aShort = arrayListOf<Short>(1)
+    var bShort: Short = 1
+    
+    val aInt = arrayListOf<Int>(1)
+    var bInt: Int = 1
+    
+    val aLong = arrayListOf<Long>(1)
+    var bLong: Long = 1
+
+    val aFloat = arrayListOf<Float>(1.0f)
+    var bFloat: Float = 1.0f
+    
+    val aDouble = arrayListOf<Double>(1.0)
+    var bDouble: Double = 1.0
+
+    aByte[0]--
+    bByte--
+
+    if (aByte[0] != bByte) return "Failed post-decrement Byte: ${aByte[0]} != $bByte"
+
+    aByte[0]++
+    bByte++
+
+    if (aByte[0] != bByte) return "Failed post-increment Byte: ${aByte[0]} != $bByte"
+    
+    aShort[0]--
+    bShort--
+
+    if (aShort[0] != bShort) return "Failed post-decrement Short: ${aShort[0]} != $bShort"
+
+    aShort[0]++
+    bShort++
+
+    if (aShort[0] != bShort) return "Failed post-increment Short: ${aShort[0]} != $bShort"
+    
+    aInt[0]--
+    bInt--
+
+    if (aInt[0] != bInt) return "Failed post-decrement Int: ${aInt[0]} != $bInt"
+
+    aInt[0]++
+    bInt++
+
+    if (aInt[0] != bInt) return "Failed post-increment Int: ${aInt[0]} != $bInt"
+
+    aLong[0]--
+    bLong--
+
+    if (aLong[0] != bLong) return "Failed post-decrement Long: ${aLong[0]} != $bLong"
+
+    aLong[0]++
+    bLong++
+
+    if (aLong[0] != bLong) return "Failed post-increment Long: ${aLong[0]} != $bLong"
+    
+    aFloat[0]--
+    bFloat--
+
+    if (aFloat[0] != bFloat) return "Failed post-decrement Float: ${aFloat[0]} != $bFloat"
+
+    aFloat[0]++
+    bFloat++
+
+    if (aFloat[0] != bFloat) return "Failed post-increment Float: ${aFloat[0]} != $bFloat"
+
+    aDouble[0]--
+    bDouble--
+
+    if (aDouble[0] != bDouble) return "Failed post-decrement Double: ${aDouble[0]} != $bDouble"
+
+    aDouble[0]++
+    bDouble++
+
+    if (aDouble[0] != bDouble) return "Failed post-increment Double: ${aDouble[0]} != $bDouble"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "increment/nullable",
+            "nullable.kt",
+            r####"fun box(): String {
+    var aByte: Byte? = 0
+    var bByte: Byte = 0
+
+    var aShort: Short? = 0
+    var bShort: Short = 0
+
+    var aInt: Int? = 0
+    var bInt: Int = 0
+
+    var aLong: Long? = 0
+    var bLong: Long = 0
+
+    var aFloat: Float? = 0.0f
+    var bFloat: Float = 0.0f
+
+    var aDouble: Double? = 0.0
+    var bDouble: Double = 0.0
+
+    if (aByte != null) aByte--
+    bByte--
+    if (aByte != bByte) return "Failed post-decrement Byte: $aByte != $bByte"
+
+    if (aByte != null) aByte++
+    bByte++
+    if (aByte != bByte) return "Failed post-increment Byte: $aByte != $bByte"
+
+    if (aShort != null) aShort--
+    bShort--
+    if (aShort != bShort) return "Failed post-decrement Short: $aShort != $bShort"
+
+    if (aShort != null) aShort++
+    bShort++
+    if (aShort != bShort) return "Failed post-increment Short: $aShort != $bShort"
+    
+    if (aInt != null) aInt--
+    bInt--
+    if (aInt != bInt) return "Failed post-decrement Int: $aInt != $bInt"
+
+    if (aInt != null) aInt++
+    bInt++
+    if (aInt != bInt) return "Failed post-increment Int: $aInt != $bInt"
+
+    if (aLong != null) aLong--
+    bLong--
+    if (aLong != bLong) return "Failed post-decrement Long: $aLong != $bLong"
+
+    if (aLong != null) aLong++
+    bLong++
+    if (aLong != bLong) return "Failed post-increment Long: $aLong != $bLong"
+
+    if (aFloat != null) aFloat--
+    bFloat--
+    if (aFloat != bFloat) return "Failed post-decrement Float: $aFloat != $bFloat"
+
+    if (aFloat != null) aFloat++
+    bFloat++
+    if (aFloat != bFloat) return "Failed post-increment Float: $aFloat != $bFloat"
+
+    if (aDouble != null) aDouble--
+    bDouble--
+    if (aDouble != bDouble) return "Failed post-decrement Double: $aDouble != $bDouble"
+
+    if (aDouble != null) aDouble++
+    bDouble++
+    if (aDouble != bDouble) return "Failed post-increment Double: $aDouble != $bDouble"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "increment/postfixIncrementDoubleSmartCast",
+            "postfixIncrementDoubleSmartCast.kt",
+            r####"fun box() : String {
+    var i : Int?
+    i = 10
+    val j: Int = i++
+
+    return if (j == 10 && 11 == i) "OK" else "fail j = $j i = $i"
+}
+"####,
+        ),
+        (
+            "increment/postfixIncrementOnClass",
+            "postfixIncrementOnClass.kt",
+            r####"interface Base
+class Derived: Base
+class Another: Base
+operator fun Base.inc(): Derived { return Derived() }
+
+fun box() : String {
+    var i : Base
+    i = Another()
+    val j = i++
+
+    return if (j is Another && i is Derived) "OK" else "fail j = $j i = $i"
+}
+"####,
+        ),
+        (
+            "increment/postfixIncrementOnClassSmartCast",
+            "postfixIncrementOnClassSmartCast.kt",
+            r####"open class Base
+class Derived: Base()
+operator fun Derived.inc(): Derived { return Derived() }
+
+fun box() : String {
+    var i : Base
+    i = Derived()
+    val j = i++
+
+    return if (j is Derived && i is Derived) "OK" else "fail j = $j i = $i"
+}
+"####,
+        ),
+        (
+            "increment/postfixIncrementOnShortSmartCast",
+            "postfixIncrementOnShortSmartCast.kt",
+            r####"fun box() : String {
+    var i : Short?
+    i = 10
+    val j = i++
+
+    return if (j!!.toInt() == 10 && i!!.toInt() == 11) "OK" else "fail j = $j i = $i"
+}
+"####,
+        ),
+        (
+            "increment/postfixIncrementOnSmartCast",
+            "postfixIncrementOnSmartCast.kt",
+            r####"fun box() : String {
+    var i : Int?
+    i = 10
+    val j = i++
+
+    return if (j == 10 && 11 == i) "OK" else "fail j = $j i = $i"
+}
+"####,
+        ),
+        (
+            "initializers/correctOrder1",
+            "correctOrder1.kt",
+            r####"import kotlin.test.*
+
+class TestClass {
+    val x: Int
+
+    init {
+        x = 42
+    }
+
+    val y = x
+}
+
+fun box(): String {
+    assertEquals(42, TestClass().y)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "initializers/correctOrder2",
+            "correctOrder2.kt",
+            r####"import kotlin.test.*
+
+class TestClass {
+    val x: Int
+
+    val y = 42
+
+    init {
+        x = y
+    }
+}
+
+fun box(): String {
+    assertEquals(42, TestClass().x)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "initializers/initializers0",
+            "initializers0.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+class A {
+    init{
+        sb.appendLine ("A::init")
+    }
+
+    val a = 1
+
+    companion object :B(1) {
+        init {
+            sb.appendLine ("A::companion")
+        }
+
+        fun foo() {
+            sb.appendLine("A::companion::foo")
+        }
+    }
+
+    object AObj : B(){
+        init {
+            sb.appendLine("A::Obj")
+        }
+        fun foo() {
+            sb.appendLine("A::AObj::foo")
+        }
+    }
+}
+
+fun box(): String {
+    sb.appendLine("main")
+    A.foo()
+    A.foo()
+    A.AObj.foo()
+    A.AObj.foo()
+
+    assertEquals("""
+        main
+        B::constructor(1)
+        A::companion
+        A::companion::foo
+        A::companion::foo
+        B::constructor(0)
+        B::constructor()
+        A::Obj
+        A::AObj::foo
+        A::AObj::foo
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+open class B(val a:Int, val b:Int) {
+    constructor(a:Int):this (a, 0) {
+        sb.appendLine("B::constructor(" + a.toString()+ ")")
+    }
+    constructor():this(0) {
+        sb.appendLine("B::constructor()")
+    }
+}
+"####,
+        ),
+        (
+            "initializers/initializers1",
+            "initializers1.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+class TestClass {
+    companion object {
+        init {
+            sb.append("OK")
+        }
+    }
+}
+
+fun box(): String {
+    val t1 = TestClass()
+    val t2 = TestClass()
+
+    return sb.toString()
+}
+"####,
+        ),
+        (
+            "initializers/initializers2",
+            "initializers2.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+class A(val msg: String) {
+    init {
+        sb.appendLine("init $msg")
+    }
+    override fun toString(): String = msg
+}
+
+val globalValue1 = 1
+val globalValue2 = A("globalValue2")
+val globalValue3 = A("globalValue3")
+
+fun box(): String {
+    sb.appendLine(globalValue1.toString())
+    sb.appendLine(globalValue2.toString())
+    sb.appendLine(globalValue3.toString())
+
+    assertEquals("""
+        init globalValue2
+        init globalValue3
+        1
+        globalValue2
+        globalValue3
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "initializers/initializers3",
+            "initializers3.kt",
+            r####"import kotlin.test.*
+
+class Foo(val bar: Int)
+
+var x = Foo(42)
+
+fun box(): String {
+    assertEquals(42, x.bar)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "initializers/initializers4",
+            "initializers4.kt",
+            r####"import kotlin.test.*
+
+const val INT_MAX_POWER_OF_TWO: Int = Int.MAX_VALUE / 2 + 1
+val DOUBLE = Double.MAX_VALUE - 1.0
+
+fun box(): String {
+    assertEquals(1073741824, INT_MAX_POWER_OF_TWO)
+    assertTrue(DOUBLE > 0.0)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "initializers/initializers5",
+            "initializers5.kt",
+            r####"import kotlin.test.*
+
+object A {
+    val a = 42
+    val b = A.a
+}
+
+fun box(): String {
+    assertEquals(42, A.b)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "initializers/initializers8",
+            "initializers8.kt",
+            r####"import kotlin.test.*
+
+var globalString = "OK"
+
+fun box(): String {
+    return globalString
+}
+"####,
+        ),
+        (
+            "initializers/initializers9",
+            "initializers9.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+object O {
+    const val C = 1
+}
+
+fun foo() = O.also { sb.appendLine("Hello!") }
+
+val X = foo().C
+
+fun box(): String {
+    assertEquals("Hello!\n", sb.toString(), "FAIL 1: $sb")
+    assertEquals(1, X)
+    assertEquals("Hello!\n", sb.toString(), "FAIL 2: $sb")
+    val Y = foo().C
+    assertEquals(1, Y)
+    assertEquals("Hello!\nHello!\n", sb.toString(), "FAIL 3: $sb")
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "innerNested/createNestedClass",
+            "createNestedClass.kt",
+            r####"class A {
+    class B1
+    class B2(val x: Int)
+    class B3(val x: Long, val y: Int)
+    class B4(val str: String)
+}
+
+
+fun box(): String {
+    A.B1()
+    val b2 = A.B2(A.B3(42, 42).y)
+    return A.B4("OK").str
+}
+"####,
+        ),
+        (
+            "innerNested/createdNestedInOuterMember",
+            "createdNestedInOuterMember.kt",
+            r####"fun foo(f: (Int) -> Int) = f(0)
+
+class Outer {
+    class Nested {
+        val y = foo { a -> a }
+    }
+
+    fun bar(): String {
+        val a = Nested()
+        return "OK"
+    }
+}
+
+fun box() = Outer().bar()
+"####,
+        ),
+        (
+            "innerNested/extenderNestedClass",
+            "extenderNestedClass.kt",
+            r####"object Foo {
+    open class Bar(val bar: String)
+}
+
+class Baz: Foo.Bar("OK")
+
+fun box(): String {
+    return Baz().bar
+}
+"####,
+        ),
+        (
+            "innerNested/extensionToNested",
+            "extensionToNested.kt",
+            r####"class Test {
+    class Nested {
+        val value = "OK"
+    }
+}
+
+fun Test.Nested.foo() = value
+
+fun box() = Test.Nested().foo()
+"####,
+        ),
+        (
+            "innerNested/importNestedClass",
+            "importNestedClass.kt",
+            r####"import A.B
+import A.B.C
+
+class A {
+    class B {
+        class C
+    }
+}
+
+fun box(): String {
+    val a = A()
+    val b = B()
+    val ab = A.B()
+    val c = C()
+    val bc = B.C()
+    val abc = A.B.C()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "innerNested/kt6804",
+            "kt6804.kt",
+            r####"class Outer {
+    class Nested {
+        fun fn() = s
+    }
+
+    companion object {
+        private val s = "OK"
+    }
+}
+
+fun box(): String {
+    return Outer.Nested().fn()
+}
+"####,
+        ),
+        (
+            "innerNested/nestedClassInObject",
+            "nestedClassInObject.kt",
+            r####"object A {
+    class B
+    class C<T>
+}
+
+fun box(): String {
+    val b = A.B()
+    val c = A.C<String>()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "innerNested/nestedClassObject",
+            "nestedClassObject.kt",
+            r####"class Outer {
+    class Nested {
+        companion object {
+            val O = "O"
+            val K = "K"
+        }
+    }
+    
+    fun O() = Nested.O
+}
+
+fun box() = Outer().O() + Outer.Nested.K
+"####,
+        ),
+        (
+            "innerNested/nestedEnumConstant",
+            "nestedEnumConstant.kt",
+            r####"class Outer {
+    enum class Nested {
+        O,
+        K
+    }
+}
+
+fun box() = "${Outer.Nested.O}${Outer.Nested.K}"
+"####,
+        ),
+        (
+            "innerNested/nestedGeneric",
+            "nestedGeneric.kt",
+            r####"class Outer {
+    class Nested<T>(val t: T) {
+        fun box() = t
+    }
+}
+
+fun box(): String {
+    if (Outer.Nested<String>("OK").box() != "OK") return "Fail"
+    
+    val x: Outer.Nested<String> = Outer.Nested("OK")
+    return x.box()
+}
+"####,
+        ),
+        (
+            "innerNested/nestedInPackage",
+            "nestedInPackage.kt",
+            r####"package package1
+
+class Outer {
+    class Nested {
+        val O = "O"
+        val K = "K"
+    }
+}
+
+fun box() = package1.Outer.Nested().O + Outer.Nested().K
+"####,
+        ),
+        (
+            "innerNested/nestedObjects",
+            "nestedObjects.kt",
+            r####"object A {
+    object B {
+        object C {
+            val ok = "OK"
+        }
+    }
+}
+
+fun box() = A.B.C.ok
+"####,
+        ),
+        (
+            "innerNested/nestedSimple",
+            "nestedSimple.kt",
+            r####"class Outer {
+    class Nested {
+        fun box() = "OK"
+    }
+}
+
+fun box() = Outer.Nested().box()
+"####,
+        ),
+        (
+            "innerNested/superConstructorCall/deepLocalHierarchy",
+            "deepLocalHierarchy.kt",
+            r####"fun box(): String {
+    abstract class L1 {
+        abstract fun foo(): String
+    }
+
+    open class L2(val s: String) : L1() {
+        override fun foo() = s
+    }
+
+    open class L3(unused: Double, value: String = "OK") : L2(value)
+
+    open class L4(i: Int, j: Long, z: Boolean, l: L3) : L3(3.14)
+
+    class L5 : L4(0, 0L, false, L3(2.71, "Fail"))
+
+    return L5().foo()
+}
+"####,
+        ),
+        (
+            "labels/controlLabelClashesWithFuncitonName",
+            "controlLabelClashesWithFuncitonName.kt",
+            r####"fun test1(): Boolean {
+    test1@ for(i in 1..2) {
+        continue@test1
+        return false
+    }
+
+    return true
+}
+
+fun test2(): Boolean {
+    test2@ while (true) {
+        break@test2
+    }
+
+    return true
+}
+
+fun box(): String {
+    if (!test1()) return "fail test1"
+    if (!test2()) return "fail test2"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "labels/propertyAccessor",
+            "propertyAccessor.kt",
+            r####"val Int.getter: Int
+    get() {
+        return this@getter
+    }
+
+fun box(): String {
+    val i = 1
+    if (i.getter != 1) return "getter failed"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "labels/propertyAccessorFunctionLiteral",
+            "propertyAccessorFunctionLiteral.kt",
+            r####"val Int.getter: Int
+    get() {
+        return {
+            this@getter
+        }.let { it.invoke() }
+    }
+
+fun box(): String {
+    val i = 1
+    if (i.getter != 1) return "getter failed"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "labels/propertyAccessorObject",
+            "propertyAccessorObject.kt",
+            r####"interface Base {
+    fun foo(): Int
+}
+
+val Int.getter: Int
+    get() {
+        return object : Base {
+            override fun foo(): Int {
+                return this@getter
+            }
+        }.foo()
+    }
+
+fun box(): String {
+    val i = 1
+    if (i.getter != 1) return "getter failed"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "lambda/ifWithReferenceAndLambda",
+            "ifWithReferenceAndLambda.kt",
+            r####"class MethodReferenceNPE() {
+    private val singleRef: () -> Unit =
+        1.let {
+            if (it == 0) {
+                { }
+            } else {
+                this@MethodReferenceNPE::myMethod
+            }
+        }
+
+    private fun myMethod() {}
+
+    fun run() {
+        singleRef()
+    }
+}
+
+fun box(): String {
+    MethodReferenceNPE().run()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "lambda/lambda1",
+            "lambda1.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    run {
+        sb.append("OK")
+    }
+    return sb.toString()
+}
+
+fun run(f: () -> Unit) {
+    f()
+}
+"####,
+        ),
+        (
+            "lambda/lambda10",
+            "lambda10.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    var str = "original"
+
+    val lambda = {
+        sb.appendLine(str)
+    }
+
+    lambda()
+
+    str = "changed"
+    lambda()
+
+    assertEquals("""
+        original
+        changed
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "lambda/lambda11",
+            "lambda11.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    val first = "first"
+    val second = "second"
+
+    run {
+        sb.appendLine(first)
+        sb.appendLine(second)
+    }
+
+    assertEquals("""
+        first
+        second
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+fun run(f: () -> Unit) {
+    f()
+}
+"####,
+        ),
+        (
+            "lambda/lambda12",
+            "lambda12.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    val lambda = { s1: String, s2: String ->
+        sb.appendLine(s1)
+        sb.appendLine(s2)
+    }
+
+    lambda("one", "two")
+
+    assertEquals("""
+        one
+        two
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "lambda/lambda13",
+            "lambda13.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    apply("OK") {
+        sb.append(this)
+    }
+    return sb.toString()
+}
+
+fun apply(str: String, block: String.() -> Unit) {
+    str.block()
+}
+"####,
+        ),
+        (
+            "lambda/lambda2",
+            "lambda2.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    mainFun(arrayOf("OK"))
+    return sb.toString()
+}
+
+fun mainFun(args : Array<String>) {
+    run {
+        sb.append(args[0])
+    }
+}
+
+fun run(f: () -> Unit) {
+    f()
+}
+"####,
+        ),
+        (
+            "lambda/lambda3",
+            "lambda3.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    var str = "OK"
+    run {
+        sb.append(str)
+    }
+    return sb.toString()
+}
+
+fun run(f: () -> Unit) {
+    f()
+}
+"####,
+        ),
+        (
+            "lambda/lambda4",
+            "lambda4.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    val lambda = bar()
+    lambda()
+    lambda()
+
+    assertEquals("""
+        1
+        2
+        3
+        3
+        4
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+fun bar(): () -> Unit {
+    var x = Integer(0)
+
+    val lambda = {
+        sb.appendLine(x.toString())
+        x = x + 1
+    }
+
+    x = x + 1
+
+    lambda()
+    lambda()
+
+    sb.appendLine(x.toString())
+
+    return lambda
+}
+
+class Integer(val value: Int) {
+    override fun toString() = value.toString()
+    operator fun plus(other: Int) = Integer(value + other)
+}
+"####,
+        ),
+        (
+            "lambda/lambda5",
+            "lambda5.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    foo {
+        sb.append(it)
+    }
+    assertEquals("42", sb.toString())
+    return "OK"
+
+}
+
+fun foo(f: (Int) -> Unit) {
+    f(42)
+}
+"####,
+        ),
+        (
+            "lambda/lambda6",
+            "lambda6.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    val str = "captured"
+    foo {
+        sb.appendLine(it)
+        sb.appendLine(str)
+    }
+    assertEquals("""
+        42
+        captured
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+
+}
+
+fun foo(f: (Int) -> Unit) {
+    f(42)
+}
+"####,
+        ),
+        (
+            "lambda/lambda7",
+            "lambda7.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val x = foo {
+        it + 1
+    }
+    assertEquals(43, x)
+    return "OK"
+}
+
+fun foo(f: (Int) -> Int) = f(42)
+"####,
+        ),
+        (
+            "lambda/lambda8",
+            "lambda8.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    val lambda1 = bar("first")
+    val lambda2 = bar("second")
+
+    lambda1()
+    lambda2()
+    lambda1()
+    lambda2()
+
+    assertEquals("""
+        first
+        0
+        second
+        0
+        first
+        1
+        second
+        1
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+fun bar(str: String): () -> Unit {
+    var x = Integer(0)
+
+    return {
+        sb.appendLine(str)
+        sb.appendLine(x.toString())
+        x = x + 1
+    }
+}
+
+class Integer(val value: Int) {
+    override fun toString() = value.toString()
+    operator fun plus(other: Int) = Integer(value + other)
+}
+"####,
+        ),
+        (
+            "lambda/lambda9",
+            "lambda9.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    val lambdas = ArrayList<() -> Unit>()
+
+    for (i in 0..1) {
+        var x = Integer(0)
+        val istr = i.toString()
+
+        lambdas.add {
+            sb.appendLine(istr)
+            sb.appendLine(x.toString())
+            x = x + 1
+        }
+    }
+
+    val lambda1 = lambdas[0]
+    val lambda2 = lambdas[1]
+
+    lambda1()
+    lambda2()
+    lambda1()
+    lambda2()
+
+    assertEquals("""
+        0
+        0
+        1
+        0
+        0
+        1
+        1
+        1
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+class Integer(val value: Int) {
+    override fun toString() = value.toString()
+    operator fun plus(other: Int) = Integer(value + other)
+}
+"####,
+        ),
+        (
+            "localClasses/anonymousObjectInInitializer",
+            "anonymousObjectInInitializer.kt",
+            r####"class A {
+    var a: String = "Fail"
+
+    init {
+        a = object {
+            override fun toString(): String = "OK"
+        }.toString()
+    }
+}
+
+fun box() : String {
+    return A().a
+}
+"####,
+        ),
+        (
+            "localClasses/inCallableReferenceLHS",
+            "inCallableReferenceLHS.kt",
+            r####"class Outer<A> {
+    fun <B> func(): String {
+        class L {
+            fun foo(): String = "OK"
+        }
+        return (L::foo)(L())
+    }
+}
+
+fun box(): String {
+    return Outer<Int>().func<Char>()
+}
+"####,
+        ),
+        (
+            "localClasses/inExtensionFunction",
+            "inExtensionFunction.kt",
+            r####"package test
+
+fun A.a(): String {
+  class B {
+      val b : String
+          get() = this@a.s
+  }
+  return B().b
+}
+
+class A {
+    val s : String = "OK"
+}
+
+fun box() : String {
+    return A().a()
+}
+"####,
+        ),
+        (
+            "localClasses/inExtensionProperty",
+            "inExtensionProperty.kt",
+            r####"package test
+
+val A.a: String
+  get() {
+      class B {
+          val b : String
+              get() = this@a.s
+      }
+      return B().b
+  }
+
+class A {
+    val s : String = "OK"
+}
+
+fun box() : String {
+    return A().a
+}
+"####,
+        ),
+        (
+            "localClasses/kt2873",
+            "kt2873.kt",
+            r####"fun foo() : String {
+    val u = {
+        class B(val data : String)
+        B("OK").data
+    }
+    return u()
+}
+
+fun box(): String {
+    return foo()
+}
+"####,
+        ),
+        (
+            "localClasses/kt3210",
+            "kt3210.kt",
+            r####"package org.example
+
+interface SomeTrait {}
+
+interface KotlinProcessor<T> {
+    fun execute(callback: KotlinCallback<T>?);
+}
+
+interface KotlinCallback<T> {
+    fun on(t : T);
+}
+
+public class Test(name : String) : KotlinProcessor<SomeTrait> {
+    public override fun execute(callback: KotlinCallback<SomeTrait>?) {
+        if(callback != null) {
+            class InlineTrait : SomeTrait {}
+
+            var inlineTrait = InlineTrait()
+            callback.on(inlineTrait)
+        }
+    }
+}
+
+fun box() : String {
+    var f = "fail"
+    Test("OK").execute(object : KotlinCallback<SomeTrait> {
+        override fun on(t: SomeTrait) {
+            f = "OK"
+        }
+    })
+    return f
+}
+"####,
+        ),
+        (
+            "localClasses/localClass",
+            "localClass.kt",
+            r####"class A {
+    fun a () : String {
+        class B() {
+            fun s() : String = "OK"
+        }
+        return B().s()
+    }
+}
+
+fun box() : String {
+    return A().a()
+}
+"####,
+        ),
+        (
+            "localClasses/nameWithWhitespace",
+            "nameWithWhitespace.kt",
+            r####"fun `method with spaces`(): String {
+    data class C(val s: String = "OK")
+    return C().s
+}
+
+fun box(): String = `method with spaces`()
+"####,
+        ),
+        (
+            "localClasses/noclosure",
+            "noclosure.kt",
+            r####"fun box(): String {
+    open class K {
+        val o = "O"
+    }
+
+    class Bar : K() {
+        val k = "K"
+    }
+
+    return K().o + Bar().k
+}
+"####,
+        ),
+        (
+            "localClasses/object",
+            "object.kt",
+            r####"fun box(): String {
+    val k = object {
+        val ok = "OK"
+    }
+
+    return k.ok
+}
+"####,
+        ),
+        (
+            "objects/anonymousObjectAndContrvariantProjection",
+            "anonymousObjectAndContrvariantProjection.kt",
+            r####"interface Invariant<A>
+
+fun Invariant<in Number>.publicFunc() = privateFunc()
+
+private fun <B> Invariant<B>.privateFunc() = object : Invariant<B> {}
+
+fun box() = "OK"
+"####,
+        ),
+        (
+            "objects/classCompanion",
+            "classCompanion.kt",
+            r####"var result = ""
+
+class A {
+
+    companion object {
+
+        val prop = test()
+
+        fun test(): String {
+            result += "OK"
+            return result
+        }
+    }
+}
+
+fun box(): String {
+    if (A.prop != "OK") return "fail ${A.prop}"
+    return result
+}
+"####,
+        ),
+        (
+            "objects/companionObjectAccess/kt27121_lv13",
+            "kt27121_lv13.kt",
+            r####"interface A {
+    fun test() = ok()
+
+    private companion object {
+        fun ok() = "OK"
+    }
+}
+
+class C : A
+
+fun box() = C().test()
+"####,
+        ),
+        (
+            "objects/companionObjectAccess/privateCompanionObjectAccessedFromInitBlockOfNestedClass",
+            "privateCompanionObjectAccessedFromInitBlockOfNestedClass.kt",
+            r####"class Outer {
+    private companion object {
+        val result = "OK"
+    }
+
+    class Nested {
+        val test: String
+
+        init {
+            test = result
+        }
+    }
+}
+
+fun box() = Outer.Nested().test
+"####,
+        ),
+        (
+            "objects/companionObjectAccess/privateCompanionObjectAccessedFromNestedClassSeveralTimes",
+            "privateCompanionObjectAccessedFromNestedClassSeveralTimes.kt",
+            r####"class Outer {
+    private companion object {
+        fun xo() = "O"
+        fun xk() = "K"
+    }
+
+    class Nested1 {
+        fun foo() = xo()
+    }
+
+    class Nested2 {
+        fun bar() = xk()
+    }
+
+    fun test() = Nested1().foo() + Nested2().bar()
+}
+
+fun box() = Outer().test()
+"####,
+        ),
+        (
+            "objects/initializationOrder",
+            "initializationOrder.kt",
+            r####"var result = "OK"
+
+class A {
+    companion object {
+        var z = result
+
+        fun patchResult() {
+            result = "fail"
+        }
+    }
+}
+
+fun box(): String {
+    A.patchResult()
+    return A.z
+}
+"####,
+        ),
+        (
+            "objects/interfaceCompanion",
+            "interfaceCompanion.kt",
+            r####"var result = ""
+
+interface A {
+
+    companion object {
+
+        val prop = test()
+
+        fun test(): String {
+            result += "OK"
+            return result
+        }
+    }
+}
+
+fun box(): String {
+    if (A.prop != "OK") return "fail ${A.prop}"
+    return result
+}
+"####,
+        ),
+        (
+            "objects/kt11117",
+            "kt11117.kt",
+            r####"class A(val value: String)
+
+fun A.test(): String {
+    val o = object  {
+        val z: String
+        init {
+            val x = value + "K"
+            z = x
+        }
+    }
+    return o.z
+}
+
+fun box(): String {
+    return A("O").test()
+}
+"####,
+        ),
+        (
+            "objects/kt18982",
+            "kt18982.kt",
+            r####"import Foo.bar0 as bar
+
+object Foo {
+    val bar0 = "OK"
+
+    fun test() = bar0
+}
+
+fun box() = Foo.test()
+"####,
+        ),
+        (
+            "objects/kt2663_2",
+            "kt2663_2.kt",
+            r####"fun box() : String {
+    var a = 1
+
+    (object: Runnable {
+        override public fun run() {
+            a = 2
+        }
+    }).run()
+    return if (a == 2) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "objects/kt45170",
+            "kt45170.kt",
+            r####"object A {
+    var id = 0
+        get() = field.also { field++ }
+}
+
+fun box(): String {
+    if (A.id != 0) return "FAIL1"
+    if (A.id != 1) return "FAIL2"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "objects/kt694",
+            "kt694.kt",
+            r####"enum class Test {
+    A,
+    B,
+    C
+}
+
+fun checkA(a: Test) = when(a) {
+    Test.B -> false
+    Test.A -> true
+    else -> false
+}
+
+fun box() : String {
+    if(!checkA(Test.A)) return "fail"
+    if( checkA(Test.C)) return "fail"
+    if( checkA(Test.B)) return "fail"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "objects/nestedObjectWithSuperclass",
+            "nestedObjectWithSuperclass.kt",
+            r####"open class A (val s: Int) {
+    open fun foo(): Int {
+        return s
+    }
+}
+
+object Outer: A(1) {
+    object O: A(2) {
+        override fun foo(): Int {
+            val s = super<A>.foo()
+            return s + 3
+        }
+    }
+}
+
+fun box() : String {
+    return if (Outer.O.foo() == 5) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "objects/objectWithSuperclass",
+            "objectWithSuperclass.kt",
+            r####"open class A {
+    open fun foo(): Int {
+        return 2
+    }
+}
+
+object O: A() {
+    override fun foo(): Int {
+        val s = super<A>.foo()
+        return s + 3
+    }
+}
+
+fun box() : String {
+  return if (O.foo() == 5) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "operatorConventions/annotatedAssignment",
+            "annotatedAssignment.kt",
+            r####"@Target(AnnotationTarget.EXPRESSION)
+@Retention(AnnotationRetention.SOURCE)
+annotation class Annotation
+
+fun box(): String {
+    var v = 0
+    @Annotation v += 1 + 2
+    if (v != 3) return "fail1"
+
+    @Annotation v = 4
+    if (v != 4) return "fail2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "operatorConventions/assignToDotQualifiedWithSideEffect",
+            "assignToDotQualifiedWithSideEffect.kt",
+            r####"package foo
+
+var global: String = ""
+
+class A {
+    var prop: Int = 0
+}
+
+fun bar(s: String, a: A): A {
+    global += s
+    return a
+}
+
+
+fun box(): String {
+    val a = A()
+
+    global = ""
+    bar("A", a).prop = try { global += "B"; 10 } finally {}
+    assertEquals("AB", global)
+    assertEquals(10, a.prop)
+
+    global = ""
+    bar("A", a).prop += try { global += "B"; 20 } finally {}
+    assertEquals("AB", global)
+    assertEquals(30, a.prop)
+
+    global = ""
+    bar("A", a).prop -= try { global += "B"; 20 } finally {}
+    assertEquals("AB", global)
+    assertEquals(10, a.prop)
+
+    global = ""
+    bar("A", a).prop *= try { global += "B"; 2 } finally {}
+    assertEquals("AB", global)
+    assertEquals(20, a.prop)
+
+    global = ""
+    bar("A", a).prop /= try { global += "B"; 5 } finally {}
+    assertEquals("AB", global)
+    assertEquals(4, a.prop)
+
+    global = ""
+    bar("A", a).prop %= try { global += "B"; 3 } finally {}
+    assertEquals("AB", global)
+    assertEquals(1, a.prop)
+
+    global = ""
+    (try { bar("A", a) } finally {}).prop++
+    assertEquals("A", global)
+    assertEquals(2, a.prop)
+
+    global = ""
+    ++(try { bar("A", a) } finally {}).prop
+    assertEquals("A", global)
+    assertEquals(3, a.prop)
+
+    return "OK"
+}
+
+fun assertEquals(first: Any?, second: Any?) {
+    if (first != second) throw AssertionError("$first != $second")
+}
+"####,
+        ),
+        (
+            "operatorConventions/assignmentOperations",
+            "assignmentOperations.kt",
+            r####"class A() {
+  var x = 0
+}
+
+operator fun A.plusAssign(y: Int) { x += y }
+operator fun A.minusAssign(y: Int) { x -= y }
+operator fun A.timesAssign(y: Int) { x *= y }
+operator fun A.divAssign(y: Int) { x /= y }
+operator fun A.remAssign(y: Int) { x %= y }
+
+fun box(): String {
+  val original = A()
+  val a = original
+
+  a += 1
+  if (a !== original) return "Fail 1: $a !== $original"
+  if (a.x != 1) return "Fail 2: ${a.x} != 1"
+
+  a -= 2
+  if (a !== original) return "Fail 3: $a !== $original"
+  if (a.x != -1) return "Fail 4: ${a.x} != -1"
+
+  a *= -10
+  if (a !== original) return "Fail 5: $a !== $original"
+  if (a.x != 10) return "Fail 6: ${a.x} != 10"
+
+  a /= 3
+  if (a !== original) return "Fail 7: $a !== $original"
+  if (a.x != 3) return "Fail 8: ${a.x} != 3"
+
+  a %= 2
+  if (a !== original) return "Fail 9: $a !== $original"
+  if (a.x != 1) return "Fail 10: ${a.x} != 1"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "operatorConventions/augmentedAssignmentInInitializer",
+            "augmentedAssignmentInInitializer.kt",
+            r####"abstract class A {
+    val b = B("O")
+
+    open val c: B
+
+    val d: B
+        get() = field
+
+    var e: String
+        get() = field
+
+    init {
+        c = B("O")
+        d = B("O")
+        e = "O"
+
+        b += ","
+        c += "."
+        d += ";"
+        e += "|"
+    }
+}
+
+class B(var value: String) {
+    operator fun plusAssign(o: String) {
+        value += o
+    }
+}
+
+class C : A() {
+    init {
+        b += "K"
+        c += "K"
+        d += "K"
+        e += "K"
+    }
+}
+
+fun box(): String {
+    val c = C()
+    val result = "${c.b.value} ${c.c.value} ${c.d.value} ${c.e}"
+    if (result != "O,K O.K O;K O|K") return "fail: $result"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "operatorConventions/augmentedAssignmentWithArrayLHS",
+            "augmentedAssignmentWithArrayLHS.kt",
+            r####"var log = ""
+
+fun foo(): Int {
+    log += "foo;"
+    return 1
+}
+fun bar(): Int {
+    log += "bar;"
+    return 42
+}
+
+data class A(val x: Int) {
+    operator fun plus(other: A) = A(x + other.x)
+}
+
+fun box(): String {
+    val array = arrayOf(0, 1)
+    array[foo()] += bar()
+
+    if (array[0] != 0) return "fail1a: ${array[0]}"
+    if (array[1] != 43) return "fail1b: ${array[0]}"
+
+    log += "!;"
+
+    val objArray = arrayOf(A(0), A(1))
+    objArray[foo()] += A(bar())
+    if (objArray[0] != A(0)) return "fail2a: ${array[0]}"
+    if (objArray[1] != A(43)) return "fail2b: ${array[0]}"
+
+    if (log != "foo;bar;!;foo;bar;") return "fail3: $log"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/comparable",
+            "comparable.kt",
+            r####"interface A : Comparable<A>
+
+class B(val x: Int) : A {
+    override fun compareTo(other: A) = x.compareTo((other as B).x)
+}
+
+fun checkLess(x: A, y: A) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(B(0), B(1))
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/doubleInt",
+            "doubleInt.kt",
+            r####"fun checkLess(x: Double, y: Int) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(0.5, 1)
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/doubleLong",
+            "doubleLong.kt",
+            r####"fun checkLess(x: Double, y: Long) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(0.5, 1.toLong())
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/extensionArray",
+            "extensionArray.kt",
+            r####"fun checkLess(x: Array<Int>, y: Array<Int>) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+operator fun Array<Int>.compareTo(other: Array<Int>) = size - other.size
+
+fun box(): String {
+    val a = arrayOfNulls<Int>(0) as Array<Int>
+    val b = arrayOfNulls<Int>(1) as Array<Int>
+    return checkLess(a, b)
+}
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/extensionObject",
+            "extensionObject.kt",
+            r####"class A(val x: Int)
+
+operator fun A.compareTo(other: A) = x.compareTo(other.x)
+
+fun checkLess(x: A, y: A) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(A(0), A(1))
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/intDouble",
+            "intDouble.kt",
+            r####"fun checkLess(x: Int, y: Double) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(0, 0.5)
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/intLong",
+            "intLong.kt",
+            r####"fun checkLess(x: Int, y: Long) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(0, 123456789123.toLong())
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/longDouble",
+            "longDouble.kt",
+            r####"fun checkLess(x: Long, y: Double) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(0.toLong(), 0.5)
+"####,
+        ),
+        (
+            "operatorConventions/compareTo/longInt",
+            "longInt.kt",
+            r####"fun checkLess(x: Long, y: Int) = when {
+    x >= y    -> "Fail $x >= $y"
+    !(x < y)  -> "Fail !($x < $y)"
+    !(x <= y) -> "Fail !($x <= $y)"
+    x > y     -> "Fail $x > $y"
+    x.compareTo(y) >= 0 -> "Fail $x.compareTo($y) >= 0"
+    else -> "OK"
+}
+
+fun box() = checkLess(-123456789123.toLong(), 0)
+"####,
+        ),
+        (
+            "primitiveTypes/charToByte",
+            "charToByte.kt",
+            r####"annotation class Foo(val b: Byte)
+
+@Foo('8'.toByte())
+const val x = '8'.toByte()
+
+fun box(): String {
+    return if (x == 56.toByte()) {
+        "OK"
+    } else {
+        "FAIL"
+    }
+}
+"####,
+        ),
+        (
+            "primitiveTypes/equalityWithObject/generated/boxedEqPrimitiveByte",
+            "boxedEqPrimitiveByte.kt",
+            r####"val nx: Byte? = 0.toByte()
+val nn: Byte? = null
+val x: Byte = 0.toByte()
+val y: Byte = 1.toByte()
+
+fun box(): String {
+    val ax: Byte? = 0.toByte()
+    val an: Byte? = null
+    val bx: Byte = 0.toByte()
+    val by: Byte = 1.toByte()
+
+    return when {
+        nx != 0.toByte() -> "Fail 0"
+        nx == 1.toByte() -> "Fail 1"
+        !(nx == 0.toByte()) -> "Fail 2"
+        !(nx != 1.toByte()) -> "Fail 3"
+        nx != x -> "Fail 4"
+        nx == y -> "Fail 5"
+        !(nx == x) -> "Fail 6"
+        !(nx != y) -> "Fail 7"
+        nn == 0.toByte() -> "Fail 8"
+        !(nn != 0.toByte()) -> "Fail 9"
+        nn == x -> "Fail 10"
+        !(nn != x) -> "Fail 11"
+        ax != 0.toByte() -> "Fail 12"
+        ax == 1.toByte() -> "Fail 13"
+        !(ax == 0.toByte()) -> "Fail 14"
+        !(ax != 1.toByte()) -> "Fail 15"
+        ax != x -> "Fail 16"
+        ax == y -> "Fail 17"
+        !(ax == x) -> "Fail 18"
+        !(ax != y) -> "Fail 19"
+        ax != bx -> "Fail 20"
+        ax == by -> "Fail 21"
+        !(ax == bx) -> "Fail 22"
+        !(ax != by) -> "Fail 23"
+        an == 0.toByte() -> "Fail 24"
+        !(an != 0.toByte()) -> "Fail 25"
+        an == x -> "Fail 26"
+        !(an != x) -> "Fail 27"
+        an == bx -> "Fail 28"
+        !(an != bx) -> "Fail 29"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "primitiveTypes/equalityWithObject/generated/primitiveEqBoxedByte",
+            "primitiveEqBoxedByte.kt",
+            r####"val nx: Byte? = 0.toByte()
+val nn: Byte? = null
+val x: Byte = 0.toByte()
+val y: Byte = 1.toByte()
+
+fun box(): String {
+    val ax: Byte? = 0.toByte()
+    val an: Byte? = null
+    val bx: Byte = 0.toByte()
+    val by: Byte = 1.toByte()
+
+    return when {
+        0.toByte() != nx -> "Fail 0"
+        1.toByte() == nx -> "Fail 1"
+        !(0.toByte() == nx) -> "Fail 2"
+        !(1.toByte() != nx) -> "Fail 3"
+        x != nx -> "Fail 4"
+        y == nx -> "Fail 5"
+        !(x == nx) -> "Fail 6"
+        !(y != nx) -> "Fail 7"
+        0.toByte() == nn -> "Fail 8"
+        !(0.toByte() != nn) -> "Fail 9"
+        x == nn -> "Fail 10"
+        !(x != nn) -> "Fail 11"
+        0.toByte() != ax -> "Fail 12"
+        1.toByte() == ax -> "Fail 13"
+        !(0.toByte() == ax) -> "Fail 14"
+        !(1.toByte() != ax) -> "Fail 15"
+        x != ax -> "Fail 16"
+        y == ax -> "Fail 17"
+        !(x == ax) -> "Fail 18"
+        !(y != ax) -> "Fail 19"
+        bx != ax -> "Fail 20"
+        by == ax -> "Fail 21"
+        !(bx == ax) -> "Fail 22"
+        !(by != ax) -> "Fail 23"
+        0.toByte() == an -> "Fail 24"
+        !(0.toByte() != an) -> "Fail 25"
+        x == an -> "Fail 26"
+        !(x != an) -> "Fail 27"
+        bx == an -> "Fail 28"
+        !(bx != an) -> "Fail 29"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "primitiveTypes/equalityWithObject/generated/primitiveEqObjectByte",
+            "primitiveEqObjectByte.kt",
+            r####"val nx: Any? = 0.toByte()
+val nn: Any? = null
+val x: Byte = 0.toByte()
+val y: Byte = 1.toByte()
+
+fun box(): String {
+    val ax: Any? = 0.toByte()
+    val an: Any? = null
+    val bx: Byte = 0.toByte()
+    val by: Byte = 1.toByte()
+
+    return when {
+        0.toByte() != nx -> "Fail 0"
+        1.toByte() == nx -> "Fail 1"
+        !(0.toByte() == nx) -> "Fail 2"
+        !(1.toByte() != nx) -> "Fail 3"
+        x != nx -> "Fail 4"
+        y == nx -> "Fail 5"
+        !(x == nx) -> "Fail 6"
+        !(y != nx) -> "Fail 7"
+        0.toByte() == nn -> "Fail 8"
+        !(0.toByte() != nn) -> "Fail 9"
+        x == nn -> "Fail 10"
+        !(x != nn) -> "Fail 11"
+        0.toByte() != ax -> "Fail 12"
+        1.toByte() == ax -> "Fail 13"
+        !(0.toByte() == ax) -> "Fail 14"
+        !(1.toByte() != ax) -> "Fail 15"
+        x != ax -> "Fail 16"
+        y == ax -> "Fail 17"
+        !(x == ax) -> "Fail 18"
+        !(y != ax) -> "Fail 19"
+        bx != ax -> "Fail 20"
+        by == ax -> "Fail 21"
+        !(bx == ax) -> "Fail 22"
+        !(by != ax) -> "Fail 23"
+        0.toByte() == an -> "Fail 24"
+        !(0.toByte() != an) -> "Fail 25"
+        x == an -> "Fail 26"
+        !(x != an) -> "Fail 27"
+        bx == an -> "Fail 28"
+        !(bx != an) -> "Fail 29"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "primitiveTypes/equalityWithObject/intEqualsNullableInt",
+            "intEqualsNullableInt.kt",
+            r####"fun eq1(a: Int?, b: Int) = a == b
+
+fun eq2(a: Int, b: Int?) = a == b
+
+fun eq3(a: Int?, b: Int?) = a == b
+
+fun box(): String =
+    when {
+        !eq1(1, 1) -> "Fail 1"
+        !eq2(1, 1) -> "Fail 2"
+        !eq3(1, 1) -> "Fail 3"
+        else -> "OK"
+    }
+"####,
+        ),
+        (
+            "primitiveTypes/equalsHashCodeToString",
+            "equalsHashCodeToString.kt",
+            r####"fun box(): String {
+    val b: Byte = 42
+    val c: Char = 'z'
+    val s: Short = 239
+    val i: Int = -1
+    val j: Long = -42L
+    val f: Float = 3.14f
+    val d: Double = -2.72
+    val z: Boolean = true
+
+    b.equals(b)
+    b == b
+    b.hashCode()
+    b.toString()
+    "$b"
+
+    c.equals(c)
+    c == c
+    c.hashCode()
+    c.toString()
+    "$c"
+
+    s.equals(s)
+    s == s
+    s.hashCode()
+    s.toString()
+    "$s"
+
+    i.equals(i)
+    i == i
+    i.hashCode()
+    i.toString()
+    "$i"
+
+    j.equals(j)
+    j == j
+    j.hashCode()
+    j.toString()
+    "$j"
+
+    f.equals(f)
+    f == f
+    f.hashCode()
+    f.toString()
+    "$f"
+
+    d.equals(d)
+    d == d
+    d.hashCode()
+    d.toString()
+    "$d"
+
+    z.equals(z)
+    z == z
+    z.hashCode()
+    z.toString()
+    "$z"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt13023",
+            "kt13023.kt",
+            r####"import kotlin.test.assertEquals
+
+fun box(): String {
+    val b = 'b'
+    val c = 'c'
+    assertEquals('c', b + 1)
+    assertEquals('a', b - 1)
+    assertEquals(1, c - b)
+
+    val list = listOf('b', 'a')
+    assertEquals('c', list[0] + 1)
+    assertEquals('a', list[0] - 1)
+    assertEquals(1, list[0] - list[1])
+    assertEquals(1, list[0] - 'a')
+    assertEquals(1, 'b' - list[1])
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt2269NotOptimizable",
+            "kt2269NotOptimizable.kt",
+            r####"fun identity(x: Int): Int {
+    return when {
+        x < 0 -> identity(x + 1) - 1
+        x > 0 -> identity(x - 1) + 1
+        else -> 0
+    }
+}
+
+fun box() : String {
+    val twoThirty = identity(230)
+    val nine = identity(9)
+    twoThirty?.toByte()?.hashCode()
+    nine.hashCode()
+
+    if(twoThirty.equals(nine.toByte())) {
+       return "fail"
+    }
+
+    if(twoThirty == nine.toByte().toInt()) {
+       return "fail"
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt2794",
+            "kt2794.kt",
+            r####"fun box() : String {
+   val b = 4.toByte()
+   val s = 5.toShort()
+   val c: Char = 'A'
+   return if( "$b" == "4" && " $b" == " 4" && "$s" == "5" && " $s" == " 5" && "$c" == "A" && " $c" == " A") "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt37505",
+            "kt37505.kt",
+            r####"fun testByte(x: Int?) = x?.toByte()?.hashCode()?.equals(x)
+
+fun testShort(x: Int?) = x?.toShort()?.hashCode()?.equals(x)
+
+fun box(): String {
+    testByte(42)
+    testShort(42)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt46864_double",
+            "kt46864_double.kt",
+            r####"fun box(): String {
+    (40.523 !== 62.562)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt737",
+            "kt737.kt",
+            r####"fun box(): String {
+    if (3.compareTo(2) != 1) return "Fail #1"
+    if (5.toByte().compareTo(10.toLong()) >= 0) return "Fail #2"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/kt882",
+            "kt882.kt",
+            r####"val _0 : Double = 0.0
+val _0dbl  : Double = 0.toDouble()
+
+fun box() : String {
+    if(_0 != _0dbl) return "fail"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "primitiveTypes/numberEqualsHashCodeToString",
+            "numberEqualsHashCodeToString.kt",
+            r####"fun test(n: Number) {
+    if (!n.equals(n)) throw Error("fail 1 for $n")
+    if (n.equals(1)) throw Error("fail 2 for $n")
+    if (n.equals(1L)) throw Error("fail 3 for $n")
+    if (n != n) throw Error("fail 4 for $n")
+    if (n == 1) throw Error("fail 5 for $n")
+    if (n == 1L) throw Error("fail 6 for $n")
+    if (n.hashCode() != n.toInt()) throw Error("fail 7 for $n")
+    if (n.toString() != "$n") throw Error("fail 8 for $n")
+}
+
+fun box(): String {
+    test(234)
+    test(546L)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "properties/PrivatePropertyOfGenericContravariantFunctionType",
+            "PrivatePropertyOfGenericContravariantFunctionType.kt",
+            r####"class Klass<in A>(private val action: (A) -> Unit) {
+    fun <B> execute(value: B, klassB: Klass<B>) {
+        klassB.action(value)
+    }
+}
+
+fun box(): String {
+    Klass { a: Int -> a.inc() }.execute("", Klass { b: String -> b.length })
+    return "OK"
+}
+"####,
+        ),
+        (
+            "properties/classFieldInsideLambda",
+            "classFieldInsideLambda.kt",
+            r####"fun <T> eval(fn: () -> T) = fn()
+
+class My {
+    val my: String = "O"
+        get() = eval { field } + "K"
+}
+
+fun box() = My().my
+"####,
+        ),
+        (
+            "properties/companionFieldInsideLambda",
+            "companionFieldInsideLambda.kt",
+            r####"fun <T> eval(fn: () -> T) = fn()
+
+class My {
+    companion object {
+        val my: String = "O"
+            get() = eval { field } + "K"
+    }
+}
+
+fun box() = My.my
+"####,
+        ),
+        (
+            "properties/const/kt52970",
+            "kt52970.kt",
+            r####"open class A(val a: String = DEFAULT_A){
+    companion object: A(){
+        const val DEFAULT_A = "O"
+    }
+}
+
+open class B(val b: String = DEFAULT_B){
+    companion object: B(){
+        const val DEFAULT_B = "K"
+    }
+}
+
+fun box() = A.a + B().b
+"####,
+        ),
+        (
+            "properties/fieldInsideLambda",
+            "fieldInsideLambda.kt",
+            r####"fun <T> eval(fn: () -> T) = fn()
+
+val my: String = "O"
+    get() = eval { field } + "K"
+
+fun box() = my
+"####,
+        ),
+        (
+            "properties/kt1165",
+            "kt1165.kt",
+            r####"public abstract class VirtualFile() {
+    public abstract val size : Long
+}
+
+public class PhysicalVirtualFile : VirtualFile() {
+    public override val size: Long
+    get() = 11
+}
+
+fun box() : String {
+    PhysicalVirtualFile()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "properties/kt1417",
+            "kt1417.kt",
+            r####"package pack
+
+open class A(val value: String )
+
+class B(value: String) : A(value) {
+    override fun toString() = "B($value)";
+}
+
+fun box() = if (B("4").toString() == "B(4)") "OK" else "fail"
+"####,
+        ),
+        (
+            "properties/kt2331",
+            "kt2331.kt",
+            r####"class P {
+    var x : Int = 0
+        private set
+
+    fun foo() {
+        ({ x = 4 }).let { it() }
+    }
+}
+
+fun box() : String {
+    val p = P()
+    p.foo()
+    return if (p.x == 4) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "properties/kt3118",
+            "kt3118.kt",
+            r####"package testing
+
+class Test {
+    private val hello: String
+        get() { return "hello" }
+
+    fun sayHello() : String = hello
+}
+
+fun box(): String {
+  return if (Test().sayHello() == "hello") "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "properties/kt4140",
+            "kt4140.kt",
+            r####"class TestObject()
+{
+    companion object {
+        var prop: Int = 1
+            get() = field++
+    }
+}
+
+fun box(): String {
+
+    if (TestObject.prop != 1) return "fail 1"
+
+    if (TestObject.prop != 2) return "fail 2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "properties/kt613",
+            "kt613.kt",
+            r####"package name
+
+class Test() {
+  var i = 5
+  val ten = 10.toLong()
+
+  fun Long.t() = this.toInt() + i++ + ++i
+
+  fun tt() = ten.t()
+}
+
+fun box() : String {
+  var m = Test()
+  return if((m.i)++ == 5 && ++(m.i) == 7 && m.tt() == 26) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "properties/lateinit/accessorExceptionPublic",
+            "accessorExceptionPublic.kt",
+            r####"fun <T> eval(fn: () -> T) = fn()
+
+public class A {
+    fun getFromClass(): Boolean {
+        try {
+            val a = str
+            return false
+        } catch (e: RuntimeException) {
+            return true
+        }
+    }
+
+    fun getFromLambda(): Boolean {
+        try {
+            val a = eval { str }
+            return false
+        } catch (e: RuntimeException) {
+            return true
+        }
+    }
+
+    companion object {
+        lateinit var str: String
+
+        fun getFromCompanion(): Boolean {
+            try {
+                val a = str
+                return false
+            } catch (e: RuntimeException) {
+                return true
+            }
+        }
+    }
+}
+
+fun box(): String {
+    if (!A().getFromClass()) return "Fail getFromClass"
+    if (!A().getFromLambda()) return "Fail getFromLambda"
+    if (!A.getFromCompanion()) return "Fail getFromCompanion"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "properties/lateinit/local/capturedLocalLateinit",
+            "capturedLocalLateinit.kt",
+            r####"fun runNoInline(f: () -> Unit) = f()
+
+fun box(): String {
+    lateinit var ok: String
+    runNoInline {
+        ok = "OK"
+    }
+    return ok
+}
+"####,
+        ),
+        (
+            "properties/lateinit/overrideException",
+            "overrideException.kt",
+            r####"interface Intf {
+    val str: String
+}
+
+class A : Intf {
+    override lateinit var str: String
+
+    fun getMyStr(): String {
+        try {
+            val a = str
+        } catch (e: RuntimeException) {
+            return "OK"
+        }
+        return "FAIL"
+    }
+}
+
+fun box(): String {
+    val a = A()
+    return a.getMyStr()
+}
+"####,
+        ),
+        (
+            "ranges/contains/charInCharRangeWithPossibleOverflow",
+            "charInCharRangeWithPossibleOverflow.kt",
+            r####"fun box(): String {
+    val x1 = 1.toChar()
+    if (x1 !in Char.MIN_VALUE..Char.MAX_VALUE)
+        return "Failed"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/evaluationOrder/forInRangeLiteralReversedReversed",
+            "forInRangeLiteralReversedReversed.kt",
+            r####"import kotlin.test.*
+
+val log = StringBuilder()
+
+fun logged(message: String, value: Int) =
+    value.also { log.append(message) }
+
+fun box(): String {
+    var sum = 0
+    for (i in (logged("start;", 1)..logged("end;", 4)).reversed().reversed()) {
+        sum = sum * 10 + i
+    }
+
+    assertEquals(1234, sum)
+
+    assertEquals("start;end;", log.toString())
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/expression/progressionMaxValueToMaxValue",
+            "progressionMaxValueToMaxValue.kt",
+            r####"val MaxI = Int.MAX_VALUE
+val MaxB = Byte.MAX_VALUE
+val MaxS = Short.MAX_VALUE
+val MaxL = Long.MAX_VALUE
+val MaxC = Char.MAX_VALUE
+
+fun box(): String {
+    val list1 = ArrayList<Int>()
+    val range1 = MaxI..MaxI step 1
+    for (i in range1) {
+        list1.add(i)
+        if (list1.size > 23) break
+    }
+    if (list1 != listOf<Int>(MaxI)) {
+        return "Wrong elements for MaxI..MaxI step 1: $list1"
+    }
+
+    val list2 = ArrayList<Int>()
+    val range2 = MaxB..MaxB step 1
+    for (i in range2) {
+        list2.add(i)
+        if (list2.size > 23) break
+    }
+    if (list2 != listOf<Int>(MaxB.toInt())) {
+        return "Wrong elements for MaxB..MaxB step 1: $list2"
+    }
+
+    val list3 = ArrayList<Int>()
+    val range3 = MaxS..MaxS step 1
+    for (i in range3) {
+        list3.add(i)
+        if (list3.size > 23) break
+    }
+    if (list3 != listOf<Int>(MaxS.toInt())) {
+        return "Wrong elements for MaxS..MaxS step 1: $list3"
+    }
+
+    val list4 = ArrayList<Long>()
+    val range4 = MaxL..MaxL step 1
+    for (i in range4) {
+        list4.add(i)
+        if (list4.size > 23) break
+    }
+    if (list4 != listOf<Long>(MaxL)) {
+        return "Wrong elements for MaxL..MaxL step 1: $list4"
+    }
+
+    val list5 = ArrayList<Char>()
+    val range5 = MaxC..MaxC step 1
+    for (i in range5) {
+        list5.add(i)
+        if (list5.size > 23) break
+    }
+    if (list5 != listOf<Char>(MaxC)) {
+        return "Wrong elements for MaxC..MaxC step 1: $list5"
+    }
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/forInIndices/forInCollectionTypeParameterIndices",
+            "forInCollectionTypeParameterIndices.kt",
+            r####"import kotlin.test.assertEquals
+
+fun <T : Collection<*>> sumIndices(c: T): Int {
+    var sum = 0
+    for (i in c.indices) {
+        sum += i
+    }
+    return sum
+}
+
+fun box(): String {
+    val list = listOf(0, 0, 0, 0)
+    val sum = sumIndices(list)
+    assertEquals(6, sum)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/forInReversed/forInReversedRange",
+            "forInReversedRange.kt",
+            r####"import kotlin.test.*
+
+fun intRange() = 1 .. 4
+fun longRange() = 1L .. 4L
+fun charRange() = '1' .. '4'
+
+fun box(): String {
+    var sum = 0
+    for (i in intRange().reversed()) {
+        sum = sum * 10 + i
+    }
+    assertEquals(4321, sum)
+
+    var sumL = 0L
+    for (i in longRange().reversed()) {
+        sumL = sumL * 10 + i
+    }
+    assertEquals(4321L, sumL)
+
+    var sumC = 0
+    for (i in charRange().reversed()) {
+        sumC = sumC * 10 + i.toInt() - '0'.toInt()
+    }
+    assertEquals(4321, sumC)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/forWithPossibleOverflow/forInDownToLongMinValue",
+            "forInDownToLongMinValue.kt",
+            r####"const val M = Long.MIN_VALUE
+
+fun box(): String {
+    var count = 0
+    for (i in M downTo M) {
+        ++count
+        if (count > 1) {
+            throw AssertionError("Loop should be executed once")
+        }
+    }
+    if (count != 1) throw AssertionError("Should be executed once")
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/literal/progressionMaxValueToMinValue",
+            "progressionMaxValueToMinValue.kt",
+            r####"val MaxI = Int.MAX_VALUE
+val MinI = Int.MIN_VALUE
+val MaxB = Byte.MAX_VALUE
+val MinB = Byte.MIN_VALUE
+val MaxS = Short.MAX_VALUE
+val MinS = Short.MIN_VALUE
+val MaxL = Long.MAX_VALUE
+val MinL = Long.MIN_VALUE
+val MaxC = Char.MAX_VALUE
+val MinC = Char.MIN_VALUE
+
+fun box(): String {
+    val list1 = ArrayList<Int>()
+    for (i in MaxI..MinI step 1) {
+        list1.add(i)
+        if (list1.size > 23) break
+    }
+    if (list1 != listOf<Int>()) {
+        return "Wrong elements for MaxI..MinI step 1: $list1"
+    }
+
+    val list2 = ArrayList<Int>()
+    for (i in MaxB..MinB step 1) {
+        list2.add(i)
+        if (list2.size > 23) break
+    }
+    if (list2 != listOf<Int>()) {
+        return "Wrong elements for MaxB..MinB step 1: $list2"
+    }
+
+    val list3 = ArrayList<Int>()
+    for (i in MaxS..MinS step 1) {
+        list3.add(i)
+        if (list3.size > 23) break
+    }
+    if (list3 != listOf<Int>()) {
+        return "Wrong elements for MaxS..MinS step 1: $list3"
+    }
+
+    val list4 = ArrayList<Long>()
+    for (i in MaxL..MinL step 1) {
+        list4.add(i)
+        if (list4.size > 23) break
+    }
+    if (list4 != listOf<Long>()) {
+        return "Wrong elements for MaxL..MinL step 1: $list4"
+    }
+
+    val list5 = ArrayList<Char>()
+    for (i in MaxC..MinC step 1) {
+        list5.add(i)
+        if (list5.size > 23) break
+    }
+    if (list5 != listOf<Char>()) {
+        return "Wrong elements for MaxC..MinC step 1: $list5"
+    }
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/expression/downTo/nestedStep/stepToSameLastThenStepOne",
+            "stepToSameLastThenStepOne.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val intList = mutableListOf<Int>()
+    val intProgression = 5 downTo 1
+    for (i in intProgression step 2 step 1) {
+        intList += i
+    }
+    assertEquals(listOf(5, 4, 3, 2, 1), intList)
+
+    val longList = mutableListOf<Long>()
+    val longProgression = 5L downTo 1L
+    for (i in longProgression step 2L step 1L) {
+        longList += i
+    }
+    assertEquals(listOf(5L, 4L, 3L, 2L, 1L), longList)
+
+    val charList = mutableListOf<Char>()
+    val charProgression = 'e' downTo 'a'
+    for (i in charProgression step 2 step 1) {
+        charList += i
+    }
+    assertEquals(listOf('e', 'd', 'c', 'b', 'a'), charList)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/expression/rangeTo/nestedStep/stepToSmallerLastThenStepToSmallerLast",
+            "stepToSmallerLastThenStepToSmallerLast.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val intList = mutableListOf<Int>()
+    val intProgression = 1..10
+    for (i in intProgression step 2 step 3) {
+        intList += i
+    }
+    assertEquals(listOf(1, 4, 7), intList)
+
+    val longList = mutableListOf<Long>()
+    val longProgression = 1L..10L
+    for (i in longProgression step 2L step 3L) {
+        longList += i
+    }
+    assertEquals(listOf(1L, 4L, 7L), longList)
+
+    val charList = mutableListOf<Char>()
+    val charProgression = 'a'..'j'
+    for (i in charProgression step 2 step 3) {
+        charList += i
+    }
+    assertEquals(listOf('a', 'd', 'g'), charList)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/expression/rangeUntil/stepToSmallerLast",
+            "stepToSmallerLast.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val intList = mutableListOf<Int>()
+    val intProgression = 1..<9
+    for (i in intProgression step 2) {
+        intList += i
+    }
+    assertEquals(listOf(1, 3, 5, 7), intList)
+
+    val longList = mutableListOf<Long>()
+    val longProgression = 1L..<9L
+    for (i in longProgression step 2L) {
+        longList += i
+    }
+    assertEquals(listOf(1L, 3L, 5L, 7L), longList)
+
+    val charList = mutableListOf<Char>()
+    val charProgression = 'a'..<'i'
+    for (i in charProgression step 2) {
+        charList += i
+    }
+    assertEquals(listOf('a', 'c', 'e', 'g'), charList)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/literal/downTo/illegalStepThenLegalStep",
+            "illegalStepThenLegalStep.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    assertFailsWith<IllegalArgumentException> {
+        for (i in 7 downTo 1 step 0 step 2) {
+        }
+    }
+
+    assertFailsWith<IllegalArgumentException> {
+        for (i in 7L downTo 1L step 0L step 2L) {
+        }
+    }
+
+    assertFailsWith<IllegalArgumentException> {
+        for (i in 'g' downTo 'a' step 0 step 2) {
+        }
+    }
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/literal/rangeTo/nestedStep/stepToSameLastThenStepToSmallerLast",
+            "stepToSameLastThenStepToSmallerLast.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val intList = mutableListOf<Int>()
+    for (i in 1..10 step 3 step 2) {
+        intList += i
+    }
+    assertEquals(listOf(1, 3, 5, 7, 9), intList)
+
+    val longList = mutableListOf<Long>()
+    for (i in 1L..10L step 3L step 2L) {
+        longList += i
+    }
+    assertEquals(listOf(1L, 3L, 5L, 7L, 9L), longList)
+
+    val charList = mutableListOf<Char>()
+    for (i in 'a'..'j' step 3 step 2) {
+        charList += i
+    }
+    assertEquals(listOf('a', 'c', 'e', 'g', 'i'), charList)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/literal/rangeUntil/stepToSameLast",
+            "stepToSameLast.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    val intList = mutableListOf<Int>()
+    for (i in 1..<8 step 2) {
+        intList += i
+    }
+    assertEquals(listOf(1, 3, 5, 7), intList)
+
+    val longList = mutableListOf<Long>()
+    for (i in 1L..<8L step 2L) {
+        longList += i
+    }
+    assertEquals(listOf(1L, 3L, 5L, 7L), longList)
+
+    val charList = mutableListOf<Char>()
+    for (i in 'a'..<'h' step 2) {
+        charList += i
+    }
+    assertEquals(listOf('a', 'c', 'e', 'g'), charList)
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "ranges/stepped/unsigned/expression/downTo/illegalStepZero",
+            "illegalStepZero.kt",
+            r####"import kotlin.test.*
+
+fun box(): String {
+    assertFailsWith<IllegalArgumentException> {
+        val uintProgression = 7u downTo 1u
+        for (i in uintProgression step 0) {
+        }
+    }
+
+    assertFailsWith<IllegalArgumentException> {
+        val ulongProgression = 7uL downTo 1uL
+        for (i in ulongProgression step 0L) {
+        }
+    }
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/accessToCompanion",
+            "accessToCompanion.kt",
+            r####"internal class A(val result: Int) {
+    companion object {
+        fun foo(): Int = 1
+        val prop = 2
+        val C = 3
+    }
+
+    constructor() : this(foo() + prop + C)
+}
+
+fun box(): String {
+    val result = A().result
+    if (result != 6) return "fail: $result"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/accessToNestedObject",
+            "accessToNestedObject.kt",
+            r####"class A(val result: Int) {
+    object B {
+        fun bar(): Int = 4
+        val prop = 5
+    }
+    object C {
+    }
+
+    constructor() : this(B.bar() + B.prop)
+}
+
+fun box(): String {
+    val result = A().result
+    if (result != 9) return "fail: $result"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/callFromPrimaryWithNamedArgs",
+            "callFromPrimaryWithNamedArgs.kt",
+            r####"open class A(val result: String) {
+    constructor(x: Int = 11, y: Int = 22, z: Int = 33) : this("$x$y$z")
+}
+
+class B() : A(y = 44)
+
+fun box(): String {
+    val result = B().result
+    if (result != "114433") return "fail: $result"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/callFromPrimaryWithOptionalArgs",
+            "callFromPrimaryWithOptionalArgs.kt",
+            r####"open class A(val result: String) {
+    constructor(x: Int, y: Int = 99) : this("$x$y")
+}
+
+class B(x: Int) : A(x)
+
+fun box(): String {
+    val result = B(11).result
+    if (result != "1199") return "fail: $result"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/callFromSubClass",
+            "callFromSubClass.kt",
+            r####"open class A(val x: String, val z: String) {
+    constructor(z: String) : this("O", z)
+}
+
+class B(val y: String) : A("_")
+
+fun box(): String {
+    val b = B("K")
+    val result = b.z + b.x + b.y
+    if (result != "_OK") return "fail: $result"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/clashingDefaultConstructors",
+            "clashingDefaultConstructors.kt",
+            r####"open class A(val x: String = "abc", val y: String = "efg") {
+    constructor(x: String, y: String, z: Int): this(x, y + "#" + z.toString())
+    
+    override fun toString() = "$x#$y"
+}
+
+class B : A {
+    constructor(x: String, y: String, z: Int): super(x, y + z.toString())
+    constructor(x: String = "xyz", y: String = "123") : super(x, y)
+    constructor(x: Double): super(x.toString())
+}
+
+fun box(): String {
+    val a1 = A().toString()
+    if (a1 != "abc#efg") return "fail1: $a1"
+
+    val a2 = A("hij", "klm", 1).toString()
+    if (a2 != "hij#klm#1") return "fail2: $a2"
+
+    val a3 = A(x="xyz").toString()
+    if (a3 != "xyz#efg") return "fail3: $a3"
+
+    val b1 = B().toString()
+    if (b1 != "xyz#123") return "fail4: $b1"
+
+    val b2 = B("hij", "klm", 2).toString()
+    if (b2 != "hij#klm2") return "fail5: $b2"
+
+    val b3 = B(123.1).toString()
+    if (b3 != "123.1#efg") return "fail6: $b3"
+
+    val b4 = B(x="test").toString()
+    if (b4 != "test#123") return "fail7: $b4"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/defaultArgs",
+            "defaultArgs.kt",
+            r####"val global = "OK"
+class A {
+    val prop: String
+    constructor(arg1: String = global) {
+        prop = arg1
+    }
+    constructor(arg1: String = global, arg2: Long) {
+        prop = "$arg1#$arg2"
+    }
+    constructor(arg1: String = global, argDouble: Double, arg3: Long = 1L) {
+        prop = "$arg1#$argDouble#$arg3"
+    }
+}
+
+fun box(): String {
+    val a1 = A()
+    if (a1.prop != "OK") return "fail1: ${a1.prop}"
+    val a2 = A("A")
+    if (a2.prop != "A") return "fail2: ${a2.prop}"
+
+    val a3 = A(arg2=123)
+    if (a3.prop != "OK#123") return "fail3: ${a3.prop}"
+    val a4 = A("A", arg2=123)
+    if (a4.prop != "A#123") return "fail4: ${a4.prop}"
+
+    val a5 = A(argDouble=23.1)
+    if (a5.prop != "OK#23.1#1") return "fail5: ${a5.prop}"
+    val a6 = A("A", argDouble=23.1)
+    if (a6.prop != "A#23.1#1") return "fail6: ${a6.prop}"
+    val a7 = A("A", arg3=2L, argDouble=23.1)
+    if (a7.prop != "A#23.1#2") return "fail7: ${a7.prop}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/delegationWithPrimary",
+            "delegationWithPrimary.kt",
+            r####"internal interface A {
+    fun foo(): String
+}
+
+internal class B : A {
+    override fun foo() = "OK"
+}
+
+internal val global = B()
+
+internal class C(x: Int) : A by global {
+    constructor(): this(1)
+}
+
+fun box(): String {
+    return C().foo()
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/generics",
+            "generics.kt",
+            r####"internal open class B<T>(val x: T, val y: T) {
+    constructor(x: T): this(x, x)
+    override fun toString() = "$x#$y"
+}
+
+internal class A : B<String> {
+    constructor(): super("default")
+    constructor(x: String): super(x, "default")
+}
+
+fun box(): String {
+    val b1 = B("1", "2").toString()
+    if (b1 != "1#2") return "fail1: $b1"
+    val b2 = B("abc").toString()
+    if (b2 != "abc#abc") return "fail2: $b2"
+
+    val a1 = A().toString()
+    if (a1 != "default#default") return "fail3: $a1"
+    val a2 = A("xyz").toString()
+    if (a2 != "xyz#default") return "fail4: $a2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/superCallSecondary",
+            "superCallSecondary.kt",
+            r####"var sideEffects: String = ""
+
+internal abstract class B {
+    val parentProp: String
+    init {
+        sideEffects += "minus-one#"
+    }
+    protected constructor(arg: Int) {
+        parentProp = (arg).toString()
+        sideEffects += "0.5#"
+    }
+    protected constructor(arg1: Int, arg2: Int) {
+        parentProp = (arg1 + arg2).toString()
+        sideEffects += "0.7#"
+    }
+    init {
+        sideEffects += "zero#"
+    }
+}
+
+internal class A : B {
+    var prop: String = ""
+    init {
+        sideEffects += prop + "first"
+    }
+
+    constructor(x1: Int, x2: Int): super(x1, x2) {
+        prop = x1.toString()
+        sideEffects += "#third"
+    }
+
+    init {
+        sideEffects += prop + "#second"
+    }
+
+    constructor(x: Int): super(3 + x) {
+        prop += "${x}#int"
+        sideEffects += "#fourth"
+    }
+
+    constructor(): this(7) {
+        sideEffects += "#fifth"
+    }
+}
+
+fun box(): String {
+    val a1 = A(5, 10)
+    if (a1.prop != "5") return "fail0: ${a1.prop}"
+    if (a1.parentProp != "15") return "fail1: ${a1.parentProp}"
+    if (sideEffects != "minus-one#zero#0.7#first#second#third") return "fail2: ${sideEffects}"
+
+    sideEffects = ""
+    val a2 = A(123)
+    if (a2.prop != "123#int") return "fail3: ${a2.prop}"
+    if (a2.parentProp != "126") return "fail4: ${a2.parentProp}"
+    if (sideEffects != "minus-one#zero#0.5#first#second#fourth") return "fail5: ${sideEffects}"
+
+    sideEffects = ""
+    val a3 = A()
+    if (a3.prop != "7#int") return "fail6: ${a3.prop}"
+    if (a3.parentProp != "10") return "fail7: ${a3.parentProp}"
+    if (sideEffects != "minus-one#zero#0.5#first#second#fourth#fifth") return "fail8: ${sideEffects}"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/varargs",
+            "varargs.kt",
+            r####"fun join(x: Array<out String>): String {
+    var result = ""
+    for (i in x) {
+        result += i
+        result += "#"
+    }
+
+    return result
+}
+
+open class B {
+    val parentProp: String
+    constructor(vararg x: String) {
+        parentProp = join(x)
+    }
+}
+
+class A : B {
+    val prop: String
+    constructor(vararg x: String): super("0", *x, "4") {
+        prop = join(x)
+    }
+}
+
+fun box(): String {
+    val a1 = A("1", "2", "3")
+    if (a1.prop != "1#2#3#") return "fail1: ${a1.prop}"
+    if (a1.parentProp != "0#1#2#3#4#") return "fail2: ${a1.parentProp}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/withReturn",
+            "withReturn.kt",
+            r####"class A {
+    val prop: Int
+    constructor(arg: Boolean) {
+        if (arg) {
+            prop = 1
+            return
+        }
+        prop = 2
+    }
+}
+
+fun box(): String {
+    val a1 = A(true)
+    if (a1.prop != 1) return "fail1: ${a1.prop}"
+    val a2 = A(false)
+    if (a2.prop != 2) return "fail2: ${a2.prop}"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/withReturnUnit",
+            "withReturnUnit.kt",
+            r####"class A {
+    val prop: Int
+    constructor(arg: Boolean) {
+        if (arg) {
+            prop = 1
+            return Unit
+        }
+        prop = 2
+    }
+}
+
+fun box(): String {
+    val a1 = A(true)
+    if (a1.prop != 1) return "fail1: ${a1.prop}"
+    val a2 = A(false)
+    if (a2.prop != 2) return "fail2: ${a2.prop}"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "secondaryConstructors/withoutPrimarySimple",
+            "withoutPrimarySimple.kt",
+            r####"class A {
+    val value: String
+        get() = field + "K"
+
+    constructor(o: String) {
+        value = o
+    }
+}
+
+fun box() = A("O").value
+"####,
+        ),
+        (
+            "smartCasts/NullableFunctionTypeAsMemberImmutableProperty",
+            "NullableFunctionTypeAsMemberImmutableProperty.kt",
+            r####"fun box(): String {
+    KlassA({})
+    KlassB()
+    return "OK"
+}
+
+class KlassA(arg: (() -> Unit)?) {
+    val func: (() -> Unit)? = arg
+    init {
+        if (func != null) {
+            func()
+        }
+    }
+}
+
+class KlassB {
+    val func: (() -> Unit)?
+    init {
+        if (true) {
+            func = {}
+            func()
+        } else {
+            func = null
+        }
+    }
+}
+"####,
+        ),
+        (
+            "smartCasts/NullableFunctionTypeAsMemberImmutablePropertyFromConstructor",
+            "NullableFunctionTypeAsMemberImmutablePropertyFromConstructor.kt",
+            r####"fun box(): String {
+    Klass({})
+    return "OK"
+}
+
+class Klass(val func: (() -> Unit)?) {
+    init {
+        if (func != null) {
+            func()
+        }
+    }
+}
+"####,
+        ),
+        (
+            "smartCasts/NullableFunctionTypeAsPrimaryConstructorParameter",
+            "NullableFunctionTypeAsPrimaryConstructorParameter.kt",
+            r####"fun box(): String {
+    Klass({})
+    return "OK"
+}
+
+class Klass(func: (() -> Unit)?) {
+    init {
+        if (func != null) {
+            func()
+        }
+    }
+}
+"####,
+        ),
+        (
+            "smartCasts/NullableFunctionTypeAsSecondaryConstructorParameter",
+            "NullableFunctionTypeAsSecondaryConstructorParameter.kt",
+            r####"fun box(): String {
+    Klass({})
+    return "OK"
+}
+
+class Klass {
+    constructor(func: (() -> Unit)?) {
+        if (func != null) {
+            func()
+        }
+    }
+}
+"####,
+        ),
+        (
+            "smartCasts/avoidSmartCastToDerivedForPrivate",
+            "avoidSmartCastToDerivedForPrivate.kt",
+            r####"open class Base {
+    fun foo(): String {
+        return when (this) {
+            is Derived -> baz()
+            else -> "fail 1"
+        }
+    }
+
+    private fun baz(): String = "OK"
+}
+
+class Derived : Base()
+
+fun box(): String {
+    return Derived().foo()
+}
+"####,
+        ),
+        (
+            "smartCasts/complexImplicitReceiver",
+            "complexImplicitReceiver.kt",
+            r####"interface Bound
+interface CompilerPhase<in X1 : Bound, Y1>
+
+private class CompositePhase<X2 : Bound, Y2>(
+    val foo: String
+) : CompilerPhase<X2, Y2>
+
+@Suppress("UNCHECKED_CAST")
+fun <X3 : Bound, Y3> CompilerPhase<X3, Y3>.bar(): String {
+    this as CompilerPhase<X3, Any?>
+    val ok = if (this is CompositePhase<X3, *>) foo + "K" else "fail"
+    return ok
+}
+
+fun box(): String {
+    return CompositePhase<Bound, Int>("O").bar()
+}
+"####,
+        ),
+        (
+            "smartCasts/falseSmartCast",
+            "falseSmartCast.kt",
+            r####"open class SuperFoo {
+    public fun bar(): String {
+        if (this is Foo) {
+            superFoo() // Smart cast
+            return baz() // Cannot be cast
+        }
+        return baz()
+    }
+
+    public fun baz() = "OK"
+}
+
+class Foo : SuperFoo() {
+    public fun superFoo() {}
+}
+
+fun box(): String = Foo().bar()
+"####,
+        ),
+        (
+            "smartCasts/genericInheritanceWithNonGenericNoAmbiguity",
+            "genericInheritanceWithNonGenericNoAmbiguity.kt",
+            r####"interface A<T> {
+    fun foo(x: T?) {}
+}
+
+interface B : A<String> {
+    override fun foo(x: String?)
+}
+
+fun <T> bar(x: A<in T>) {
+    if (x is B) {
+        x.foo(null)
+    }
+}
+
+fun box(): String {
+    bar<String>(
+        object : B {
+            override fun foo(x: String?) {}
+        }
+    )
+    return "OK"
+}
+"####,
+        ),
+        (
+            "smartCasts/genericIntersection",
+            "genericIntersection.kt",
+            r####"class A
+
+fun <T> test(v: T): T {
+    val a: T = if (v !is A) v else v
+    return a
+}
+
+fun box() = test("OK")
+"####,
+        ),
+        (
+            "smartCasts/implicitCastOnAssignment",
+            "implicitCastOnAssignment.kt",
+            r####"interface A
+abstract class B
+
+fun process(a: A): String {
+    var b: B? = null
+    if (a is B) {
+        b = a
+        return "OK"
+    } else {
+        return "FAIL"
+    }
+}
+
+class C : B(), A
+
+fun box(): String {
+    return process(C())
+}
+"####,
+        ),
+        (
+            "smartCasts/implicitExtensionReceiver",
+            "implicitExtensionReceiver.kt",
+            r####"class A {
+    fun foo() = "OK"
+}
+
+fun A?.bar() = if (this != null) foo() else "FAIL"
+
+fun box() = A().bar()
+"####,
+        ),
+        (
+            "smartCasts/implicitReceiver",
+            "implicitReceiver.kt",
+            r####"open class A {
+    class B : A() {
+        val a = "FAIL"
+    }
+
+    fun foo(): String {
+        if (this is B) return a
+        return "OK"
+    }
+}
+
+
+fun box(): String = A().foo()
+"####,
+        ),
+        (
+            "smartCasts/implicitReceiverInWhen",
+            "implicitReceiverInWhen.kt",
+            r####"open class A {
+    fun f(): String =
+            when (this) {
+                is B -> x
+                else -> "FAIL"
+            }
+}
+
+class B(val x: String) : A()
+
+fun box() = B("OK").f()
+"####,
+        ),
+        (
+            "smartCasts/implicitToGrandSon",
+            "implicitToGrandSon.kt",
+            r####"open class A {
+    open fun foo() = "FAIL"
+
+    fun bar() = if (this is C) foo() else foo()
+}
+
+open class B : A()
+
+open class C : B() {
+    override fun foo() = "OK"
+}
+
+fun box() = C().bar()
+"####,
+        ),
+        (
+            "strings/charSequenceGet",
+            "charSequenceGet.kt",
+            r####"import kotlin.test.*
+
+fun getStringChar(s: String, index: Int): Char = s[index]
+
+fun getCharSequenceChar(s: CharSequence, index: Int): Char = s[index]
+
+private class MyCharSequence(val s: String) : CharSequence by s
+
+fun box(): String {
+    assertEquals('a', getStringChar("a", 0))
+    assertEquals('a', getCharSequenceChar("a", 0))
+    assertEquals('a', getCharSequenceChar(MyCharSequence("a"), 0))
+
+    assertEquals(Char.MIN_VALUE, getStringChar("${Char.MIN_VALUE}", 0))
+    assertEquals(Char.MIN_VALUE, getCharSequenceChar("${Char.MIN_VALUE}", 0))
+    assertEquals(Char.MIN_VALUE, getCharSequenceChar(MyCharSequence("${Char.MIN_VALUE}"), 0))
+
+    assertEquals(Char.MAX_VALUE, getStringChar("${Char.MAX_VALUE}", 0))
+    assertEquals(Char.MAX_VALUE, getCharSequenceChar("${Char.MAX_VALUE}", 0))
+    assertEquals(Char.MAX_VALUE, getCharSequenceChar(MyCharSequence("${Char.MAX_VALUE}"), 0))
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/concatDynamicWithConstants",
+            "concatDynamicWithConstants.kt",
+            r####"fun test(z: Int): String {
+    val result = "" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" +
+            z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" +
+            z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" +
+            z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" +
+            z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" + z + "1" +
+            z + "1" + z + "1" + z + "1" + z + "1"
+
+    return result
+}
+
+fun box(): String {
+    val result = test(0)
+
+    if (result.length != 208)
+        return "fail 1: ${result.length}"
+
+    if (result != "0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101")
+        return "fail 2: $result"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/concatGenericWithPrimitiveUpperBound",
+            "concatGenericWithPrimitiveUpperBound.kt",
+            r####"import kotlin.test.assertEquals
+
+fun <T : Boolean> concatBoolean(x: T) = "[[$x]]"
+fun <T : Byte> concatByte(x: T) = "[[$x]]"
+fun <T : Short> concatShort(x: T) = "[[$x]]"
+fun <T : Int> concatInt(x: T) = "[[$x]]"
+fun <T : Long> concatLong(x: T) = "[[$x]]"
+fun <T : Float> concatFloat(x: T) = "[[$x]]"
+fun <T : Double> concatDouble(x: T) = "[[$x]]"
+
+fun box(): String {
+    assertEquals("[[true]]", concatBoolean(true))
+    assertEquals("[[0]]", concatByte(0.toByte()))
+    assertEquals("[[1]]", concatShort(1.toShort()))
+    assertEquals("[[2]]", concatInt(2))
+    assertEquals("[[3]]", concatLong(3L))
+    assertEquals("[[4.4]]", concatFloat(4.4f))
+    assertEquals("[[5.5]]", concatFloat(5.5f))
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/constInStringTemplate",
+            "constInStringTemplate.kt",
+            r####"import kotlin.test.assertEquals
+
+const val constTrue = true
+const val const42 = 42
+const val constPiF = 3.14F
+const val constPi = 3.1415926358
+const val constString = "string"
+
+fun box(): String {
+    assertEquals("true", "$constTrue")
+    assertEquals("42", "$const42")
+    assertEquals("3.14", "$constPiF")
+    assertEquals("3.1415926358", "$constPi")
+    assertEquals("string", "$constString")
+
+    assertEquals(constPi.toString(), "$constPi")
+    assertEquals((constPi * constPi).toString(), "${constPi * constPi}")
+
+    assertEquals("null", "${null}")
+    assertEquals("42", "${42}")
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/forInString",
+            "forInString.kt",
+            r####"fun foo(): Int {
+    var sum = 0
+    for (c in "239")
+        sum += (c.toInt() - '0'.toInt())
+    return sum
+}
+
+fun box(): String {
+    val f = foo()
+    return if (f == 14) "OK" else "Fail $f"
+}
+"####,
+        ),
+        (
+            "strings/kt2592",
+            "kt2592.kt",
+            r####"fun box(): String {
+    String()
+    return String() + "OK" + String()
+}
+"####,
+        ),
+        (
+            "strings/kt3652",
+            "kt3652.kt",
+            r####"fun box(): String {
+ var a = 'a'
+
+  if ("${a++}x" != "ax") return "fail1"
+
+  if ("${a++}" != "b") return "fail2"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "strings/kt86478_stringBuilderSetLength",
+            "kt86478_stringBuilderSetLength.kt",
+            r####"fun box(): String {
+    val sb = StringBuilder("abc")
+
+    sb.setLength(3)
+    val result1 = sb.toString()
+    if (result1 != "abc") return "Fail setLength(3): <$result1>, length=${result1.length}"
+
+    sb.setLength(5)
+    val result2 = sb.toString()
+    if (result2 != "abc\u0000\u0000") return "Fail setLength(5): <$result2>, length=${result2.length}"
+
+    sb.setLength(2)
+    val result3 = sb.toString()
+    if (result3 != "ab") return "Fail setLength(2): <$result3>, length=${result3.length}"
+
+    sb.setLength(3)
+    val result4 = sb.toString()
+    if (result4 != "ab\u0000") return "Fail setLength(3) after setLength(2): <$result4>, length=${result4.length}"
+
+    sb.append("cd")
+    sb.setLength(4)
+
+    val result5 = sb.toString()
+    if (result5 != "ab\u0000c") return "Fail setLength(4) after append(\"cd\"): <$result5>, length=${result5.length}"
+
+    sb.setLength(0)
+    val result6 = sb.toString()
+    if (result6 != "") return "Fail setLength(0): <$result6>, length=${result6.length}"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/kt889",
+            "kt889.kt",
+            r####"operator fun Int.plus(s: String) : String {
+  return s
+}
+
+fun box() : String {
+   val s = "${1 + "a"}"
+   return if(s == "a") "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "strings/multilineStringsWithTemplates",
+            "multilineStringsWithTemplates.kt",
+            r####"fun box() : String {
+    val s = "abc"
+    val test1 = """$s"""
+    if (test1 != "abc") return "Fail 1: $test1"
+
+    val test2 = """${s}"""
+    if (test2 != "abc") return "Fail 2: $test2"
+
+    val test3 = """ "$s" """
+    if (test3 != " \"abc\" ") return "Fail 3: $test3"
+
+    val test4 = """ "${s}" """
+    if (test4 != " \"abc\" ") return "Fail 4: $test4"
+
+    val test5 =
+"""
+  ${s.length}
+"""
+    if (test5 != "\n  3\n") return "Fail 5: $test5"
+
+    val test6 = """\n"""
+    if (test6 != "\\n") return "Fail 6: $test6"
+
+    val test7 = """\${'$'}foo"""
+    if (test7 != "\\\$foo") return "Fail 7: $test7"
+
+    val test8 = """$ foo"""
+    if (test8 != "$ foo") return "Fail 8: $test8"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/rawStrings",
+            "rawStrings.kt",
+            r####"fun box() : String {
+  val s = """ foo \n bar """
+  if (s != " foo \\n bar ") return "Fail: '$s'"
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "strings/simpleStringPlus",
+            "simpleStringPlus.kt",
+            r####"fun f(s: String?, t: String): String {
+    return s.plus(t)
+}
+
+fun g(s: String, t: Any?): String {
+    return "$s$t"
+}
+
+fun h(s: String, t: Any?): String {
+    return s + t
+}
+
+fun box(): String {
+    if (f("O", "K") != "OK") return "Fail 1"
+    if (g("O", "K") != "OK") return "Fail 2"
+    if (h("O", "K") != "OK") return "Fail 3"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/stringPlusOnlyWorksOnString",
+            "stringPlusOnlyWorksOnString.kt",
+            r####"fun box(): String {
+    var x: MutableCollection<Int> = ArrayList()
+    x + ArrayList()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "strings/twoArgumentNullableStringPlus",
+            "twoArgumentNullableStringPlus.kt",
+            r####"fun stringPlus(x: String?, y: Any?) = x.plus(y)
+
+fun box(): String {
+    val t1 = stringPlus("a", "b")
+    if (t1 != "ab") return "Failed: t1=$t1"
+
+    val t2 = stringPlus("a", null)
+    if (t2 != "anull") return "Failed: t2=$t2"
+
+    val t3 = stringPlus(null, "b")
+    if (t3 != "nullb") return "Failed: t3=$t3"
+
+    val t4 = stringPlus(null, null)
+    if (t4 != "nullnull") return "Failed: t4=$t4"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "super/basicmethodSuperTrait",
+            "basicmethodSuperTrait.kt",
+            r####"interface Tr {
+   fun extra() : String = "_"
+}
+
+class N() : Tr {
+   override fun extra() : String = super<Tr>.extra() + super<Tr>.extra()
+}
+
+fun box(): String {
+    val n = N()
+    if (n.extra() == "__") return "OK"
+    return "fail";
+}
+"####,
+        ),
+        (
+            "super/basicproperty",
+            "basicproperty.kt",
+            r####"open class M() {
+    open var b: Int = 0
+}
+
+class N() : M() {
+    val a : Int
+        get() {
+            super.b = super.b + 1
+            return super.b + 1
+        }
+    override var b: Int = a + 1
+
+    val superb : Int
+        get() = super.b
+}
+
+fun box(): String {
+    val n = N()
+    n.a
+    n.b
+    n.superb
+    if (n.b == 3 && n.a == 4 && n.superb == 3) return "OK";
+    return "fail";
+}
+"####,
+        ),
+        (
+            "super/interfaceHashCode",
+            "interfaceHashCode.kt",
+            r####"interface I
+class C : I { fun foo() = super<I>.hashCode() }
+
+fun box(): String {
+    C().foo()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "super/kt14243_class",
+            "kt14243_class.kt",
+            r####"open class Z<T, Y> {
+    open fun test(p: T, z: Y): T {
+        return p
+    }
+}
+
+open class ZImpl<X> : Z<String, X>()
+
+open class ZImpl2 : ZImpl<String>()
+
+class ZImpl3 : ZImpl2() {
+    override fun test(p: String, z: String): String {
+        return super.test(p, z)
+    }
+}
+
+fun box(): String {
+    return ZImpl3().test("OK", "fail")
+}
+"####,
+        ),
+        (
+            "super/multipleSuperTraits",
+            "multipleSuperTraits.kt",
+            r####"interface T1 {
+    fun foo() = "O"
+}
+
+interface T2 {
+    fun foo() = "K"
+}
+
+class A : T1, T2 {
+    override fun foo() = super<T1>.foo() + super<T2>.foo()
+}
+
+fun box() = A().foo()
+"####,
+        ),
+        (
+            "super/superConstructor/kt17464_arrayOf",
+            "kt17464_arrayOf.kt",
+            r####"open class A(val array: Array<Any>)
+
+class B : A(arrayOf("OK"))
+
+fun box() = B().array[0].toString()
+"####,
+        ),
+        (
+            "super/superConstructor/kt18356",
+            "kt18356.kt",
+            r####"open class Base(val addr: Long, val name: String)
+
+fun box(): String {
+    val obj1 = object : Base(name = "OK", addr = 0x1234L) {}
+    if (obj1.addr != 0x1234L) return "fail ${obj1.addr}"
+    return obj1.name
+}
+"####,
+        ),
+        (
+            "super/traitproperty",
+            "traitproperty.kt",
+            r####"interface M {
+    var backingB : Int
+    var b : Int
+        get() = backingB
+        set(value: Int) {
+            backingB = value
+        }
+}
+
+class N() : M {
+    public override var backingB : Int = 0
+
+    val a : Int
+        get() {
+            super.b = super.b + 1
+            return super.b + 1
+        }
+    override var b: Int = a + 1
+
+    val superb : Int
+        get() = super.b
+}
+
+fun box(): String {
+    val n = N()
+    n.a
+    n.b
+    n.superb
+    if (n.b == 3 && n.a == 4 && n.superb == 3) return "OK";
+    return "fail";
+}
+"####,
+        ),
+        (
+            "super/unqualifiedSuper",
+            "unqualifiedSuper.kt",
+            r####"open class Base() {
+    open fun baseFun(): String = "Base.baseFun()"
+
+    open fun unambiguous(): String = "Base.unambiguous()"
+
+    open val baseProp: String
+        get() = "Base.baseProp"
+}
+
+interface Interface {
+    fun interfaceFun(): String = "Interface.interfaceFun()"
+
+    fun unambiguous(): String // NB abstract
+}
+
+interface AnotherInterface
+
+interface DerivedInterface: Interface, AnotherInterface {
+    override fun interfaceFun(): String = "DerivedInterface.interfaceFun()"
+
+    override fun unambiguous(): String = "DerivedInterface.unambiguous()"
+
+    fun callsFunFromSuperInterface(): String = super.interfaceFun()
+}
+
+class Derived : Base(), Interface {
+    override fun baseFun(): String = "Derived.baseFun()"
+
+    override fun unambiguous(): String = "Derived.unambiguous()"
+
+    override fun interfaceFun(): String = "Derived.interfaceFun()"
+
+    override val baseProp: String
+        get() = "Derived.baseProp"
+
+    fun callsBaseFun(): String = super.baseFun()
+
+    fun callsUnambiguousFun(): String = super.unambiguous()
+
+    fun getsBaseProp(): String = super.baseProp
+
+    fun callsInterfaceFun(): String = super.interfaceFun()
+}
+
+fun box(): String {
+    val d = Derived()
+
+    val test1 = d.callsBaseFun()
+    if (test1 != "Base.baseFun()") return "Failed: d.callsBaseFun()==$test1"
+
+    val test2 = d.callsUnambiguousFun()
+    if (test2 != "Base.unambiguous()") return "Failed: d.callsUnambiguousFun()==$test2"
+
+    val test3 = d.getsBaseProp()
+    if (test3 != "Base.baseProp") return "Failed: d.getsBaseProp()==$test3"
+
+    val test4 = d.callsInterfaceFun()
+    if (test4 != "Interface.interfaceFun()") return "Failed: d.callsInterfaceFun()==$test4"
+
+    val di = object : DerivedInterface {}
+
+    val test5 = di.callsFunFromSuperInterface()
+    if (test5 != "Interface.interfaceFun()") return "Failed: di.callsFunFromSuperInterface()==$test5"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "super/unqualifiedSuperWithMethodsOfAny",
+            "unqualifiedSuperWithMethodsOfAny.kt",
+            r####"interface ISomething
+
+open class ClassWithToString {
+    override fun toString(): String = "C"
+}
+
+interface IWithToString {
+    override fun toString(): String
+}
+
+class C1 : ClassWithToString(), ISomething {
+    override fun toString(): String = super.toString()
+}
+
+class C2 : ClassWithToString(), IWithToString, ISomething  {
+    override fun toString(): String = super.toString()
+}
+
+fun box(): String {
+    return when {
+        C1().toString() != "C" -> "Failed #1"
+        C2().toString() != "C" -> "Failed #2"
+        else -> "OK"
+    }
+}
+"####,
+        ),
+        (
+            "traits/abstractClassWithFakeOverride",
+            "abstractClassWithFakeOverride.kt",
+            r####"interface A {
+    fun foo(): String = "Fail"
+}
+
+abstract class B : A {
+    abstract override fun foo(): String
+}
+
+abstract class C : B()
+
+class D : C() {
+    override fun foo(): String = "OK"
+}
+
+fun box() = D().foo()
+"####,
+        ),
+        (
+            "traits/diamondPropertyAccessors",
+            "diamondPropertyAccessors.kt",
+            r####"interface A {
+    var bar: Boolean
+        get() = false
+        set(value) { throw AssertionError("Fail set") }
+}
+
+interface B : A
+
+interface C : A {
+    override var bar: Boolean
+        get() = true
+        set(value) {}
+}
+
+interface D : B, C
+
+class Impl : D
+
+fun box(): String {
+    Impl().bar = false
+    if (!Impl().bar) return "Fail get"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "traits/doubleDiamond",
+            "doubleDiamond.kt",
+            r####"interface A {
+    val result: String get() = "Fail"
+}
+
+interface B : A
+
+abstract class AImpl : A
+
+abstract class BImpl : AImpl(), B
+
+interface C : B {
+    override val result: String get() = "OK"
+}
+
+object CImpl : BImpl(), C
+
+fun box(): String = CImpl.result
+"####,
+        ),
+        (
+            "traits/genericMethod",
+            "genericMethod.kt",
+            r####"interface A<T> {
+    val property : T
+
+    open  fun a() : T {
+        return property
+    }
+}
+
+open class B : A<Any> {
+
+    override val property: Any = "fail"
+}
+
+open class C : B(), A<Any> {
+
+    override val property: Any = "OK"
+}
+
+fun box() : String {
+    return C().a() as String
+}
+"####,
+        ),
+        (
+            "traits/indirectlyInheritPropertyGetter",
+            "indirectlyInheritPropertyGetter.kt",
+            r####"interface A {
+    val str: String
+        get() = "OK"
+}
+
+interface B : A
+
+class Impl : B
+
+fun box() = Impl().str
+"####,
+        ),
+        (
+            "traits/inheritedFun",
+            "inheritedFun.kt",
+            r####"interface A {
+    fun f():Int = 239
+}
+
+class B() : A
+
+fun box() : String {
+    return if (B().f() == 239) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "traits/inheritedVar",
+            "inheritedVar.kt",
+            r####"interface A {
+    var a:Int
+        get() = 239
+        set(value) {
+        }
+}
+
+class B() : A
+
+fun box() : String {
+    return if (B().a == 239) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "traits/interfaceWithNonAbstractFunIndirect",
+            "interfaceWithNonAbstractFunIndirect.kt",
+            r####"interface I {
+    fun foo(): String = "foo"
+
+    fun bar(x: String = "default") = "bar:$x"
+}
+
+interface J : I
+
+interface K : J
+
+class A : I, J
+
+class B : K, I
+
+fun box(): String {
+    val foo = A().foo()
+    if (foo != "foo") return "fail1: $foo"
+
+    val bar1 = A().bar()
+    if (bar1 != "bar:default") return "fail2: $bar1"
+
+    val bar2 = A().bar("q")
+    if (bar2 != "bar:q") return "fail3: $bar2"
+
+    val foo2 = B().foo()
+    if (foo2 != "foo") return "fail4: $foo2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "traits/interfaceWithNonAbstractFunIndirectGeneric",
+            "interfaceWithNonAbstractFunIndirectGeneric.kt",
+            r####"interface I<T> {
+    fun foo(x: T): String = "foo($x)"
+
+    fun bar(x: T, y: String = "default") = "bar($x,$y)"
+}
+
+interface J : I<String>
+
+class A : I<String>, J
+
+class B : J, I<String>
+
+fun box(): String {
+    val foo = A().foo("q")
+    if (foo != "foo(q)") return "fail1: $foo"
+
+    val bar1 = A().bar("w")
+    if (bar1 != "bar(w,default)") return "fail2: $bar1"
+
+    val bar2 = A().bar("e", "r")
+    if (bar2 != "bar(e,r)") return "fail3: $bar2"
+
+    val foo2 = B().foo("t")
+    if (foo2 != "foo(t)") return "fail4: $foo2"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "traits/kt1936",
+            "kt1936.kt",
+            r####"var result = "Fail"
+
+interface MyTrait
+{
+    var property : String
+    fun foo()  {
+        result = property
+    }
+}
+
+open class B(param : String) : MyTrait
+{
+    override var property : String = param
+    override fun foo() {
+        super.foo()
+    }
+}
+
+fun box(): String {
+    val b = B("OK")
+    b.foo()
+    return result
+}
+"####,
+        ),
+        (
+            "traits/kt1936_1",
+            "kt1936_1.kt",
+            r####"interface MyTrait
+{
+    var property : String
+    fun foo() = property
+}
+
+open class B(param : String) : MyTrait
+{
+    override var property : String = param
+    override fun foo() = super.foo()
+}
+
+fun box()= B("OK").foo()
+"####,
+        ),
+        (
+            "traits/kt2541",
+            "kt2541.kt",
+            r####"interface A<T, U> {
+    fun foo(t: T, u: U) = "OK"
+}
+
+class B<T> : A<T, Int>
+
+fun box(): String = B<Int>().foo(1, 2)
+"####,
+        ),
+        (
+            "traits/kt3315",
+            "kt3315.kt",
+            r####"interface B<T> {
+    fun foo(dd: T): T = dd
+}
+
+class A: B<Int>
+
+fun box(): String {
+    val a = A()
+    return "OK"
+}
+"####,
+        ),
+        (
+            "traits/kt3500",
+            "kt3500.kt",
+            r####"interface BK {
+    fun foo(): String = 10.toString()
+}
+
+interface KTrait: BK {
+    override fun foo() = 30.toString()
+}
+
+class A : BK, KTrait {
+
+}
+
+fun box(): String {
+    return if (A().foo() == "30") "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "try/catch3",
+            "catch3.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    try {
+        sb.appendLine("Before")
+        throw Error("Error happens")
+        sb.appendLine("After")
+    } catch (e: Throwable) {
+        sb.appendLine("Caught Throwable")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Before
+        Caught Throwable
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/catch4",
+            "catch4.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    try {
+        sb.appendLine("Before")
+        throw Error("Error happens")
+        sb.appendLine("After")
+    } catch (e: Exception) {
+        sb.appendLine("Caught Exception")
+    } catch (e: Error) {
+        sb.appendLine("Caught Error")
+    } catch (e: Throwable) {
+        sb.appendLine("Caught Throwable")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Before
+        Caught Error
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/catch5",
+            "catch5.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    try {
+        try {
+            sb.appendLine("Before")
+            foo()
+            sb.appendLine("After")
+        } catch (e: Exception) {
+            sb.appendLine("Caught Exception")
+        }
+
+        sb.appendLine("After nested try")
+
+    } catch (e: Error) {
+        sb.appendLine("Caught Error")
+    } catch (e: Throwable) {
+        sb.appendLine("Caught Throwable")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Before
+        Caught Error
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+fun foo() {
+    throw Error("Error happens")
+    sb.appendLine("After in foo()")
+}
+"####,
+        ),
+        (
+            "try/catch6",
+            "catch6.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    try {
+        sb.appendLine("Before")
+        foo()
+        sb.appendLine("After")
+    } catch (e: Exception) {
+        sb.appendLine("Caught Exception")
+    } catch (e: Error) {
+        sb.appendLine("Caught Error")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Before
+        Caught Error
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+
+fun foo() {
+    try {
+        throw Error("Error happens")
+    } catch (e: Exception) {
+        sb.appendLine("Caught Exception")
+    }
+}
+"####,
+        ),
+        (
+            "try/catch8",
+            "catch8.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    try {
+        throw Error("Error happens")
+    } catch (e: Throwable) {
+        val message = e.message
+        if (message != null) {
+            sb.appendLine(message)
+        }
+    }
+
+    assertEquals("""
+        Error happens
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/finally1",
+            "finally1.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+
+    try {
+        sb.appendLine("Try")
+    } finally {
+        sb.appendLine("Finally")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Try
+        Finally
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/finally10",
+            "finally10.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+    while (true) {
+        try {
+            continue
+        } finally {
+            sb.appendLine("Finally")
+            break
+        }
+    }
+
+    sb.appendLine("After")
+
+    assertEquals("""
+        Finally
+        After
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/finally12",
+            "finally12.kt",
+            r####"fun box(): String {
+    var x: Any = 42
+    do {
+        try {
+            throw Exception()
+        } catch(e: Throwable) {
+            x = "OK"
+            break
+            x = 117
+        } finally {
+            return x.toString()
+        }
+    } while (false)
+}
+"####,
+        ),
+        (
+            "try/finally13",
+            "finally13.kt",
+            r####"fun box(): String {
+    var result = "fail"
+
+    try {
+        var x: Any = "OK"
+
+        try {
+            throw Error()
+            x = 42
+        } catch (e: Exception) {
+            x = 43
+        } finally {
+            result = x.toString()
+        }
+    } catch (_: Throwable) { }
+
+    return result
+}
+"####,
+        ),
+        (
+            "try/finally14",
+            "finally14.kt",
+            r####"fun box(): String {
+    var result = "fail"
+
+    try {
+        var x: Any = "OK"
+
+        try {
+            throw Error()
+            x = 42
+        } catch (e: Throwable) {
+            throw Error()
+            x = 43
+        } finally {
+            result = x.toString()
+        }
+    } catch (_: Throwable) { }
+
+    return result
+}
+"####,
+        ),
+        (
+            "try/finally15",
+            "finally15.kt",
+            r####"fun box(): String {
+    var result = "fail"
+
+    try {
+        var x: Any = 42
+
+        try {
+            try {
+                throw Error()
+            } finally {
+                x = "OK"
+            }
+            x = 117
+        } finally {
+            result = x.toString()
+        }
+    } catch (_: Throwable) { }
+
+    return result
+}
+"####,
+        ),
+        (
+            "try/finally2",
+            "finally2.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+
+    try {
+        sb.appendLine("Try")
+        throw Error("Error happens")
+        sb.appendLine("After throw")
+    } catch (e: Error) {
+        sb.appendLine("Caught Error")
+    } finally {
+        sb.appendLine("Finally")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Try
+        Caught Error
+        Finally
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/finally3",
+            "finally3.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+
+    try {
+        try {
+            sb.appendLine("Try")
+            throw Error("Error happens")
+            sb.appendLine("After throw")
+        } finally {
+            sb.appendLine("Finally")
+        }
+
+        sb.appendLine("After nested try")
+
+    } catch (e: Error) {
+        sb.appendLine("Caught Error")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Try
+        Finally
+        Caught Error
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "try/finally4",
+            "finally4.kt",
+            r####"import kotlin.test.*
+
+val sb = StringBuilder()
+
+fun box(): String {
+
+    try {
+        try {
+            sb.appendLine("Try")
+            throw Error("Error happens")
+            sb.appendLine("After throw")
+        } catch (e: Error) {
+            sb.appendLine("Catch")
+            throw Exception()
+            sb.appendLine("After throw")
+        } finally {
+            sb.appendLine("Finally")
+        }
+
+        sb.appendLine("After nested try")
+
+    } catch (e: Error) {
+        sb.appendLine("Caught Error")
+    } catch (e: Exception) {
+        sb.appendLine("Caught Exception")
+    }
+
+    sb.appendLine("Done")
+
+    assertEquals("""
+        Try
+        Catch
+        Finally
+        Caught Exception
+        Done
+
+    """.trimIndent(), sb.toString())
+    return "OK"
+}
+"####,
+        ),
+        (
+            "typealias/enumEntryQualifier",
+            "enumEntryQualifier.kt",
+            r####"enum class MyEnum {
+    O;
+    companion object {
+        val K = "K"
+    }
+}
+
+typealias MyAlias = MyEnum
+
+fun box() = MyAlias.O.name + MyAlias.K
+"####,
+        ),
+        (
+            "typealias/genericTypeAliasConstructor",
+            "genericTypeAliasConstructor.kt",
+            r####"class Cell<T>(val x: T)
+
+typealias StringCell = Cell<String>
+
+fun box(): String =
+        StringCell("O").x + Cell("K").x
+"####,
+        ),
+        (
+            "typealias/genericTypeAliasConstructor_implicitTypeArguments",
+            "genericTypeAliasConstructor_implicitTypeArguments.kt",
+            r####"class Cell<T>(val x: T)
+
+typealias AliasedCell<TT> = Cell<TT>
+
+class MyClass
+
+val propertyWithImplicitType = AliasedCell(MyClass())
+
+fun box(): String = "OK"
+"####,
+        ),
+        (
+            "typealias/incorrectTypeOfTypealiasForSuspendFunctionalType",
+            "incorrectTypeOfTypealiasForSuspendFunctionalType.kt",
+            r####"typealias MySuspendFunction = suspend (String) -> Unit
+fun foo(function: MySuspendFunction) {}
+fun box() = "OK"
+"####,
+        ),
+        (
+            "typealias/simple",
+            "simple.kt",
+            r####"typealias StringAlias = String
+
+typealias SF<T> = (T) -> StringAlias
+
+val f: SF<StringAlias> = { it }
+
+fun box(): StringAlias = f("OK")
+"####,
+        ),
+        (
+            "typealias/typeAliasAsBareType",
+            "typeAliasAsBareType.kt",
+            r####"typealias L<T> = List<T>
+
+fun box(): String {
+    val test: Collection<Int> = listOf(1, 2, 3)
+    if (test !is L) return "test !is L"
+    val test2 = test as L
+    if (test.toList() != test2) return "test.toList() != test2"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "typealias/typeAliasConstructor",
+            "typeAliasConstructor.kt",
+            r####"class C(val x: String)
+
+typealias Alias = C
+
+fun box(): String = Alias("OK").x
+"####,
+        ),
+        (
+            "typealias/typeAliasConstructorAccessor",
+            "typeAliasConstructorAccessor.kt",
+            r####"class Outer private constructor(public val x: String) {
+    class Nested {
+        fun foo() = OuterAlias("OK")
+    }
+}
+
+typealias OuterAlias = Outer
+
+fun box(): String =
+        Outer.Nested().foo().x
+"####,
+        ),
+        (
+            "typealias/typeAliasFunction",
+            "typeAliasFunction.kt",
+            r####"typealias F<X> = (X?) -> X
+
+fun <T> invoke(f: F<T>) = f(null)
+
+fun box() = invoke<String> { it ?: "OK" }
+"####,
+        ),
+        (
+            "typealias/typeAliasObject",
+            "typeAliasObject.kt",
+            r####"object OHolder {
+    val O = "O"
+}
+
+typealias OHolderAlias = OHolder
+
+class KHolder {
+    companion object {
+        val K = "K"
+    }
+}
+
+typealias KHolderAlias = KHolder
+
+fun box(): String = OHolderAlias.O + KHolderAlias.K
+"####,
+        ),
+        (
+            "typealias/typeAliasSecondaryConstructor",
+            "typeAliasSecondaryConstructor.kt",
+            r####"class C(val x: String) {
+    constructor(n: Int) : this(n.toString())
+}
+
+typealias Alias = C
+
+fun box(): String {
+    val c = Alias(23)
+    if (c.x != "23") return "fail: $c"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/UnitValue",
+            "UnitValue.kt",
+            r####"fun foo() {}
+
+fun box(): String {
+  return if (foo() == Unit) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "unit/kt3634",
+            "kt3634.kt",
+            r####"val c = Unit
+val d = c
+
+fun box(): String {
+    c
+    d
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/kt4212",
+            "kt4212.kt",
+            r####"fun foo(): Any? = bar()
+
+fun bar() {}
+
+fun baz(): Any? {
+    return bar()
+}
+
+fun quux(): Unit? = bar()
+
+fun box(): String {
+    foo()
+
+    if (foo() != Unit) return "Fail 1"
+    if (foo() != bar()) return "Fail 2"
+    if (bar() != baz()) return "Fail 3"
+    if (baz() != quux()) return "Fail 4"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/kt4265",
+            "kt4265.kt",
+            r####"fun <T : Any, R> T.myLet(f: (T) -> R): R = f(this)
+
+fun box(): String {
+    val o: String? = null
+
+    var state = 0
+
+    o?.myLet {
+        state = 1
+    } ?: { state = 2 }.let { it() }
+
+    if (state != 2) return "Fail: $state"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/kt51036",
+            "kt51036.kt",
+            r####"fun box(): String {
+    A().close()
+    return "OK"
+}
+
+class A {
+    companion object;
+    operator fun String.invoke() = Unit
+    fun close() = kotlin.run { "abc" }()
+}
+"####,
+        ),
+        (
+            "unit/nullableUnit",
+            "nullableUnit.kt",
+            r####"fun isNull(x: Unit?) = x == null
+
+fun <T : Any> isNullGeneric(x: T?) = x == null
+
+fun deepIsNull0(x: Unit?) = isNull(x)
+fun deepIsNull(x: Unit?) = deepIsNull0(x)
+
+fun box(): String {
+    if (!isNull(null)) return "Fail 1"
+
+    val x: Unit? = null
+    if (!isNull(x)) return "Fail 2"
+
+    val y = x
+    if (!isNullGeneric(y)) return "Fail 3"
+
+    if (!deepIsNull(x ?: null)) return "Fail 4"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/nullableUnitInWhen1",
+            "nullableUnitInWhen1.kt",
+            r####"fun foo() {}
+
+fun box(): String {
+    when ("A") {
+        "B" -> foo()
+        else -> null
+    }
+
+    foo()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/nullableUnitInWhen2",
+            "nullableUnitInWhen2.kt",
+            r####"fun foo() {}
+
+fun box(): String {
+    when ("A") {
+        "B" -> null
+        else -> foo()
+    }
+
+    foo()
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/nullableUnitInWhen3",
+            "nullableUnitInWhen3.kt",
+            r####"fun foo() {}
+
+fun box(): String {
+    val x = when ("A") {
+        "B" -> foo()
+        else -> null
+    }
+
+    foo()
+    
+    return if (x == null) "OK" else "Fail"
+}
+"####,
+        ),
+        (
+            "unit/unitClassObject",
+            "unitClassObject.kt",
+            r####"fun box(): String {
+    Unit
+
+    val a = Unit
+    val b = Unit
+    if (a != b) return "Fail a != b"
+
+    if (Unit != Unit) return "Fail Unit != Unit"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "unit/unitCoercionWithElvis",
+            "unitCoercionWithElvis.kt",
+            r####"fun launch(x: () -> Unit) {
+    x()
+}
+
+fun box(): String {
+    var result: String = "fail"
+    val job = launch {
+        "test".let {
+            null
+        } ?: run { // this is not called if it is the last thing in the block
+            result = "OK"
+        }
+    }
+
+    return result
+}
+"####,
+        ),
+        (
+            "vararg/kt581",
+            "kt581.kt",
+            r####"package whats.the.difference
+
+fun iarray(vararg a : Int) = a // BUG
+val IntArray.indices: IntRange get() = IntRange(0, lastIndex())
+fun IntArray.lastIndex() = size - 1
+
+fun box() : String {
+    val vals = iarray(789, 678, 567, 456, 345, 234, 123, 12)
+    val diffs = HashSet<Int>()
+    for (i in vals.indices)
+        for (j in i..vals.lastIndex())
+             diffs.add(vals[i] - vals[j])
+    val size = diffs.size
+
+    if (size != 8) return "Fail $size"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "vararg/kt796_797",
+            "kt796_797.kt",
+            r####"operator fun <T> Array<T>?.get(i : Int?) = this!!.get(i!!)
+fun <T> array(vararg t : T) : Array<T> = t as Array<T>
+
+fun box() : String {
+    val a : Array<String>? = array<String>("Str", "Str2")
+    val i : Int? = 1
+    return if(a[i] == "Str2") "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "vararg/varargInFunParam",
+            "varargInFunParam.kt",
+            r####"fun box(): String {
+    if (test1() != "") return "fail 1"
+    if (test1(1) != "1") return "fail 2"
+    if (test1(1, 2) != "12") return "fail 3"
+
+    if (test1(*intArrayOf()) != "") return "fail 4"
+    if (test1(*intArrayOf(1)) != "1") return "fail 5"
+    if (test1(*intArrayOf(1, 2)) != "12") return "fail 6"
+
+    if (test1(p = *intArrayOf()) != "") return "fail 8"
+    if (test1(p = *intArrayOf(1)) != "1") return "fail 9"
+    if (test1(p = *intArrayOf(1, 2)) != "12") return "fail 10"
+
+    if (test2() != "") return "fail 11"
+    if (test2("1") != "1") return "fail 12"
+    if (test2("1", "2") != "12") return "fail 13"
+
+    if (test2(*arrayOf<String>()) != "") return "fail 14"
+    if (test2(*arrayOf<String>("1")) != "1") return "fail 15"
+    if (test2(*arrayOf<String>("1", "2")) != "12") return "fail 16"
+
+    if (test2(p = *arrayOf<String>()) != "") return "fail 18"
+    if (test2(p = *arrayOf<String>("1")) != "1") return "fail 19"
+    if (test2(p = *arrayOf<String>("1", "2")) != "12") return "fail 20"
+
+    if (test3<String>() != "") return "fail 21"
+    if (test3("1") != "1") return "fail 22"
+    if (test3("1", "2") != "12") return "fail 23"
+
+    if (test3(*arrayOf<String>()) != "") return "fail 24"
+    if (test3(*arrayOf<String>("1")) != "1") return "fail 25"
+    if (test3(*arrayOf<String>("1", "2")) != "12") return "fail 26"
+
+    if (test3(p = *arrayOf<String>()) != "") return "fail 28"
+    if (test3(p = *arrayOf<String>("1")) != "1") return "fail 29"
+    if (test3(p = *arrayOf<String>("1", "2")) != "12") return "fail 30"
+
+    return "OK"
+}
+
+fun test1(vararg p: Int): String {
+    var result = ""
+    for (i in p) {
+        result += i
+    }
+    return result
+}
+
+fun test2(vararg p: String): String {
+    var result = ""
+    for (i in p) {
+        result += i
+    }
+    return result
+}
+
+fun <T> test3(vararg p: T): String {
+    var result = ""
+    for (i in p) {
+        result += i
+    }
+    return result
+}
+"####,
+        ),
+        (
+            "vararg/varargInTailrec",
+            "varargInTailrec.kt",
+            r####"tailrec fun <T> foo(vararg items: String, fn: (String) -> T): T = when (items.size) {
+    0 -> fn("")
+    else -> foo(*items.drop(1).toTypedArray()) {
+        fn(items.first())
+    }
+}
+
+fun box(): String {
+    val result = buildString {
+        foo("abcde") { append(it) }
+    }
+    if (result != "abcde") {
+        return "Fail: $result"
+    }
+    return "OK"
+}
+"####,
+        ),
+        (
+            "vararg/varargsAndFunctionLiterals",
+            "varargsAndFunctionLiterals.kt",
+            r####"fun foo(a: Int, vararg b: Int, f: (IntArray) -> String): String {
+  return "test" + a + " " + f(b)
+}
+
+fun box(): String {
+  val test1 = foo(1) {a -> "" + a.size}
+  if (test1 != "test1 0") return test1
+
+  val test2 = foo(2, 2) {a -> "" + a.size}
+  if (test2 != "test2 1") return test2
+
+  val test3 = foo(3, 2, 3) {a -> "" + a.size}
+  if (test3 != "test3 2") return test3
+
+  return "OK"
+}
+"####,
+        ),
+        (
+            "when/callProperty",
+            "callProperty.kt",
+            r####"class C(val p: Boolean) { }
+
+fun box(): String {
+  val c = C(true)
+
+  return if (c.p) "OK" else "fail"
+}
+"####,
+        ),
+        (
+            "when/enumOptimization/expression",
+            "expression.kt",
+            r####"import kotlin.test.assertEquals
+
+enum class Season {
+    WINTER,
+    SPRING,
+    SUMMER,
+    AUTUMN
+}
+
+fun bar1(x : Season) : String {
+    return when (x) {
+        Season.WINTER, Season.SPRING -> "winter_spring"
+        Season.SUMMER -> "summer"
+        else -> "autumn"
+    }
+}
+
+fun bar2(x : Season) : String {
+    return when (x) {
+        Season.WINTER, Season.SPRING -> "winter_spring"
+        Season.SUMMER -> "summer"
+        Season.AUTUMN -> "autumn"
+    }
+}
+
+fun box() : String {
+    assertEquals("winter_spring", bar1(Season.WINTER))
+    assertEquals("winter_spring", bar1(Season.SPRING))
+    assertEquals("summer", bar1(Season.SUMMER))
+    assertEquals("autumn", bar1(Season.AUTUMN))
+
+    assertEquals("winter_spring", bar2(Season.WINTER))
+    assertEquals("winter_spring", bar2(Season.SPRING))
+    assertEquals("summer", bar2(Season.SUMMER))
+    assertEquals("autumn", bar2(Season.AUTUMN))
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/enumOptimization/manyWhensWithinClass",
+            "manyWhensWithinClass.kt",
+            r####"import kotlin.test.assertEquals
+
+enum class Season {
+    WINTER,
+    SPRING,
+    SUMMER,
+    AUTUMN
+}
+
+class A {
+    public fun bar1(x : Season) : String {
+        when (x) {
+            Season.WINTER, Season.SPRING -> return "winter_spring"
+            Season.SPRING -> return "spring"
+            Season.SUMMER -> return "summer"
+            else -> return "autumn";
+        }
+    }
+
+    public fun bar2(y : Season) : String {
+        return bar3(y) { x ->
+            when (x) {
+                Season.WINTER, Season.SPRING -> "winter_spring"
+                Season.SPRING -> "spring"
+                Season.SUMMER -> "summer"
+                else -> "autumn"
+            }
+        }
+    }
+
+    private fun bar3(x : Season, block : (Season) -> String) = block(x)
+}
+
+fun box() : String {
+    val a = A()
+
+    assertEquals("winter_spring", a.bar1(Season.WINTER))
+    assertEquals("winter_spring", a.bar1(Season.SPRING))
+    assertEquals("summer", a.bar1(Season.SUMMER))
+    assertEquals("autumn", a.bar1(Season.AUTUMN))
+
+    assertEquals("winter_spring", a.bar2(Season.WINTER))
+    assertEquals("winter_spring", a.bar2(Season.SPRING))
+    assertEquals("summer", a.bar2(Season.SUMMER))
+    assertEquals("autumn", a.bar2(Season.AUTUMN))
+
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/enumOptimization/nullableEnum",
+            "nullableEnum.kt",
+            r####"enum class E {
+    A,
+    B
+}
+
+fun mytest(e: E?) = when (e) {
+    E.A -> "Fail A"
+    null -> "OK"
+    E.B -> "Fail B"
+}
+
+fun box(): String {
+    return mytest(null)
+}
+"####,
+        ),
+        (
+            "when/exhaustiveWhenReturn",
+            "exhaustiveWhenReturn.kt",
+            r####"enum class A { V }
+
+fun box(): String {
+    val a: A = A.V
+    when (a) {
+        A.V -> return "OK"
+    }
+}
+"####,
+        ),
+        (
+            "when/integralWhenWithNoInlinedConstants2",
+            "integralWhenWithNoInlinedConstants2.kt",
+            r####"fun foo1(x: Int): Boolean {
+    when(x) {
+        2 + 2 -> return true
+        else -> return false
+    }
+}
+
+fun foo2(x: Int): Boolean {
+    when(x) {
+        Int.MAX_VALUE -> return true
+        else -> return false
+    }
+}
+
+fun box(): String {
+    if(!foo1(4)) return "FAIL: foo1(4) must be true"
+    if(foo1(1)) return "FAIL: foo1(1) must be false"
+
+    if(!foo2(Int.MAX_VALUE)) return "FAIL: foo2(Int.MAX_VALUE) must be true"
+    if(foo2(1)) return "FAIL: foo2(1) must be false"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/kt55993",
+            "kt55993.kt",
+            r####"fun test(boolean: Boolean) {
+    if (boolean) { // Breakpoint
+        throw IllegalArgumentException()
+    }
+    val x: Int
+}
+
+fun box(): String {
+    test(false)
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/multipleEntries",
+            "multipleEntries.kt",
+            r####"fun foo(x: Any) =
+        when (x) {
+            0, 1 -> "bit"
+            else -> "something"
+        }
+
+fun box(): String {
+    if (foo(0) != "bit") return "Fail 0"
+    if (foo(1) != "bit") return "Fail 1"
+    if (foo(2) != "something") return "Fail 2"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/noElseInStatement",
+            "noElseInStatement.kt",
+            r####"fun box(): String {
+    val x = 1
+    when (x) {
+        1 -> return "OK"
+    }
+    return "Fail 1"
+}
+"####,
+        ),
+        (
+            "when/sealedWhenInitialization",
+            "sealedWhenInitialization.kt",
+            r####"sealed class A {
+    object B : A()
+
+    class C : A()
+}
+
+fun box(): String {
+    val a: A = A.C()
+    val b: Boolean
+    when (a) {
+        A.B -> b = true
+        is A.C -> b = false
+    }
+    return if (!b) "OK" else "FAIL"
+}
+"####,
+        ),
+        (
+            "when/stringOptimization/nullability",
+            "nullability.kt",
+            r####"import kotlin.test.assertEquals
+
+fun foo1(x : String?) : String {
+    when (x) {
+        "abc", "cde" -> return "abc_cde"
+        "efg", "ghi", null -> return "efg_ghi"
+    }
+
+    return "other"
+}
+
+fun foo2(x : String?) : String {
+    when (x) {
+        "abc", "cde" -> return "abc_cde"
+        "efg", "ghi" -> return "efg_ghi"
+        else -> return "other"
+    }
+}
+
+fun box() : String {
+    assertEquals("abc_cde", foo1("abc"))
+    assertEquals("abc_cde", foo1("cde"))
+    assertEquals("efg_ghi", foo1("efg"))
+    assertEquals("efg_ghi", foo1("ghi"))
+    assertEquals("efg_ghi", foo1(null))
+
+    assertEquals("other",   foo1("xyz"))
+
+    assertEquals("abc_cde", foo2("abc"))
+    assertEquals("abc_cde", foo2("cde"))
+    assertEquals("efg_ghi", foo2("efg"))
+    assertEquals("efg_ghi", foo2("ghi"))
+
+
+    assertEquals("other",   foo2("xyz"))
+    assertEquals("other",   foo2(null))
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/switchOptimizationMultipleMixedConditions",
+            "switchOptimizationMultipleMixedConditions.kt",
+            r####"private fun parse(text: String) = when (text) {
+    Numbers.One.name, "one", "1" -> 1
+    Numbers.Two.name, "two", "2" -> 2
+    else -> -1
+}
+
+enum class Numbers {
+    One,
+    Two,
+}
+
+fun box(): String {
+
+    val oneParsed = parse("one")
+    if (oneParsed != 1) return "'one' should map to '1' but was $oneParsed"
+
+    val OneParsed = parse("One")
+    if (OneParsed != 1) return "'One' should map to '1' but was $OneParsed"
+
+    return "OK"
+}
+"####,
+        ),
+        (
+            "when/whenSubjectVariable/equalityWithSubjectVariable",
+            "equalityWithSubjectVariable.kt",
+            r####"val x = 1
+
+fun box() =
+    when (val y = x) {
+        1 -> "OK"
+        else -> "Fail: $y"
+    }
+"####,
+        ),
+        (
+            "when/whenSubjectVariable/kt27161_string",
+            "kt27161_string.kt",
+            r####"fun peek() = "A"
+
+fun box(): String {
+    val x = when (val s = peek()) {
+        "A" -> "OK"
+        "B" -> "B"
+        else -> "other $s"
+    }
+    return x
+}
+"####,
+        ),
+    ];
 }
 
 mod rust {

@@ -819,6 +819,14 @@ impl Binary {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Through {
+    Static,
+    Virtual,
+    Interface,
+    Special,
+}
+
 #[derive(Clone, Debug)]
 pub enum Expression {
     Int(i64),
@@ -846,6 +854,14 @@ pub enum Expression {
         arguments: Vec<Expression>,
 
         held: Vec<Written>,
+    },
+    Invoke {
+        on: Option<Box<Expression>>,
+        owner: String,
+        name: String,
+        descriptor: String,
+        through: Through,
+        arguments: Vec<Expression>,
     },
     New {
         what: Written,
@@ -1071,7 +1087,7 @@ pub struct Pattern {
     pub taken: bool,
 }
 
-fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
+pub fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
     let answering = constants.iter().any(|held| held.body.is_some());
     let named = Written::Named(unit.name.clone(), Vec::new());
     let array_of = Written::Array(Box::new(named.clone()));
@@ -2425,7 +2441,7 @@ fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression))
         | Expression::Super
         | Expression::Name(_) => {}
         Expression::Field { of, .. } => visit(of),
-        Expression::Call { on, arguments, .. } => {
+        Expression::Call { on, arguments, .. } | Expression::Invoke { on, arguments, .. } => {
             if let Some(on) = on {
                 visit(on);
             }
@@ -6232,7 +6248,12 @@ impl Classpath {
             .map(type_parameters_of)
             .unwrap_or_default();
         for method in &class.methods {
-            if method.access_flags & 0x1000 != 0 {
+            if method.access_flags & 0x1000 != 0
+                && !method.name.ends_with("$default")
+                && !method
+                    .descriptor
+                    .contains("Lkotlin/jvm/internal/DefaultConstructorMarker;")
+            {
                 continue;
             }
             let Some((parameters, returns)) = read_descriptor(&method.descriptor) else {
@@ -6404,6 +6425,20 @@ impl Classpath {
 
     pub fn find_methods(&self, owner: &str, name: &str, arity: usize) -> Vec<Signature> {
         let mut found: Vec<Signature> = Vec::new();
+        if name == "<init>" {
+            if let Some(known) = self.known.get(owner) {
+                found.extend(
+                    known
+                        .methods
+                        .iter()
+                        .filter(|held| held.name == name && held.parameters.len() == arity)
+                        .cloned(),
+                );
+            }
+            if !found.is_empty() {
+                return found;
+            }
+        }
         for one in self.ancestors(owner) {
             let Some(known) = self.known.get(&one) else {
                 continue;
@@ -9135,7 +9170,7 @@ fn resolve_named_within(
     exists(&in_lang).then_some(in_lang)
 }
 
-pub(crate) const THE_LIBRARY: &[(&str, &str)] = &[
+pub const THE_LIBRARY: &[(&str, &str)] = &[
     (
         "java.lang",
         r####"
@@ -12021,6 +12056,27 @@ impl Emitter<'_> {
     }
 
     fn push_string(&mut self, text: &str) {
+        if crate::binary::modified_utf8::encode(text).len() > 65_535 {
+            let characters: Vec<char> = text.chars().collect();
+            let mut first = true;
+            for piece in characters.chunks(16_000) {
+                let piece: String = piece.iter().collect();
+                self.push_string(&piece);
+                if !first {
+                    let concat = self.pool.method(
+                        "java/lang/String",
+                        "concat",
+                        "(Ljava/lang/String;)Ljava/lang/String;",
+                        false,
+                    );
+                    self.op2(0xb6, concat);
+                    self.pops(2);
+                    self.pushes(&Type::Object("java/lang/String".to_string(), Vec::new()));
+                }
+                first = false;
+            }
+            return;
+        }
         let index = self.pool.string(text);
         if index <= 255 {
             self.op1(0x12, index as u8);
@@ -12929,6 +12985,22 @@ impl Emitter<'_> {
                 arguments,
                 held,
             } => self.call(on.as_deref(), *super_call, name, arguments, held, line),
+            Expression::Invoke {
+                on,
+                owner,
+                name,
+                descriptor,
+                through,
+                arguments,
+            } => self.invoke_exactly(
+                on.as_deref(),
+                owner,
+                name,
+                descriptor,
+                *through,
+                arguments,
+                line,
+            ),
             Expression::Assign {
                 target,
                 operator,
@@ -13361,6 +13433,13 @@ impl Emitter<'_> {
         true
     }
 
+    fn written_in_kotlin(&self) -> bool {
+        self.unit
+            .source
+            .as_deref()
+            .is_some_and(|held| held.ends_with(".kt"))
+    }
+
     fn covers(&self, held: &[String], thrown: &str) -> bool {
         held.iter().any(|one| {
             one == thrown
@@ -13372,7 +13451,7 @@ impl Emitter<'_> {
     }
 
     fn it_can_throw(&mut self, named: &str, line: u32) -> Result<(), Diagnostic> {
-        if !self.is_answered_for(named) {
+        if self.written_in_kotlin() || !self.is_answered_for(named) {
             return Ok(());
         }
         if self.caught.iter().any(|held| self.covers(held, named)) {
@@ -14338,6 +14417,63 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_exactly(
+        &mut self,
+        on: Option<&Expression>,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        through: Through,
+        arguments: &[Expression],
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let Some((parameters, returns)) = read_descriptor(descriptor) else {
+            return Err(at(
+                "EJ227",
+                line,
+                1,
+                format!(
+                    "`{}.{name}` has a signature this compilation cannot read.",
+                    owner.replace('/', ".")
+                ),
+            ));
+        };
+        let static_ = through == Through::Static;
+        if let Some(on) = on {
+            let found = self.value(on, line)?;
+            if !found.is_reference() {
+                return Err(at(
+                    "EJ221",
+                    line,
+                    1,
+                    format!("A {} has no method `{name}`.", found.readable()),
+                ));
+            }
+        } else if !static_ {
+            self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
+        }
+        self.arguments_for(&parameters, arguments, line)?;
+        let index = self
+            .pool
+            .method(owner, name, descriptor, through == Through::Interface);
+        let taken: i32 = parameters.iter().map(|one| i32::from(one.width())).sum();
+        match through {
+            Through::Static => self.op2(0xb8, index),
+            Through::Virtual => self.op2(0xb6, index),
+            Through::Special => self.op2(0xb7, index),
+            Through::Interface => {
+                self.code.push(0xb9);
+                self.code.extend_from_slice(&index.to_be_bytes());
+                self.code.push((taken + 1) as u8);
+                self.code.push(0);
+            }
+        }
+        self.pops(taken + i32::from(!static_));
+        self.pushes(&returns);
+        Ok(returns)
+    }
+
     fn call(
         &mut self,
         on: Option<&Expression>,
@@ -14807,8 +14943,13 @@ impl Emitter<'_> {
                                 );
                                 self.arguments_for_signature(&shaped, arguments, line)?;
                                 let descriptor = signature.descriptor();
+                                let qualifying = if signature.interface {
+                                    signature.owner.clone()
+                                } else {
+                                    owner.clone()
+                                };
                                 let index = self.pool.method(
-                                    &signature.owner,
+                                    &qualifying,
                                     name,
                                     &descriptor,
                                     signature.interface,
@@ -14860,9 +15001,14 @@ impl Emitter<'_> {
                 self.arguments_for_signature(&shaped, arguments, line)?;
                 let descriptor = signature.descriptor();
 
-                let index =
-                    self.pool
-                        .method(&signature.owner, name, &descriptor, signature.interface);
+                let qualifying = if signature.interface {
+                    signature.owner.clone()
+                } else {
+                    owner.clone()
+                };
+                let index = self
+                    .pool
+                    .method(&qualifying, name, &descriptor, signature.interface);
                 self.op2(0xb8, index);
                 let taken: i32 = signature
                     .parameters
@@ -16236,6 +16382,7 @@ impl Emitter<'_> {
                     }
                 }
 
+                Cleanup::Unlock(_, _) if !self.reachable => {}
                 Cleanup::Unlock(slot, what) => {
                     let (slot, what) = (*slot, what.clone());
                     self.load(slot, &what);
@@ -16300,6 +16447,9 @@ impl Emitter<'_> {
     }
 
     fn statement(&mut self, statement: &Positioned<Statement>) -> Result<(), Diagnostic> {
+        if !self.reachable {
+            return Ok(());
+        }
         let line = statement.line;
 
         let began = self.code.len() as u16;
@@ -16440,7 +16590,8 @@ impl Emitter<'_> {
                 self.statement(then)?;
                 match otherwise {
                     Some(otherwise) => {
-                        let over = (!never_completes(&then.node)).then(|| self.jump(0xa7));
+                        let over = (self.reachable && !never_completes(&then.node))
+                            .then(|| self.jump(0xa7));
                         self.land(to_else);
                         self.a_branch_lands_here();
                         self.statement(otherwise)?;
@@ -16645,7 +16796,7 @@ impl Emitter<'_> {
                 for one in body {
                     self.statement(one)?;
                 }
-                let leaves = body.iter().any(|one| never_completes(&one.node));
+                let leaves = !self.reachable || body.iter().any(|one| never_completes(&one.node));
                 self.finallys.truncate(outer);
                 if !leaves {
                     self.load(held, &found);
@@ -16820,8 +16971,11 @@ impl Emitter<'_> {
                     return Err(self.no_such_level(label.as_deref(), line, "break"));
                 };
                 self.run_finallys(self.levels[index].finallys)?;
-                let jump = self.jump(0xa7);
-                self.levels[index].breaks.push(jump);
+                if self.reachable {
+                    let jump = self.jump(0xa7);
+                    self.levels[index].breaks.push(jump);
+                }
+                self.reachable = false;
                 Ok(())
             }
             Statement::Continue(label) => {
@@ -16829,8 +16983,11 @@ impl Emitter<'_> {
                     return Err(self.no_such_level(label.as_deref(), line, "continue"));
                 };
                 self.run_finallys(self.levels[index].finallys)?;
-                let jump = self.jump(0xa7);
-                self.levels[index].continues.push(jump);
+                if self.reachable {
+                    let jump = self.jump(0xa7);
+                    self.levels[index].continues.push(jump);
+                }
+                self.reachable = false;
                 Ok(())
             }
             Statement::Return(value) => {
@@ -17215,7 +17372,8 @@ impl Emitter<'_> {
                 self.close();
             }
 
-            if arm.arrow && !arm.body.iter().any(|one| never_completes(&one.node)) {
+            if arm.arrow && self.reachable && !arm.body.iter().any(|one| never_completes(&one.node))
+            {
                 ends.push(self.jump(0xa7));
             }
         }
@@ -18337,9 +18495,11 @@ impl Emitter<'_> {
         let ended = self.code.len();
 
         let mut outs: Vec<Pending> = Vec::new();
-        if !body.iter().any(|one| never_completes(&one.node)) {
+        if self.reachable && !body.iter().any(|one| never_completes(&one.node)) {
             self.run_finallys(outer)?;
-            outs.push(self.jump(0xa7));
+            if self.reachable {
+                outs.push(self.jump(0xa7));
+            }
         }
 
         let throwable = Type::Object("java/lang/Throwable".to_string(), Vec::new());
@@ -18390,9 +18550,11 @@ impl Emitter<'_> {
             self.close();
             caught.push((body_begun, body_ended));
 
-            if !catch.body.iter().any(|one| never_completes(&one.node)) {
+            if self.reachable && !catch.body.iter().any(|one| never_completes(&one.node)) {
                 self.run_finallys(outer)?;
-                outs.push(self.jump(0xa7));
+                if self.reachable {
+                    outs.push(self.jump(0xa7));
+                }
             }
         }
 
@@ -21192,6 +21354,7 @@ fn what_a_lambda_gives(body: &[Positioned<Statement>], expression: bool) -> Give
         return match body.first().map(|one| &one.node) {
             Some(Statement::Express(
                 Expression::Call { .. }
+                | Expression::Invoke { .. }
                 | Expression::Assign { .. }
                 | Expression::Step { .. }
                 | Expression::New { .. }
@@ -21297,7 +21460,10 @@ fn folded_constant(field: &Field, what: &Type, pool: &mut Pool) -> Option<u16> {
         (Expression::Long(value), Type::Long) => Some(pool.long(*value)),
         (Expression::Float(value), Type::Float) => Some(pool.float(*value as f32)),
         (Expression::Double(value), Type::Double) => Some(pool.double(*value)),
-        (Expression::Str(text), Type::Object(named, _)) if named == "java/lang/String" => {
+        (Expression::Str(text), Type::Object(named, _))
+            if named == "java/lang/String"
+                && crate::binary::modified_utf8::encode(text).len() <= 65_535 =>
+        {
             Some(pool.string(text))
         }
         _ => None,
@@ -22909,6 +23075,10 @@ fn parsed_and_declared(
         }
     }
 
+    Ok(units_declared(declared, classpath))
+}
+
+fn units_declared(declared: Vec<(String, Unit)>, classpath: &Classpath) -> Declared {
     let mut together = classpath.clone();
 
     let inside: Vec<Unit> = declared
@@ -22936,7 +23106,11 @@ fn parsed_and_declared(
         together.declare(unit);
     }
 
-    Ok((declared, together))
+    (declared, together)
+}
+
+pub fn units_seen_together(declared: Vec<(String, Unit)>, classpath: &Classpath) -> Classpath {
+    units_declared(declared, classpath).1
 }
 
 pub fn declared_together(
@@ -22950,8 +23124,22 @@ pub fn compile_together(
     sources: &[(String, String)],
     classpath: &Classpath,
 ) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
-    let (declared, mut together) = parsed_and_declared(sources, classpath)?;
+    let (declared, together) = parsed_and_declared(sources, classpath)?;
+    compile_declared(declared, together)
+}
 
+pub fn compile_units_together(
+    units: Vec<(String, Unit)>,
+    classpath: &Classpath,
+) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+    let (declared, together) = units_declared(units, classpath);
+    compile_declared(declared, together)
+}
+
+fn compile_declared(
+    declared: Vec<(String, Unit)>,
+    mut together: Classpath,
+) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
     for (index, (label, unit)) in declared.iter().enumerate() {
         let name = unit.internal_name();
         if let Some((first, _)) = declared

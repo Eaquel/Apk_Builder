@@ -580,6 +580,9 @@ pub fn repairs_for(root: &str, refusal: &Diagnostic) -> Vec<Repair> {
     if refusal.code.starts_with("EJ") {
         return java_repairs(root, refusal);
     }
+    if refusal.code.starts_with("EK") {
+        return crate::compilers::kotlin_fixer::repairs_for(root, refusal);
+    }
     let mut out = Vec::new();
     match refusal.code.as_str() {
         "EB042" | "EB045" => {

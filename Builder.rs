@@ -15,8 +15,12 @@ pub mod compilers {
     pub mod java_diagnostic;
     #[path = "Compilers/Java/Java_Fixer.rs"]
     pub mod java_fixer;
-    #[path = "Compilers/Kotlin.rs"]
+    #[path = "Compilers/Kotlin/Kotlin.rs"]
     pub mod kotlin;
+    #[path = "Compilers/Kotlin/Kotlin_Diagnostic.rs"]
+    pub mod kotlin_diagnostic;
+    #[path = "Compilers/Kotlin/Kotlin_Fixer.rs"]
+    pub mod kotlin_fixer;
     #[path = "Compilers/Rust.rs"]
     pub mod rust;
 }
@@ -890,6 +894,13 @@ pub mod diag {
             }
             if self.code.starts_with("EJ") && crate::speech::chosen() != "en" {
                 if let Some(translated) = crate::compilers::java_diagnostic::explain(&self.code) {
+                    if translated != self.message {
+                        return translated;
+                    }
+                }
+            }
+            if self.code.starts_with("EK") && crate::speech::chosen() != "en" {
+                if let Some(translated) = crate::compilers::kotlin_diagnostic::explain(&self.code) {
                     if translated != self.message {
                         return translated;
                     }
@@ -44965,6 +44976,7 @@ pub mod maven {
     pub const POM: &str = "pom";
     pub const MODULE: &str = "module";
     pub const ALIGNED_FAMILIES: &[&str] = &["org.jetbrains.kotlin:kotlin-stdlib"];
+    pub const KOTLIN_STANDARD_LIBRARY: &str = "org.jetbrains.kotlin:kotlin-stdlib:2.4.10";
     pub const GRADLE_METADATA: &str = "published-with-gradle-metadata";
     pub const JAR: &str = "jar";
     pub const AAR: &str = "aar";
@@ -45844,6 +45856,20 @@ pub mod maven {
                 });
             }
         }
+        let writes_kotlin = settings.languages.iter().any(|one| one == "kotlin")
+            || crate::builder::holds_kotlin(root);
+        let named_already = roots
+            .iter()
+            .any(|held| held.coordinate.named() == "org.jetbrains.kotlin:kotlin-stdlib");
+        if writes_kotlin && !named_already {
+            if let Some(found) = Coordinate::parse(KOTLIN_STANDARD_LIBRARY) {
+                roots.push(Need {
+                    coordinate: found,
+                    strictly: false,
+                    excluded: Vec::new(),
+                });
+            }
+        }
         Ok(Some((roots, unresolved)))
     }
 
@@ -45991,6 +46017,8 @@ pub mod scaffold {
 
     pub const JAVA_FOLDER: &str = "Java";
 
+    pub const KOTLIN_FOLDER: &str = "Kotlin";
+
     pub const ASSETS_FOLDER: &str = "Assets";
 
     pub const JAVA_RESOURCES_FOLDER: &str = "Java_Resources";
@@ -46003,7 +46031,7 @@ pub mod scaffold {
 
     pub const LANGUAGES: &[(&str, &str, &str, bool)] = &[
         ("java", JAVA_FOLDER, ".java", true),
-        ("kotlin", "Kotlin", ".kt", false),
+        ("kotlin", KOTLIN_FOLDER, ".kt", false),
         ("cpp", "Native", ".cpp", false),
         ("rust", "Rust", ".rs", false),
     ];
@@ -46011,7 +46039,7 @@ pub mod scaffold {
     pub fn compiled_languages() -> impl Iterator<Item = &'static str> {
         LANGUAGES
             .iter()
-            .filter(|(_, _, _, compiled)| *compiled)
+            .filter(|(name, _, _, compiled)| *compiled || *name == "kotlin")
             .map(|(name, _, _, _)| *name)
     }
 
@@ -58570,7 +58598,7 @@ public final class R {{
             .unwrap_or_default();
         let mut found = Vec::new();
         for (language, folder, suffix, compiled) in crate::scaffold::LANGUAGES {
-            if *compiled {
+            if *compiled || *language == "kotlin" {
                 continue;
             }
             let asked = declared.iter().any(|one| one == language);
@@ -58646,11 +58674,39 @@ public final class R {{
         let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
-        if sources.is_empty() && generated.is_empty() {
+        let mut kotlin_paths = Vec::new();
+        gather_by_suffix(&folder, ".kt", &mut kotlin_paths);
+        gather_by_suffix(
+            &std::path::Path::new(root).join(crate::scaffold::KOTLIN_FOLDER),
+            ".kt",
+            &mut kotlin_paths,
+        );
+        kotlin_paths.sort();
+        kotlin_paths.dedup();
+        if sources.is_empty() && generated.is_empty() && kotlin_paths.is_empty() {
             return library_classes(root, &[]);
         }
 
         sources.sort();
+        let mut kotlin = Vec::new();
+        for path in &kotlin_paths {
+            let bytes = std::fs::read(path).map_err(|why| {
+                fail("EB040", "A Kotlin file could not be read.")
+                    .with_context(format!("Path: {}", path.display()))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            let named = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            let text = String::from_utf8(bytes).map_err(|_| {
+                crate::compilers::kotlin::at("EK302", 0, 0, "A Kotlin source file is not text.")
+                    .with_context(format!("File: {named}"))
+            })?;
+            kotlin.push((named, text));
+        }
 
         let mut read = Vec::new();
         for path in &sources {
@@ -58677,7 +58733,30 @@ public final class R {{
         crate::progress::keep_going()?;
         let made = crate::room::generated(&read, &classpath)?;
         read.extend(made);
-        let produced = crate::compilers::java::compile_together(&read, &classpath)?;
+        let produced = if kotlin.is_empty() {
+            crate::compilers::java::compile_together(&read, &classpath)?
+        } else {
+            let jars = kotlin_jars(root)?;
+            let carries_the_library = jars.iter().any(|bytes| {
+                let mut sink = Sink::new();
+                crate::archive::read(bytes, &mut sink)
+                    .is_some_and(|archive| archive.entry("kotlin/Unit.class").is_some())
+            });
+            if !carries_the_library {
+                return Err(crate::compilers::kotlin::at(
+                    "EK301",
+                    0,
+                    0,
+                    "Kotlin source was found and the Kotlin standard library is not among the dependencies.",
+                )
+                .with_context(format!("Dependency: {}", crate::maven::KOTLIN_STANDARD_LIBRARY))
+                .with_suggestion(
+                    "Add the Kotlin standard library to the project's dependencies and let them be fetched.",
+                ));
+            }
+            crate::progress::keep_going()?;
+            crate::compilers::kotlin::compile_mixed(&kotlin, &read, &classpath, jars)?
+        };
         let min_sdk = crate::settings::held(root)?
             .map(|held| held.min_sdk)
             .or_else(|| {
@@ -59656,6 +59735,44 @@ public final class R {{
             None => (held, 0),
         };
         Some((major.parse().ok()?, minor))
+    }
+
+    pub fn holds_kotlin(root: &str) -> bool {
+        let mut found = Vec::new();
+        for folder in [crate::scaffold::KOTLIN_FOLDER, crate::scaffold::JAVA_FOLDER] {
+            gather_by_suffix(&std::path::Path::new(root).join(folder), ".kt", &mut found);
+            if !found.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn kotlin_jars(root: &str) -> Result<Vec<Vec<u8>>, Diagnostic> {
+        let folder = std::path::Path::new(root).join(crate::scaffold::LIBRARY_FOLDER);
+        let mut paths: Vec<std::path::PathBuf> = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|held| held == "jar" || held == "aar")
+                        && path.file_name().is_none_or(|held| held != "android.jar")
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        paths.sort();
+        let mut out = Vec::new();
+        for path in paths {
+            let bytes = std::fs::read(&path).map_err(|why| {
+                fail("EB045", "A dependency could not be read.")
+                    .with_context(format!("Path: {}", path.display()))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            out.extend(jars_within(&path, &bytes)?);
+        }
+        Ok(out)
     }
 
     fn gather_java(folder: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {

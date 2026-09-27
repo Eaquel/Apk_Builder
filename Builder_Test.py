@@ -149,7 +149,7 @@ def check_layout() -> str:
         raise AssertionError("missing: " + ", ".join(missing))
 
     compilers = sorted(path.name for path in COMPILERS.glob("*.rs"))
-    expected = ["Cpp.rs", "Kotlin.rs", "Rust.rs"]
+    expected = ["Cpp.rs", "Rust.rs"]
     if compilers != expected:
         raise AssertionError(f"Compilers holds {compilers}, expected {expected}")
 
@@ -157,6 +157,11 @@ def check_layout() -> str:
     wanted_java = ["Java.rs", "Java_Diagnostic.rs", "Java_Fixer.rs"]
     if java != wanted_java:
         raise AssertionError(f"Compilers/Java holds {java}, expected {wanted_java}")
+
+    kotlin = sorted(path.name for path in (COMPILERS / "Kotlin").glob("*.rs"))
+    wanted_kotlin = ["Kotlin.rs", "Kotlin_Diagnostic.rs", "Kotlin_Fixer.rs"]
+    if kotlin != wanted_kotlin:
+        raise AssertionError(f"Compilers/Kotlin holds {kotlin}, expected {wanted_kotlin}")
 
     if (ROOT / "Examples").exists():
         raise AssertionError("Examples is gone from this tree")
@@ -175,6 +180,7 @@ def check_layout() -> str:
     ]
     sources += sorted(COMPILERS.glob("*.rs"))
     sources += sorted((COMPILERS / "Java").glob("*.rs"))
+    sources += sorted((COMPILERS / "Kotlin").glob("*.rs"))
     carried = [
         str(path.relative_to(ROOT))
         for path in sources
@@ -211,6 +217,7 @@ def check_comments() -> str:
     ]
     watched += sorted(COMPILERS.glob("*.rs"))
     watched += sorted((COMPILERS / "Java").glob("*.rs"))
+    watched += sorted((COMPILERS / "Kotlin").glob("*.rs"))
     watched += [ANDROID]
 
     found: list[str] = []
@@ -611,7 +618,12 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
     def plain(text: str) -> str:
         return re.sub(r"\\\n\s*", "", text).replace('\\"', '"').replace("\\'", "'").strip()
 
-    for path in [CORE, ANDROID] + sorted(COMPILERS.glob("*.rs")) + sorted((COMPILERS / "Java").glob("*.rs")):
+    for path in (
+        [CORE, ANDROID]
+        + sorted(COMPILERS.glob("*.rs"))
+        + sorted((COMPILERS / "Java").glob("*.rs"))
+        + sorted((COMPILERS / "Kotlin").glob("*.rs"))
+    ):
         text = path.read_text(encoding="utf-8")
         text = text.split("\n#[cfg(test)]\n", 1)[0]
         for found in re.finditer(r'"(E(?:[A-Z]\d{3}|\d{4}))"', text):
@@ -684,21 +696,23 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
                 if "{" not in part:
                     lines.add(part)
 
-    fixer = (COMPILERS / "Java" / "Java_Fixer.rs").read_text(encoding="utf-8")
-    opened = fixer.index("pub const REPAIR_TITLES: &[&str] = &[")
-    closed = fixer.index("\n];", opened)
-    for said in re.finditer(r'"((?:[^"\\]|\\.)*)"\s*,', fixer[opened + 36:closed]):
-        lines.add(plain(said.group(1)))
+    for folder in ("Java", "Kotlin"):
+        fixer = (COMPILERS / folder / f"{folder}_Fixer.rs").read_text(encoding="utf-8")
+        opened = fixer.index("pub const REPAIR_TITLES: &[&str] = &[")
+        closed = fixer.index("\n];", opened)
+        for said in re.finditer(r'"((?:[^"\\]|\\.)*)"\s*,', fixer[opened + 36:closed]):
+            lines.add(plain(said.group(1)))
 
-    catalogue = (COMPILERS / "Java" / "Java_Diagnostic.rs").read_text(encoding="utf-8")
-    opened = catalogue.index("pub const CATALOGUE: &[(&str, &str)] = &[")
-    closed = catalogue.index("\n];", opened)
-    for said in re.finditer(
-        r'\(\s*"EJ\d{3}"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)\s*,',
-        catalogue[opened:closed],
-        re.S,
-    ):
-        lines.add(plain(said.group(1)))
+    for folder, prefix in (("Java", "EJ"), ("Kotlin", "EK")):
+        catalogue = (COMPILERS / folder / f"{folder}_Diagnostic.rs").read_text(encoding="utf-8")
+        opened = catalogue.index("pub const CATALOGUE: &[(&str, &str)] = &[")
+        closed = catalogue.index("\n];", opened)
+        for said in re.finditer(
+            r'\(\s*"' + prefix + r'\d{3}"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)\s*,',
+            catalogue[opened:closed],
+            re.S,
+        ):
+            lines.add(plain(said.group(1)))
 
     return lines, words, woven
 
