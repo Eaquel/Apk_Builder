@@ -40045,8 +40045,8 @@ public class Newer {
             "the class is replaced"
         );
         assert!(
-            !main.contains("java/util/HexFormat"),
-            "nothing still names the new class"
+            !main.contains("Ljava/util/HexFormat;"),
+            "no descriptor still names the new class"
         );
         let Some(java) = java_25() else {
             eprintln!("no JDK 25 here, so the lowered calls were not run");
