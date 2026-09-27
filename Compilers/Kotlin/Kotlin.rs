@@ -9833,6 +9833,7 @@ pub mod lower {
         pub type_map: HashMap<String, Ty>,
         pub file: usize,
         pub depth: usize,
+        pub called_from: (usize, Spot),
     }
 
     pub struct Method<'c, 'w, 'a> {
@@ -9903,7 +9904,33 @@ pub mod lower {
         }
 
         pub fn fail(&self, code: &str, message: &str) -> Diagnostic {
-            at(code, self.spot.line, self.spot.column, message.to_string())
+            let label_of = |file: usize| {
+                self.c
+                    .files
+                    .get(file)
+                    .map(|held| held.label.clone())
+                    .unwrap_or_default()
+            };
+            let (file, spot) = self
+                .inline
+                .iter()
+                .find(|frame| !label_of(frame.called_from.0).starts_with("<prelude>"))
+                .filter(|_| self.file_label().starts_with("<prelude>"))
+                .map_or((self.file, self.spot), |frame| frame.called_from);
+            let mut error = at(code, spot.line, spot.column, message.to_string());
+            if file != self.file {
+                error = error.with_context(format!(
+                    "Library: {} line {}",
+                    self.file_label(),
+                    self.spot.line
+                ));
+            }
+            let label = label_of(file);
+            if label.is_empty() {
+                error
+            } else {
+                super::labelled(error, &label)
+            }
         }
 
         pub fn file_label(&self) -> String {
@@ -10191,10 +10218,13 @@ pub mod lower {
         }
 
         pub fn smart_type(&self, path: &str) -> Option<Ty> {
+            let ranges: Vec<(usize, usize)> = self.hides.iter().map(|one| one.scopes).collect();
             self.smart
                 .iter()
+                .enumerate()
                 .rev()
-                .flat_map(|frame| frame.iter().rev())
+                .filter(|(index, _)| !hidden(&ranges, *index))
+                .flat_map(|(_, frame)| frame.iter().rev())
                 .find(|(held, _)| held == path)
                 .map(|(_, ty)| ty.clone())
         }
@@ -12497,7 +12527,8 @@ pub mod lower {
                 barrier: false,
             });
             self.open();
-            if !setup.is_empty() {
+            let tested_inside = !setup.is_empty();
+            if tested_inside {
                 self.emit_all(setup);
                 self.emit(S::If {
                     condition: not(test.clone()),
@@ -12513,11 +12544,7 @@ pub mod lower {
             self.loops.pop();
             let condition = test;
             let looping = S::While {
-                condition: if inner
-                    .first()
-                    .is_some_and(|first| matches!(first.node, S::If { .. }))
-                    && matches!(condition, J::Name(_))
-                {
+                condition: if tested_inside {
                     J::Boolean(true)
                 } else {
                     condition
@@ -12964,6 +12991,28 @@ pub mod lower {
             }
         }
 
+        pub fn implicit_receiver(&self, wanted: &Ty) -> Option<Val> {
+            let receivers = self.visible_receivers();
+            let innermost = receivers.len().checked_sub(1)?;
+            let loose = wanted.is_error() || wanted.mentions_params();
+            for (index, receiver) in receivers.iter().enumerate().rev() {
+                let mut value = Val::new(receiver.j.clone(), receiver.ty.clone());
+                if let Some(ty) = self.smart_type(&receiver_path(receiver)).or_else(|| {
+                    if index == innermost {
+                        self.smart_type("this")
+                    } else {
+                        None
+                    }
+                }) {
+                    value.ty = ty;
+                }
+                if loose || self.assignable(&value.ty, wanted, &[]).is_some() {
+                    return Some(value);
+                }
+            }
+            None
+        }
+
         pub fn class_as_value(&mut self, name: &str) -> Lowered<Val> {
             let info = self.c.world.class(name).ok_or_else(|| {
                 self.fail("EK200", "A name is not a type this compilation knows.")
@@ -13024,6 +13073,53 @@ pub mod lower {
             out
         }
 
+        fn lateinit_check(&mut self, reference: &Expr) -> Lowered<Option<Val>> {
+            let Expr::Reference {
+                receiver: holder,
+                name,
+                ..
+            } = reference.unparenthesized()
+            else {
+                return Ok(None);
+            };
+            let holders: Vec<Val> = match holder {
+                Some(held) => match self.thing(held)? {
+                    Thing::Value(value) => vec![value],
+                    _ => Vec::new(),
+                },
+                None => self
+                    .visible_receivers()
+                    .iter()
+                    .rev()
+                    .map(|one| Val::new(one.j.clone(), one.ty.clone()))
+                    .collect(),
+            };
+            for value in holders {
+                let Some((info, _)) = self.find_property(&value.ty, name) else {
+                    continue;
+                };
+                if !info.lateinit {
+                    continue;
+                }
+                let (class, field_name, static_) = info.field.clone().unwrap_or((
+                    info.owner.clone(),
+                    info.name.clone(),
+                    info.static_,
+                ));
+                let read = if static_ {
+                    static_field(&class, &field_name)
+                } else {
+                    let owner = self.coerce(value, &Ty::class(&class));
+                    field(owner, &field_name)
+                };
+                return Ok(Some(Val::new(
+                    binary(java::Binary::NotEqual, read, J::Null),
+                    Ty::boolean(),
+                )));
+            }
+            Ok(None)
+        }
+
         fn thing_inner(&mut self, expr: &Expr) -> Lowered<Thing> {
             match expr {
                 Expr::Name(name, _) => self.name_thing(name),
@@ -13039,6 +13135,11 @@ pub mod lower {
                     }
                     if name == "class" {
                         return Ok(Thing::Value(self.class_literal(receiver, false)?));
+                    }
+                    if name == "isInitialized" {
+                        if let Some(found) = self.lateinit_check(receiver)? {
+                            return Ok(Thing::Value(found));
+                        }
                     }
                     if name == "java" {
                         if let Expr::ClassLiteral(inner, _) = receiver.unparenthesized() {
@@ -13223,13 +13324,45 @@ pub mod lower {
             Ok(Val::with_rep(J::Name(name), ty, rep))
         }
 
+        pub fn materialize_inline(&mut self, inline: &Rc<InlineLambda>) -> Lowered<Val> {
+            let saved_hides = self.hides.split_off(inline.hides.min(self.hides.len()));
+            self.hides.push(Hide {
+                scopes: (inline.scopes, self.scopes.len()),
+                receivers: (inline.receivers, self.receivers.len()),
+                targets: (inline.targets, self.targets.len()),
+                loops: (inline.loops, self.loops.len()),
+                inline: (inline.inline, self.inline.len()),
+            });
+            let saved_cx = core::mem::replace(&mut self.cx, inline.cx.clone());
+            let function = self.reified(&inline.function);
+            let made = self.function_object(&Expr::Lambda(inline.lambda.clone()), &function);
+            self.cx = saved_cx;
+            self.hides.pop();
+            self.hides.extend(saved_hides);
+            made
+        }
+
+        pub fn forwarded_inline(&self, expr: &Expr) -> Option<Rc<InlineLambda>> {
+            match expr.unparenthesized() {
+                Expr::Name(name, _) => match &self.lookup_local(name)?.slot {
+                    Slot::Inline(inline) => Some(inline.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+
         pub fn name_thing(&mut self, name: &str) -> Lowered<Thing> {
             if let Some(local) = self.lookup_local(name).cloned() {
-                if let Slot::Inline(..) = local.slot {
-                    return Err(self.fail(
-                        "EK211",
-                        "A lambda given to an inline function can only be called.",
-                    ));
+                if let Slot::Inline(inline) = &local.slot {
+                    if !matches!(inline.function, Ty::Function(..)) {
+                        return Err(self.fail(
+                            "EK211",
+                            "A lambda given to an inline function can only be called.",
+                        ));
+                    }
+                    let inline = inline.clone();
+                    return Ok(Thing::Value(self.materialize_inline(&inline)?));
                 }
                 let mut value = self.local_value(&local);
                 if let Some(ty) = self.smart_type(name) {
@@ -13280,6 +13413,14 @@ pub mod lower {
                         return Ok(Thing::Value(found));
                     }
                     let info = self.c.world.class(&current);
+                    if let Some(held) = &info {
+                        if held.enum_entries.iter().any(|entry| entry == name) {
+                            return Ok(Thing::Value(Val::new(
+                                static_field(&current, name),
+                                held.as_ty(),
+                            )));
+                        }
+                    }
                     walking = info.and_then(|held| held.outer.clone());
                 }
             }
@@ -13698,7 +13839,11 @@ pub mod lower {
                 for (param, argument) in info.type_parameters.iter().zip(current.arguments()) {
                     map.insert(param.name.clone(), argument);
                 }
-                for function in info.functions.iter().filter(|one| one.name == name) {
+                for function in info
+                    .functions
+                    .iter()
+                    .filter(|one| one.name == name && !hidden_jdk_member(&class, one))
+                {
                     let key = format!(
                         "{}({})",
                         function.name,
@@ -14065,6 +14210,42 @@ pub mod lower {
         }
     }
 
+    pub fn hidden_jdk_member(class: &str, function: &FunctionInfo) -> bool {
+        if !function.java {
+            return false;
+        }
+        let arity = function.parameters.len();
+        match class {
+            "java/lang/String" => matches!(
+                (function.name.as_str(), arity),
+                ("lines", 0)
+                    | ("repeat", 1)
+                    | ("isBlank", 0)
+                    | ("strip", 0)
+                    | ("stripLeading", 0)
+                    | ("stripTrailing", 0)
+                    | ("indent", 1)
+                    | ("transform", 1)
+                    | ("stripIndent", 0)
+                    | ("translateEscapes", 0)
+                    | ("formatted", _)
+                    | ("describeConstable", 0)
+                    | ("resolveConstantDesc", 1)
+                    | ("splitWithDelimiters", 2)
+            ),
+            "java/lang/CharSequence" => matches!(function.name.as_str(), "isEmpty"),
+            "java/util/List"
+            | "java/util/ArrayList"
+            | "java/util/SequencedCollection"
+            | "java/util/SequencedSet"
+            | "java/util/Collection" => matches!(
+                (function.name.as_str(), arity),
+                ("removeFirst", 0) | ("removeLast", 0) | ("reversed", 0)
+            ),
+            _ => false,
+        }
+    }
+
     pub fn receiver_path(receiver: &Receiver) -> String {
         match &receiver.label {
             Some(label) => format!("this@{label}"),
@@ -14286,6 +14467,30 @@ pub mod lower {
                             class: None,
                             implicit_companions: false,
                         });
+                    }
+                    if property.initializer.is_some() || property.delegate.is_some() {
+                        let primary = class
+                            .and_then(|held| self.class_decl(held))
+                            .and_then(|held| held.tree.primary.clone());
+                        for parameter in primary.iter().flat_map(|held| held.parameters.iter()) {
+                            let ty = match &parameter.type_ref {
+                                Some(held) => self.resolve_type(&method.cx, held)?,
+                                None => Ty::Error,
+                            };
+                            let ty = if parameter.vararg() {
+                                Ty::array_of(ty)
+                            } else {
+                                ty
+                            };
+                            method.bind_local(Local {
+                                name: parameter.name.clone(),
+                                jvm: parameter.name.clone(),
+                                rep: rep_of(&ty),
+                                ty,
+                                mutable: false,
+                                slot: Slot::Plain,
+                            });
+                        }
                     }
                     if let Some(expr) = &property.initializer {
                         return Ok(method.value(expr, None)?.ty);
@@ -14981,7 +15186,7 @@ pub mod lower {
                 let deferred = matches!(
                     argument.value.unparenthesized(),
                     Expr::Lambda(_) | Expr::Anonymous(_) | Expr::Reference { .. }
-                );
+                ) || self.forwarded_inline(&argument.value).is_some();
                 if deferred {
                     out.push(Given {
                         name: argument.name.clone(),
@@ -14992,17 +15197,32 @@ pub mod lower {
                     marks.push(self.mark());
                     continue;
                 }
-                let mark = self.mark();
+                let mut mark = self.mark();
                 let value = self.value(&argument.value, None)?;
                 if self.mark() != mark {
-                    for (index, held) in out.iter_mut().enumerate() {
-                        if let ArgValue::Ready(earlier) = &held.value {
-                            if !is_stable(&earlier.j) {
-                                let spilled =
-                                    self.spill_before(marks[index].min(mark), earlier.clone());
-                                held.value = ArgValue::Ready(spilled);
+                    for index in 0..out.len() {
+                        let ArgValue::Ready(earlier) = &out[index].value else {
+                            continue;
+                        };
+                        if is_stable(&earlier.j) {
+                            continue;
+                        }
+                        let earlier = earlier.clone();
+                        let at = marks[index].min(mark);
+                        let before = self.mark();
+                        let spilled = self.spill_before(at, earlier);
+                        if self.mark() != before {
+                            for (other, held) in marks.iter_mut().enumerate() {
+                                if *held > at || other > index && *held == at {
+                                    *held += 1;
+                                }
+                            }
+                            marks[index] = at + 1;
+                            if mark >= at {
+                                mark += 1;
                             }
                         }
+                        out[index].value = ArgValue::Ready(spilled);
                     }
                 }
                 out.push(Given {
@@ -15161,6 +15381,22 @@ pub mod lower {
         ) -> Lowered<Val> {
             if let Ty::Function(parts, _) = &function.ty {
                 let parts = parts.clone();
+                let mut given = given;
+                if let Some(wanted) = &parts.receiver {
+                    if given.len() == parts.parameters.len() {
+                        if let Some(receiver) = self.implicit_receiver(wanted) {
+                            given.insert(
+                                0,
+                                Given {
+                                    name: None,
+                                    spread: false,
+                                    value: ArgValue::Ready(receiver),
+                                    trailing: false,
+                                },
+                            );
+                        }
+                    }
+                }
                 let mut info = FunctionInfo::new("invoke", &function_class(&parts));
                 info.interface = true;
                 let mut all: Vec<Ty> = parts.receiver.iter().cloned().collect();
@@ -15222,9 +15458,7 @@ pub mod lower {
                 }) {
                     value.ty = ty;
                 }
-                if candidates.is_empty()
-                    && (value.ty.primitive_name().is_some() || value.ty.is_array())
-                {
+                if candidates.is_empty() {
                     if let Some(found) = self.builtin_call(&value, name, &given)? {
                         return Ok(found);
                     }
@@ -15316,7 +15550,10 @@ pub mod lower {
                                     });
                                 }
                             }
-                            if held.java_source || !held.kotlin {
+                            if held.java_source
+                                || !held.kotlin
+                                || held.kind == Kind::Enum && matches!(name, "values" | "valueOf")
+                            {
                                 for function in held
                                     .functions
                                     .iter()
@@ -15667,7 +15904,7 @@ pub mod lower {
                 .class(class)
                 .ok_or_else(|| self.unresolved(class))?;
             if info.is_interface() {
-                if let Some(found) = self.sam_constructor(&info, &given)? {
+                if let Some(found) = self.sam_constructor(&info, &given, explicit, expected)? {
                     return Ok(found);
                 }
             }
@@ -15704,15 +15941,41 @@ pub mod lower {
             self.finish_call(candidates, given, explicit, expected, "<init>")
         }
 
-        fn sam_constructor(&mut self, info: &ClassInfo, given: &[Given]) -> Lowered<Option<Val>> {
+        fn sam_constructor(
+            &mut self,
+            info: &ClassInfo,
+            given: &[Given],
+            explicit: &[Ty],
+            expected: Option<&Ty>,
+        ) -> Lowered<Option<Val>> {
             if given.len() != 1 {
                 return Ok(None);
             }
             if let ArgValue::Deferred(expr) = &given[0].value {
-                let ty = info.as_ty();
+                let declared = info.as_ty().arguments().len();
+                let arguments: Vec<Arg> = if explicit.len() == declared && declared > 0 {
+                    explicit.iter().map(|one| Arg::Is(one.clone())).collect()
+                } else {
+                    match expected.map(|wanted| self.reified(wanted)) {
+                        Some(Ty::Class {
+                            name, arguments, ..
+                        }) if name == info.name
+                            && arguments.len() == declared
+                            && !arguments.iter().any(|one| match one {
+                                Arg::Star => false,
+                                Arg::Is(held) | Arg::Out(held) | Arg::In(held) => {
+                                    held.mentions_params() || held.is_error()
+                                }
+                            }) =>
+                        {
+                            arguments
+                        }
+                        _ => (0..declared).map(|_| Arg::Star).collect(),
+                    }
+                };
                 let ty = Ty::Class {
                     name: info.name.clone(),
-                    arguments: ty.arguments().into_iter().map(|_| Arg::Star).collect(),
+                    arguments,
                     null: Null::Not,
                 };
                 let value = self.function_object(expr, &ty)?;
@@ -16103,7 +16366,8 @@ pub mod lower {
                                 None => match &given[*index].value {
                                     ArgValue::Ready(held) => held.clone(),
                                     ArgValue::Deferred(expr) => {
-                                        self.function_object(expr, &element_ty)?
+                                        let formal = parameter.ty.substitute(&subst);
+                                        self.function_object(expr, &formal)?
                                     }
                                 },
                             };
@@ -17138,6 +17402,17 @@ pub mod lower {
                                 .unwrap_or_else(|| Ty::any().nullable()),
                         },
                     };
+                    let element = if name == "Array"
+                        && explicit.is_empty()
+                        && expected.and_then(|held| held.array_element()).is_none()
+                    {
+                        match arguments.get(1).map(|one| one.value.clone()) {
+                            Some(init) => self.loop_lambda_result(&init).unwrap_or(element),
+                            None => element,
+                        }
+                    } else {
+                        element
+                    };
                     let element = self.reified(&element);
                     let size = if name == "emptyArray" {
                         Val::new(J::Int(0), Ty::int())
@@ -17229,6 +17504,26 @@ pub mod lower {
                 _ => {}
             }
             Ok(None)
+        }
+
+        fn loop_lambda_result(&mut self, init: &Expr) -> Option<Ty> {
+            let units_before = self.c.units.borrow().len();
+            let temp_before = self.c.temp.get();
+            self.c.dry.set(self.c.dry.get() + 1);
+            self.open();
+            let made = self.lower_loop_lambda(
+                init,
+                &Ty::function(vec![Ty::int()], Ty::Error),
+                vec![Val::new(J::Int(0), Ty::int())],
+                None,
+            );
+            self.close();
+            self.c.dry.set(self.c.dry.get() - 1);
+            self.c.units.borrow_mut().truncate(units_before);
+            self.c.temp.set(temp_before.max(self.c.temp.get()));
+            made.ok()
+                .map(|(_, value)| value.ty)
+                .filter(|ty| !ty.is_error() && !ty.is_unit() && !ty.mentions_params())
         }
 
         pub fn lower_loop_lambda(
@@ -17947,11 +18242,15 @@ pub mod lower {
                             ));
                         }
                         ArgValue::Deferred(expr) => {
-                            let lambda_like = matches!(expr.unparenthesized(), Expr::Lambda(_))
-                                && !parameter.noinline
+                            let inlinable = !parameter.noinline
                                 && !parameter.crossinline
                                 && matches!(ty, Ty::Function(..));
-                            if lambda_like {
+                            let lambda_like =
+                                matches!(expr.unparenthesized(), Expr::Lambda(_)) && inlinable;
+                            let forwarded = self.forwarded_inline(expr).filter(|_| inlinable);
+                            if let Some(inline) = forwarded {
+                                bound.push((parameter.name.clone(), ty, None, Some(inline), None));
+                            } else if lambda_like {
                                 let Expr::Lambda(lambda) = expr.unparenthesized() else {
                                     unreachable!()
                                 };
@@ -17977,6 +18276,7 @@ pub mod lower {
                                     &vars,
                                     &mut subst,
                                 );
+                                let ty = parameter.ty.substitute(&subst);
                                 bound.push((parameter.name.clone(), ty, Some(value), None, None));
                             }
                         }
@@ -18102,6 +18402,7 @@ pub mod lower {
                 type_map: subst.clone(),
                 file,
                 depth: inline_at,
+                called_from: (saved_file, self.spot),
             });
             self.open();
             if let Some(held) = &dispatch {
@@ -18298,6 +18599,14 @@ pub mod lower {
                     ArgValue::Deferred(expr) => {
                         let value = self.value(&expr, None)?;
                         values.push(value);
+                    }
+                }
+            }
+            if let Some(wanted) = &parts.receiver {
+                if values.len() == parts.parameters.len() {
+                    let wanted = self.reified(wanted);
+                    if let Some(receiver) = self.implicit_receiver(&wanted) {
+                        values.insert(0, receiver);
                     }
                 }
             }
@@ -20326,11 +20635,6 @@ pub mod lower {
                 }
                 unit.above.push(written(above, true, &class_params, &[]));
             }
-            if let Some(outer) = &info.outer {
-                if info.inner {
-                    unit.outer = Some(outer.clone());
-                }
-            }
             let this_ty = info.as_ty();
             let mut extra: Vec<java::Unit> = Vec::new();
             let mut constants: Vec<java::Constant> = Vec::new();
@@ -21686,12 +21990,44 @@ pub mod lower {
             } else {
                 self.this_value(None)?
             };
-            let property = Val::with_rep(
-                J::Null,
-                Ty::class("kotlin/reflect/KProperty").nullable(),
-                Rep::Ref("kotlin/reflect/KProperty".to_string()),
-            );
+            let property = self.property_metadata(info);
             self.operator_call(holder, "getValue", vec![this, property])
+        }
+
+        pub fn property_metadata(&mut self, info: &PropertyInfo) -> Val {
+            let (getter, descriptor) = info
+                .getter
+                .as_ref()
+                .map(|(name, descriptor, _)| (name.clone(), descriptor.clone()))
+                .unwrap_or_else(|| (getter_name(&info.name), "()Ljava/lang/Object;".to_string()));
+            let class = if self.static_context || info.static_ {
+                "kotlin/jvm/internal/PropertyReference0Impl"
+            } else {
+                "kotlin/jvm/internal/PropertyReference1Impl"
+            };
+            let owner = J::ClassLiteral {
+                of: named(&info.owner),
+                line: self.spot.line,
+            };
+            let ty = Ty::Class {
+                name: "kotlin/reflect/KProperty".to_string(),
+                arguments: vec![Arg::Star],
+                null: Null::Not,
+            };
+            Val::with_rep(
+                J::New {
+                    what: named(class),
+                    arguments: vec![
+                        owner,
+                        J::Str(info.name.clone()),
+                        J::Str(format!("{getter}{descriptor}")),
+                        J::Int(0),
+                    ],
+                    outer: None,
+                },
+                ty,
+                Rep::Ref("kotlin/reflect/KProperty".to_string()),
+            )
         }
 
         pub fn delegate_set(
@@ -21711,11 +22047,7 @@ pub mod lower {
             } else {
                 self.this_value(None)?
             };
-            let property = Val::with_rep(
-                J::Null,
-                Ty::class("kotlin/reflect/KProperty").nullable(),
-                Rep::Ref("kotlin/reflect/KProperty".to_string()),
-            );
+            let property = self.property_metadata(info);
             let result = self.operator_call(holder, "setValue", vec![this, property, value])?;
             self.statement_of(result);
             Ok(())
