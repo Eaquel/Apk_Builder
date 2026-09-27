@@ -755,25 +755,31 @@ JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeBuildUnsigned(
 JNIEXPORT jstring JNICALL Java_com_apk_builder_Builder_nativeSealPackage(
     JNIEnv *env, jobject , jstring packagePath, jstring sealedPath,
     jstring certificate, jstring signatureV2, jstring signatureV3,
-    jstring signatureV31, jint minSdk, jint maxSdk) {
+    jstring signatureV31, jstring signatureV32, jstring quantumSeed,
+    jint minSdk, jint maxSdk) {
   std::string pathHeld;
   std::string sealedHeld;
   std::string certificateHeld;
   std::string firstHeld;
   std::string secondHeld;
   std::string thirdHeld;
+  std::string fourthHeld;
+  std::string seedHeld;
   if (!JavaStringToUtf8(env, packagePath, &pathHeld) ||
       !JavaStringToUtf8(env, sealedPath, &sealedHeld) ||
       !JavaStringToUtf8(env, certificate, &certificateHeld) ||
       !JavaStringToUtf8(env, signatureV2, &firstHeld) ||
       !JavaStringToUtf8(env, signatureV3, &secondHeld) ||
-      !JavaStringToUtf8(env, signatureV31, &thirdHeld)) {
+      !JavaStringToUtf8(env, signatureV31, &thirdHeld) ||
+      !JavaStringToUtf8(env, signatureV32, &fourthHeld) ||
+      !JavaStringToUtf8(env, quantumSeed, &seedHeld)) {
     return nullptr;
   }
   return HandBack(env, apk_builder_seal_package(
                            pathHeld.c_str(), sealedHeld.c_str(),
                            certificateHeld.c_str(), firstHeld.c_str(),
                            secondHeld.c_str(), thirdHeld.c_str(),
+                           fourthHeld.c_str(), seedHeld.c_str(),
                            static_cast<uint32_t>(minSdk),
                            static_cast<uint32_t>(maxSdk)));
 }

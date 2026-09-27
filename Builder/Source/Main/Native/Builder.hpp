@@ -112,6 +112,7 @@ char *apk_builder_build_unsigned(const char *root, const char *package_path,
 char *apk_builder_seal_package(const char *package_path, const char *sealed_path,
                         const char *certificate, const char *signature_v2,
                         const char *signature_v3, const char *signature_v31,
+                        const char *signature_v32, const char *quantum_seed,
                         uint32_t min_sdk, uint32_t max_sdk);
 
 char *apk_builder_list_built(const char *directory);

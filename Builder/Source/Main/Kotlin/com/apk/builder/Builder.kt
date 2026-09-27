@@ -741,6 +741,8 @@ object Builder {
         signatureV2: String,
         signatureV3: String,
         signatureV31: String,
+        signatureV32: String,
+        quantumSeed: String,
         minSdk: Int,
         maxSdk: Int,
     ): String
@@ -1102,7 +1104,14 @@ data class BuildOutcome(
                 signatureSchemes = packaged?.optJSONObject("verified")
                     ?.optJSONArray("schemes")
                     ?.let { array -> (0 until array.length()).map { array.getString(it) } }
-                    .orEmpty(),
+                    .orEmpty()
+                    .let { found ->
+                        when {
+                            root.optString("sideSignaturePath").isEmpty() -> found
+                            "v3.1" in found -> found + listOf("v4", "v4.1")
+                            else -> found + "v4"
+                        }
+                    },
                 signaturesVerified =
                     packaged?.optJSONObject("verified")?.optLong("signaturesVerified") ?: 0L,
                 signatureKeyMatches = packaged?.optJSONObject("verified")
@@ -18506,6 +18515,8 @@ class BuilderActivity : Activity() {
             DeviceKey.hex(signedFirst),
             signedWith("toSignV3"),
             signedWith("toSignV31"),
+            signedWith("toSignV32"),
+            DeviceKey.quantumSeed(this),
             prepared.optInt("minSdk"),
             prepared.optInt("maxSdk"),
         )
@@ -21984,6 +21995,24 @@ internal object DeviceKey {
     private fun store(): KeyStore = KeyStore.getInstance(STORE).apply { load(null) }
 
     fun present(): Boolean = runCatching { store().containsAlias(ALIAS) }.getOrDefault(false)
+
+    const val QUANTUM_SEED = "apk_builder_signing.mldsa"
+
+    const val QUANTUM_SEED_BYTES = 32
+
+    fun quantumSeed(context: Context): String {
+        val held = File(context.noBackupFilesDir, QUANTUM_SEED)
+        val existing = runCatching { held.readBytes() }.getOrNull()
+        if (existing != null && existing.size == QUANTUM_SEED_BYTES) {
+            return hex(existing)
+        }
+        val fresh = ByteArray(QUANTUM_SEED_BYTES)
+        java.security.SecureRandom().nextBytes(fresh)
+        return runCatching {
+            held.writeBytes(fresh)
+            hex(fresh)
+        }.getOrDefault("")
+    }
 
     fun make(): Boolean = runCatching {
         val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, STORE)

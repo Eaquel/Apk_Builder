@@ -5429,6 +5429,117 @@ final class NeverCalled {
     }
 
     #[test]
+    fn members_nothing_reaches_leave_the_classes_that_stay() {
+        const MAIN: &str = r#"
+package com.tr.yt.deep;
+
+import android.app.Activity;
+import android.os.Bundle;
+
+public final class App extends Activity {
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        Model one = new Model();
+        one.used = 3;
+        setTitle("" + one.twice());
+        Runnable later = one;
+        later.run();
+    }
+}
+"#;
+        const MODEL: &str = r#"
+package com.tr.yt.deep;
+
+final class Model implements Runnable {
+    int used;
+    int neverTouched;
+
+    int twice() {
+        return used * 2;
+    }
+
+    int neverCalled() {
+        return neverTouched + 7;
+    }
+
+    public void run() {
+    }
+
+    @Override
+    public String toString() {
+        return "model";
+    }
+}
+"#;
+        let directory = temp_directory("builder-deep");
+        let root = directory.join("Deep");
+        let folder = root.to_str().unwrap().to_string();
+        crate::scaffold::create(
+            &folder,
+            &crate::scaffold::Spec {
+                package: "com.tr.yt.deep".to_string(),
+                label: "Deep".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        let sources = root.join("Java");
+        std::fs::create_dir_all(&sources).unwrap();
+        for (name, text) in [("App.java", MAIN), ("Model.java", MODEL)] {
+            std::fs::write(sources.join(name), text.trim_start()).unwrap();
+        }
+        let project = crate::builder::from_project(&folder).expect("it compiles");
+        let roots = vec!["Lcom/tr/yt/deep/App;".to_string()];
+        let (kept, trimmed) = crate::shrink::apply_deep(
+            project.code.clone(),
+            &roots,
+            &crate::shrink::Keep::default(),
+        );
+        let model = kept
+            .iter()
+            .find(|one| one.descriptor == "Lcom/tr/yt/deep/Model;")
+            .expect("the model stays");
+        let methods: Vec<&str> = model
+            .direct_methods
+            .iter()
+            .chain(model.virtual_methods.iter())
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        for wanted in ["<init>", "twice", "run", "toString"] {
+            assert!(methods.contains(&wanted), "{wanted} stays: {methods:?}");
+        }
+        assert!(!methods.contains(&"neverCalled"), "{methods:?}");
+        let fields: Vec<&str> = model
+            .instance_fields
+            .iter()
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        assert_eq!(fields, vec!["used"]);
+        let app = kept
+            .iter()
+            .find(|one| one.descriptor == "Lcom/tr/yt/deep/App;")
+            .expect("the activity stays");
+        assert!(app
+            .virtual_methods
+            .iter()
+            .any(|one| one.reference.name == "onCreate"));
+        assert!(trimmed.methods >= 1 && trimmed.fields >= 1, "{trimmed:?}");
+        assert_eq!(
+            crate::shrink::handlers_in(&[
+                "<Button android:onClick=\"sayHello\" /><View android:onClick=\"@{x}\" />"
+                    .to_string()
+            ]),
+            vec!["sayHello".to_string()]
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn generated_sources_are_compiled_even_when_the_java_folder_is_empty() {
         let directory = temp_directory("builder-generated");
         let root = directory.join("Gen");
@@ -6107,6 +6218,138 @@ final class Doubling extends Counter {
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!("rotation block: apksigner verified v2, v3 and v3.1 on one package");
+    }
+
+    #[test]
+    fn ml_dsa_signs_what_it_verifies_and_nothing_else() {
+        let keys = crate::mldsa::Keys::from_seed(&[7u8; 32]);
+        assert_eq!(keys.public.len(), crate::mldsa::PUBLIC_KEY_BYTES);
+        let said = b"apk builder signs for the quantum age";
+        let signature = keys.sign(said, &[3u8; 32]);
+        assert_eq!(signature.len(), crate::mldsa::SIGNATURE_BYTES);
+        assert!(crate::mldsa::verify(&keys.public, said, &signature));
+        assert!(!crate::mldsa::verify(
+            &keys.public,
+            b"something else",
+            &signature
+        ));
+        let mut bent = signature.clone();
+        bent[100] ^= 1;
+        assert!(!crate::mldsa::verify(&keys.public, said, &bent));
+        let other = crate::mldsa::Keys::from_seed(&[8u8; 32]);
+        assert!(!crate::mldsa::verify(&other.public, said, &signature));
+        assert_eq!(
+            crate::mldsa::raw_public_key(&keys.public_key_info()),
+            Some(keys.public.clone())
+        );
+        assert_eq!(
+            crate::der::to_hex(&crate::mldsa::shake256(&[b"abc"]).bytes(32)).to_lowercase(),
+            "483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739"
+        );
+        assert_eq!(
+            crate::der::to_hex(&crate::mldsa::shake128(&[b""]).bytes(16)).to_lowercase(),
+            "7f9c2ba4e88f827d616045507605853e"
+        );
+    }
+
+    #[test]
+    fn a_quantum_certificate_holds_its_own_signature() {
+        let keys = crate::mldsa::Keys::from_seed(&[11u8; 32]);
+        let first = crate::certificate::quantum(&keys).expect("the certificate is made");
+        let again = crate::certificate::quantum(&keys).expect("the certificate is made");
+        assert_eq!(first, again, "one seed always makes the same certificate");
+        let held = crate::x509::own_signature(&first).expect("it parses");
+        assert!(held.self_issued && held.checkable && held.holds, "{held:?}");
+        let key_info = crate::x509::Certificate::public_key_info(&first).unwrap();
+        assert_eq!(crate::mldsa::raw_public_key(&key_info), Some(keys.public));
+    }
+
+    #[test]
+    fn a_hybrid_signature_carries_a_v32_block_both_signers_verify() {
+        let (Some(_), Some(_)) = (find_apksigner(), openssl()) else {
+            eprintln!("hybrid block: apksigner or openssl is not available here");
+            return;
+        };
+        let directory = temp_directory("builder-v32");
+        let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
+            eprintln!("hybrid block: openssl could not make a certificate");
+            return;
+        };
+        let key = crate::rsa::parse_private_key(&key_bytes).expect("the key must parse");
+        let (root, sink) = parse_xml(APK_BUILDER_BUILT_MANIFEST);
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let manifest = axml::encode(&root.expect("the manifest must parse")).unwrap();
+        let mut builder = ArchiveBuilder::for_android();
+        builder.add("AndroidManifest.xml", manifest).unwrap();
+        let unsigned = builder.finish().unwrap();
+
+        let quantum = signing::Quantum::from_seed(&[5u8; 32]).expect("the seed is used");
+        let floor = crate::compiler::OLDEST_API;
+        let range = Some((floor, crate::builder::NEWEST_PLATFORM));
+        let signed = signing::sign_hybrid(
+            &unsigned,
+            &key,
+            &certificate,
+            crate::rsa::DigestAlgorithm::Sha256,
+            range,
+            Some(&quantum),
+        )
+        .expect("signing must work");
+
+        let mut own = Sink::new();
+        let read = archive::read(&signed, &mut own).expect("the package must read");
+        let block = signing::find_block(&signed, read.central_directory_offset())
+            .expect("the block must read")
+            .expect("there must be a signing block");
+        for (id, named) in [
+            (signing::V2_BLOCK_ID, "v2"),
+            (signing::V3_BLOCK_ID, "v3"),
+            (signing::V31_BLOCK_ID, "v3.1"),
+            (signing::V32_BLOCK_ID, "v3.2"),
+        ] {
+            assert!(block.value(id).is_some(), "{named} is missing");
+        }
+        let hybrid = signing::parse_signers(
+            block.value(signing::V32_BLOCK_ID).unwrap(),
+            signing::Scheme::V3,
+        )
+        .expect("the v3.2 signers read back");
+        assert_eq!(hybrid.len(), 2, "one classical and one post-quantum signer");
+
+        let mut checking = Sink::new();
+        let report = signing::examine(
+            &signed,
+            read.central_directory_offset(),
+            read.end_record_offset(),
+            &mut checking,
+        );
+        assert!(report.schemes.contains(&"v3.2"), "{:?}", report.schemes);
+        assert!(
+            report.everything_checkable_passed(),
+            "{:?} {:?}",
+            report,
+            checking.entries()
+        );
+
+        let path = directory.join("builder-hybrid.apk");
+        std::fs::write(&path, &signed).unwrap();
+        if let Some(apksigner) = find_apksigner() {
+            let verified = std::process::Command::new(&apksigner)
+                .args(["verify", "--verbose", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&verified.stdout),
+                String::from_utf8_lossy(&verified.stderr)
+            );
+            assert!(
+                verified.status.success(),
+                "apksigner refused the hybrid package:\n{said}"
+            );
+            eprintln!("hybrid block: {said}");
+        }
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
@@ -9296,7 +9539,13 @@ public final class MainActivity extends Activity {
                 .success());
             crate::der::to_hex(&std::fs::read(&signature).unwrap())
         };
-        let (v2, v3, v31) = (signed("toSignV2"), signed("toSignV3"), signed("toSignV31"));
+        let (v2, v3, v31, v32) = (
+            signed("toSignV2"),
+            signed("toSignV3"),
+            signed("toSignV31"),
+            signed("toSignV32"),
+        );
+        let seed = "07".repeat(32);
         let low = asked
             .get("minSdk")
             .and_then(crate::json::Json::integer)
@@ -9313,6 +9562,8 @@ public final class MainActivity extends Activity {
                 c(&v2).as_ptr(),
                 c(&v3).as_ptr(),
                 c(&v31).as_ptr(),
+                c(&v32).as_ptr(),
+                c(&seed).as_ptr(),
                 low,
                 high,
             )
@@ -39561,6 +39812,87 @@ public final class JournalCheck {
             String::from_utf8_lossy(&done.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&done.stdout), expected);
+    }
+
+    #[test]
+    fn newer_library_calls_are_lowered_and_still_answer_the_same() {
+        let source = r#"
+import java.util.*;
+import java.util.stream.*;
+
+public class Newer {
+    public static void main(String[] args) {
+        List<String> list = new ArrayList<>(List.of("b", "c"));
+        list.addFirst("a");
+        list.addLast("d");
+        StringBuilder out = new StringBuilder();
+        out.append(list.getFirst()).append(list.getLast()).append(list.reversed()).append(' ');
+        out.append(list.removeFirst()).append(list.removeLast()).append(list).append(' ');
+        LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+        map.put("x", 1);
+        map.put("y", 2);
+        out.append(map.firstEntry().getKey()).append(map.lastEntry().getValue()).append(' ');
+        out.append("  hi\n  there".stripIndent().replace('\n', '|')).append(' ');
+        out.append("a\\tb".translateEscapes().length()).append(' ');
+        out.append(new StringBuilder().repeat("ab", 3)).append(' ');
+        out.append(HexFormat.of().withUpperCase().formatHex(new byte[] {1, (byte) 0xab})).append(' ');
+        out.append(Arrays.toString(HexFormat.of().parseHex("0aff"))).append(' ');
+        out.append(Stream.of(1, 2, 3, 4).collect(Collectors.teeing(Collectors.counting(), Collectors.summingInt(v -> v), (count, sum) -> count + ":" + sum))).append(' ');
+        out.append(Stream.of(1, 2, 3, 4).collect(Collectors.filtering(v -> v % 2 == 0, Collectors.toList())));
+        out.append("x".indent(2).replace('\n', '|'));
+        System.out.println(out);
+    }
+}
+"#;
+        let made = compile_together(&[("Newer.java".to_string(), source.to_string())], &empty())
+            .expect("it compiles");
+        let lowered = crate::desugar::lowered(made, 30).expect("it lowers");
+        let main = lowered
+            .iter()
+            .find(|(name, _)| name == "Newer.class")
+            .map(|(_, bytes)| String::from_utf8_lossy(bytes).to_string())
+            .expect("the class is there");
+        assert!(
+            main.contains("com/apk/builder/desugar/Backports"),
+            "the calls are lowered"
+        );
+        assert!(
+            main.contains("com/apk/builder/desugar/HexFormat"),
+            "the class is replaced"
+        );
+        assert!(
+            !main.contains("java/util/HexFormat"),
+            "nothing still names the new class"
+        );
+        let Some(java) = java_25() else {
+            eprintln!("no JDK 25 here, so the lowered calls were not run");
+            return;
+        };
+        let directory =
+            std::env::temp_dir().join(format!("builder-lowered-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        for (name, bytes) in &lowered {
+            let path = directory.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let done = std::process::Command::new(java)
+            .arg("-cp")
+            .arg(&directory)
+            .arg("Newer")
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .output()
+            .expect("java runs");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            done.status.success(),
+            "the lowered calls failed:\n{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&done.stdout),
+            "ad[d, c, b, a] ad[b, c] x2 hi|there 3 ababab 01AB [10, -1] 4:10 [2, 4]  x|\n"
+        );
     }
 
     #[test]

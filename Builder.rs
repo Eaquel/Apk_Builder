@@ -14942,6 +14942,24 @@ pub mod x509 {
             return Ok(out);
         }
 
+        if certificate.signature_algorithm.oid == crate::mldsa::OID_TEXT {
+            out.checkable = true;
+            let mut outer = der::Reader::new(data, 0);
+            let whole = outer.expect(tag::SEQUENCE)?;
+            let mut body = whole.reader();
+            let tbs = body.expect(tag::SEQUENCE)?;
+            let signed = der::encode_element(tbs.tag, tbs.contents);
+            let _algorithm = body.expect(tag::SEQUENCE)?;
+            let bits = body.expect(tag::BIT_STRING)?;
+            let key_info = Certificate::public_key_info(data)?;
+            if let (Some((0, signature)), Some(raw)) = (
+                bits.contents.split_first(),
+                crate::mldsa::raw_public_key(&key_info),
+            ) {
+                out.holds = crate::mldsa::verify(&raw, &signed, signature);
+            }
+            return Ok(out);
+        }
         let which = match certificate.signature_algorithm.oid.as_str() {
             "1.2.840.113549.1.1.11" => crate::rsa::DigestAlgorithm::Sha256,
             "1.2.840.113549.1.1.12" => crate::rsa::DigestAlgorithm::Sha384,
@@ -15258,6 +15276,14 @@ pub mod signing {
 
     pub const ROTATION_MIN_SDK_ATTRIBUTE: u32 = 0x559f_8b02;
 
+    pub const V32_BLOCK_ID: u32 = 0x70e1_c89f;
+
+    pub const HYBRID_MIN_SDK_ATTRIBUTE: u32 = 0xbf94_0529;
+
+    pub const HYBRID_PLATFORM: u32 = 37;
+
+    pub const ML_DSA_ALGORITHM: u32 = 0x0501;
+
     pub const ROTATION_PLATFORM: u32 = 33;
 
     pub const CHUNK_SIZE: usize = 1024 * 1024;
@@ -15279,6 +15305,8 @@ pub mod signing {
     pub enum Padding {
         RsaPkcs1Sha256,
         RsaPkcs1Sha512,
+
+        MlDsa,
 
         NotImplemented,
     }
@@ -15351,6 +15379,12 @@ pub mod signing {
             name: "DSA with SHA-256 over a verity tree",
             digest: DigestKind::VerityMerkle,
             padding: Padding::NotImplemented,
+        },
+        SignatureAlgorithm {
+            id: ML_DSA_ALGORITHM,
+            name: "ML-DSA",
+            digest: DigestKind::Chunked512,
+            padding: Padding::MlDsa,
         },
     ];
 
@@ -15926,6 +15960,22 @@ pub mod signing {
         certificate: &[u8],
         sdk_range: Option<(u32, u32)>,
     ) -> Result<Vec<u8>, Diagnostic> {
+        Ok(prefixed(&signer_record(
+            algorithm_id,
+            signed_data,
+            signature,
+            certificate,
+            sdk_range,
+        )?))
+    }
+
+    pub fn signer_record(
+        algorithm_id: u32,
+        signed_data: &[u8],
+        signature: &[u8],
+        certificate: &[u8],
+        sdk_range: Option<(u32, u32)>,
+    ) -> Result<Vec<u8>, Diagnostic> {
         let mut one_signature = Vec::new();
         one_signature.extend_from_slice(&algorithm_id.to_le_bytes());
         one_signature.extend_from_slice(&prefixed(signature));
@@ -15940,7 +15990,7 @@ pub mod signing {
         }
         signer.extend_from_slice(&prefixed(&prefixed(&one_signature)));
         signer.extend_from_slice(&prefixed(&public_key));
-        Ok(prefixed(&prefixed(&signer)))
+        Ok(prefixed(&signer))
     }
 
     #[derive(Clone, Debug)]
@@ -15949,6 +15999,34 @@ pub mod signing {
         pub v2: Vec<u8>,
         pub v3: Option<Vec<u8>>,
         pub v31: Option<Vec<u8>>,
+        pub v32: Option<Vec<u8>>,
+    }
+
+    pub struct Quantum {
+        pub keys: crate::mldsa::Keys,
+        pub certificate: Vec<u8>,
+    }
+
+    impl Quantum {
+        pub fn from_seed(seed: &[u8]) -> Result<Quantum, Diagnostic> {
+            if seed.len() != crate::mldsa::SEED_BYTES {
+                return Err(fail(
+                    "ES050",
+                    "The post-quantum signing seed is not 32 bytes long.",
+                ));
+            }
+            let keys = crate::mldsa::Keys::from_seed(seed);
+            let certificate = crate::certificate::quantum(&keys)?;
+            Ok(Quantum { keys, certificate })
+        }
+    }
+
+    pub fn hybrid_range(sdk_range: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        let (minimum, maximum) = sdk_range?;
+        if maximum < HYBRID_PLATFORM {
+            return None;
+        }
+        Some((minimum.max(HYBRID_PLATFORM), maximum))
     }
 
     pub fn rotation_range(sdk_range: Option<(u32, u32)>) -> Option<(u32, u32)> {
@@ -15965,17 +16043,40 @@ pub mod signing {
         algorithm: crate::rsa::DigestAlgorithm,
         sdk_range: Option<(u32, u32)>,
     ) -> Result<ToSign, Diagnostic> {
+        to_sign_hybrid(package, certificate, algorithm, sdk_range, false)
+    }
+
+    pub fn to_sign_hybrid(
+        package: &[u8],
+        certificate: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+        sdk_range: Option<(u32, u32)>,
+        hybrid: bool,
+    ) -> Result<ToSign, Diagnostic> {
         let (algorithm_id, digest) = content_of(package, algorithm)?;
         let rotation = rotation_range(sdk_range);
-        let rotation_attribute = rotation
+        let quantum = if hybrid {
+            hybrid_range(sdk_range)
+        } else {
+            None
+        };
+        let protection: Vec<(u32, Vec<u8>)> = quantum
             .map(|_| {
                 vec![(
-                    ROTATION_MIN_SDK_ATTRIBUTE,
-                    ROTATION_PLATFORM.to_le_bytes().to_vec(),
+                    HYBRID_MIN_SDK_ATTRIBUTE,
+                    HYBRID_PLATFORM.to_le_bytes().to_vec(),
                 )]
             })
             .unwrap_or_default();
+        let mut rotation_attribute = protection.clone();
+        if rotation.is_some() {
+            rotation_attribute.push((
+                ROTATION_MIN_SDK_ATTRIBUTE,
+                ROTATION_PLATFORM.to_le_bytes().to_vec(),
+            ));
+        }
         Ok(ToSign {
+            v32: quantum.map(|range| signed_data(algorithm_id, &digest, certificate, Some(range))),
             algorithm_id,
             v2: signed_data(algorithm_id, &digest, certificate, None),
             v3: sdk_range.map(|range| {
@@ -15987,7 +16088,9 @@ pub mod signing {
                     &rotation_attribute,
                 )
             }),
-            v31: rotation.map(|range| signed_data(algorithm_id, &digest, certificate, Some(range))),
+            v31: rotation.map(|range| {
+                signed_data_carrying(algorithm_id, &digest, certificate, Some(range), &protection)
+            }),
         })
     }
 
@@ -16000,6 +16103,30 @@ pub mod signing {
         v31: Option<&[u8]>,
         sdk_range: Option<(u32, u32)>,
     ) -> Result<Vec<u8>, Diagnostic> {
+        with_every_signature_hybrid(
+            package,
+            certificate,
+            held,
+            [Some(v2), v3, v31, None],
+            None,
+            sdk_range,
+        )
+    }
+
+    pub fn with_every_signature_hybrid(
+        package: &[u8],
+        certificate: &[u8],
+        held: &ToSign,
+        signatures: [Option<&[u8]>; 4],
+        quantum: Option<&Quantum>,
+        sdk_range: Option<(u32, u32)>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let [Some(v2), v3, v31, v32] = signatures else {
+            return Err(fail(
+                "ES051",
+                "A package cannot be sealed without its v2 signature.",
+            ));
+        };
         let mut block = Vec::new();
         let one = one_signer_signed(held.algorithm_id, &held.v2, v2, certificate, None)?;
         add_pair(&mut block, V2_BLOCK_ID, &one);
@@ -16016,6 +16143,30 @@ pub mod signing {
             let rotated =
                 one_signer_signed(held.algorithm_id, data, signature, certificate, Some(range))?;
             add_pair(&mut block, V31_BLOCK_ID, &rotated);
+        }
+
+        if let (Some(data), Some(signature), Some(quantum), Some(range)) =
+            (&held.v32, v32, quantum, hybrid_range(sdk_range))
+        {
+            let classical =
+                signer_record(held.algorithm_id, data, signature, certificate, Some(range))?;
+            let (_, digest) = content_of(package, crate::rsa::DigestAlgorithm::Sha512)?;
+            let safe = signed_data(ML_DSA_ALGORITHM, &digest, &quantum.certificate, Some(range));
+            let mut random = [0u8; 32];
+            if let Ok(fresh) = crate::random::bytes(32) {
+                random.copy_from_slice(&fresh);
+            }
+            let proof = quantum.keys.sign(&safe, &random);
+            let post_quantum = signer_record(
+                ML_DSA_ALGORITHM,
+                &safe,
+                &proof,
+                &quantum.certificate,
+                Some(range),
+            )?;
+            let mut both = classical;
+            both.extend_from_slice(&post_quantum);
+            add_pair(&mut block, V32_BLOCK_ID, &prefixed(&both));
         }
         spliced(package, block)
     }
@@ -16127,7 +16278,24 @@ pub mod signing {
         algorithm: crate::rsa::DigestAlgorithm,
         sdk_range: Option<(u32, u32)>,
     ) -> Result<Vec<u8>, Diagnostic> {
-        let held = to_sign(package, certificate, algorithm, sdk_range)?;
+        sign_hybrid(package, key, certificate, algorithm, sdk_range, None)
+    }
+
+    pub fn sign_hybrid(
+        package: &[u8],
+        key: &crate::rsa::PrivateKey,
+        certificate: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+        sdk_range: Option<(u32, u32)>,
+        quantum: Option<&Quantum>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let held = to_sign_hybrid(
+            package,
+            certificate,
+            algorithm,
+            sdk_range,
+            quantum.is_some(),
+        )?;
         let v2 = crate::rsa::sign(key, algorithm, &held.v2)?;
         let v3 = match &held.v3 {
             Some(data) => Some(crate::rsa::sign(key, algorithm, data)?),
@@ -16137,13 +16305,16 @@ pub mod signing {
             Some(data) => Some(crate::rsa::sign(key, algorithm, data)?),
             None => None,
         };
-        with_every_signature(
+        let v32 = match &held.v32 {
+            Some(data) => Some(crate::rsa::sign(key, algorithm, data)?),
+            None => None,
+        };
+        with_every_signature_hybrid(
             package,
             certificate,
             &held,
-            &v2,
-            v3.as_deref(),
-            v31.as_deref(),
+            [Some(&v2), v3.as_deref(), v31.as_deref(), v32.as_deref()],
+            quantum,
             sdk_range,
         )
     }
@@ -16202,6 +16373,33 @@ pub mod signing {
         }
         out.key_matches_certificate = true;
 
+        if let Some(raw) = crate::mldsa::raw_public_key(&signer.public_key) {
+            for (algorithm, signature) in &signer.signatures {
+                if algorithm.padding == Padding::MlDsa
+                    && crate::mldsa::verify(&raw, &signer.signed_data, signature)
+                {
+                    out.signatures.push((*algorithm, Checked::Verified));
+                } else {
+                    out.signatures.push((*algorithm, Checked::Failed));
+                    sink.emit(
+                        Diagnostic::new(
+                            "ES036",
+                            Severity::Fatal,
+                            FailureClass::SecurityFailure,
+                            "core.signing",
+                            "A signature does not check out against the key that presents it.",
+                        )
+                        .with_context(format!("Algorithm: {}", algorithm.name))
+                        .with_suggestion(
+                            "Whatever produced this package did not have the private \
+                             key it claims. Do not install it.",
+                        ),
+                    );
+                }
+            }
+            return out;
+        }
+
         let (modulus, exponent) = match crate::rsa::parse_public_key(&signer.public_key) {
             Ok(pair) => pair,
             Err(error) => {
@@ -16212,6 +16410,10 @@ pub mod signing {
 
         for (algorithm, signature) in &signer.signatures {
             let hashed = match algorithm.padding {
+                Padding::MlDsa => {
+                    out.signatures.push((*algorithm, Checked::Failed));
+                    continue;
+                }
                 Padding::RsaPkcs1Sha256 => (
                     crate::rsa::DigestAlgorithm::Sha256,
                     crate::hash::sha256(&signer.signed_data).as_bytes().to_vec(),
@@ -16321,6 +16523,7 @@ pub mod signing {
             (V2_BLOCK_ID, "v2"),
             (V3_BLOCK_ID, "v3"),
             (V31_BLOCK_ID, "v3.1"),
+            (V32_BLOCK_ID, "v3.2"),
         ] {
             if block.value(id).is_some() {
                 report.schemes.push(name);
@@ -16332,6 +16535,7 @@ pub mod signing {
             (V2_BLOCK_ID, Scheme::V2),
             (V3_BLOCK_ID, Scheme::V3),
             (V31_BLOCK_ID, Scheme::V3),
+            (V32_BLOCK_ID, Scheme::V3),
         ] {
             let Some(value) = block.value(id) else {
                 continue;
@@ -20786,6 +20990,725 @@ pub mod rsa {
     }
 }
 
+pub mod mldsa {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    pub const Q: i64 = 8_380_417;
+    const N: usize = 256;
+    const D: u32 = 13;
+    const K: usize = 6;
+    const L: usize = 5;
+    const TAU: usize = 49;
+    const BETA: i64 = 196;
+    const GAMMA1: i64 = 1 << 19;
+    const GAMMA2: i64 = (Q - 1) / 32;
+    const OMEGA: usize = 55;
+    const CHALLENGE_BYTES: usize = 48;
+    const ETA_BITS: u32 = 4;
+    const T1_BITS: u32 = 10;
+    const Z_BITS: u32 = 20;
+    const W1_BITS: u32 = 4;
+    pub const SEED_BYTES: usize = 32;
+    pub const PUBLIC_KEY_BYTES: usize = 32 + K * N * T1_BITS as usize / 8;
+    pub const SIGNATURE_BYTES: usize = CHALLENGE_BYTES + L * N * Z_BITS as usize / 8 + OMEGA + K;
+    pub const OID: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12];
+    pub const OID_TEXT: &str = "2.16.840.1.101.3.4.3.18";
+    pub const NAME: &str = "ML-DSA-65";
+
+    type Poly = [i64; N];
+
+    const ROUNDS: [u64; 24] = [
+        0x0000_0000_0000_0001,
+        0x0000_0000_0000_8082,
+        0x8000_0000_0000_808a,
+        0x8000_0000_8000_8000,
+        0x0000_0000_0000_808b,
+        0x0000_0000_8000_0001,
+        0x8000_0000_8000_8081,
+        0x8000_0000_0000_8009,
+        0x0000_0000_0000_008a,
+        0x0000_0000_0000_0088,
+        0x0000_0000_8000_8009,
+        0x0000_0000_8000_000a,
+        0x0000_0000_8000_808b,
+        0x8000_0000_0000_008b,
+        0x8000_0000_0000_8089,
+        0x8000_0000_0000_8003,
+        0x8000_0000_0000_8002,
+        0x8000_0000_0000_0080,
+        0x0000_0000_0000_800a,
+        0x8000_0000_8000_000a,
+        0x8000_0000_8000_8081,
+        0x8000_0000_0000_8080,
+        0x0000_0000_8000_0001,
+        0x8000_0000_8000_8008,
+    ];
+
+    const TURNS: [u32; 25] = [
+        0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56,
+        14,
+    ];
+
+    fn permute(state: &mut [u64; 25]) {
+        for round in ROUNDS {
+            let mut columns = [0u64; 5];
+            for x in 0..5 {
+                columns[x] =
+                    state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+            }
+            for x in 0..5 {
+                let mix = columns[(x + 4) % 5] ^ columns[(x + 1) % 5].rotate_left(1);
+                for y in 0..5 {
+                    state[x + 5 * y] ^= mix;
+                }
+            }
+            let mut moved = [0u64; 25];
+            for x in 0..5 {
+                for y in 0..5 {
+                    moved[y + 5 * ((2 * x + 3 * y) % 5)] =
+                        state[x + 5 * y].rotate_left(TURNS[x + 5 * y]);
+                }
+            }
+            for x in 0..5 {
+                for y in 0..5 {
+                    state[x + 5 * y] = moved[x + 5 * y]
+                        ^ (!moved[(x + 1) % 5 + 5 * y] & moved[(x + 2) % 5 + 5 * y]);
+                }
+            }
+            state[0] ^= round;
+        }
+    }
+
+    pub struct Squeezer {
+        state: [u64; 25],
+        rate: usize,
+        block: Vec<u8>,
+        at: usize,
+    }
+
+    impl Squeezer {
+        fn new(rate: usize, parts: &[&[u8]]) -> Squeezer {
+            let mut data: Vec<u8> = parts.concat();
+            data.push(0x1f);
+            while !data.len().is_multiple_of(rate) {
+                data.push(0);
+            }
+            let last = data.len() - 1;
+            data[last] |= 0x80;
+            let mut state = [0u64; 25];
+            for chunk in data.chunks(rate) {
+                for (lane, bytes) in chunk.chunks(8).enumerate() {
+                    let mut word = [0u8; 8];
+                    word.copy_from_slice(bytes);
+                    state[lane] ^= u64::from_le_bytes(word);
+                }
+                permute(&mut state);
+            }
+            let mut out = Squeezer {
+                state,
+                rate,
+                block: Vec::new(),
+                at: 0,
+            };
+            out.refill();
+            out
+        }
+
+        fn refill(&mut self) {
+            self.block.clear();
+            for lane in 0..self.rate / 8 {
+                self.block
+                    .extend_from_slice(&self.state[lane].to_le_bytes());
+            }
+            self.at = 0;
+        }
+
+        pub fn byte(&mut self) -> u8 {
+            if self.at == self.rate {
+                permute(&mut self.state);
+                self.refill();
+            }
+            self.at += 1;
+            self.block[self.at - 1]
+        }
+
+        pub fn bytes(&mut self, count: usize) -> Vec<u8> {
+            (0..count).map(|_| self.byte()).collect()
+        }
+    }
+
+    pub fn shake128(parts: &[&[u8]]) -> Squeezer {
+        Squeezer::new(168, parts)
+    }
+
+    pub fn shake256(parts: &[&[u8]]) -> Squeezer {
+        Squeezer::new(136, parts)
+    }
+
+    fn reduce(value: i64) -> i64 {
+        value.rem_euclid(Q)
+    }
+
+    fn centered(value: i64, modulus: i64) -> i64 {
+        let held = value.rem_euclid(modulus);
+        if held > modulus / 2 {
+            held - modulus
+        } else {
+            held
+        }
+    }
+
+    fn zetas() -> &'static [i64; N] {
+        static HELD: std::sync::OnceLock<[i64; N]> = std::sync::OnceLock::new();
+        HELD.get_or_init(|| {
+            let mut out = [0i64; N];
+            for (at, slot) in out.iter_mut().enumerate() {
+                let reversed = (at as u8).reverse_bits() as u64;
+                let mut power = 1i64;
+                let mut base = 1753i64;
+                let mut exponent = reversed;
+                while exponent > 0 {
+                    if exponent & 1 == 1 {
+                        power = power * base % Q;
+                    }
+                    base = base * base % Q;
+                    exponent >>= 1;
+                }
+                *slot = power;
+            }
+            out
+        })
+    }
+
+    fn ntt(input: &Poly) -> Poly {
+        let zeta = zetas();
+        let mut w = *input;
+        let mut m = 0usize;
+        let mut length = 128usize;
+        while length >= 1 {
+            let mut start = 0usize;
+            while start < N {
+                m += 1;
+                let z = zeta[m];
+                for j in start..start + length {
+                    let t = z * w[j + length] % Q;
+                    w[j + length] = reduce(w[j] - t);
+                    w[j] = reduce(w[j] + t);
+                }
+                start += 2 * length;
+            }
+            length /= 2;
+        }
+        w
+    }
+
+    fn inverse_ntt(input: &Poly) -> Poly {
+        let zeta = zetas();
+        let mut w = *input;
+        let mut m = N;
+        let mut length = 1usize;
+        while length < N {
+            let mut start = 0usize;
+            while start < N {
+                m -= 1;
+                let z = Q - zeta[m];
+                for j in start..start + length {
+                    let t = w[j];
+                    w[j] = reduce(t + w[j + length]);
+                    w[j + length] = reduce(t - w[j + length]);
+                    w[j + length] = z * w[j + length] % Q;
+                }
+                start += 2 * length;
+            }
+            length *= 2;
+        }
+        for one in w.iter_mut() {
+            *one = *one * 8_347_681 % Q;
+        }
+        w
+    }
+
+    fn multiply(left: &Poly, right: &Poly) -> Poly {
+        let mut out = [0i64; N];
+        for at in 0..N {
+            out[at] = left[at] * right[at] % Q;
+        }
+        out
+    }
+
+    fn add(left: &Poly, right: &Poly) -> Poly {
+        let mut out = [0i64; N];
+        for at in 0..N {
+            out[at] = reduce(left[at] + right[at]);
+        }
+        out
+    }
+
+    fn subtract(left: &Poly, right: &Poly) -> Poly {
+        let mut out = [0i64; N];
+        for at in 0..N {
+            out[at] = reduce(left[at] - right[at]);
+        }
+        out
+    }
+
+    fn norm(polys: &[Poly]) -> i64 {
+        polys
+            .iter()
+            .flat_map(|one| one.iter())
+            .map(|value| centered(*value, Q).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn rejected_ntt(parts: &[&[u8]]) -> Poly {
+        let mut stream = shake128(parts);
+        let mut out = [0i64; N];
+        let mut at = 0;
+        while at < N {
+            let bytes = stream.bytes(3);
+            let value =
+                i64::from(bytes[0]) | i64::from(bytes[1]) << 8 | i64::from(bytes[2] & 0x7f) << 16;
+            if value < Q {
+                out[at] = value;
+                at += 1;
+            }
+        }
+        out
+    }
+
+    fn rejected_bounded(parts: &[&[u8]]) -> Poly {
+        let mut stream = shake256(parts);
+        let mut out = [0i64; N];
+        let mut at = 0;
+        while at < N {
+            let byte = stream.byte();
+            for half in [byte & 15, byte >> 4] {
+                if half < 9 && at < N {
+                    out[at] = reduce(4 - i64::from(half));
+                    at += 1;
+                }
+            }
+        }
+        out
+    }
+
+    fn expand_a(rho: &[u8]) -> Vec<Vec<Poly>> {
+        (0..K)
+            .map(|row| {
+                (0..L)
+                    .map(|column| rejected_ntt(&[rho, &[column as u8, row as u8]]))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn pack(values: &[u64], bits: u32, out: &mut Vec<u8>) {
+        let mut held: u64 = 0;
+        let mut filled: u32 = 0;
+        for value in values {
+            held |= (value & ((1u64 << bits) - 1)) << filled;
+            filled += bits;
+            while filled >= 8 {
+                out.push(held as u8);
+                held >>= 8;
+                filled -= 8;
+            }
+        }
+        if filled > 0 {
+            out.push(held as u8);
+        }
+    }
+
+    fn unpack(bytes: &[u8], bits: u32, count: usize) -> Vec<u64> {
+        let mut out = Vec::with_capacity(count);
+        let mut held: u64 = 0;
+        let mut filled: u32 = 0;
+        let mut at = 0usize;
+        while out.len() < count {
+            while filled < bits {
+                held |= u64::from(*bytes.get(at).unwrap_or(&0)) << filled;
+                at += 1;
+                filled += 8;
+            }
+            out.push(held & ((1u64 << bits) - 1));
+            held >>= bits;
+            filled -= bits;
+        }
+        out
+    }
+
+    fn expand_mask(seed: &[u8], nonce: u16) -> Poly {
+        let bytes = shake256(&[seed, &nonce.to_le_bytes()]).bytes(N * Z_BITS as usize / 8);
+        let raw = unpack(&bytes, Z_BITS, N);
+        let mut out = [0i64; N];
+        for (at, value) in raw.iter().enumerate() {
+            out[at] = reduce(GAMMA1 - *value as i64);
+        }
+        out
+    }
+
+    fn sample_in_ball(seed: &[u8]) -> Poly {
+        let mut stream = shake256(&[seed]);
+        let mut signs = [0u8; 8];
+        signs.copy_from_slice(&stream.bytes(8));
+        let signs = u64::from_le_bytes(signs);
+        let mut out = [0i64; N];
+        for at in N - TAU..N {
+            let mut chosen = stream.byte() as usize;
+            while chosen > at {
+                chosen = stream.byte() as usize;
+            }
+            out[at] = out[chosen];
+            out[chosen] = if (signs >> (at + TAU - N)) & 1 == 1 {
+                Q - 1
+            } else {
+                1
+            };
+        }
+        out
+    }
+
+    fn decompose(value: i64) -> (i64, i64) {
+        let plus = reduce(value);
+        let mut low = centered(plus, 2 * GAMMA2);
+        if plus - low == Q - 1 {
+            low -= 1;
+            return (0, low);
+        }
+        ((plus - low) / (2 * GAMMA2), low)
+    }
+
+    fn high_bits(poly: &Poly) -> Poly {
+        let mut out = [0i64; N];
+        for at in 0..N {
+            out[at] = decompose(poly[at]).0;
+        }
+        out
+    }
+
+    fn low_bits(poly: &Poly) -> Poly {
+        let mut out = [0i64; N];
+        for at in 0..N {
+            out[at] = reduce(decompose(poly[at]).1);
+        }
+        out
+    }
+
+    fn use_hint(hint: bool, value: i64) -> i64 {
+        let (high, low) = decompose(value);
+        if !hint {
+            return high;
+        }
+        if low > 0 {
+            (high + 1).rem_euclid(16)
+        } else {
+            (high - 1).rem_euclid(16)
+        }
+    }
+
+    fn encode_w1(w1: &[Poly]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for poly in w1 {
+            let values: Vec<u64> = poly.iter().map(|one| *one as u64).collect();
+            pack(&values, W1_BITS, &mut out);
+        }
+        out
+    }
+
+    fn pack_bounded(poly: &Poly, bound: i64, bits: u32, out: &mut Vec<u8>) {
+        let values: Vec<u64> = poly
+            .iter()
+            .map(|one| (bound - centered(*one, Q)) as u64)
+            .collect();
+        pack(&values, bits, out);
+    }
+
+    pub struct Keys {
+        pub public: Vec<u8>,
+        rho: Vec<u8>,
+        key: Vec<u8>,
+        tr: Vec<u8>,
+        s1: Vec<Poly>,
+        s2: Vec<Poly>,
+        t0: Vec<Poly>,
+    }
+
+    impl Keys {
+        pub fn from_seed(seed: &[u8]) -> Keys {
+            let mut stream = shake256(&[seed, &[K as u8, L as u8]]);
+            let rho = stream.bytes(32);
+            let noise = stream.bytes(64);
+            let key = stream.bytes(32);
+            let a = expand_a(&rho);
+            let s1: Vec<Poly> = (0..L)
+                .map(|row| rejected_bounded(&[&noise, &(row as u16).to_le_bytes()]))
+                .collect();
+            let s2: Vec<Poly> = (0..K)
+                .map(|row| rejected_bounded(&[&noise, &((row + L) as u16).to_le_bytes()]))
+                .collect();
+            let s1_hat: Vec<Poly> = s1.iter().map(ntt).collect();
+            let mut t1: Vec<Poly> = Vec::with_capacity(K);
+            let mut t0: Vec<Poly> = Vec::with_capacity(K);
+            for row in 0..K {
+                let mut sum = [0i64; N];
+                for column in 0..L {
+                    sum = add(&sum, &multiply(&a[row][column], &s1_hat[column]));
+                }
+                let t = add(&inverse_ntt(&sum), &s2[row]);
+                let mut high = [0i64; N];
+                let mut low = [0i64; N];
+                for at in 0..N {
+                    let plus = reduce(t[at]);
+                    let small = centered(plus, 1 << D);
+                    high[at] = (plus - small) >> D;
+                    low[at] = reduce(small);
+                }
+                t1.push(high);
+                t0.push(low);
+            }
+            let mut public = rho.clone();
+            for poly in &t1 {
+                let values: Vec<u64> = poly.iter().map(|one| *one as u64).collect();
+                pack(&values, T1_BITS, &mut public);
+            }
+            let tr = shake256(&[&public]).bytes(64);
+            Keys {
+                public,
+                rho,
+                key,
+                tr,
+                s1,
+                s2,
+                t0,
+            }
+        }
+
+        pub fn secret_bytes(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&self.rho);
+            out.extend_from_slice(&self.key);
+            out.extend_from_slice(&self.tr);
+            for poly in self.s1.iter().chain(self.s2.iter()) {
+                pack_bounded(poly, 4, ETA_BITS, &mut out);
+            }
+            for poly in &self.t0 {
+                pack_bounded(poly, 1 << (D - 1), D, &mut out);
+            }
+            out
+        }
+
+        pub fn public_key_info(&self) -> Vec<u8> {
+            let algorithm = crate::der::encode_element(
+                crate::der::tag::SEQUENCE,
+                &crate::der::encode_element(crate::der::tag::OID, OID),
+            );
+            let mut bits = vec![0u8];
+            bits.extend_from_slice(&self.public);
+            let mut body = algorithm;
+            body.extend_from_slice(&crate::der::encode_element(
+                crate::der::tag::BIT_STRING,
+                &bits,
+            ));
+            crate::der::encode_element(crate::der::tag::SEQUENCE, &body)
+        }
+
+        pub fn sign(&self, message: &[u8], random: &[u8; 32]) -> Vec<u8> {
+            let a = expand_a(&self.rho);
+            let s1_hat: Vec<Poly> = self.s1.iter().map(ntt).collect();
+            let s2_hat: Vec<Poly> = self.s2.iter().map(ntt).collect();
+            let t0_hat: Vec<Poly> = self.t0.iter().map(ntt).collect();
+            let mu = shake256(&[&self.tr, &[0u8, 0u8], message]).bytes(64);
+            let mask_seed = shake256(&[&self.key, random, &mu]).bytes(64);
+            let mut kappa: u16 = 0;
+            loop {
+                let y: Vec<Poly> = (0..L)
+                    .map(|row| expand_mask(&mask_seed, kappa + row as u16))
+                    .collect();
+                kappa = kappa.wrapping_add(L as u16);
+                let y_hat: Vec<Poly> = y.iter().map(ntt).collect();
+                let mut w: Vec<Poly> = Vec::with_capacity(K);
+                for row in &a {
+                    let mut sum = [0i64; N];
+                    for (entry, masked) in row.iter().zip(y_hat.iter()) {
+                        sum = add(&sum, &multiply(entry, masked));
+                    }
+                    w.push(inverse_ntt(&sum));
+                }
+                let w1: Vec<Poly> = w.iter().map(high_bits).collect();
+                let challenge = shake256(&[&mu, &encode_w1(&w1)]).bytes(CHALLENGE_BYTES);
+                let c_hat = ntt(&sample_in_ball(&challenge));
+                let z: Vec<Poly> = (0..L)
+                    .map(|row| add(&y[row], &inverse_ntt(&multiply(&c_hat, &s1_hat[row]))))
+                    .collect();
+                let shifted: Vec<Poly> = (0..K)
+                    .map(|row| subtract(&w[row], &inverse_ntt(&multiply(&c_hat, &s2_hat[row]))))
+                    .collect();
+                let r0: Vec<Poly> = shifted.iter().map(low_bits).collect();
+                if norm(&z) >= GAMMA1 - BETA || norm(&r0) >= GAMMA2 - BETA {
+                    continue;
+                }
+                let ct0: Vec<Poly> = (0..K)
+                    .map(|row| inverse_ntt(&multiply(&c_hat, &t0_hat[row])))
+                    .collect();
+                if norm(&ct0) >= GAMMA2 {
+                    continue;
+                }
+                let mut hints: Vec<Vec<bool>> = Vec::with_capacity(K);
+                let mut count = 0usize;
+                for row in 0..K {
+                    let lifted = add(&shifted[row], &ct0[row]);
+                    let mut held = vec![false; N];
+                    for at in 0..N {
+                        held[at] = decompose(lifted[at]).0 != decompose(shifted[row][at]).0;
+                        if held[at] {
+                            count += 1;
+                        }
+                    }
+                    hints.push(held);
+                }
+                if count > OMEGA {
+                    continue;
+                }
+                let mut out = challenge;
+                for poly in &z {
+                    pack_bounded(poly, GAMMA1, Z_BITS, &mut out);
+                }
+                let mut hint_bytes = vec![0u8; OMEGA + K];
+                let mut index = 0usize;
+                for (row, held) in hints.iter().enumerate() {
+                    for (at, set) in held.iter().enumerate() {
+                        if *set {
+                            hint_bytes[index] = at as u8;
+                            index += 1;
+                        }
+                    }
+                    hint_bytes[OMEGA + row] = index as u8;
+                }
+                out.extend_from_slice(&hint_bytes);
+                return out;
+            }
+        }
+    }
+
+    pub fn verify(public: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        if public.len() != PUBLIC_KEY_BYTES || signature.len() != SIGNATURE_BYTES {
+            return false;
+        }
+        let rho = &public[..32];
+        let t1_values = unpack(&public[32..], T1_BITS, K * N);
+        let challenge = &signature[..CHALLENGE_BYTES];
+        let z_end = CHALLENGE_BYTES + L * N * Z_BITS as usize / 8;
+        let z_values = unpack(&signature[CHALLENGE_BYTES..z_end], Z_BITS, L * N);
+        let hint_bytes = &signature[z_end..];
+        let mut hints = vec![vec![false; N]; K];
+        let mut index = 0usize;
+        for (row, held) in hints.iter_mut().enumerate() {
+            let until = usize::from(hint_bytes[OMEGA + row]);
+            if until < index || until > OMEGA {
+                return false;
+            }
+            let first = index;
+            while index < until {
+                if index > first && hint_bytes[index - 1] >= hint_bytes[index] {
+                    return false;
+                }
+                held[usize::from(hint_bytes[index])] = true;
+                index += 1;
+            }
+        }
+        if hint_bytes[index..OMEGA].iter().any(|one| *one != 0) {
+            return false;
+        }
+        let mut z: Vec<Poly> = Vec::with_capacity(L);
+        for row in 0..L {
+            let mut poly = [0i64; N];
+            for at in 0..N {
+                poly[at] = reduce(GAMMA1 - z_values[row * N + at] as i64);
+            }
+            z.push(poly);
+        }
+        if norm(&z) >= GAMMA1 - BETA {
+            return false;
+        }
+        let a = expand_a(rho);
+        let tr = shake256(&[public]).bytes(64);
+        let mu = shake256(&[&tr, &[0u8, 0u8], message]).bytes(64);
+        let c_hat = ntt(&sample_in_ball(challenge));
+        let z_hat: Vec<Poly> = z.iter().map(ntt).collect();
+        let mut w1: Vec<Poly> = Vec::with_capacity(K);
+        for row in 0..K {
+            let mut sum = [0i64; N];
+            for column in 0..L {
+                sum = add(&sum, &multiply(&a[row][column], &z_hat[column]));
+            }
+            let mut scaled = [0i64; N];
+            for at in 0..N {
+                scaled[at] = reduce((t1_values[row * N + at] as i64) << D);
+            }
+            let approximate = inverse_ntt(&subtract(&sum, &multiply(&c_hat, &ntt(&scaled))));
+            let mut high = [0i64; N];
+            for at in 0..N {
+                high[at] = use_hint(hints[row][at], approximate[at]);
+            }
+            w1.push(high);
+        }
+        let again = shake256(&[&mu, &encode_w1(&w1)]).bytes(CHALLENGE_BYTES);
+        again == challenge
+    }
+
+    pub fn raw_public_key(key_info: &[u8]) -> Option<Vec<u8>> {
+        let mut outer = crate::der::Reader::new(key_info, 0);
+        let sequence = outer.expect(crate::der::tag::SEQUENCE).ok()?;
+        let mut fields = sequence.reader();
+        let algorithm = fields.expect(crate::der::tag::SEQUENCE).ok()?;
+        let mut inside = algorithm.reader();
+        let named = inside.expect(crate::der::tag::OID).ok()?;
+        if named.contents != OID {
+            return None;
+        }
+        let bits = fields.expect(crate::der::tag::BIT_STRING).ok()?;
+        let (unused, raw) = bits.contents.split_first()?;
+        (*unused == 0 && raw.len() == PUBLIC_KEY_BYTES).then(|| raw.to_vec())
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::SecurityFailure,
+            "core.mldsa",
+            message,
+        )
+    }
+
+    pub fn seed_beside(key_path: &str) -> Result<Vec<u8>, Diagnostic> {
+        let path = format!("{key_path}.mldsa");
+        if let Ok(held) = std::fs::read(&path) {
+            if held.len() == SEED_BYTES {
+                return Ok(held);
+            }
+            return Err(fail(
+                "EQ010",
+                "The post-quantum signing seed beside the key is damaged.",
+            )
+            .with_context(format!("Path: {path}"))
+            .with_suggestion(
+                "Restore it from a backup. A new seed would sign as someone else, and \
+                 devices that already trust the old one would refuse the update.",
+            ));
+        }
+        let seed = crate::random::bytes(SEED_BYTES)?;
+        std::fs::write(&path, &seed).map_err(|why| {
+            fail("EQ011", "The post-quantum signing seed could not be saved.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(seed)
+    }
+}
+
 pub mod certificate {
     use crate::der;
     use crate::diag::{Diagnostic, Severity};
@@ -20982,6 +21905,54 @@ pub mod certificate {
             0xa3,
             &der::encode_element(der::tag::SEQUENCE, &all),
         ))
+    }
+
+    pub fn quantum(keys: &crate::mldsa::Keys) -> Result<Vec<u8>, Diagnostic> {
+        let mut name_body = Vec::new();
+        name_body.extend_from_slice(&relative_name(COUNTRY, "TR"));
+        name_body.extend_from_slice(&relative_name(ORGANISATION, "Apk Builder"));
+        name_body.extend_from_slice(&relative_name(COMMON_NAME, "Apk Builder Quantum Safe"));
+        let name = der::encode_element(der::tag::SEQUENCE, &name_body);
+
+        let mut validity_body = Vec::new();
+        validity_body.extend_from_slice(&encode_time(moment_from_epoch(1_735_689_600)));
+        validity_body.extend_from_slice(&encode_time(moment_from_epoch(3_313_526_400)));
+        let validity = der::encode_element(der::tag::SEQUENCE, &validity_body);
+
+        let mut serial = crate::hash::sha256(&keys.public).as_bytes()[..16].to_vec();
+        serial[0] &= 0x7f;
+        if serial[0] == 0 {
+            serial[0] = 1;
+        }
+        let algorithm = der::encode_element(
+            der::tag::SEQUENCE,
+            &der::encode_element(der::tag::OID, crate::mldsa::OID),
+        );
+
+        let mut tbs_body = Vec::new();
+        tbs_body.extend_from_slice(&der::encode_element(
+            0xa0,
+            &der::encode_element(der::tag::INTEGER, &[2]),
+        ));
+        tbs_body.extend_from_slice(&integer(&serial));
+        tbs_body.extend_from_slice(&algorithm);
+        tbs_body.extend_from_slice(&name);
+        tbs_body.extend_from_slice(&validity);
+        tbs_body.extend_from_slice(&name);
+        let key_info = keys.public_key_info();
+        tbs_body.extend_from_slice(&key_info);
+        tbs_body.extend_from_slice(&extensions(&key_info)?);
+        let tbs = der::encode_element(der::tag::SEQUENCE, &tbs_body);
+
+        let signature = keys.sign(&tbs, &[0u8; 32]);
+        let mut wrapped = vec![0u8];
+        wrapped.extend_from_slice(&signature);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&tbs);
+        body.extend_from_slice(&algorithm);
+        body.extend_from_slice(&der::encode_element(der::tag::BIT_STRING, &wrapped));
+        Ok(der::encode_element(der::tag::SEQUENCE, &body))
     }
 
     pub fn self_signed(
@@ -37372,6 +38343,44 @@ pub mod desugar {
         ("java/lang/Thread", "threadId", "()J", Called::Virtual, 36, "threadId"),
         ("java/util/ServiceLoader", "stream", "()Ljava/util/stream/Stream;", Called::Virtual, 35, "stream"),
         ("java/util/ServiceLoader", "findFirst", "()Ljava/util/Optional;", Called::Virtual, 34, "findFirst"),
+        ("java/util/Collection", "getFirst", "()Ljava/lang/Object;", Called::Interface, 35, "getFirst"),
+        ("java/util/Collection", "getLast", "()Ljava/lang/Object;", Called::Interface, 35, "getLast"),
+        ("java/util/Collection", "removeFirst", "()Ljava/lang/Object;", Called::Interface, 35, "removeFirst"),
+        ("java/util/Collection", "removeLast", "()Ljava/lang/Object;", Called::Interface, 35, "removeLast"),
+        ("java/util/Collection", "addFirst", "(Ljava/lang/Object;)V", Called::Interface, 35, "addFirst"),
+        ("java/util/Collection", "addLast", "(Ljava/lang/Object;)V", Called::Interface, 35, "addLast"),
+        ("java/util/List", "reversed", "()Ljava/util/List;", Called::Interface, 35, "reversed"),
+        ("java/util/Deque", "reversed", "()Ljava/util/Deque;", Called::Interface, 35, "reversed"),
+        ("java/util/LinkedList", "reversed", "()Ljava/util/LinkedList;", Called::Virtual, 35, "reversed"),
+        ("java/util/Map", "firstEntry", "()Ljava/util/Map$Entry;", Called::Interface, 35, "firstEntry"),
+        ("java/util/Map", "lastEntry", "()Ljava/util/Map$Entry;", Called::Interface, 35, "lastEntry"),
+        ("java/util/Map", "pollFirstEntry", "()Ljava/util/Map$Entry;", Called::Interface, 35, "pollFirstEntry"),
+        ("java/util/Map", "pollLastEntry", "()Ljava/util/Map$Entry;", Called::Interface, 35, "pollLastEntry"),
+        ("java/lang/String", "indent", "(I)Ljava/lang/String;", Called::Virtual, 34, "indent"),
+        ("java/lang/String", "stripIndent", "()Ljava/lang/String;", Called::Virtual, 34, "stripIndent"),
+        ("java/lang/String", "translateEscapes", "()Ljava/lang/String;", Called::Virtual, 34, "translateEscapes"),
+        ("java/lang/String", "splitWithDelimiters", "(Ljava/lang/String;I)[Ljava/lang/String;", Called::Virtual, 36, "splitWithDelimiters"),
+        ("java/lang/String", "indexOf", "(III)I", Called::Virtual, 36, "indexOf"),
+        ("java/lang/String", "indexOf", "(Ljava/lang/String;II)I", Called::Virtual, 36, "indexOf"),
+        ("java/lang/StringBuilder", "repeat", "(Ljava/lang/CharSequence;I)Ljava/lang/StringBuilder;", Called::Virtual, 36, "repeat"),
+        ("java/lang/StringBuilder", "repeat", "(II)Ljava/lang/StringBuilder;", Called::Virtual, 36, "repeat"),
+        ("java/util/stream/Collectors", "teeing", "(Ljava/util/stream/Collector;Ljava/util/stream/Collector;Ljava/util/function/BiFunction;)Ljava/util/stream/Collector;", Called::Static, 34, "teeing"),
+        ("java/util/stream/Collectors", "filtering", "(Ljava/util/function/Predicate;Ljava/util/stream/Collector;)Ljava/util/stream/Collector;", Called::Static, 34, "filtering"),
+        ("java/util/stream/Collectors", "flatMapping", "(Ljava/util/function/Function;Ljava/util/stream/Collector;)Ljava/util/stream/Collector;", Called::Static, 34, "flatMapping"),
+        ("java/util/HashMap", "newHashMap", "(I)Ljava/util/HashMap;", Called::Static, 36, "newHashMap"),
+        ("java/util/LinkedHashMap", "newLinkedHashMap", "(I)Ljava/util/LinkedHashMap;", Called::Static, 36, "newLinkedHashMap"),
+        ("java/util/HashSet", "newHashSet", "(I)Ljava/util/HashSet;", Called::Static, 36, "newHashSet"),
+        ("java/util/LinkedHashSet", "newLinkedHashSet", "(I)Ljava/util/LinkedHashSet;", Called::Static, 36, "newLinkedHashSet"),
+        ("java/util/concurrent/Executors", "newVirtualThreadPerTaskExecutor", "()Ljava/util/concurrent/ExecutorService;", Called::Static, 1000, "newVirtualThreadPerTaskExecutor"),
+        ("java/nio/file/Path", "of", "(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;", Called::Static, 34, "pathOf"),
+        ("java/nio/file/Path", "of", "(Ljava/net/URI;)Ljava/nio/file/Path;", Called::Static, 34, "pathOf"),
+        ("java/nio/file/Files", "readString", "(Ljava/nio/file/Path;)Ljava/lang/String;", Called::Static, 34, "readString"),
+        ("java/nio/file/Files", "readString", "(Ljava/nio/file/Path;Ljava/nio/charset/Charset;)Ljava/lang/String;", Called::Static, 34, "readString"),
+        ("java/nio/file/Files", "writeString", "(Ljava/nio/file/Path;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;", Called::Static, 34, "writeString"),
+        ("java/nio/file/Files", "writeString", "(Ljava/nio/file/Path;Ljava/lang/CharSequence;Ljava/nio/charset/Charset;[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;", Called::Static, 34, "writeString"),
+        ("java/io/Reader", "transferTo", "(Ljava/io/Writer;)J", Called::Virtual, 34, "transferTo"),
+        ("java/io/InputStream", "nullInputStream", "()Ljava/io/InputStream;", Called::Static, 34, "nullInputStream"),
+        ("java/io/OutputStream", "nullOutputStream", "()Ljava/io/OutputStream;", Called::Static, 34, "nullOutputStream"),
     ];
     pub const OVERRIDDEN: &[(&str, &str, &str, u32)] = &[
         ("java/lang/String", "isEmpty", "()Z", 9),
@@ -37385,6 +38394,11 @@ pub mod desugar {
             "com/apk/builder/desugar/MatchException",
         ),
         ("java/lang/Record", 34, "com/apk/builder/desugar/RecordTag"),
+        (
+            "java/util/HexFormat",
+            34,
+            "com/apk/builder/desugar/HexFormat",
+        ),
         (
             "java/util/ServiceLoader$Provider",
             35,
@@ -38256,6 +39270,828 @@ public final class Backports {
         }
         return Optional.empty();
     }
+
+    public static Object getFirst(Collection<Object> held) {
+        if (held instanceof java.util.Deque) {
+            return ((java.util.Deque<Object>) held).getFirst();
+        }
+        if (held instanceof List) {
+            List<Object> list = (List<Object>) held;
+            if (list.isEmpty()) {
+                throw new NoSuchElementException();
+            }
+            return list.get(0);
+        }
+        if (held instanceof java.util.SortedSet) {
+            return ((java.util.SortedSet<Object>) held).first();
+        }
+        Iterator<Object> walked = held.iterator();
+        if (!walked.hasNext()) {
+            throw new NoSuchElementException();
+        }
+        return walked.next();
+    }
+
+    public static Object getLast(Collection<Object> held) {
+        if (held instanceof java.util.Deque) {
+            return ((java.util.Deque<Object>) held).getLast();
+        }
+        if (held instanceof List) {
+            List<Object> list = (List<Object>) held;
+            if (list.isEmpty()) {
+                throw new NoSuchElementException();
+            }
+            return list.get(list.size() - 1);
+        }
+        if (held instanceof java.util.SortedSet) {
+            return ((java.util.SortedSet<Object>) held).last();
+        }
+        Object last = null;
+        boolean any = false;
+        for (Object one : held) {
+            last = one;
+            any = true;
+        }
+        if (!any) {
+            throw new NoSuchElementException();
+        }
+        return last;
+    }
+
+    public static Object removeFirst(Collection<Object> held) {
+        if (held instanceof java.util.Deque) {
+            return ((java.util.Deque<Object>) held).removeFirst();
+        }
+        if (held instanceof List) {
+            List<Object> list = (List<Object>) held;
+            if (list.isEmpty()) {
+                throw new NoSuchElementException();
+            }
+            return list.remove(0);
+        }
+        Iterator<Object> walked = held.iterator();
+        if (!walked.hasNext()) {
+            throw new NoSuchElementException();
+        }
+        Object first = walked.next();
+        walked.remove();
+        return first;
+    }
+
+    public static Object removeLast(Collection<Object> held) {
+        if (held instanceof java.util.Deque) {
+            return ((java.util.Deque<Object>) held).removeLast();
+        }
+        if (held instanceof List) {
+            List<Object> list = (List<Object>) held;
+            if (list.isEmpty()) {
+                throw new NoSuchElementException();
+            }
+            return list.remove(list.size() - 1);
+        }
+        Object last = getLast(held);
+        held.remove(last);
+        return last;
+    }
+
+    public static void addFirst(Collection<Object> held, Object value) {
+        if (held instanceof java.util.Deque) {
+            ((java.util.Deque<Object>) held).addFirst(value);
+            return;
+        }
+        if (held instanceof List) {
+            ((List<Object>) held).add(0, value);
+            return;
+        }
+        if (held instanceof java.util.LinkedHashSet) {
+            List<Object> rest = new ArrayList<>(held);
+            rest.remove(value);
+            held.clear();
+            held.add(value);
+            held.addAll(rest);
+            return;
+        }
+        throw new UnsupportedOperationException();
+    }
+
+    public static void addLast(Collection<Object> held, Object value) {
+        if (held instanceof java.util.Deque) {
+            ((java.util.Deque<Object>) held).addLast(value);
+            return;
+        }
+        if (held instanceof List) {
+            ((List<Object>) held).add(value);
+            return;
+        }
+        if (held instanceof java.util.LinkedHashSet) {
+            held.remove(value);
+            held.add(value);
+            return;
+        }
+        throw new UnsupportedOperationException();
+    }
+
+    public static List<Object> reversed(List<Object> held) {
+        return new ReversedList(held);
+    }
+
+    public static java.util.Deque<Object> reversed(java.util.Deque<Object> held) {
+        java.util.LinkedList<Object> out = new java.util.LinkedList<>();
+        Iterator<Object> walked = held.descendingIterator();
+        while (walked.hasNext()) {
+            out.add(walked.next());
+        }
+        return out;
+    }
+
+    public static java.util.LinkedList<Object> reversed(java.util.LinkedList<Object> held) {
+        java.util.LinkedList<Object> out = new java.util.LinkedList<>();
+        Iterator<Object> walked = held.descendingIterator();
+        while (walked.hasNext()) {
+            out.add(walked.next());
+        }
+        return out;
+    }
+
+    static final class ReversedList extends java.util.AbstractList<Object> {
+        private final List<Object> held;
+
+        ReversedList(List<Object> held) {
+            this.held = held;
+        }
+
+        public Object get(int at) {
+            return held.get(held.size() - 1 - at);
+        }
+
+        public int size() {
+            return held.size();
+        }
+
+        public Object set(int at, Object value) {
+            return held.set(held.size() - 1 - at, value);
+        }
+
+        public void add(int at, Object value) {
+            held.add(held.size() - at, value);
+        }
+
+        public Object remove(int at) {
+            return held.remove(held.size() - 1 - at);
+        }
+    }
+
+    public static Map.Entry<Object, Object> firstEntry(Map<Object, Object> held) {
+        if (held instanceof java.util.NavigableMap) {
+            return ((java.util.NavigableMap<Object, Object>) held).firstEntry();
+        }
+        Iterator<Map.Entry<Object, Object>> walked = held.entrySet().iterator();
+        if (!walked.hasNext()) {
+            return null;
+        }
+        Map.Entry<Object, Object> one = walked.next();
+        return new AbstractMap.SimpleImmutableEntry<Object, Object>(one.getKey(), one.getValue());
+    }
+
+    public static Map.Entry<Object, Object> lastEntry(Map<Object, Object> held) {
+        if (held instanceof java.util.NavigableMap) {
+            return ((java.util.NavigableMap<Object, Object>) held).lastEntry();
+        }
+        Map.Entry<Object, Object> last = null;
+        for (Map.Entry<Object, Object> one : held.entrySet()) {
+            last = one;
+        }
+        if (last == null) {
+            return null;
+        }
+        return new AbstractMap.SimpleImmutableEntry<Object, Object>(last.getKey(), last.getValue());
+    }
+
+    public static Map.Entry<Object, Object> pollFirstEntry(Map<Object, Object> held) {
+        if (held instanceof java.util.NavigableMap) {
+            return ((java.util.NavigableMap<Object, Object>) held).pollFirstEntry();
+        }
+        Map.Entry<Object, Object> first = firstEntry(held);
+        if (first != null) {
+            held.remove(first.getKey());
+        }
+        return first;
+    }
+
+    public static Map.Entry<Object, Object> pollLastEntry(Map<Object, Object> held) {
+        if (held instanceof java.util.NavigableMap) {
+            return ((java.util.NavigableMap<Object, Object>) held).pollLastEntry();
+        }
+        Map.Entry<Object, Object> last = lastEntry(held);
+        if (last != null) {
+            held.remove(last.getKey());
+        }
+        return last;
+    }
+
+    private static List<String> linesOf(String text) {
+        List<String> out = new ArrayList<>();
+        int start = 0;
+        int at = 0;
+        int length = text.length();
+        while (at < length) {
+            char one = text.charAt(at);
+            if (one == '\n' || one == '\r') {
+                out.add(text.substring(start, at));
+                if (one == '\r' && at + 1 < length && text.charAt(at + 1) == '\n') {
+                    at++;
+                }
+                at++;
+                start = at;
+            } else {
+                at++;
+            }
+        }
+        if (start < length) {
+            out.add(text.substring(start));
+        }
+        return out;
+    }
+
+    private static int leading(String line) {
+        int at = 0;
+        while (at < line.length() && Character.isWhitespace(line.charAt(at))) {
+            at++;
+        }
+        return at;
+    }
+
+    public static String indent(String text, int count) {
+        if (text.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        for (String line : linesOf(text)) {
+            if (count > 0) {
+                for (int at = 0; at < count; at++) {
+                    out.append(' ');
+                }
+                out.append(line);
+            } else if (count < 0) {
+                out.append(line.substring(Math.min(-count, leading(line))));
+            } else {
+                out.append(line);
+            }
+            out.append('\n');
+        }
+        return out.toString();
+    }
+
+    public static String stripIndent(String text) {
+        int length = text.length();
+        if (length == 0) {
+            return "";
+        }
+        char tail = text.charAt(length - 1);
+        boolean ends = tail == '\n' || tail == '\r';
+        List<String> lines = linesOf(text);
+        if (ends) {
+            lines.add("");
+        }
+        int least = Integer.MAX_VALUE;
+        for (int at = 0; at < lines.size(); at++) {
+            String line = lines.get(at);
+            int lead = leading(line);
+            if (lead < line.length() || at == lines.size() - 1) {
+                least = Math.min(least, lead);
+            }
+        }
+        if (least == Integer.MAX_VALUE) {
+            least = 0;
+        }
+        StringBuilder out = new StringBuilder();
+        for (int at = 0; at < lines.size(); at++) {
+            String line = lines.get(at);
+            int lead = leading(line);
+            String kept = lead == line.length() ? "" : line.substring(Math.min(least, lead));
+            out.append(stripTrailing(kept));
+            if (at < lines.size() - 1) {
+                out.append('\n');
+            }
+        }
+        return out.toString();
+    }
+
+    public static String translateEscapes(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        int at = 0;
+        int length = text.length();
+        while (at < length) {
+            char one = text.charAt(at++);
+            if (one != '\\') {
+                out.append(one);
+                continue;
+            }
+            if (at >= length) {
+                throw new IllegalArgumentException("Invalid escape sequence: \\");
+            }
+            char next = text.charAt(at++);
+            switch (next) {
+                case 'b':
+                    out.append('\b');
+                    break;
+                case 'f':
+                    out.append('\f');
+                    break;
+                case 'n':
+                    out.append('\n');
+                    break;
+                case 'r':
+                    out.append('\r');
+                    break;
+                case 's':
+                    out.append(' ');
+                    break;
+                case 't':
+                    out.append('\t');
+                    break;
+                case '\'':
+                case '"':
+                case '\\':
+                    out.append(next);
+                    break;
+                case '\n':
+                    break;
+                case '\r':
+                    if (at < length && text.charAt(at) == '\n') {
+                        at++;
+                    }
+                    break;
+                default:
+                    if (next >= '0' && next <= '7') {
+                        int value = next - '0';
+                        int limit = next <= '3' ? 2 : 1;
+                        while (limit > 0 && at < length && text.charAt(at) >= '0' && text.charAt(at) <= '7') {
+                            value = value * 8 + (text.charAt(at) - '0');
+                            at++;
+                            limit--;
+                        }
+                        out.append((char) value);
+                    } else {
+                        throw new IllegalArgumentException("Invalid escape sequence: \\" + next);
+                    }
+            }
+        }
+        return out.toString();
+    }
+
+    public static String[] splitWithDelimiters(String text, String regex, int limit) {
+        java.util.regex.Matcher found = java.util.regex.Pattern.compile(regex).matcher(text);
+        List<String> out = new ArrayList<>();
+        int start = 0;
+        int matches = 0;
+        while (found.find()) {
+            if (limit > 0 && matches >= limit - 1) {
+                break;
+            }
+            if (found.end() == 0) {
+                continue;
+            }
+            out.add(text.substring(start, found.start()));
+            out.add(found.group());
+            start = found.end();
+            matches++;
+        }
+        out.add(text.substring(start));
+        if (limit == 0) {
+            while (!out.isEmpty() && out.get(out.size() - 1).isEmpty()) {
+                out.remove(out.size() - 1);
+            }
+        }
+        return out.toArray(new String[0]);
+    }
+
+    private static void bounds(String text, int begin, int end) {
+        if (begin < 0 || end > text.length() || begin > end) {
+            throw new StringIndexOutOfBoundsException("begin " + begin + ", end " + end + ", length " + text.length());
+        }
+    }
+
+    public static int indexOf(String text, int point, int begin, int end) {
+        bounds(text, begin, end);
+        int found = text.indexOf(point, begin);
+        return found >= 0 && found < end ? found : -1;
+    }
+
+    public static int indexOf(String text, String wanted, int begin, int end) {
+        bounds(text, begin, end);
+        int found = text.indexOf(wanted, begin);
+        return found >= 0 && found + wanted.length() <= end ? found : -1;
+    }
+
+    public static StringBuilder repeat(StringBuilder into, CharSequence said, int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count is negative: " + count);
+        }
+        for (int at = 0; at < count; at++) {
+            into.append(said);
+        }
+        return into;
+    }
+
+    public static StringBuilder repeat(StringBuilder into, int point, int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count is negative: " + count);
+        }
+        for (int at = 0; at < count; at++) {
+            into.appendCodePoint(point);
+        }
+        return into;
+    }
+
+    private static Collector.Characteristics[] traits(Collector<Object, Object, Object> held) {
+        return held.characteristics().toArray(new Collector.Characteristics[0]);
+    }
+
+    public static Collector<Object, Object, Object> teeing(Collector<Object, Object, Object> first, Collector<Object, Object, Object> second, java.util.function.BiFunction<Object, Object, Object> merger) {
+        final Supplier<Object> firstMake = first.supplier();
+        final BiConsumer<Object, Object> firstAdd = first.accumulator();
+        final BinaryOperator<Object> firstJoin = first.combiner();
+        final Function<Object, Object> firstEnd = first.finisher();
+        final Supplier<Object> secondMake = second.supplier();
+        final BiConsumer<Object, Object> secondAdd = second.accumulator();
+        final BinaryOperator<Object> secondJoin = second.combiner();
+        final Function<Object, Object> secondEnd = second.finisher();
+        return Collector.of(new Supplier<Object>() {
+            public Object get() {
+                return new Object[] {firstMake.get(), secondMake.get()};
+            }
+        }, new BiConsumer<Object, Object>() {
+            public void accept(Object held, Object one) {
+                Object[] pair = (Object[]) held;
+                firstAdd.accept(pair[0], one);
+                secondAdd.accept(pair[1], one);
+            }
+        }, new BinaryOperator<Object>() {
+            public Object apply(Object left, Object right) {
+                Object[] into = (Object[]) left;
+                Object[] from = (Object[]) right;
+                into[0] = firstJoin.apply(into[0], from[0]);
+                into[1] = secondJoin.apply(into[1], from[1]);
+                return into;
+            }
+        }, new Function<Object, Object>() {
+            public Object apply(Object held) {
+                Object[] pair = (Object[]) held;
+                return merger.apply(firstEnd.apply(pair[0]), secondEnd.apply(pair[1]));
+            }
+        });
+    }
+
+    public static Collector<Object, Object, Object> filtering(Predicate<Object> keep, Collector<Object, Object, Object> downstream) {
+        final BiConsumer<Object, Object> add = downstream.accumulator();
+        return Collector.of(downstream.supplier(), new BiConsumer<Object, Object>() {
+            public void accept(Object held, Object one) {
+                if (keep.test(one)) {
+                    add.accept(held, one);
+                }
+            }
+        }, downstream.combiner(), downstream.finisher(), traits(downstream));
+    }
+
+    public static Collector<Object, Object, Object> flatMapping(Function<Object, Object> mapper, Collector<Object, Object, Object> downstream) {
+        final BiConsumer<Object, Object> add = downstream.accumulator();
+        return Collector.of(downstream.supplier(), new BiConsumer<Object, Object>() {
+            public void accept(final Object held, Object one) {
+                Stream<Object> made = (Stream<Object>) mapper.apply(one);
+                if (made == null) {
+                    return;
+                }
+                try {
+                    made.forEach(new Consumer<Object>() {
+                        public void accept(Object value) {
+                            add.accept(held, value);
+                        }
+                    });
+                } finally {
+                    made.close();
+                }
+            }
+        }, downstream.combiner(), downstream.finisher(), traits(downstream));
+    }
+
+    private static int capacityFor(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("Negative number of mappings: " + count);
+        }
+        return (int) Math.ceil(count / 0.75d);
+    }
+
+    public static HashMap<Object, Object> newHashMap(int count) {
+        return new HashMap<>(capacityFor(count));
+    }
+
+    public static LinkedHashMap<Object, Object> newLinkedHashMap(int count) {
+        return new LinkedHashMap<>(capacityFor(count));
+    }
+
+    public static HashSet<Object> newHashSet(int count) {
+        return new HashSet<>(capacityFor(count));
+    }
+
+    public static java.util.LinkedHashSet<Object> newLinkedHashSet(int count) {
+        return new java.util.LinkedHashSet<>(capacityFor(count));
+    }
+
+    public static java.util.concurrent.ExecutorService newVirtualThreadPerTaskExecutor() {
+        return java.util.concurrent.Executors.newCachedThreadPool();
+    }
+
+    public static java.nio.file.Path pathOf(String first, String[] more) {
+        return java.nio.file.Paths.get(first, more);
+    }
+
+    public static java.nio.file.Path pathOf(java.net.URI where) {
+        return java.nio.file.Paths.get(where);
+    }
+
+    public static String readString(java.nio.file.Path path) throws IOException {
+        return new String(java.nio.file.Files.readAllBytes(path), java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    public static String readString(java.nio.file.Path path, java.nio.charset.Charset charset) throws IOException {
+        return new String(java.nio.file.Files.readAllBytes(path), charset);
+    }
+
+    public static java.nio.file.Path writeString(java.nio.file.Path path, CharSequence said, java.nio.file.OpenOption[] options) throws IOException {
+        return java.nio.file.Files.write(path, said.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), options);
+    }
+
+    public static java.nio.file.Path writeString(java.nio.file.Path path, CharSequence said, java.nio.charset.Charset charset, java.nio.file.OpenOption[] options) throws IOException {
+        return java.nio.file.Files.write(path, said.toString().getBytes(charset), options);
+    }
+
+    public static long transferTo(java.io.Reader from, java.io.Writer to) throws IOException {
+        Objects.requireNonNull(to, "out");
+        long moved = 0;
+        char[] buffer = new char[8192];
+        int read;
+        while ((read = from.read(buffer, 0, buffer.length)) >= 0) {
+            to.write(buffer, 0, read);
+            moved += read;
+        }
+        return moved;
+    }
+
+    public static InputStream nullInputStream() {
+        return new java.io.ByteArrayInputStream(new byte[0]);
+    }
+
+    public static OutputStream nullOutputStream() {
+        return new OutputStream() {
+            public void write(int one) {
+            }
+
+            public void write(byte[] bytes, int from, int length) {
+            }
+        };
+    }
+}
+"####,
+        ),
+        (
+            "com/apk/builder/desugar/HexFormat.java",
+            r####"package com.apk.builder.desugar;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+
+public final class HexFormat {
+    private static final char[] LOWER = "0123456789abcdef".toCharArray();
+    private static final char[] UPPER = "0123456789ABCDEF".toCharArray();
+    private static final HexFormat PLAIN = new HexFormat("", "", "", false);
+
+    private final String delimiter;
+    private final String prefix;
+    private final String suffix;
+    private final boolean upper;
+
+    private HexFormat(String delimiter, String prefix, String suffix, boolean upper) {
+        this.delimiter = delimiter;
+        this.prefix = prefix;
+        this.suffix = suffix;
+        this.upper = upper;
+    }
+
+    public static HexFormat of() {
+        return PLAIN;
+    }
+
+    public static HexFormat ofDelimiter(String delimiter) {
+        return new HexFormat(delimiter, "", "", false);
+    }
+
+    public HexFormat withDelimiter(String delimiter) {
+        return new HexFormat(delimiter, prefix, suffix, upper);
+    }
+
+    public HexFormat withPrefix(String prefix) {
+        return new HexFormat(delimiter, prefix, suffix, upper);
+    }
+
+    public HexFormat withSuffix(String suffix) {
+        return new HexFormat(delimiter, prefix, suffix, upper);
+    }
+
+    public HexFormat withUpperCase() {
+        return new HexFormat(delimiter, prefix, suffix, true);
+    }
+
+    public HexFormat withLowerCase() {
+        return new HexFormat(delimiter, prefix, suffix, false);
+    }
+
+    public String delimiter() {
+        return delimiter;
+    }
+
+    public String prefix() {
+        return prefix;
+    }
+
+    public String suffix() {
+        return suffix;
+    }
+
+    public boolean isUpperCase() {
+        return upper;
+    }
+
+    public String formatHex(byte[] bytes) {
+        return formatHex(bytes, 0, bytes.length);
+    }
+
+    public String formatHex(byte[] bytes, int from, int to) {
+        if (from < 0 || to > bytes.length || from > to) {
+            throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", length " + bytes.length);
+        }
+        StringBuilder out = new StringBuilder();
+        for (int at = from; at < to; at++) {
+            if (at > from) {
+                out.append(delimiter);
+            }
+            out.append(prefix);
+            out.append(toHighHexDigit(bytes[at]));
+            out.append(toLowHexDigit(bytes[at]));
+            out.append(suffix);
+        }
+        return out.toString();
+    }
+
+    public Appendable formatHex(Appendable out, byte[] bytes) {
+        try {
+            out.append(formatHex(bytes));
+        } catch (IOException failed) {
+            throw new UncheckedIOException(failed);
+        }
+        return out;
+    }
+
+    public byte[] parseHex(CharSequence text) {
+        return parseHex(text, 0, text.length());
+    }
+
+    public byte[] parseHex(char[] chars, int from, int to) {
+        return parseHex(new String(chars, from, to - from));
+    }
+
+    public byte[] parseHex(CharSequence text, int from, int to) {
+        String said = text.subSequence(from, to).toString();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        int at = 0;
+        boolean first = true;
+        while (at < said.length()) {
+            if (!first) {
+                if (!said.startsWith(delimiter, at)) {
+                    throw new IllegalArgumentException("found: \"" + said.substring(at) + "\", expected: \"" + delimiter + "\"");
+                }
+                at += delimiter.length();
+            }
+            if (!said.startsWith(prefix, at)) {
+                throw new IllegalArgumentException("found: \"" + said.substring(at) + "\", expected prefix: \"" + prefix + "\"");
+            }
+            at += prefix.length();
+            if (at + 2 > said.length()) {
+                throw new IllegalArgumentException("string length not valid: " + said.length());
+            }
+            out.write((fromHexDigit(said.charAt(at)) << 4) | fromHexDigit(said.charAt(at + 1)));
+            at += 2;
+            if (!said.startsWith(suffix, at)) {
+                throw new IllegalArgumentException("found: \"" + said.substring(at) + "\", expected suffix: \"" + suffix + "\"");
+            }
+            at += suffix.length();
+            first = false;
+        }
+        return out.toByteArray();
+    }
+
+    public char toLowHexDigit(int value) {
+        return (upper ? UPPER : LOWER)[value & 0xf];
+    }
+
+    public char toHighHexDigit(int value) {
+        return (upper ? UPPER : LOWER)[(value >> 4) & 0xf];
+    }
+
+    private String digits(long value, int count) {
+        char[] out = new char[count];
+        for (int at = count - 1; at >= 0; at--) {
+            out[at] = toLowHexDigit((int) value);
+            value >>>= 4;
+        }
+        return new String(out);
+    }
+
+    public String toHexDigits(byte value) {
+        return digits(value & 0xffL, 2);
+    }
+
+    public String toHexDigits(char value) {
+        return digits(value & 0xffffL, 4);
+    }
+
+    public String toHexDigits(short value) {
+        return digits(value & 0xffffL, 4);
+    }
+
+    public String toHexDigits(int value) {
+        return digits(value & 0xffffffffL, 8);
+    }
+
+    public String toHexDigits(long value) {
+        return digits(value, 16);
+    }
+
+    public String toHexDigits(long value, int count) {
+        if (count < 0 || count > 16) {
+            throw new IllegalArgumentException("number of digits: " + count);
+        }
+        return digits(value, count);
+    }
+
+    public static boolean isHexDigit(int point) {
+        return (point >= '0' && point <= '9') || (point >= 'a' && point <= 'f') || (point >= 'A' && point <= 'F');
+    }
+
+    public static int fromHexDigit(int point) {
+        if (point >= '0' && point <= '9') {
+            return point - '0';
+        }
+        if (point >= 'a' && point <= 'f') {
+            return point - 'a' + 10;
+        }
+        if (point >= 'A' && point <= 'F') {
+            return point - 'A' + 10;
+        }
+        throw new NumberFormatException("not a hexadecimal digit: \"" + (char) point + "\" = " + point);
+    }
+
+    public static int fromHexDigits(CharSequence text) {
+        return fromHexDigits(text, 0, text.length());
+    }
+
+    public static int fromHexDigits(CharSequence text, int from, int to) {
+        if (to - from > 8) {
+            throw new IllegalArgumentException("string length greater than 8: " + (to - from));
+        }
+        return (int) fromHexDigitsToLong(text, from, to);
+    }
+
+    public static long fromHexDigitsToLong(CharSequence text) {
+        return fromHexDigitsToLong(text, 0, text.length());
+    }
+
+    public static long fromHexDigitsToLong(CharSequence text, int from, int to) {
+        if (to - from > 16) {
+            throw new IllegalArgumentException("string length greater than 16: " + (to - from));
+        }
+        long value = 0;
+        for (int at = from; at < to; at++) {
+            value = (value << 4) | fromHexDigit(text.charAt(at));
+        }
+        return value;
+    }
+
+    public boolean equals(Object other) {
+        if (!(other instanceof HexFormat)) {
+            return false;
+        }
+        HexFormat that = (HexFormat) other;
+        return delimiter.equals(that.delimiter) && prefix.equals(that.prefix) && suffix.equals(that.suffix) && upper == that.upper;
+    }
+
+    public int hashCode() {
+        return ((delimiter.hashCode() * 31 + prefix.hashCode()) * 31 + suffix.hashCode()) * 31 + (upper ? 1 : 0);
+    }
+
+    public String toString() {
+        return "uppercase: " + upper + ", delimiter: \"" + delimiter + "\", prefix: \"" + prefix + "\", suffix: \"" + suffix + "\"";
+    }
 }
 "####,
         ),
@@ -38765,6 +40601,8 @@ pub mod shrink {
         pub kept: usize,
         pub dropped: usize,
         pub names: Vec<String>,
+        pub methods: usize,
+        pub fields: usize,
     }
 
     impl Trimmed {
@@ -39333,6 +41171,8 @@ pub mod shrink {
                     kept,
                     dropped: 0,
                     names: Vec::new(),
+                    methods: 0,
+                    fields: 0,
                 },
             );
         }
@@ -39352,6 +41192,8 @@ pub mod shrink {
                     kept,
                     dropped: 0,
                     names: Vec::new(),
+                    methods: 0,
+                    fields: 0,
                 },
             );
         }
@@ -39370,6 +41212,579 @@ pub mod shrink {
             kept: out.len(),
             dropped: names.len(),
             names,
+            methods: 0,
+            fields: 0,
+        };
+        (out, trimmed)
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Keep {
+        pub whole: Vec<String>,
+        pub handlers: Vec<String>,
+    }
+
+    type MemberKey = (String, String, String);
+
+    fn proto_of(reference: &crate::dexwrite::MethodRef) -> String {
+        format!(
+            "({}){}",
+            reference.parameters.concat(),
+            reference.return_type
+        )
+    }
+
+    fn internal_of(descriptor: &str) -> Option<&str> {
+        descriptor
+            .strip_prefix('L')
+            .and_then(|rest| rest.strip_suffix(';'))
+    }
+
+    fn arity(proto: &str) -> usize {
+        let inside = proto
+            .strip_prefix('(')
+            .and_then(|rest| rest.split(')').next())
+            .unwrap_or("");
+        let chars: Vec<char> = inside.chars().collect();
+        let mut count = 0;
+        let mut at = 0;
+        while at < chars.len() {
+            while at < chars.len() && chars[at] == '[' {
+                at += 1;
+            }
+            if at < chars.len() && chars[at] == 'L' {
+                while at < chars.len() && chars[at] != ';' {
+                    at += 1;
+                }
+            }
+            at += 1;
+            count += 1;
+        }
+        count
+    }
+
+    fn runtime_visible(annotations: &[crate::jvm::Annotation]) -> bool {
+        annotations
+            .iter()
+            .any(|one| one.visibility == crate::jvm::Visibility::Runtime)
+    }
+
+    const ACC_PRIVATE: u32 = 0x0002;
+    const ACC_STATIC: u32 = 0x0008;
+    const ACC_NATIVE: u32 = 0x0100;
+    const ACC_INTERFACE: u32 = 0x0200;
+    const ACC_ANNOTATION: u32 = 0x2000;
+    const ACC_ENUM: u32 = 0x4000;
+    const SERIAL: &[&str] = &[
+        "writeObject",
+        "readObject",
+        "readObjectNoData",
+        "writeReplace",
+        "readResolve",
+    ];
+
+    enum Work {
+        Class(String),
+        Method(String, String, String),
+        Field(String, String, String),
+        Reflected(String),
+    }
+
+    struct Graph<'a> {
+        classes: &'a [Class],
+        by_name: std::collections::HashMap<&'a str, usize>,
+        whole: BTreeSet<String>,
+        handlers: BTreeSet<String>,
+        live: BTreeSet<String>,
+        methods: BTreeSet<MemberKey>,
+        fields: BTreeSet<MemberKey>,
+        called: std::collections::HashMap<(String, String), BTreeSet<String>>,
+        declarers: std::collections::HashMap<(String, String), Vec<String>>,
+        reflected: BTreeSet<String>,
+        waiting: Vec<Work>,
+    }
+
+    impl<'a> Graph<'a> {
+        fn class(&self, descriptor: &str) -> Option<&'a Class> {
+            self.by_name.get(descriptor).map(|at| &self.classes[*at])
+        }
+
+        fn above(&self, descriptor: &str) -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            let mut waiting = vec![descriptor.to_string()];
+            while let Some(here) = waiting.pop() {
+                if out.contains(&here) || out.len() > 512 {
+                    continue;
+                }
+                out.push(here.clone());
+                if let Some(class) = self.class(&here) {
+                    if !class.superclass.is_empty() {
+                        waiting.push(class.superclass.clone());
+                    }
+                    waiting.extend(class.interfaces.iter().cloned());
+                }
+            }
+            out
+        }
+
+        fn note(&mut self, descriptor: &str) {
+            let element = descriptor.trim_start_matches('[');
+            if element.starts_with('L') && self.by_name.contains_key(element) {
+                self.waiting.push(Work::Class(element.to_string()));
+            }
+        }
+
+        fn declares(class: &Class, name: &str, proto: &str) -> bool {
+            class
+                .direct_methods
+                .iter()
+                .chain(class.virtual_methods.iter())
+                .any(|one| one.reference.name == name && proto_of(&one.reference) == proto)
+        }
+
+        fn resolve_method(&self, owner: &str, name: &str, proto: &str) -> Option<String> {
+            let mut at = owner.to_string();
+            let mut steps = 0;
+            while let Some(class) = self.class(&at) {
+                if Self::declares(class, name, proto) {
+                    return Some(at);
+                }
+                steps += 1;
+                if steps > 256 || class.superclass.is_empty() {
+                    break;
+                }
+                at = class.superclass.clone();
+            }
+            for one in self.above(owner) {
+                if let Some(class) = self.class(&one) {
+                    if class.access_flags & ACC_INTERFACE != 0 && Self::declares(class, name, proto)
+                    {
+                        return Some(one);
+                    }
+                }
+            }
+            None
+        }
+
+        fn resolve_field(&self, owner: &str, name: &str, descriptor: &str) -> Option<String> {
+            for one in self.above(owner) {
+                if let Some(class) = self.class(&one) {
+                    if class
+                        .static_fields
+                        .iter()
+                        .chain(class.instance_fields.iter())
+                        .any(|field| {
+                            field.reference.name == name && field.reference.descriptor == descriptor
+                        })
+                    {
+                        return Some(one);
+                    }
+                }
+            }
+            None
+        }
+
+        fn outside_declares(&self, descriptor: &str, name: &str, proto: &str) -> bool {
+            let Some(internal) = internal_of(descriptor) else {
+                return false;
+            };
+            let library = crate::compilers::java::Classpath::everything();
+            if library.get(internal).is_none() {
+                return true;
+            }
+            let arity = arity(proto);
+            library
+                .find_methods(internal, name, arity)
+                .iter()
+                .any(|one| !one.static_ && one.descriptor() == proto)
+        }
+
+        fn overrides_what_stays(&self, descriptor: &str, name: &str, proto: &str) -> bool {
+            for one in self.above(descriptor).into_iter().skip(1) {
+                match self.class(&one) {
+                    None => {
+                        if one == "Ljava/lang/Object;"
+                            && !matches!(
+                                name,
+                                "equals" | "hashCode" | "toString" | "finalize" | "clone"
+                            )
+                        {
+                            continue;
+                        }
+                        if self.outside_declares(&one, name, proto) {
+                            return true;
+                        }
+                    }
+                    Some(class) => {
+                        if self.whole.contains(&one) && Self::declares(class, name, proto) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        fn serializable(&self, descriptor: &str) -> bool {
+            self.above(descriptor)
+                .iter()
+                .any(|one| one == "Ljava/io/Serializable;" || one == "Ljava/io/Externalizable;")
+        }
+
+        fn visit_class(&mut self, descriptor: String) {
+            let Some(class) = self.class(&descriptor) else {
+                return;
+            };
+            if !self.live.insert(descriptor.clone()) {
+                return;
+            }
+            let whole = self.whole.contains(&descriptor)
+                || class.access_flags & (ACC_ENUM | ACC_ANNOTATION) != 0;
+            let interface = class.access_flags & ACC_INTERFACE != 0;
+            let serial = self.serializable(&descriptor);
+            if !class.superclass.is_empty() {
+                self.note(&class.superclass.clone());
+            }
+            for one in class.interfaces.clone() {
+                self.note(&one);
+            }
+            for one in &class.annotations {
+                let held = one.descriptor.clone();
+                self.note(&held);
+            }
+            let above = self.above(&descriptor);
+            for method in class
+                .direct_methods
+                .iter()
+                .chain(class.virtual_methods.iter())
+            {
+                let name = method.reference.name.clone();
+                let proto = proto_of(&method.reference);
+                let flags = method.access_flags;
+                let dispatched = flags & (ACC_STATIC | ACC_PRIVATE) == 0 && name != "<init>";
+                let keep = whole
+                    || interface
+                    || name == "<clinit>"
+                    || flags & ACC_NATIVE != 0
+                    || runtime_visible(&method.annotations)
+                    || (serial && SERIAL.contains(&name.as_str()))
+                    || (self.handlers.contains(&name) && proto == "(Landroid/view/View;)V")
+                    || (dispatched
+                        && (self.overrides_what_stays(&descriptor, &name, &proto)
+                            || self.called.get(&(name.clone(), proto.clone())).is_some_and(
+                                |owners| above.iter().any(|one| owners.contains(one)),
+                            )));
+                if keep {
+                    self.waiting
+                        .push(Work::Method(descriptor.clone(), name, proto));
+                }
+            }
+            for field in class
+                .static_fields
+                .iter()
+                .chain(class.instance_fields.iter())
+            {
+                let keep = whole
+                    || interface
+                    || serial
+                    || runtime_visible(&field.annotations)
+                    || field.reference.name == "CREATOR";
+                if keep {
+                    self.waiting.push(Work::Field(
+                        descriptor.clone(),
+                        field.reference.name.clone(),
+                        field.reference.descriptor.clone(),
+                    ));
+                }
+            }
+        }
+
+        fn visit_reflected(&mut self, descriptor: String) {
+            let Some(class) = self.class(&descriptor) else {
+                return;
+            };
+            if !self.reflected.insert(descriptor.clone()) {
+                return;
+            }
+            self.waiting.push(Work::Class(descriptor.clone()));
+            for method in &class.direct_methods {
+                if method.reference.name == "<init>" {
+                    self.waiting.push(Work::Method(
+                        descriptor.clone(),
+                        "<init>".to_string(),
+                        proto_of(&method.reference),
+                    ));
+                }
+            }
+            for field in class.instance_fields.iter() {
+                self.waiting.push(Work::Field(
+                    descriptor.clone(),
+                    field.reference.name.clone(),
+                    field.reference.descriptor.clone(),
+                ));
+            }
+        }
+
+        fn visit_method(&mut self, owner: String, name: String, proto: String) {
+            let Some(declared) = self.resolve_method(&owner, &name, &proto) else {
+                self.note(&owner);
+                return;
+            };
+            let key = (declared.clone(), name.clone(), proto.clone());
+            if !self.methods.insert(key) {
+                return;
+            }
+            self.waiting.push(Work::Class(declared.clone()));
+            let Some(class) = self.class(&declared) else {
+                return;
+            };
+            let Some(method) = class
+                .direct_methods
+                .iter()
+                .chain(class.virtual_methods.iter())
+                .find(|one| one.reference.name == name && proto_of(&one.reference) == proto)
+            else {
+                return;
+            };
+            let mut notes: Vec<String> = Vec::new();
+            notes.push(method.reference.return_type.clone());
+            notes.extend(method.reference.parameters.iter().cloned());
+            for one in &method.annotations {
+                notes.push(one.descriptor.clone());
+            }
+            for one in &method.tries {
+                for (caught, _) in &one.catches {
+                    if let Some(held) = caught {
+                        notes.push(held.clone());
+                    }
+                }
+            }
+            let mut later: Vec<Work> = Vec::new();
+            let mut virtuals: Vec<(String, String, String)> = Vec::new();
+            for insn in &method.instructions {
+                let opcode = insn.units.first().map(|one| one & 0xff).unwrap_or(0);
+                match &insn.operand {
+                    Operand::Method(reference) => {
+                        notes.push(reference.class.clone());
+                        notes.push(reference.return_type.clone());
+                        notes.extend(reference.parameters.iter().cloned());
+                        let proto = proto_of(reference);
+                        later.push(Work::Method(
+                            reference.class.clone(),
+                            reference.name.clone(),
+                            proto.clone(),
+                        ));
+                        if matches!(opcode, 0x6e | 0x72 | 0x74 | 0x78) && reference.name != "<init>"
+                        {
+                            virtuals.push((reference.class.clone(), reference.name.clone(), proto));
+                        }
+                    }
+                    Operand::Field(reference) => {
+                        notes.push(reference.class.clone());
+                        notes.push(reference.descriptor.clone());
+                        later.push(Work::Field(
+                            reference.class.clone(),
+                            reference.name.clone(),
+                            reference.descriptor.clone(),
+                        ));
+                    }
+                    Operand::Type(held) => {
+                        notes.push(held.clone());
+                        if opcode == 0x1c {
+                            later.push(Work::Reflected(held.trim_start_matches('[').to_string()));
+                        }
+                    }
+                    Operand::Text(held) => {
+                        if held.contains('.') && !held.contains(' ') {
+                            let named = format!("L{};", held.replace('.', "/"));
+                            if self.by_name.contains_key(named.as_str()) {
+                                later.push(Work::Reflected(named));
+                            }
+                        }
+                    }
+                    Operand::None => {}
+                }
+            }
+            for one in notes {
+                self.note(&one);
+            }
+            self.waiting.extend(later);
+            for (owner, name, proto) in virtuals {
+                let fresh = self
+                    .called
+                    .entry((name.clone(), proto.clone()))
+                    .or_default()
+                    .insert(owner.clone());
+                if !fresh {
+                    continue;
+                }
+                let declaring: Vec<String> = self
+                    .declarers
+                    .get(&(name.clone(), proto.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                for one in declaring {
+                    if self.live.contains(&one) && self.above(&one).contains(&owner) {
+                        self.waiting
+                            .push(Work::Method(one, name.clone(), proto.clone()));
+                    }
+                }
+            }
+        }
+
+        fn visit_field(&mut self, owner: String, name: String, descriptor: String) {
+            let Some(declared) = self.resolve_field(&owner, &name, &descriptor) else {
+                self.note(&owner);
+                return;
+            };
+            let key = (declared.clone(), name, descriptor.clone());
+            if !self.fields.insert(key) {
+                return;
+            }
+            self.waiting.push(Work::Class(declared));
+            self.note(&descriptor);
+        }
+
+        fn run(&mut self) {
+            while let Some(work) = self.waiting.pop() {
+                match work {
+                    Work::Class(one) => self.visit_class(one),
+                    Work::Method(owner, name, proto) => self.visit_method(owner, name, proto),
+                    Work::Field(owner, name, descriptor) => {
+                        self.visit_field(owner, name, descriptor)
+                    }
+                    Work::Reflected(one) => self.visit_reflected(one),
+                }
+            }
+        }
+    }
+
+    pub fn handlers_in(texts: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for text in texts {
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("android:onClick=\"") {
+                rest = &rest[at + "android:onClick=\"".len()..];
+                let Some(end) = rest.find('"') else {
+                    break;
+                };
+                let named = &rest[..end];
+                if !named.is_empty()
+                    && !named.starts_with('@')
+                    && named
+                        .chars()
+                        .all(|one| one.is_alphanumeric() || one == '_' || one == '$')
+                    && !out.iter().any(|held: &String| held == named)
+                {
+                    out.push(named.to_string());
+                }
+                rest = &rest[end..];
+            }
+        }
+        out
+    }
+
+    pub fn apply_deep(classes: Vec<Class>, roots: &[String], keep: &Keep) -> (Vec<Class>, Trimmed) {
+        let present: BTreeSet<&str> = classes.iter().map(|one| one.descriptor.as_str()).collect();
+        if roots.is_empty() || !roots.iter().any(|one| present.contains(one.as_str())) {
+            return apply(classes, roots);
+        }
+        let mut declarers: std::collections::HashMap<(String, String), Vec<String>> =
+            std::collections::HashMap::new();
+        for class in &classes {
+            for method in &class.virtual_methods {
+                declarers
+                    .entry((method.reference.name.clone(), proto_of(&method.reference)))
+                    .or_default()
+                    .push(class.descriptor.clone());
+            }
+        }
+        let mut whole: BTreeSet<String> = keep.whole.iter().cloned().collect();
+        for class in &classes {
+            if class
+                .descriptor
+                .rsplit('/')
+                .next()
+                .map(|one| one.trim_end_matches(';'))
+                == Some(crate::seal::CLASS)
+            {
+                whole.insert(class.descriptor.clone());
+            }
+        }
+        let (live, methods, fields) = {
+            let mut graph = Graph {
+                classes: &classes,
+                by_name: classes
+                    .iter()
+                    .enumerate()
+                    .map(|(at, one)| (one.descriptor.as_str(), at))
+                    .collect(),
+                whole: whole.clone(),
+                handlers: keep.handlers.iter().cloned().collect(),
+                live: BTreeSet::new(),
+                methods: BTreeSet::new(),
+                fields: BTreeSet::new(),
+                called: std::collections::HashMap::new(),
+                declarers,
+                reflected: BTreeSet::new(),
+                waiting: Vec::new(),
+            };
+            for one in roots {
+                if present.contains(one.as_str()) {
+                    graph.waiting.push(Work::Reflected(one.clone()));
+                }
+            }
+            for one in &whole {
+                graph.waiting.push(Work::Class(one.clone()));
+            }
+            graph.run();
+            (graph.live, graph.methods, graph.fields)
+        };
+        let mut names = Vec::new();
+        let mut out = Vec::with_capacity(classes.len());
+        let mut methods_dropped = 0usize;
+        let mut fields_dropped = 0usize;
+        for mut one in classes {
+            if !live.contains(&one.descriptor) {
+                if let Some(held) = named_in(&one.descriptor) {
+                    names.push(held.to_string());
+                }
+                continue;
+            }
+            if !whole.contains(&one.descriptor) {
+                let descriptor = one.descriptor.clone();
+                let method_kept = |method: &crate::dexwrite::Method| {
+                    methods.contains(&(
+                        descriptor.clone(),
+                        method.reference.name.clone(),
+                        proto_of(&method.reference),
+                    ))
+                };
+                let field_kept = |field: &crate::dexwrite::Field| {
+                    fields.contains(&(
+                        descriptor.clone(),
+                        field.reference.name.clone(),
+                        field.reference.descriptor.clone(),
+                    ))
+                };
+                let before = one.direct_methods.len() + one.virtual_methods.len();
+                one.direct_methods.retain(|method| method_kept(method));
+                one.virtual_methods.retain(|method| method_kept(method));
+                methods_dropped += before - one.direct_methods.len() - one.virtual_methods.len();
+                let before = one.static_fields.len() + one.instance_fields.len();
+                one.static_fields.retain(|field| field_kept(field));
+                one.instance_fields.retain(|field| field_kept(field));
+                fields_dropped += before - one.static_fields.len() - one.instance_fields.len();
+            }
+            out.push(one);
+        }
+        names.sort();
+        let trimmed = Trimmed {
+            kept: out.len(),
+            dropped: names.len(),
+            names,
+            methods: methods_dropped,
+            fields: fields_dropped,
         };
         (out, trimmed)
     }
@@ -57422,14 +59837,14 @@ public final class R {{
             let package = package_of(&project.manifest).unwrap_or_default();
             let written = if project.shrink {
                 let mut roots = crate::shrink::roots_from_manifest(&project.manifest, &package);
-                roots.extend(crate::shrink::beyond_the_package(&project.code, &package));
-                roots.extend(crate::shrink::found_by_name(&project.code));
-                roots.extend(crate::shrink::kept_by_rules(
+                let mut whole = crate::shrink::beyond_the_package(&project.code, &package);
+                whole.extend(crate::shrink::found_by_name(&project.code));
+                whole.extend(crate::shrink::kept_by_rules(
                     &project.code,
                     &project.keep_rules,
                 ));
                 if project.debugger.is_some() {
-                    roots.extend(
+                    whole.extend(
                         project
                             .code
                             .iter()
@@ -57437,6 +59852,7 @@ public final class R {{
                             .map(|one| one.descriptor.clone()),
                     );
                 }
+                roots.extend(whole.iter().cloned());
                 let texts: Vec<String> = project
                     .resources
                     .iter()
@@ -57449,7 +59865,12 @@ public final class R {{
                     &project.code,
                     &package,
                 ));
-                let (kept, trimmed) = crate::shrink::apply(project.code.clone(), &roots);
+                let keep = crate::shrink::Keep {
+                    handlers: crate::shrink::handlers_in(&texts),
+                    whole,
+                };
+                let (kept, trimmed) =
+                    crate::shrink::apply_deep(project.code.clone(), &roots, &keep);
                 if trimmed.dropped > 0 {
                     sink.emit(
                         crate::diag::Diagnostic::new(
@@ -57461,6 +59882,19 @@ public final class R {{
                         )
                         .with_context(format!("Kept: {}", trimmed.kept))
                         .with_context(format!("Dropped: {}", trimmed.dropped)),
+                    );
+                }
+                if trimmed.methods > 0 || trimmed.fields > 0 {
+                    sink.emit(
+                        crate::diag::Diagnostic::new(
+                            "EB071",
+                            Severity::Info,
+                            FailureClass::Success,
+                            "core.shrink",
+                            "Methods and fields nothing reaches were left out of the classes that stay.",
+                        )
+                        .with_context(format!("Methods: {}", trimmed.methods))
+                        .with_context(format!("Fields: {}", trimmed.fields)),
                     );
                 }
                 kept
@@ -57512,6 +59946,16 @@ public final class R {{
         certificate_der: &[u8],
         sink: &mut Sink,
     ) -> Result<Outcome, Diagnostic> {
+        assemble_with(project, key, certificate_der, None, sink)
+    }
+
+    pub fn assemble_with(
+        project: &Project,
+        key: &rsa::PrivateKey,
+        certificate_der: &[u8],
+        quantum: Option<&crate::signing::Quantum>,
+        sink: &mut Sink,
+    ) -> Result<Outcome, Diagnostic> {
         let Unsigned {
             package: made,
             guard: report,
@@ -57520,12 +59964,13 @@ public final class R {{
         } = unsigned(project, sink)?;
 
         crate::progress::enter_checked("signing")?;
-        let package = crate::signing::sign(
+        let package = crate::signing::sign_hybrid(
             &made,
             key,
             certificate_der,
             rsa::DigestAlgorithm::Sha256,
             Some((minimum_sdk, NEWEST_PLATFORM)),
+            quantum,
         )?;
 
         crate::progress::enter_checked("verify")?;
@@ -61525,7 +63970,15 @@ pub mod ffi {
                 let project = crate::builder::sealed_project(&root, Some(&made_by))?;
                 w.field_bool("carriesImage", project.icon.is_some());
                 w.field_bool("sealed", project.sealed.is_some());
-                crate::builder::assemble(&project, &key, &certificate, &mut sink)
+                let quantum =
+                    crate::signing::Quantum::from_seed(&crate::mldsa::seed_beside(&key_path)?)?;
+                crate::builder::assemble_with(
+                    &project,
+                    &key,
+                    &certificate,
+                    Some(&quantum),
+                    &mut sink,
+                )
             })();
 
             let mut built = false;
@@ -61746,7 +64199,15 @@ pub mod ffi {
                         .collect::<std::collections::BTreeSet<_>>()
                         .len() as u64,
                 );
-                let package = crate::builder::assemble(&project, &key, &certificate, &mut sink)?;
+                let quantum =
+                    crate::signing::Quantum::from_seed(&crate::mldsa::seed_beside(&key_path)?)?;
+                let package = crate::builder::assemble_with(
+                    &project,
+                    &key,
+                    &certificate,
+                    Some(&quantum),
+                    &mut sink,
+                )?;
                 let bundle = crate::bundle::write(&project)?;
                 Ok((package, bundle))
             })();
@@ -62676,11 +65137,12 @@ pub mod ffi {
                     let made_by = crate::builder::made_by(&held)?;
                     let project = crate::builder::sealed_project(&root, Some(&made_by))?;
                     let made = crate::builder::unsigned(&project, &mut sink)?;
-                    let asked = crate::signing::to_sign(
+                    let asked = crate::signing::to_sign_hybrid(
                         &made.package,
                         &held,
                         crate::rsa::DigestAlgorithm::Sha256,
                         Some((made.minimum_sdk, crate::builder::NEWEST_PLATFORM)),
+                        true,
                     )?;
                     Ok((project, made, asked))
                 });
@@ -62708,6 +65170,12 @@ pub mod ffi {
                                 w.field_str("toSignV31", &crate::der::to_hex(rotated));
                             }
                             None => w.field_str("toSignV31", ""),
+                        }
+                        match &asked.v32 {
+                            Some(hybrid) => {
+                                w.field_str("toSignV32", &crate::der::to_hex(hybrid));
+                            }
+                            None => w.field_str("toSignV32", ""),
                         }
                         made.guard.write_json(&mut w, "policy");
                     }
@@ -62737,6 +65205,8 @@ pub mod ffi {
         signature_v2: *const c_char,
         signature_v3: *const c_char,
         signature_v31: *const c_char,
+        signature_v32: *const c_char,
+        quantum_seed: *const c_char,
         min_sdk: u32,
         max_sdk: u32,
     ) -> *mut c_char {
@@ -62751,6 +65221,8 @@ pub mod ffi {
             };
             let three = text_from(signature_v3).unwrap_or_default();
             let rotated = text_from(signature_v31).unwrap_or_default();
+            let hybrid = text_from(signature_v32).unwrap_or_default();
+            let seed = text_from(quantum_seed).unwrap_or_default();
 
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
@@ -62759,9 +65231,8 @@ pub mod ffi {
             let outcome = sealed(
                 &package_path,
                 &certificate,
-                &v2,
-                &three,
-                &rotated,
+                [&v2, &three, &rotated, &hybrid],
+                &seed,
                 (min_sdk, max_sdk),
             );
             let mut sealed_ok = false;
@@ -62812,11 +65283,11 @@ pub mod ffi {
     fn sealed(
         package_path: &str,
         certificate: &str,
-        v2: &str,
-        v3: &str,
-        v31: &str,
+        signatures: [&str; 4],
+        seed: &str,
         range: (u32, u32),
     ) -> Result<Sealed, crate::diag::Diagnostic> {
+        let [v2, v3, v31, v32] = signatures;
         let named = |code: &str, said: &str| {
             crate::diag::Diagnostic::new(
                 code,
@@ -62847,6 +65318,20 @@ pub mod ffi {
                     named("EB061", "The signature is not written as hexadecimal.")
                 })?)
             };
+        let fourth =
+            if v32.is_empty() {
+                None
+            } else {
+                Some(crate::der::from_hex(v32).ok_or_else(|| {
+                    named("EB061", "The signature is not written as hexadecimal.")
+                })?)
+            };
+        let quantum = if fourth.is_none() {
+            None
+        } else {
+            let raw = crate::der::from_hex(seed).unwrap_or_default();
+            Some(crate::signing::Quantum::from_seed(&raw)?)
+        };
 
         let package = std::fs::read(package_path).map_err(|why| {
             named("EB062", "The package to seal could not be read.")
@@ -62855,15 +65340,24 @@ pub mod ffi {
         })?;
 
         let range = Some(range);
-        let asked =
-            crate::signing::to_sign(&package, &held, crate::rsa::DigestAlgorithm::Sha256, range)?;
-        let out = crate::signing::with_every_signature(
+        let asked = crate::signing::to_sign_hybrid(
+            &package,
+            &held,
+            crate::rsa::DigestAlgorithm::Sha256,
+            range,
+            quantum.is_some(),
+        )?;
+        let out = crate::signing::with_every_signature_hybrid(
             &package,
             &held,
             &asked,
-            &first,
-            second.as_deref(),
-            third.as_deref(),
+            [
+                Some(&first),
+                second.as_deref(),
+                third.as_deref(),
+                fourth.as_deref(),
+            ],
+            quantum.as_ref(),
             range,
         )?;
 
