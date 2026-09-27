@@ -18172,7 +18172,7 @@ class BuilderActivity : Activity() {
         working({ Builder.nativeMavenPlan(root) }) planned@{ answer ->
             val wanted = wantedLibraries(answer)
             if (wanted.isEmpty()) {
-                mendThenBuildNow(root)
+                buildProject(root)
                 return@planned
             }
             dialogShell(
@@ -18197,32 +18197,35 @@ class BuilderActivity : Activity() {
                 listOf(
                     getString(R.string.libraries_without) to { it: AlertDialog ->
                         it.dismiss()
-                        mendThenBuildNow(root)
+                        buildProject(root)
                     },
                     getString(R.string.libraries_fetch) to { it: AlertDialog ->
                         it.dismiss()
-                        fetchTheLibraries(root) { mendThenBuildNow(root) }
+                        fetchTheLibraries(root) { buildProject(root) }
                     },
                 ),
             )
         }
     }
 
-    private fun mendThenBuildNow(root: String) {
-        results.removeAllViews()
-        working({ Builder.nativeProjectRepairs(root) }) finished@{ answer ->
-            val document = runCatching { JSONObject(answer) }.getOrNull()
-            val listed = document?.optJSONArray("repairs")
-            val found = mutableListOf<Mend>()
-            for (index in 0 until (listed?.length() ?: 0)) {
-                listed?.optJSONObject(index)?.let { found.add(Mend(it)) }
+    private fun offerMendsAfterRefusal(root: String) {
+        Thread {
+            val answer = runCatching { Builder.nativeProjectRepairs(root) }.getOrNull()
+            runOnUiThread {
+                if (isFinishing || isDestroyed || answer == null) {
+                    return@runOnUiThread
+                }
+                val document = runCatching { JSONObject(answer) }.getOrNull()
+                val listed = document?.optJSONArray("repairs")
+                val found = mutableListOf<Mend>()
+                for (index in 0 until (listed?.length() ?: 0)) {
+                    listed?.optJSONObject(index)?.let { found.add(Mend(it)) }
+                }
+                if (found.isNotEmpty()) {
+                    offerTheMends(root, found, document?.optString("left").orEmpty())
+                }
             }
-            if (found.isEmpty()) {
-                buildProject(root)
-                return@finished
-            }
-            offerTheMends(root, found, document?.optString("left").orEmpty())
-        }
+        }.start()
     }
 
     private fun mendRow(root: String, one: Mend, onDone: () -> Unit): View =
@@ -18591,6 +18594,9 @@ class BuilderActivity : Activity() {
                 }
                 val refusal = Refusal.parse(JSONObject(answer))
                 showRefusal(refusal, results)
+                if (refusal.code?.startsWith("EJ") == true) {
+                    offerMendsAfterRefusal(root)
+                }
                 outcome.findings.forEach { results.addView(quiet(it)) }
                 val whole = (
                     listOfNotNull(refusal.code, refusal.message, outcome.error) + outcome.findings

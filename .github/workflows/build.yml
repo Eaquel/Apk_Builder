@@ -26,6 +26,39 @@ env:
   APK_BUILDER_SDK_CMAKE_FOR_NINJA: "4.1.2"
 
 jobs:
+  artifacts:
+    name: Old artifacts
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete what earlier runs left behind
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const listed = await github.paginate(github.rest.actions.listArtifactsForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const newest = listed
+              .filter((one) => !one.expired)
+              .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+            let removed = 0;
+            for (const one of listed) {
+              if (newest && one.id === newest.id) {
+                continue;
+              }
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: one.id,
+              });
+              removed += 1;
+            }
+            core.info(`Removed ${removed} of ${listed.length} artifacts.`);
+
   core:
     name: Core
     runs-on: ubuntu-latest
@@ -228,3 +261,4 @@ jobs:
             Builder/build/outputs/apk/release/*.apk
             Builder/build/outputs/bundle/release/*.aab
           if-no-files-found: error
+          retention-days: 7
