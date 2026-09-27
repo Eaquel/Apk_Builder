@@ -3379,7 +3379,10 @@ mod core {
             read(&said, "leftMillis").parse::<u64>().unwrap() > 0,
             "a stage running longer than it did before is not already over: {said}"
         );
-        assert!(read(&said, "percent").parse::<u64>().unwrap() < 99, "{said}");
+        assert!(
+            read(&said, "percent").parse::<u64>().unwrap() < 99,
+            "{said}"
+        );
     }
 
     #[test]
@@ -17053,7 +17056,11 @@ dependencies {
         )
         .unwrap();
         let plan = crate::maven::plan(&text).expect("the plan is made");
-        assert!(plan.done, "{:?}", plan.wanted.iter().map(|one| &one.path).collect::<Vec<_>>());
+        assert!(
+            plan.done,
+            "{:?}",
+            plan.wanted.iter().map(|one| &one.path).collect::<Vec<_>>()
+        );
         assert!(plan
             .held
             .contains(&"androidx.databinding:databinding-runtime:8.7.3".to_string()));
@@ -26212,7 +26219,11 @@ Viewbinding   = false
             &held,
             &mut found,
         );
-        assert_eq!(found.unread.len(), 1, "a folder other than libs is still reported");
+        assert_eq!(
+            found.unread.len(),
+            1,
+            "a folder other than libs is still reported"
+        );
     }
 
     #[test]
@@ -26238,8 +26249,8 @@ Viewbinding   = false
              }\n",
         )
         .unwrap();
-        let found = crate::gradle::read(directory.to_str().unwrap(), "app")
-            .expect("the build file reads");
+        let found =
+            crate::gradle::read(directory.to_str().unwrap(), "app").expect("the build file reads");
         assert_eq!(found.settings.compile_sdk, 36);
         assert_eq!(found.settings.min_sdk, 29);
     }
