@@ -42902,6 +42902,7 @@ pub mod gradle {
         pub unread: Vec<String>,
         pub placeholders: Vec<(String, String)>,
         pub flavors: Vec<String>,
+        pub flavors_left: Vec<String>,
         pub linked: Vec<String>,
     }
 
@@ -43161,6 +43162,10 @@ pub mod gradle {
 
     pub fn looked_up(said: &str, known: &std::collections::BTreeMap<String, String>) -> String {
         let trimmed = said.trim();
+        let trimmed = match trimmed.find(".get(") {
+            Some(cut) if trimmed.starts_with("libs.") => &trimmed[..cut],
+            _ => trimmed,
+        };
         let bare = trimmed
             .strip_prefix("rootProject.ext.")
             .or_else(|| trimmed.strip_prefix("project.ext."))
@@ -43725,8 +43730,12 @@ pub mod gradle {
                 let local = inside
                     .split(',')
                     .find_map(|one| {
-                        let (key, value) = one.split_once([':', '='])?;
-                        (key.trim() == "dir").then(|| unquoted(value)).flatten()
+                        let (key, value) = one
+                            .split_once(" to ")
+                            .or_else(|| one.split_once([':', '=']))?;
+                        let key = key.trim().trim_start_matches("mapOf(").trim();
+                        let key = unquoted(key).unwrap_or_else(|| key.to_string());
+                        (key == "dir").then(|| unquoted(value)).flatten()
                     })
                     .or_else(|| unquoted(&inside));
                 if local.as_deref() != Some(LOCAL_LIBRARIES) {
@@ -44132,6 +44141,12 @@ pub mod gradle {
         plugins(&text, &mut found);
 
         let mut known = std::collections::BTreeMap::new();
+        for one in &held.versions {
+            known.insert(
+                format!("libs.versions.{}", one.name.replace(['-', '_'], ".")),
+                one.value.clone(),
+            );
+        }
         properties(&text, &mut known);
         if !module.is_empty() {
             if let Some(outer) = build_file(here).and_then(|path| text_of(&path)) {
@@ -44275,21 +44290,7 @@ pub mod gradle {
                 found.settings.version_name.push_str(&held);
             }
         }
-        if !chosen.is_empty() {
-            found.unread.push(format!(
-                "productFlavors: {} is built{}",
-                chosen
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("+"),
-                if left.is_empty() {
-                    String::new()
-                } else {
-                    format!(", not {}", left.join(", "))
-                }
-            ));
-        }
+        found.flavors_left = left;
         found.placeholders = placeholders(&default)
             .into_iter()
             .map(|(key, held)| (key, looked_up(&held, &known)))
@@ -44464,6 +44465,8 @@ pub mod gradle {
         pub moved: u64,
         pub processors: Vec<Dependency>,
         pub unread: Vec<String>,
+        pub flavors: Vec<String>,
+        pub flavors_left: Vec<String>,
     }
 
     pub const SOURCE_MAP: &[(&str, &str)] = &[
@@ -44779,6 +44782,8 @@ pub mod gradle {
             moved: 0,
             processors: found.processors.clone(),
             unread: found.unread.clone(),
+            flavors: found.flavors.clone(),
+            flavors_left: found.flavors_left.clone(),
         };
         for one in &found.processors {
             if crate::room::runs_here(&one.name) || DONE_WITHOUT.contains(&one.name.as_str()) {
@@ -45616,6 +45621,17 @@ pub mod maven {
         }
 
         fn look(&mut self, root: &str, one: &Coordinate) -> Option<Described> {
+            if !pom_path(root, one).is_file() {
+                if let Some(kind) = [AAR, JAR]
+                    .into_iter()
+                    .find(|kind| library_path(root, one, kind).is_file())
+                {
+                    return Some(Described {
+                        kind: kind.to_string(),
+                        ..Described::default()
+                    });
+                }
+            }
             let pom = self.pom(root, one, 0)?;
             if pom.gradle {
                 let path = module_path(root, one);
@@ -51269,6 +51285,8 @@ pub mod workspace {
         pub icon_drawn: bool,
         pub adopted: bool,
         pub unread: Vec<String>,
+        pub flavors: Vec<String>,
+        pub flavors_left: Vec<String>,
     }
 
     fn shared_prefix(names: &[String]) -> String {
@@ -51396,6 +51414,8 @@ pub mod workspace {
         out.adopted = adoption.adopted;
         out.settings_written = adoption.settings_written;
         out.unread = adoption.unread;
+        out.flavors = adoption.flavors;
+        out.flavors_left = adoption.flavors_left;
         out.icon_drawn = adoption.icon_drawn;
         Ok(out)
     }
@@ -51406,6 +51426,8 @@ pub mod workspace {
         pub settings_written: bool,
         pub icon_drawn: bool,
         pub unread: Vec<String>,
+        pub flavors: Vec<String>,
+        pub flavors_left: Vec<String>,
         pub package: String,
         pub label: String,
     }
@@ -51453,11 +51475,24 @@ pub mod workspace {
                 out.adopted = true;
                 out.settings_written = true;
                 out.unread = held.unread.clone();
+                out.flavors = held.flavors.clone();
+                out.flavors_left = held.flavors_left.clone();
             } else if crate::gradle::adopt_classic(into)? > 0 {
                 out.adopted = true;
             }
         }
         let manifest = crate::scaffold::read_manifest(into)?;
+        if out.settings_written {
+            let mut quiet = crate::diag::Sink::new();
+            let named = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut quiet)
+                .and_then(|parsed| label_in(into, &parsed));
+            if let (Some(named), Ok(Some(mut settings))) = (named, crate::settings::held(into)) {
+                if settings.label != named {
+                    settings.label = named;
+                    crate::settings::write(into, &settings)?;
+                }
+            }
+        }
         if !had_settings {
             let mut settings = crate::settings::Settings::default();
             let mut quiet = crate::diag::Sink::new();
@@ -62858,7 +62893,7 @@ pub mod progress {
         pub fn report(&self) -> String {
             let expected = self.expected();
             let now = Instant::now();
-            let elapsed = self.began.map(|held| elapsed(held, now)).unwrap_or(0);
+            let whole = self.began.map(|held| elapsed(held, now)).unwrap_or(0);
 
             let behind: u64 = expected.iter().take(self.at).sum();
             let so_far: u64 = self.measured.iter().take(self.at).sum();
@@ -62868,15 +62903,25 @@ pub mod progress {
             } else {
                 1.0
             };
-            let ahead: u64 = expected.iter().skip(self.at).sum();
-            let total = (so_far as f64 + pace * ahead as f64).max(1.0);
+            let in_stage = self.entered.map(|held| elapsed(held, now)).unwrap_or(0) as f64;
+            let planned = expected.get(self.at).copied().unwrap_or(0) as f64;
+            let pace = if planned > 0.0 {
+                pace.max(in_stage / planned)
+            } else {
+                pace
+            };
+            let current = pace * planned;
+            let after = pace * expected.iter().skip(self.at + 1).sum::<u64>() as f64;
+            let stage_left = (current - in_stage).max(current.max(in_stage) * 0.1);
+            let done = so_far as f64 + in_stage;
+            let total = (done + stage_left + after).max(1.0);
 
             let (percent, left) = match self.outcome {
                 Outcome::Built | Outcome::Refused | Outcome::Stopped => (100.0, 0.0),
                 Outcome::Waiting => (0.0, total),
                 Outcome::Building => (
-                    ((elapsed as f64 / total) * 100.0).clamp(0.0, 99.0),
-                    (total - elapsed as f64).max(0.0),
+                    ((done / total) * 100.0).clamp(0.0, 99.0),
+                    (total - done).max(0.0),
                 ),
             };
 
@@ -62887,7 +62932,7 @@ pub mod progress {
             w.field_u64("step", self.at as u64 + 1);
             w.field_u64("steps", STAGES.len() as u64);
             w.field_u64("percent", percent.round() as u64);
-            w.field_u64("elapsedMillis", as_millis(elapsed as f64));
+            w.field_u64("elapsedMillis", as_millis(whole as f64));
             w.field_u64("leftMillis", as_millis(left));
             w.field_u64("wholeMillis", as_millis(total));
             w.field_bool("estimated", self.knows_this_device());
@@ -64977,6 +65022,16 @@ pub mod ffi {
                         w.element_str(one);
                     }
                     w.end_array();
+                    w.begin_array(Some("flavors"));
+                    for one in &held.flavors {
+                        w.element_str(one);
+                    }
+                    w.end_array();
+                    w.begin_array(Some("flavorsLeft"));
+                    for one in &held.flavors_left {
+                        w.element_str(one);
+                    }
+                    w.end_array();
                 }
                 Err(error) => write_failure(&mut w, "unpacked", &error),
             }
@@ -65008,6 +65063,16 @@ pub mod ffi {
                     w.field_bool("adopted", held.adopted);
                     w.begin_array(Some("unread"));
                     for one in &held.unread {
+                        w.element_str(one);
+                    }
+                    w.end_array();
+                    w.begin_array(Some("flavors"));
+                    for one in &held.flavors {
+                        w.element_str(one);
+                    }
+                    w.end_array();
+                    w.begin_array(Some("flavorsLeft"));
+                    for one in &held.flavors_left {
                         w.element_str(one);
                     }
                     w.end_array();

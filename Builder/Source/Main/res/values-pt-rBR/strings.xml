@@ -783,4 +783,6 @@
     <string name="virtual_bridge">Android Debug Bridge</string>
     <string name="virtual_terminal">Terminal completo</string>
     <string name="form_abis">Arquiteturas</string>
+    <string name="import_flavor_built">Variante de produto compilada: %1$s. Não compilada: %2$s.</string>
+    <string name="import_gradle_carried">Projeto Gradle importado</string>
 </resources>

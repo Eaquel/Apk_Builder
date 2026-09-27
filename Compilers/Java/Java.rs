@@ -9349,7 +9349,7 @@ public class Integer extends Number implements Comparable<Integer> {
     public static native int remainderUnsigned(int left, int right);
     public static native long toUnsignedLong(int value);
     public static native String toUnsignedString(int value);
-    public static native int decode(String held) throws java.lang.NumberFormatException ;
+    public static native Integer decode(String held) throws java.lang.NumberFormatException ;
 }
 
 public class Long extends Number implements Comparable<Long> {
@@ -9548,9 +9548,10 @@ public class Math {
     public static native double expm1(double value);
     public static native double log1p(double value);
     public static native double fma(double a, double b, double c);
-    public static native int clamp(int value, int low, int high);
+    public static native int clamp(long value, int low, int high);
     public static native long clamp(long value, long low, long high);
     public static native double clamp(double value, double low, double high);
+    public static native float clamp(float value, float low, float high);
 }
 
 public class System {
@@ -12707,7 +12708,15 @@ impl Emitter<'_> {
                     {
                         target.clone()
                     }
-                    _ => self.what_both_sides_come_to(then, otherwise, line)?,
+                    _ => {
+                        let both = self.what_both_sides_come_to(then, otherwise, line)?;
+                        match &wanted {
+                            Some(target) if target.is_reference() && both.is_reference() => {
+                                target.clone()
+                            }
+                            _ => both,
+                        }
+                    }
                 };
                 let to_else = self.jump(0x99);
 

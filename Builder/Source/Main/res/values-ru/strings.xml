@@ -783,4 +783,6 @@
     <string name="virtual_bridge">Android Debug Bridge</string>
     <string name="virtual_terminal">Полноценный терминал</string>
     <string name="form_abis">Архитектуры</string>
+    <string name="import_flavor_built">Собран вариант продукта: %1$s. Не собран: %2$s.</string>
+    <string name="import_gradle_carried">Проект Gradle перенесён</string>
 </resources>

@@ -783,4 +783,6 @@
     <string name="virtual_bridge">Android Debug Bridge</string>
     <string name="virtual_terminal">充実した端末</string>
     <string name="form_abis">アーキテクチャ</string>
+    <string name="import_flavor_built">ビルドしたプロダクトフレーバー: %1$s。ビルドしていないもの: %2$s。</string>
+    <string name="import_gradle_carried">Gradle プロジェクトを取り込みました</string>
 </resources>

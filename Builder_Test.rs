@@ -3369,6 +3369,17 @@ mod core {
         learned.learn(&vec!["50"; STAGES.len()].join(","));
         assert!(learned.knows_this_device());
         assert_eq!(read(&learned.report(), "estimated"), "true");
+
+        let mut late = Channel::new();
+        late.learn(&vec!["1"; STAGES.len()].join(","));
+        late.begin();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let said = late.report();
+        assert!(
+            read(&said, "leftMillis").parse::<u64>().unwrap() > 0,
+            "a stage running longer than it did before is not already over: {said}"
+        );
+        assert!(read(&said, "percent").parse::<u64>().unwrap() < 99, "{said}");
     }
 
     #[test]
@@ -17018,6 +17029,38 @@ dependencies {
     }
 
     #[test]
+    fn a_named_library_already_in_the_project_is_not_fetched_again() {
+        let directory = temp_directory("builder-maven-held");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        crate::scaffold::create(&text, &crate::scaffold::Spec::default()).unwrap();
+        let mut settings = crate::settings::held(&text).unwrap().unwrap();
+        settings.dependencies = vec![crate::settings::Dependency {
+            name: "androidx.databinding:databinding-runtime".to_string(),
+            version: "8.7.3".to_string(),
+            file: String::new(),
+        }];
+        crate::settings::write(&text, &settings).unwrap();
+        let libraries = root.join(crate::scaffold::LIBRARY_FOLDER);
+        std::fs::create_dir_all(&libraries).unwrap();
+
+        let plan = crate::maven::plan(&text).expect("the plan is made");
+        assert!(!plan.done, "with nothing here the library is wanted");
+
+        std::fs::write(
+            libraries.join("androidx.databinding.databinding-runtime-8.7.3.aar"),
+            b"PK",
+        )
+        .unwrap();
+        let plan = crate::maven::plan(&text).expect("the plan is made");
+        assert!(plan.done, "{:?}", plan.wanted.iter().map(|one| &one.path).collect::<Vec<_>>());
+        assert!(plan
+            .held
+            .contains(&"androidx.databinding:databinding-runtime:8.7.3".to_string()));
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn what_a_project_names_comes_down_from_maven_with_all_it_leans_on() {
         let directory = temp_directory("builder-maven");
         let root = directory.join("Held");
@@ -26151,6 +26194,99 @@ Viewbinding   = false
     }
 
     #[test]
+    fn local_libraries_named_in_either_gradle_language_are_read_as_kept() {
+        let held = crate::settings::Catalogue::default();
+        for written in [
+            "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar'])\n}\n",
+            "dependencies {\n    implementation(fileTree(mapOf(\"dir\" to \"libs\", \"include\" to listOf(\"*.aar\", \"*.jar\"))))\n}\n",
+            "dependencies {\n    implementation(fileTree(\"libs\") { include(\"*.jar\") })\n}\n",
+            "dependencies {\n    implementation fileTree(include: ['*.jar', '*.aar'], dir: 'libs')\n}\n",
+        ] {
+            let mut found = crate::gradle::Read::default();
+            crate::gradle::dependencies(written, &held, &mut found);
+            assert!(found.unread.is_empty(), "{written} -> {:?}", found.unread);
+        }
+        let mut found = crate::gradle::Read::default();
+        crate::gradle::dependencies(
+            "dependencies {\n    implementation(fileTree(mapOf(\"dir\" to \"vendor\")))\n}\n",
+            &held,
+            &mut found,
+        );
+        assert_eq!(found.unread.len(), 1, "a folder other than libs is still reported");
+    }
+
+    #[test]
+    fn sdk_levels_taken_from_the_version_catalogue_are_read() {
+        let directory = temp_directory("builder-catalogue-sdk");
+        std::fs::create_dir_all(directory.join("app")).unwrap();
+        std::fs::create_dir_all(directory.join("gradle")).unwrap();
+        std::fs::write(directory.join("settings.gradle.kts"), "include(\":app\")\n").unwrap();
+        std::fs::write(
+            directory.join("gradle/libs.versions.toml"),
+            "[versions]\ncompileSdk = \"36\"\nmin-sdk = \"29\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("app/build.gradle.kts"),
+            "plugins { id(\"com.android.application\") }\n\
+             android {\n\
+             \x20   namespace = \"com.a.b\"\n\
+             \x20   compileSdk = libs.versions.compileSdk.get().toInt()\n\
+             \x20   defaultConfig {\n\
+             \x20       minSdk = libs.versions.min.sdk.get().toInt()\n\
+             \x20   }\n\
+             }\n",
+        )
+        .unwrap();
+        let found = crate::gradle::read(directory.to_str().unwrap(), "app")
+            .expect("the build file reads");
+        assert_eq!(found.settings.compile_sdk, 36);
+        assert_eq!(found.settings.min_sdk, 29);
+    }
+
+    #[test]
+    fn an_imported_gradle_project_is_named_the_way_its_manifest_names_it() {
+        let directory = temp_directory("builder-gradle-label");
+        let at = |path: &str, text: &str| {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        at("settings.gradle", "include ':app'\n");
+        at("build.gradle", "");
+        at(
+            "app/build.gradle",
+            "plugins { id 'com.android.application' }\n\
+             android {\n\
+                 namespace 'com.demo.habits'\n\
+                 defaultConfig { minSdk 30 }\n\
+             }\n",
+        );
+        at(
+            "app/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\
+             <application android:label=\"@string/app_name\" /></manifest>",
+        );
+        at(
+            "app/src/main/res/values/strings.xml",
+            "<resources><string name=\"app_name\">Named Well</string></resources>",
+        );
+        at(
+            "app/src/main/java/com/demo/habits/Main.java",
+            "package com.demo.habits; public class Main {}",
+        );
+        let root = directory.to_str().unwrap().to_string();
+        let adopted = crate::workspace::adopt_folder(&root, false).unwrap();
+        assert!(adopted.adopted);
+        assert_eq!(adopted.label, "Named Well");
+        assert_eq!(
+            crate::settings::held(&root).unwrap().unwrap().label,
+            "Named Well"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_gradle_flavor_is_built_with_its_sources_and_placeholders() {
         let directory = temp_directory("builder-flavors");
         let at = |path: &str, text: &str| {
@@ -26208,12 +26344,11 @@ Viewbinding   = false
         let adopted = crate::gradle::adopt(&root)
             .unwrap()
             .expect("a Gradle project");
+        assert_eq!(adopted.flavors, vec!["free".to_string()]);
+        assert_eq!(adopted.flavors_left, vec!["paid".to_string()]);
         assert!(
-            adopted
-                .unread
-                .iter()
-                .any(|one| one == "productFlavors: free is built, not paid"),
-            "{:?}",
+            !adopted.unread.iter().any(|one| one.contains("productFlavors")),
+            "the flavors travel on their own, so the screen can say it in the reader's language: {:?}",
             adopted.unread
         );
         assert!(
@@ -38980,6 +39115,55 @@ public class Nested {
             )],
             "Nested",
             "x 1 1 a\nx11a xa1\nx 2 5 b\nx25b xb5\nb3\n",
+        );
+    }
+
+    #[test]
+    fn a_conditional_takes_the_type_it_is_assigned_to() {
+        runs_like_the_jdk(
+            &[(
+                "Picked.java",
+                r####"import java.util.*;
+public class Picked {
+    sealed interface Kind permits Daily, Weekly, Custom {}
+    record Daily() implements Kind {}
+    record Weekly(int days) implements Kind {}
+    record Custom(String rule) implements Kind {}
+    interface Named { String name(); }
+    static final class A implements Named { public String name() { return "a"; } }
+    static final class B implements Named { public String name() { return "b"; } }
+    static String show(Kind kind) {
+        return switch (kind) {
+            case Daily d -> "daily";
+            case Weekly(int days) -> "weekly " + days;
+            case Custom(String rule) -> "custom " + rule;
+        };
+    }
+    static Named named(int at) {
+        return at % 2 == 0 ? new A() : new B();
+    }
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+        for (int at = 0; at < 3; at++) {
+            Kind kind = at == 0 ? new Daily() : at == 1 ? new Weekly(3) : new Custom("rest");
+            out.append(show(kind)).append(';');
+        }
+        List<Kind> kinds = new ArrayList<>();
+        kinds.add(args.length > 0 ? new Daily() : new Custom("none"));
+        Named one = named(1);
+        Integer boxed = args.length > 0 ? 1 : null;
+        long wide = args.length == 0 ? 2 : 3L;
+        out.append(show(kinds.get(0))).append(';').append(one.name()).append(named(2).name())
+            .append(';').append(boxed).append(';').append(wide)
+            .append(';').append(Math.clamp(args.length + 5000, 0, 3650))
+            .append(';').append(Integer.decode("0x10") + 1);
+        System.out.println(out);
+    }
+}
+"####,
+            )],
+            "Picked",
+            "daily;weekly 3;custom rest;custom none;ba;null;2;3650;17\n",
         );
     }
 

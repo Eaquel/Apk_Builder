@@ -783,4 +783,6 @@
     <string name="virtual_bridge">Android Debug Bridge</string>
     <string name="virtual_terminal">व्यापक टर्मिनल</string>
     <string name="form_abis">आर्किटेक्चर</string>
+    <string name="import_flavor_built">बनाया गया प्रोडक्ट फ़्लेवर: %1$s। नहीं बनाया गया: %2$s।</string>
+    <string name="import_gradle_carried">Gradle प्रोजेक्ट लाया गया</string>
 </resources>

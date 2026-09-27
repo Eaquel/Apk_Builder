@@ -783,4 +783,6 @@
     <string name="virtual_bridge">Android Debug Bridge</string>
     <string name="virtual_terminal">완전한 터미널</string>
     <string name="form_abis">아키텍처</string>
+    <string name="import_flavor_built">빌드한 제품 플레이버: %1$s. 빌드하지 않음: %2$s.</string>
+    <string name="import_gradle_carried">Gradle 프로젝트를 가져왔습니다</string>
 </resources>

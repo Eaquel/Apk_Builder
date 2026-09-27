@@ -6052,7 +6052,7 @@ class BuilderActivity : Activity() {
         )
         addView(
             TextView(context).apply {
-                text = value.uppercase(Locale.getDefault())
+                text = value
                 setTextColor(palette.muted)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 letterSpacing = 0.06f
@@ -18882,16 +18882,36 @@ class BuilderActivity : Activity() {
                     left.add(held.getString(index))
                 }
             }
-            if (left.isEmpty()) {
+            val named = { key: String ->
+                val held = document.optJSONArray(key)
+                (0 until (held?.length() ?: 0)).map { held!!.getString(it) }
+            }
+            val flavorsLeft = named("flavorsLeft")
+            val flavorNote = if (flavorsLeft.isEmpty()) {
+                null
+            } else {
+                getString(
+                    R.string.import_flavor_built,
+                    named("flavors").joinToString(" + "),
+                    flavorsLeft.joinToString(", "),
+                )
+            }
+            if (left.isEmpty() && flavorNote == null) {
                 openHere(root.absolutePath)
                 return@finished
             }
             dialogShell(
-                getString(R.string.import_gradle_left),
+                getString(
+                    if (left.isEmpty()) R.string.import_gradle_carried
+                    else R.string.import_gradle_left
+                ),
                 LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(0, gap(1), 0, gap(2))
-                    addView(quiet(getString(R.string.import_gradle_left_note)))
+                    if (left.isNotEmpty()) {
+                        addView(quiet(getString(R.string.import_gradle_left_note)))
+                    }
+                    flavorNote?.let { addView(quiet(it)) }
                     left.forEach { one ->
                         addView(
                             TextView(context).apply {
@@ -19298,7 +19318,7 @@ class BuilderActivity : Activity() {
 
     private fun heading(value: String): View {
         val written = TextView(this).apply {
-            text = value.uppercase(Locale.getDefault())
+            text = value
             setTextColor(palette.foreground)
             typeface = Type.heading
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
@@ -20639,6 +20659,7 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
         val rows = stages.size.coerceAtLeast(1)
         val step = (room2 / rows).coerceAtMost(min(w, h) * 0.062f)
         text.textSize = (step * 0.44f).coerceAtMost(min(w, h) * 0.026f)
+        val column = text.measureText(clock.format(Date())) + step * 0.5f
         stages.forEachIndexed { index, named ->
             val y = listTop + step * (index + 0.7f)
             val past = index < stageAt || (done && reported >= 100f)
@@ -20646,7 +20667,7 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
             val stamp = stamps.getOrNull(index).orEmpty()
             text.color = palette.muted
             canvas.drawText(stamp, left, y, text)
-            val dot = left + step * 1.7f
+            val dot = left + column + step * 0.16f
             when {
                 refusedAt == index -> {
                     paint.color = palette.error
@@ -21322,6 +21343,9 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     private var matchHere = -1
     private var matchThere = -1
     private var faultLine = -1
+    private var faultAt = 0
+    private var countedUpTo = 0
+    private var countedBreaks = 0
     private var said = ""
     private val squiggle = Path()
     private val guide = Paint()
@@ -21400,6 +21424,8 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             }
 
             override fun afterTextChanged(s: Editable?) {
+                countedUpTo = 0
+                countedBreaks = 0
                 if (!helping) {
                     faultLine = -1
                 }
@@ -21555,6 +21581,14 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
 
     fun fault(line: Int) {
         faultLine = line
+        val held = text ?: ""
+        var at = 0
+        var seen = 1
+        while (seen < line && at < held.length) {
+            if (held[at] == '\n') seen += 1
+            at += 1
+        }
+        faultAt = at
         if (line > 0) {
             showLine(line)
         }
@@ -21822,7 +21856,12 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             drawGuides(canvas, layout, first, lowest)
             canvas.restore()
 
-            val faulty = faultLine - 1
+            val held = text ?: ""
+            val faulty = if (faultLine > 0) {
+                layout.getLineForOffset(faultAt.coerceIn(0, held.length))
+            } else {
+                -1
+            }
             if (faulty in first..lowest) {
                 canvas.save()
                 canvas.translate(liftX, liftY)
@@ -21830,14 +21869,22 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
                 canvas.restore()
             }
 
+            val caretOffset = selectionStart.coerceIn(0, held.length)
+            val caretRow = layout.getLineForOffset(
+                if (caretOffset == 0) 0 else held.lastIndexOf('\n', caretOffset - 1) + 1
+            )
+            var number = breaksBefore(held, layout.getLineStart(first)) + 1
             for (line in first..lowest) {
+                val begins = line == 0 || held[layout.getLineStart(line) - 1] == '\n'
+                if (!begins) continue
+                if (line > first) number += 1
                 gutter.color = when (line) {
                     faulty -> palette.error
-                    caretLine -> palette.accent
+                    caretRow -> palette.accent
                     else -> Ink.fade(palette.muted, 0.55f)
                 }
                 canvas.drawText(
-                    (line + 1).toString(),
+                    number.toString(),
                     edge,
                     liftY + layout.getLineBaseline(line),
                     gutter,
@@ -21884,6 +21931,22 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             )
         }
         super.onDraw(canvas)
+    }
+
+    private fun breaksBefore(held: CharSequence, offset: Int): Int {
+        if (offset < countedUpTo || countedUpTo > held.length) {
+            countedUpTo = 0
+            countedBreaks = 0
+        }
+        var at = countedUpTo
+        var breaks = countedBreaks
+        while (at < offset) {
+            if (held[at] == '\n') breaks += 1
+            at += 1
+        }
+        countedUpTo = offset
+        countedBreaks = breaks
+        return breaks
     }
 
     override fun onSelectionChanged(start: Int, end: Int) {
