@@ -5344,6 +5344,9 @@ pub mod model {
             pub enum_entries: Vec<i32>,
             pub sealed: Vec<i32>,
             pub types: Vec<PType>,
+            pub underlying_name: Option<i32>,
+            pub underlying: Option<PType>,
+            pub underlying_id: Option<i32>,
         }
 
         #[derive(Clone, Debug, Default)]
@@ -5653,6 +5656,9 @@ pub mod model {
                         }
                     }
                     16 => reader.ints(wire, &mut out.sealed)?,
+                    17 => out.underlying_name = Some(reader.int()?),
+                    18 => out.underlying = Some(ty(reader.chunk()?, &names)?),
+                    19 => out.underlying_id = Some(reader.int()?),
                     30 => type_table(reader.chunk()?, &names, &mut out.types)?,
                     _ => reader.skip(wire)?,
                 }
@@ -5696,6 +5702,7 @@ pub mod world {
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
 
+    #[derive(Clone)]
     struct Stored {
         jar: usize,
         offset: usize,
@@ -5715,6 +5722,115 @@ pub mod world {
         packages: RefCell<HashMap<String, Rc<RefCell<PackageMembers>>>>,
         loaded_packages: RefCell<HashSet<String>>,
         known_packages: RefCell<HashSet<String>>,
+    }
+
+    pub struct ValueScan {
+        jars: Vec<Rc<Vec<u8>>>,
+        stored: HashMap<String, Stored>,
+        known: RefCell<HashMap<String, Option<(Ty, String)>>>,
+    }
+
+    thread_local! {
+        static VALUE_SCAN: RefCell<Option<Rc<ValueScan>>> = const { RefCell::new(None) };
+    }
+
+    pub fn value_class(name: &str) -> Option<(Ty, String)> {
+        let scan = VALUE_SCAN.with(|held| held.borrow().clone())?;
+        if let Some(found) = scan.known.borrow().get(name) {
+            return found.clone();
+        }
+        let found = scan.read(name);
+        scan.known
+            .borrow_mut()
+            .insert(name.to_string(), found.clone());
+        found
+    }
+
+    pub fn note_value_class(name: &str, found: Option<(Ty, String)>) {
+        VALUE_SCAN.with(|held| {
+            if let Some(scan) = held.borrow().as_ref() {
+                scan.known.borrow_mut().insert(name.to_string(), found);
+            }
+        });
+    }
+
+    impl ValueScan {
+        fn read(&self, name: &str) -> Option<(Ty, String)> {
+            let stored = self.stored.get(name)?;
+            let bytes = self.jars.get(stored.jar)?;
+            let slice = bytes.get(stored.offset..stored.offset.checked_add(stored.size)?)?;
+            let data = if stored.deflated {
+                crate::inflate::raw(slice).ok()?
+            } else {
+                slice.to_vec()
+            };
+            let raw = crate::jvm::read(&data).ok()?;
+            let (kind, d1, d2, _) = World::metadata_of(&raw)?;
+            if kind != 1 {
+                return None;
+            }
+            let (names, class) = metadata::class(&d1, d2)?;
+            if class.flags & (1 << 13) == 0 {
+                return None;
+            }
+            let reader = MetaReader {
+                names: &names,
+                types: &class.types,
+            };
+            let scope: Vec<(i32, TypeParam)> = class
+                .type_parameters
+                .iter()
+                .map(|one| {
+                    (
+                        one.id,
+                        TypeParam {
+                            name: names.get(one.name),
+                            bounds: Vec::new(),
+                            reified: false,
+                        },
+                    )
+                })
+                .collect();
+            let scope: Vec<(i32, TypeParam)> = class
+                .type_parameters
+                .iter()
+                .map(|one| (one.id, reader.type_param(one, &scope)))
+                .collect();
+            let underlying = class
+                .underlying
+                .as_ref()
+                .or_else(|| {
+                    class
+                        .underlying_id
+                        .and_then(|id| class.types.get(id as usize))
+                })
+                .map(|held| reader.ty(held, &scope))
+                .or_else(|| {
+                    let primary = class
+                        .constructors
+                        .iter()
+                        .find(|one| one.flags & (1 << 4) == 0)?;
+                    let parameter = primary.parameters.first()?;
+                    let held = parameter.ty.as_ref().or_else(|| {
+                        parameter
+                            .type_id
+                            .and_then(|id| class.types.get(id as usize))
+                    })?;
+                    Some(reader.ty(held, &scope))
+                })?;
+            let property = class
+                .underlying_name
+                .map(|id| names.get(id))
+                .or_else(|| {
+                    let primary = class
+                        .constructors
+                        .iter()
+                        .find(|one| one.flags & (1 << 4) == 0)?;
+                    primary.parameters.first().map(|one| names.get(one.name))
+                })
+                .unwrap_or_default();
+            Some((underlying, property))
+        }
     }
 
     fn simple_part(name: &str) -> &str {
@@ -5760,6 +5876,12 @@ pub mod world {
                 world.note_package(package_of(&name));
                 world.units.entry(name).or_insert_with(|| Rc::new(unit));
             }
+            let scan = ValueScan {
+                jars: world.jars.clone(),
+                stored: world.stored.clone(),
+                known: RefCell::new(HashMap::new()),
+            };
+            VALUE_SCAN.with(|held| *held.borrow_mut() = Some(Rc::new(scan)));
             world
         }
 
@@ -6412,6 +6534,13 @@ pub mod world {
                 let ty = self.written(unit, &field.what, &class_scope, &[]);
                 let mut built = PropertyInfo::new(&field.name, &name, ty);
                 built.java_field = true;
+                built.visibility = if field.modifiers.public || interface {
+                    Visible::Public
+                } else if field.modifiers.protected {
+                    Visible::Protected
+                } else {
+                    Visible::Internal
+                };
                 built.static_ = field.modifiers.static_ || interface;
                 built.mutable = !field.modifiers.final_;
                 built.field = Some((name.clone(), field.name.clone(), built.static_));
@@ -7201,6 +7330,13 @@ pub mod world {
             let static_ = access & 0x0008 != 0;
             let mut built = PropertyInfo::new(&field.name, &name, ty);
             built.java_field = true;
+            built.visibility = if access & 0x0001 != 0 {
+                Visible::Public
+            } else if access & 0x0004 != 0 {
+                Visible::Protected
+            } else {
+                Visible::Internal
+            };
             built.static_ = static_;
             built.mutable = access & 0x0010 == 0;
             built.field = Some((name.clone(), field.name.clone(), static_));
@@ -7592,6 +7728,8 @@ pub mod lower {
         pub local_classes: Vec<(String, String)>,
     }
 
+    pub type MemberBodies = HashMap<(String, String), Vec<Rc<FunctionInfo>>>;
+
     pub struct Compiler<'w, 'a> {
         pub world: &'w World<'a>,
         pub files: Vec<FileScope>,
@@ -7606,6 +7744,7 @@ pub mod lower {
         pub unsupported: RefCell<Vec<(String, String)>>,
         pub dry: Cell<usize>,
         pub lambda_count: RefCell<HashMap<String, usize>>,
+        pub member_bodies: RefCell<MemberBodies>,
     }
 
     pub fn dotted(internal: &str) -> String {
@@ -7693,6 +7832,13 @@ pub mod lower {
     }
 
     pub fn written(ty: &Ty, generic: bool, class_params: &[TypeParam], own: &[TypeParam]) -> W {
+        match unboxed_value(ty) {
+            Some(inner) => written_inner(&inner, generic, class_params, own),
+            None => written_inner(ty, generic, class_params, own),
+        }
+    }
+
+    fn written_inner(ty: &Ty, generic: bool, class_params: &[TypeParam], own: &[TypeParam]) -> W {
         match ty {
             Ty::Class {
                 name,
@@ -7721,12 +7867,17 @@ pub mod lower {
                         Ty::Class { name, .. } if boxed_of(name).is_some() => {
                             named(boxed_of(name).unwrap_or(OBJECT))
                         }
-                        other => written(other, generic, class_params, own),
+                        other => written_inner(other, generic, class_params, own),
                     };
                     return W::Array(Box::new(inner));
                 }
                 if let Some(element) = element_of_primitive_array(name) {
-                    return W::Array(Box::new(written(&Ty::class(element), false, &[], &[])));
+                    return W::Array(Box::new(written_inner(
+                        &Ty::class(element),
+                        false,
+                        &[],
+                        &[],
+                    )));
                 }
                 let held = if generic {
                     arguments
@@ -7797,7 +7948,7 @@ pub mod lower {
                 named(boxed_of(name).unwrap_or(OBJECT))
             }
             Ty::Class { name, .. } if name == UNIT => named(UNIT),
-            _ => written(ty, generic, class_params, own),
+            _ => written_inner(ty, generic, class_params, own),
         }
     }
 
@@ -7829,6 +7980,7 @@ pub mod lower {
                 unsupported: RefCell::new(Vec::new()),
                 dry: Cell::new(0),
                 lambda_count: RefCell::new(HashMap::new()),
+                member_bodies: RefCell::new(HashMap::new()),
             }
         }
 
@@ -8366,7 +8518,9 @@ pub mod lower {
                 let Some(decl) = self.class_decl(&current) else {
                     break;
                 };
-                cx.file = decl.file;
+                if first {
+                    cx.file = decl.file;
+                }
                 cx.classes.push(current.clone());
                 cx.local_classes.extend(decl.local_classes.iter().cloned());
                 if through_inner || decl.local {
@@ -8445,6 +8599,18 @@ pub mod lower {
                 let mut properties = Vec::new();
                 for declaration in &file.declarations {
                     match declaration {
+                        tree::Declaration::Function(function)
+                            if library
+                                && function.modifiers.annotated("InlineMember").is_some() =>
+                        {
+                            match self.function_info(function, &facade, &cx, true, index) {
+                                Ok(info) => self.note_member_body(info),
+                                Err(why) => self
+                                    .unsupported
+                                    .borrow_mut()
+                                    .push((function.name.clone(), why.message)),
+                            }
+                        }
                         tree::Declaration::Function(function) => {
                             match self.function_info(function, &facade, &cx, true, index) {
                                 Ok(info) => functions.push(Rc::new(info)),
@@ -8491,7 +8657,106 @@ pub mod lower {
                 held.functions = functions;
                 held.properties = properties;
             }
+            self.rename_inferred_members();
             Ok(())
+        }
+
+        fn rename_inferred_members(&self) {
+            let classes = self.classes.borrow().clone();
+            for decl in classes {
+                let Some(info) = self.world.class(&decl.jvm) else {
+                    continue;
+                };
+                let in_value_class = value_class(&decl.jvm).is_some();
+                let mut changed = false;
+                let mut functions = Vec::new();
+                for function in &info.functions {
+                    let renamed = (|| {
+                        let slot = function.infer?;
+                        let source = function.source.as_ref()?;
+                        if function.static_
+                            || function.jvm_static
+                            || source.modifiers.annotated("JvmName").is_some()
+                        {
+                            return None;
+                        }
+                        let returns = self.inferred(slot).ok()?;
+                        value_type_name(&returns)?;
+                        let mut types: Vec<Ty> = function.receiver.iter().cloned().collect();
+                        types.extend(function.parameters.iter().map(|one| one.ty.clone()));
+                        let name =
+                            mangled_name(&function.name, &types, Some(&returns), in_value_class)?;
+                        (name != function.jvm_name).then_some(name)
+                    })();
+                    match renamed {
+                        Some(name) => {
+                            let mut updated = (**function).clone();
+                            updated.jvm_name = name;
+                            functions.push(Rc::new(updated));
+                            changed = true;
+                        }
+                        None => functions.push(function.clone()),
+                    }
+                }
+                if changed {
+                    let mut updated = (*info).clone();
+                    updated.functions = functions;
+                    self.world.define(updated);
+                }
+            }
+        }
+
+        fn note_member_body(&self, info: FunctionInfo) {
+            let Some(Ty::Class {
+                name: owner,
+                arguments,
+                ..
+            }) = info.receiver.clone()
+            else {
+                return;
+            };
+            let class_params: Vec<String> = arguments
+                .iter()
+                .filter_map(|one| match one.ty() {
+                    Ty::Param { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect();
+            let mut member = info;
+            member.receiver = None;
+            member.owner = owner.clone();
+            member
+                .type_parameters
+                .retain(|one| !class_params.contains(&one.name));
+            member.static_ = false;
+            self.member_bodies
+                .borrow_mut()
+                .entry((owner, member.name.clone()))
+                .or_default()
+                .push(Rc::new(member));
+        }
+
+        pub fn member_body(
+            &self,
+            class: &str,
+            function: &FunctionInfo,
+        ) -> Option<Rc<FunctionInfo>> {
+            if function.source.is_some() || !function.inline {
+                return None;
+            }
+            let bodies = self.member_bodies.borrow();
+            let found = bodies.get(&(class.to_string(), function.name.clone()))?;
+            found
+                .iter()
+                .find(|one| {
+                    one.parameters.len() == function.parameters.len()
+                        && one
+                            .parameters
+                            .iter()
+                            .zip(function.parameters.iter())
+                            .all(|(a, b)| jvm_erasure(&a.ty) == jvm_erasure(&b.ty))
+                })
+                .cloned()
         }
 
         pub fn define_classes(&self, all: &[ClassDecl]) -> Lowered<()> {
@@ -8505,6 +8770,28 @@ pub mod lower {
                 info.type_parameters =
                     self.type_params_of(&cx, &decl.tree.type_parameters, &decl.tree.constraints)?;
                 self.world.define(info);
+            }
+            for decl in all {
+                if !(decl.tree.modifiers.has("value") || decl.tree.modifiers.has("inline")) {
+                    continue;
+                }
+                let Some(parameter) = decl
+                    .tree
+                    .primary
+                    .as_ref()
+                    .and_then(|held| held.parameters.first())
+                else {
+                    continue;
+                };
+                let Some(written) = &parameter.type_ref else {
+                    continue;
+                };
+                let mut cx = self.class_cx(&decl.jvm);
+                if let Some(info) = self.world.class(&decl.jvm) {
+                    cx.params.extend(info.type_parameters.iter().cloned());
+                }
+                let underlying = self.resolve_type(&cx, written)?;
+                note_value_class(&decl.jvm, Some((underlying, parameter.name.clone())));
             }
             for decl in all {
                 let info = self.class_info(decl)?;
@@ -8623,6 +8910,13 @@ pub mod lower {
                         }
                     }
                     property.source_file = Some(decl.file);
+                    let (getter, setter) = self.accessor_names(&property, &owner, false);
+                    if let (Some(name), Some(held)) = (getter, property.getter.as_mut()) {
+                        held.0 = name;
+                    }
+                    if let (Some(name), Some(held)) = (setter, property.setter.as_mut()) {
+                        held.0 = name;
+                    }
                     info.properties.push(Rc::new(property));
                 }
             }
@@ -8873,7 +9167,50 @@ pub mod lower {
             {
                 built.jvm_name = format!("{}$jvmStatic", built.jvm_name);
             }
+            if function.modifiers.annotated("JvmName").is_none() {
+                let mut types: Vec<Ty> = built.receiver.iter().cloned().collect();
+                types.extend(built.parameters.iter().map(|one| {
+                    if one.vararg {
+                        Ty::array_of(one.ty.clone())
+                    } else {
+                        one.ty.clone()
+                    }
+                }));
+                let returns = (!top_level && !built.returns.is_error()).then_some(&built.returns);
+                let in_value_class = !top_level && value_class(owner).is_some();
+                if let Some(name) = mangled_name(&built.jvm_name, &types, returns, in_value_class) {
+                    built.jvm_name = name;
+                }
+            }
             Ok(built)
+        }
+
+        pub fn accessor_names(
+            &self,
+            property: &PropertyInfo,
+            owner: &str,
+            top_level: bool,
+        ) -> (Option<String>, Option<String>) {
+            let receiver: Vec<Ty> = property.receiver.iter().cloned().collect();
+            let in_value_class = !top_level && value_class(owner).is_some();
+            let underlying = value_class(owner).is_some_and(|(_, name)| name == property.name);
+            let getter = property.getter.as_ref().and_then(|(name, _, _)| {
+                if underlying {
+                    return None;
+                }
+                mangled_name(
+                    name,
+                    &receiver,
+                    (!top_level).then_some(&property.ty),
+                    in_value_class,
+                )
+            });
+            let setter = property.setter.as_ref().and_then(|(name, _, _)| {
+                let mut types = receiver.clone();
+                types.push(property.ty.clone());
+                mangled_name(name, &types, None, in_value_class)
+            });
+            (getter, setter)
         }
 
         pub fn property_info(
@@ -8976,7 +9313,55 @@ pub mod lower {
             if built.const_ {
                 built.constant = property.initializer.as_ref().and_then(fold);
             }
+            if (built.jvm_field || built.const_) && !top_level {
+                if let Some(holder) = self.static_field_holder(owner) {
+                    if let Some(field) = built.field.as_mut() {
+                        field.0 = holder;
+                        field.2 = true;
+                    }
+                }
+            }
+            if property.modifiers.annotated("JvmStatic").is_some()
+                && !top_level
+                && self
+                    .class_decl(owner)
+                    .is_some_and(|held| held.tree.kind == tree::ClassKind::Object)
+            {
+                if let Some(held) = built.getter.as_mut() {
+                    held.0 = format!("{}$jvmStatic", held.0);
+                }
+                if let Some(held) = built.setter.as_mut() {
+                    held.0 = format!("{}$jvmStatic", held.0);
+                }
+            }
+            if property.modifiers.annotated("JvmName").is_none() {
+                let (getter, setter) = self.accessor_names(&built, owner, top_level);
+                if let (Some(name), Some(held)) = (getter, built.getter.as_mut()) {
+                    held.0 = name;
+                }
+                if let (Some(name), Some(held)) = (setter, built.setter.as_mut()) {
+                    held.0 = name;
+                }
+            }
             Ok(built)
+        }
+
+        pub fn static_field_holder(&self, owner: &str) -> Option<String> {
+            let decl = self.class_decl(owner)?;
+            match decl.tree.kind {
+                tree::ClassKind::Object => return Some(owner.to_string()),
+                tree::ClassKind::Companion => {}
+                _ => return None,
+            }
+            let (outer, _) = owner.rsplit_once('$')?;
+            let outer_decl = self.class_decl(outer)?;
+            if matches!(
+                outer_decl.tree.kind,
+                tree::ClassKind::Interface | tree::ClassKind::Annotation
+            ) {
+                return None;
+            }
+            Some(outer.to_string())
         }
 
         pub fn needs_backing_field(&self, property: &tree::Property) -> bool {
@@ -9263,8 +9648,183 @@ pub mod lower {
     pub enum Rep {
         Prim(&'static str),
         Ref(String),
+        Value(String, Box<Rep>),
         Void,
         Never,
+    }
+
+    impl Rep {
+        pub fn carried(&self) -> &Rep {
+            match self {
+                Rep::Value(_, inner) => inner.carried(),
+                other => other,
+            }
+        }
+    }
+
+    pub fn rep_descriptor(rep: &Rep) -> String {
+        match rep {
+            Rep::Prim(name) => descriptor_of_primitive(name).unwrap_or("I").to_string(),
+            Rep::Ref(name) if name.starts_with('[') => name.clone(),
+            Rep::Ref(name) => format!("L{name};"),
+            Rep::Value(_, inner) => rep_descriptor(inner),
+            Rep::Void => "V".to_string(),
+            Rep::Never => format!("L{OBJECT};"),
+        }
+    }
+
+    pub fn value_box(class: &str, inner: &Rep, j: J) -> J {
+        J::Invoke {
+            on: None,
+            owner: class.to_string(),
+            name: "box-impl".to_string(),
+            descriptor: format!("({})L{class};", rep_descriptor(inner)),
+            through: java::Through::Static,
+            arguments: vec![j],
+        }
+    }
+
+    pub fn value_unbox(class: &str, inner: &Rep, holder: J) -> J {
+        J::Invoke {
+            on: Some(Box::new(holder)),
+            owner: class.to_string(),
+            name: "unbox-impl".to_string(),
+            descriptor: format!("(){}", rep_descriptor(inner)),
+            through: java::Through::Virtual,
+            arguments: Vec::new(),
+        }
+    }
+
+    pub fn value_static(class: &str, name: &str, arguments: Vec<(J, Rep)>, returns: &Rep) -> J {
+        let descriptor = format!(
+            "({}){}",
+            arguments
+                .iter()
+                .map(|(_, rep)| rep_descriptor(rep))
+                .collect::<String>(),
+            rep_descriptor(returns)
+        );
+        J::Invoke {
+            on: None,
+            owner: class.to_string(),
+            name: name.to_string(),
+            descriptor,
+            through: java::Through::Static,
+            arguments: arguments.into_iter().map(|(j, _)| j).collect(),
+        }
+    }
+
+    pub fn md5base64(text: &str) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let hex = crate::room::md5_hex(text.as_bytes());
+        let bytes: Vec<u8> = (0..5)
+            .map(|at| {
+                u8::from_str_radix(hex.get(at * 2..at * 2 + 2).unwrap_or("00"), 16).unwrap_or(0)
+            })
+            .collect();
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let first = u32::from(chunk[0]);
+            let second = u32::from(chunk.get(1).copied().unwrap_or(0));
+            let third = u32::from(chunk.get(2).copied().unwrap_or(0));
+            let joined = first << 16 | second << 8 | third;
+            for index in 0..=chunk.len() {
+                out.push(char::from(
+                    TABLE[((joined >> (18 - 6 * index)) & 63) as usize],
+                ));
+            }
+        }
+        out
+    }
+
+    pub fn value_type_name(ty: &Ty) -> Option<String> {
+        let name = match ty {
+            Ty::Class { name, .. } => name,
+            Ty::Param { erasure, .. } => erasure,
+            _ => return None,
+        };
+        value_class(name)?;
+        Some(name.replace(['/', '$'], "."))
+    }
+
+    fn mangling_element(ty: &Ty) -> String {
+        match value_type_name(ty) {
+            Some(name) => format!("L{name}{};", if ty.is_nullable() { "?" } else { "" }),
+            None => "_".to_string(),
+        }
+    }
+
+    pub fn mangling_suffix(parameters: &[Ty], returns: Option<&Ty>) -> Option<String> {
+        let requires = parameters
+            .iter()
+            .any(|one| value_type_name(one).is_some_and(|name| name != "kotlin.Result"));
+        let returns = returns.filter(|one| value_type_name(one).is_some());
+        if !requires && returns.is_none() {
+            return None;
+        }
+        let mut signature: String = parameters.iter().map(mangling_element).collect();
+        if let Some(held) = returns {
+            signature.push(':');
+            signature.push_str(&mangling_element(held));
+        }
+        Some(md5base64(&signature))
+    }
+
+    pub fn mangled_name(
+        base: &str,
+        parameters: &[Ty],
+        returns: Option<&Ty>,
+        in_value_class: bool,
+    ) -> Option<String> {
+        match mangling_suffix(parameters, returns) {
+            Some(suffix) => Some(format!("{base}-{suffix}")),
+            None if in_value_class => Some(format!("{base}-impl")),
+            None => None,
+        }
+    }
+
+    pub fn holds_lambda_call(expr: &Expr) -> bool {
+        match expr.unparenthesized() {
+            Expr::Call { arguments, .. } => arguments
+                .iter()
+                .any(|one| matches!(one.value.unparenthesized(), Expr::Lambda(_))),
+            Expr::Infix(_, _, right, _) => matches!(right.unparenthesized(), Expr::Lambda(_)),
+            _ => false,
+        }
+    }
+
+    pub fn value_member_name(jvm_name: &str) -> String {
+        if jvm_name.contains('-') {
+            jvm_name.to_string()
+        } else {
+            format!("{jvm_name}-impl")
+        }
+    }
+
+    pub fn unboxed_value(ty: &Ty) -> Option<Ty> {
+        let Ty::Class { name, null, .. } = ty else {
+            return None;
+        };
+        let (underlying, _) = value_class(name)?;
+        let mut inner = match &underlying {
+            Ty::Class { name: held, .. } if value_class(held).is_some() => {
+                unboxed_value(&underlying).unwrap_or(underlying.clone())
+            }
+            _ => underlying.clone(),
+        };
+        if let Ty::Param { erasure, null, .. } = &inner {
+            if *null == Null::Not {
+                inner = Ty::class(erasure);
+            }
+        }
+        if *null == Null::Not {
+            return Some(inner);
+        }
+        if inner.is_nullable() || inner.is_primitive() {
+            return None;
+        }
+        Some(inner.nullable())
     }
 
     #[derive(Clone, Debug)]
@@ -9562,55 +10122,6 @@ pub mod lower {
         }
     }
 
-    pub fn static_bridge(
-        function: &FunctionInfo,
-        holder: J,
-        name: &str,
-        spot: Spot,
-    ) -> java::Method {
-        let mut parameters: Vec<(W, String)> = Vec::new();
-        if let Some(receiver) = &function.receiver {
-            parameters.push((
-                written(&erase_params(receiver), false, &[], &[]),
-                "p$receiver".to_string(),
-            ));
-        }
-        for (at, one) in function.parameters.iter().enumerate() {
-            let ty = if one.vararg {
-                Ty::array_of(one.ty.clone())
-            } else {
-                one.ty.clone()
-            };
-            parameters.push((
-                written(&erase_params(&ty), false, &[], &[]),
-                format!("p{at}"),
-            ));
-        }
-        let arguments: Vec<J> = parameters
-            .iter()
-            .map(|(_, name)| J::Name(name.clone()))
-            .collect();
-        let invocation = call(holder, &function.jvm_name, arguments);
-        let returns = returned_written(&erase_params(&function.returns), false, &[], &[]);
-        let body = if returns == W::Void {
-            vec![at_line(S::Express(invocation), spot)]
-        } else {
-            vec![at_line(S::Return(Some(invocation)), spot)]
-        };
-        new_method(
-            name,
-            returns,
-            parameters,
-            Some(body),
-            java::Modifiers {
-                public: true,
-                static_: true,
-                ..java::Modifiers::default()
-            },
-            spot.line,
-        )
-    }
-
     pub fn box_returns(body: &mut [Positioned<S>], returns: &Ty) {
         for one in body.iter_mut() {
             box_returns_in(&mut one.node, returns);
@@ -9690,6 +10201,11 @@ pub mod lower {
     }
 
     pub fn rep_of(ty: &Ty) -> Rep {
+        if let Ty::Class { name, .. } = ty {
+            if let Some(inner) = unboxed_value(ty) {
+                return Rep::Value(jvm_class_of(name), Box::new(rep_of(&inner)));
+            }
+        }
         match ty {
             Ty::Class { name, .. } if name == ARRAY => Rep::Ref(array_class(ty)),
             Ty::Class {
@@ -9713,6 +10229,7 @@ pub mod lower {
 
     pub fn rep_written(rep: &Rep) -> W {
         match rep {
+            Rep::Value(_, inner) => rep_written(inner),
             Rep::Prim(name) => written_raw(&Ty::class(name)),
             Rep::Ref(name) => class_written(name),
             Rep::Void => W::Void,
@@ -9741,6 +10258,7 @@ pub mod lower {
 
     pub fn default_value(rep: &Rep) -> J {
         match rep {
+            Rep::Value(_, inner) => default_value(inner),
             Rep::Prim(LONG) => J::Long(0),
             Rep::Prim(FLOAT) => J::Float(0.0),
             Rep::Prim(DOUBLE) => J::Double(0.0),
@@ -9774,6 +10292,7 @@ pub mod lower {
         pub inline: usize,
         pub hides: usize,
         pub cx: TypeCx,
+        pub learned: RefCell<HashMap<String, Ty>>,
     }
 
     #[derive(Clone, Debug)]
@@ -9855,6 +10374,7 @@ pub mod lower {
         pub file: usize,
         pub in_constructor: bool,
         pub early: bool,
+        pub arguments_expected: bool,
         pub static_context: bool,
         pub hides: Vec<Hide>,
         pub label_hint: Option<String>,
@@ -9897,6 +10417,7 @@ pub mod lower {
                 file,
                 in_constructor: false,
                 early: false,
+                arguments_expected: false,
                 static_context: false,
                 hides: Vec::new(),
                 label_hint: None,
@@ -10256,6 +10777,25 @@ pub mod lower {
                     self.coerce_rep(unit, target)
                 }
                 (_, Rep::Void) => value.j,
+                (_, Rep::Never) => value.j,
+                (Rep::Value(have, _), Rep::Value(want, _)) if have == want => value.j,
+                (Rep::Value(have, inner), _) => {
+                    let have = have.clone();
+                    let boxed = Val::with_rep(
+                        value_box(&have, inner, value.j),
+                        value.ty.clone(),
+                        Rep::Ref(have),
+                    );
+                    self.coerce_rep(boxed, target)
+                }
+                (_, Rep::Value(want, inner)) => {
+                    if matches!(value.j, J::Null) {
+                        return J::Null;
+                    }
+                    let (want, inner) = (want.clone(), inner.clone());
+                    let holder = self.coerce_rep(value, &Rep::Ref(want.clone()));
+                    value_unbox(&want, &inner, holder)
+                }
                 (Rep::Prim(have), Rep::Prim(want)) => {
                     if have == want {
                         value.j
@@ -10310,7 +10850,6 @@ pub mod lower {
                         cast(class_written(want), value.j)
                     }
                 }
-                (_, Rep::Never) => value.j,
             }
         }
 
@@ -11011,36 +11550,49 @@ pub mod lower {
         }
 
         fn template(&mut self, parts: &[tree::Part]) -> Lowered<Val> {
-            let mut pieces: Vec<(J, usize)> = Vec::new();
+            let mut pieces: Vec<(J, usize, Ty, Rep)> = Vec::new();
             for part in parts {
                 match part {
-                    tree::Part::Text(text) => pieces.push((J::Str(text.clone()), self.mark())),
+                    tree::Part::Text(text) => pieces.push((
+                        J::Str(text.clone()),
+                        self.mark(),
+                        Ty::string(),
+                        Rep::Ref(STRING.to_string()),
+                    )),
                     tree::Part::Value(expr) => {
                         let mark = self.mark();
                         let value = self.value(expr, None)?;
+                        let kept = match &value.rep {
+                            Rep::Prim(_) => true,
+                            Rep::Ref(name) => {
+                                !name.starts_with('[')
+                                    && name != "java/lang/Character"
+                                    && !(name == OBJECT && value.ty.primitive_name() == Some(CHAR))
+                            }
+                            _ => false,
+                        };
+                        let (ty, rep) = if kept {
+                            (value.ty.clone(), value.rep.clone())
+                        } else {
+                            (Ty::string(), Rep::Ref(STRING.to_string()))
+                        };
                         let j = self.string_piece(value);
                         if self.mark() != mark {
                             for piece in pieces.iter_mut() {
-                                let (held, at) = piece.clone();
+                                let (held, at, ty, rep) = piece.clone();
                                 if !is_stable(&held) {
-                                    let spilled = self.spill_before(
-                                        at.min(mark),
-                                        Val::with_rep(
-                                            held,
-                                            Ty::string(),
-                                            Rep::Ref(STRING.to_string()),
-                                        ),
-                                    );
+                                    let spilled = self
+                                        .spill_before(at.min(mark), Val::with_rep(held, ty, rep));
                                     piece.0 = spilled.j;
                                 }
                             }
                         }
-                        pieces.push((j, self.mark()));
+                        pieces.push((j, self.mark(), ty, rep));
                     }
                 }
             }
             let mut out: Option<J> = None;
-            for (piece, _) in pieces {
+            for (piece, _, _, _) in pieces {
                 out = Some(match out {
                     None => match &piece {
                         J::Str(_) => piece,
@@ -11057,6 +11609,10 @@ pub mod lower {
 
         pub fn string_piece(&mut self, value: Val) -> J {
             match value.rep {
+                Rep::Value(ref held, ref inner) => {
+                    let boxed = value_box(held, inner, value.j.clone());
+                    static_call(STRING, "valueOf", vec![cast(named(OBJECT), boxed)])
+                }
                 Rep::Void => {
                     self.emit(S::Express(value.j));
                     J::Str("kotlin.Unit".to_string())
@@ -11102,7 +11658,7 @@ pub mod lower {
             let rep = rep_of(&ty.non_null());
             let what = match &rep {
                 Rep::Prim(name) => named(boxed_of(name).unwrap_or(OBJECT)),
-                Rep::Ref(name) => class_written(name),
+                Rep::Ref(name) | Rep::Value(name, _) => class_written(name),
                 _ => named(OBJECT),
             };
             let nullable = ty.is_nullable();
@@ -11117,6 +11673,7 @@ pub mod lower {
                     "valueOf",
                     vec![subject.j.clone()],
                 ),
+                Rep::Value(held, inner) => value_box(held, inner, subject.j.clone()),
                 _ => subject.j.clone(),
             };
             let test = J::InstanceOf {
@@ -12734,7 +13291,7 @@ pub mod lower {
 
     pub fn jvm_or(rep: &Rep) -> String {
         match rep {
-            Rep::Ref(name) => name.clone(),
+            Rep::Ref(name) | Rep::Value(name, _) => name.clone(),
             Rep::Prim(name) => boxed_of(name).unwrap_or(OBJECT).to_string(),
             _ => OBJECT.to_string(),
         }
@@ -12903,6 +13460,23 @@ pub mod lower {
         world: &World<'a>,
         interface: &str,
     ) -> Option<(Rc<FunctionInfo>, HashMap<String, Ty>)> {
+        if matches!(
+            interface,
+            "java/lang/Iterable"
+                | "java/lang/Comparable"
+                | "java/lang/CharSequence"
+                | "java/util/Iterator"
+                | "java/util/ListIterator"
+                | "java/util/Collection"
+                | "java/util/List"
+                | "java/util/Set"
+                | "java/util/Map"
+                | "java/util/Map$Entry"
+                | "java/lang/annotation/Annotation"
+                | "java/lang/Cloneable"
+        ) {
+            return None;
+        }
         let info = world.class(interface)?;
         if !info.is_interface() {
             return None;
@@ -13339,6 +13913,13 @@ pub mod lower {
             self.cx = saved_cx;
             self.hides.pop();
             self.hides.extend(saved_hides);
+            if let Some(parts) = made
+                .as_ref()
+                .ok()
+                .and_then(|value| value.ty.function_parts())
+            {
+                self.learn_lambda_result(inline, &parts.returns);
+            }
             made
         }
 
@@ -13650,6 +14231,28 @@ pub mod lower {
                         &HashMap::new(),
                     )?));
                 }
+                if info.kind == Kind::Enum && name == "entries" {
+                    let values = J::Invoke {
+                        on: None,
+                        owner: class.to_string(),
+                        name: "values".to_string(),
+                        descriptor: format!("()[L{class};"),
+                        through: java::Through::Static,
+                        arguments: Vec::new(),
+                    };
+                    let entries = J::Invoke {
+                        on: None,
+                        owner: "kotlin/enums/EnumEntriesKt".to_string(),
+                        name: "enumEntries".to_string(),
+                        descriptor: "([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;".to_string(),
+                        through: java::Through::Static,
+                        arguments: vec![values],
+                    };
+                    return Ok(Thing::Value(Val::new(
+                        entries,
+                        Ty::of("kotlin/enums/EnumEntries", vec![info.as_ty()]),
+                    )));
+                }
                 if info.kind == Kind::Object || info.companion.is_some() {
                     let holder = self.class_as_value(class)?;
                     if let Some(found) = self.try_property(holder, name)? {
@@ -13738,6 +14341,31 @@ pub mod lower {
                 .unwrap_or_default()
         }
 
+        pub fn java_field_visible(&self, info: &PropertyInfo) -> bool {
+            if !info.java_field {
+                return true;
+            }
+            let here = self
+                .c
+                .files
+                .get(self.file)
+                .map(|held| held.package.clone())
+                .unwrap_or_default();
+            let same_package = package_of(&info.owner) == here;
+            match info.visibility {
+                Visible::Public => true,
+                Visible::Private => false,
+                Visible::Internal => same_package,
+                Visible::Protected => {
+                    same_package
+                        || self
+                            .class
+                            .as_deref()
+                            .is_some_and(|held| self.c.world.is_subclass(held, &info.owner))
+                }
+            }
+        }
+
         pub fn find_property(
             &self,
             ty: &Ty,
@@ -13771,11 +14399,12 @@ pub mod lower {
                 let Some(info) = self.c.world.class(class) else {
                     continue;
                 };
-                if let Some(found) = info
-                    .properties
-                    .iter()
-                    .find(|one| one.name == name && one.receiver.is_none() && !one.static_)
-                {
+                if let Some(found) = info.properties.iter().find(|one| {
+                    one.name == name
+                        && one.receiver.is_none()
+                        && !one.static_
+                        && self.java_field_visible(one)
+                }) {
                     let mut map = HashMap::new();
                     for (param, argument) in info.type_parameters.iter().zip(current.arguments()) {
                         map.insert(param.name.clone(), argument);
@@ -13839,11 +14468,15 @@ pub mod lower {
                 for (param, argument) in info.type_parameters.iter().zip(current.arguments()) {
                     map.insert(param.name.clone(), argument);
                 }
-                for function in info
-                    .functions
-                    .iter()
-                    .filter(|one| one.name == name && !hidden_jdk_member(&class, one))
-                {
+                for function in info.functions.iter().filter(|one| {
+                    one.name == name
+                        && !(hidden_jdk_member(&class, one)
+                            && !self.file_label().starts_with("<prelude>"))
+                }) {
+                    let function = &self
+                        .c
+                        .member_body(&class, function)
+                        .unwrap_or(function.clone());
                     let key = format!(
                         "{}({})",
                         function.name,
@@ -13938,6 +14571,9 @@ pub mod lower {
             }
             let mut chars = name.chars();
             let first = chars.next()?;
+            if first.is_uppercase() {
+                return None;
+            }
             let capital = format!("{}{}", first.to_uppercase(), chars.as_str());
             names.push(format!("get{capital}"));
             for candidate in names {
@@ -13959,6 +14595,9 @@ pub mod lower {
             ty: &Ty,
             name: &str,
         ) -> Option<(Rc<FunctionInfo>, HashMap<String, Ty>)> {
+            if name.chars().next().is_some_and(char::is_uppercase) {
+                return None;
+            }
             let base = name
                 .strip_prefix("is")
                 .filter(|rest| rest.chars().next().is_some_and(|one| one.is_uppercase()))
@@ -14088,6 +14727,39 @@ pub mod lower {
             }
             let declared = self.property_type(info)?;
             let rep = rep_of(&erase_params(&declared));
+            if let Some((_, underlying)) = value_class(&info.owner) {
+                if !info.static_ && info.receiver.is_none() && extension.is_none() {
+                    let holder = match dispatch.clone() {
+                        Some(held) => held,
+                        None => self.this_value(None)?,
+                    };
+                    let unboxed = self.coerce(holder, &Ty::class(&info.owner));
+                    if info.name == underlying {
+                        return Ok(Val::with_rep(unboxed, ty, rep));
+                    }
+                    if let Some((getter, descriptor, _)) = &info.getter {
+                        let owner_rep = rep_of(&Ty::class(&info.owner));
+                        let j = if info.source.is_none() && descriptor.starts_with('(') {
+                            J::Invoke {
+                                on: None,
+                                owner: info.owner.clone(),
+                                name: value_member_name(getter),
+                                descriptor: descriptor.clone(),
+                                through: java::Through::Static,
+                                arguments: vec![unboxed],
+                            }
+                        } else {
+                            value_static(
+                                &info.owner,
+                                &value_member_name(getter),
+                                vec![(unboxed, owner_rep)],
+                                &rep,
+                            )
+                        };
+                        return Ok(Val::with_rep(j, ty, rep));
+                    }
+                }
+            }
             let is_own_field_access = info.getter.is_none()
                 || (info.source.is_some()
                     && self.class.as_deref() == Some(info.owner.as_str())
@@ -14214,36 +14886,123 @@ pub mod lower {
         if !function.java {
             return false;
         }
-        let arity = function.parameters.len();
-        match class {
-            "java/lang/String" => matches!(
-                (function.name.as_str(), arity),
-                ("lines", 0)
-                    | ("repeat", 1)
-                    | ("isBlank", 0)
-                    | ("strip", 0)
-                    | ("stripLeading", 0)
-                    | ("stripTrailing", 0)
-                    | ("indent", 1)
-                    | ("transform", 1)
-                    | ("stripIndent", 0)
-                    | ("translateEscapes", 0)
-                    | ("formatted", _)
-                    | ("describeConstable", 0)
-                    | ("resolveConstantDesc", 1)
-                    | ("splitWithDelimiters", 2)
-            ),
-            "java/lang/CharSequence" => matches!(function.name.as_str(), "isEmpty"),
+        let listed: &[&str] = match class {
+            "java/lang/String" => &[
+                "codePointAt(I)I",
+                "codePointBefore(I)I",
+                "codePointCount(II)I",
+                "compareToIgnoreCase(Ljava/lang/String;)I",
+                "concat(Ljava/lang/String;)Ljava/lang/String;",
+                "contains(Ljava/lang/CharSequence;)Z",
+                "contentEquals(Ljava/lang/CharSequence;)Z",
+                "contentEquals(Ljava/lang/StringBuffer;)Z",
+                "endsWith(Ljava/lang/String;)Z",
+                "equalsIgnoreCase(Ljava/lang/String;)Z",
+                "getBytes()[B",
+                "getBytes(II[BI)V",
+                "getBytes(Ljava/lang/String;)[B",
+                "getBytes(Ljava/nio/charset/Charset;)[B",
+                "getChars(II[CI)V",
+                "indexOf(I)I",
+                "indexOf(II)I",
+                "indexOf(Ljava/lang/String;)I",
+                "indexOf(Ljava/lang/String;I)I",
+                "intern()Ljava/lang/String;",
+                "isEmpty()Z",
+                "lastIndexOf(I)I",
+                "lastIndexOf(II)I",
+                "lastIndexOf(Ljava/lang/String;)I",
+                "lastIndexOf(Ljava/lang/String;I)I",
+                "matches(Ljava/lang/String;)Z",
+                "offsetByCodePoints(II)I",
+                "regionMatches(ILjava/lang/String;II)Z",
+                "regionMatches(ZILjava/lang/String;II)Z",
+                "replaceAll(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                "replace(CC)Ljava/lang/String;",
+                "replaceFirst(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                "replace(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;",
+                "split(Ljava/lang/String;I)[Ljava/lang/String;",
+                "split(Ljava/lang/String;)[Ljava/lang/String;",
+                "startsWith(Ljava/lang/String;I)Z",
+                "startsWith(Ljava/lang/String;)Z",
+                "substring(II)Ljava/lang/String;",
+                "substring(I)Ljava/lang/String;",
+                "toCharArray()[C",
+                "toLowerCase()Ljava/lang/String;",
+                "toLowerCase(Ljava/util/Locale;)Ljava/lang/String;",
+                "toUpperCase()Ljava/lang/String;",
+                "toUpperCase(Ljava/util/Locale;)Ljava/lang/String;",
+                "trim()Ljava/lang/String;",
+                "isBlank()Z",
+                "lines()Ljava/util/stream/Stream;",
+                "repeat(I)Ljava/lang/String;",
+                "strip()Ljava/lang/String;",
+                "stripLeading()Ljava/lang/String;",
+                "stripTrailing()Ljava/lang/String;",
+                "indent(I)Ljava/lang/String;",
+                "transform(Ljava/util/function/Function;)Ljava/lang/Object;",
+                "stripIndent()Ljava/lang/String;",
+                "translateEscapes()Ljava/lang/String;",
+                "formatted([Ljava/lang/Object;)Ljava/lang/String;",
+                "describeConstable()Ljava/util/Optional;",
+                "resolveConstantDesc(Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/String;",
+                "splitWithDelimiters(Ljava/lang/String;I)[Ljava/lang/String;",
+            ],
+            "java/lang/Double" | "java/lang/Float" => &["isInfinite()Z", "isNaN()Z"],
+            "java/lang/Enum" => &["getDeclaringClass()Ljava/lang/Class;", "finalize()V"],
+            "java/lang/CharSequence" => &["isEmpty()Z"],
+            "java/lang/Boolean" => &["booleanValue()Z"],
+            "java/lang/Character" => &["charValue()C"],
             "java/util/List"
             | "java/util/ArrayList"
             | "java/util/SequencedCollection"
             | "java/util/SequencedSet"
-            | "java/util/Collection" => matches!(
-                (function.name.as_str(), arity),
-                ("removeFirst", 0) | ("removeLast", 0) | ("reversed", 0)
-            ),
-            _ => false,
+            | "java/util/Collection" => &[
+                "sort(Ljava/util/Comparator;)V",
+                "reversed()Ljava/util/List;",
+                "reversed()Ljava/util/SequencedCollection;",
+                "reversed()Ljava/util/SequencedSet;",
+                "removeFirst()Ljava/lang/Object;",
+                "removeLast()Ljava/lang/Object;",
+            ],
+            _ => return false,
+        };
+        match &function.descriptor {
+            Some(descriptor) => {
+                let signature = format!("{}{descriptor}", function.name);
+                listed.iter().any(|one| *one == signature)
+            }
+            None => listed.iter().any(|one| {
+                one.split('(').next() == Some(function.name.as_str())
+                    && descriptor_arity(one) == function.parameters.len()
+            }),
         }
+    }
+
+    fn descriptor_arity(signature: &str) -> usize {
+        let Some(inner) = signature
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(inner, _)| inner)
+        else {
+            return 0;
+        };
+        let bytes = inner.as_bytes();
+        let mut count = 0;
+        let mut at = 0;
+        while at < bytes.len() {
+            while bytes[at] == b'[' {
+                at += 1;
+            }
+            if bytes[at] == b'L' {
+                while bytes[at] != b';' {
+                    at += 1;
+                }
+            }
+            at += 1;
+            count += 1;
+        }
+        count
     }
 
     pub fn receiver_path(receiver: &Receiver) -> String {
@@ -14396,15 +15155,17 @@ pub mod lower {
             let unit_name = class
                 .map(str::to_string)
                 .unwrap_or_else(|| self.files[file].facade.clone());
-            let mut method = Method::new(self, cx, &unit_name);
-            method.class = class.map(str::to_string);
-            if let Some(held) = class {
-                if let Some(info) = self.world.class(held) {
-                    method.receivers = self.receivers_for(&info, J::This);
+            let mut method = match class {
+                Some(held) if self.world.class(held).is_some() => {
+                    self.method_for(cx, &unit_name, Some(held), Some(J::This))
                 }
-            } else {
-                method.static_context = true;
-            }
+                _ => {
+                    let mut method = Method::new(self, cx, &unit_name);
+                    method.class = class.map(str::to_string);
+                    method.static_context = class.is_none();
+                    method
+                }
+            };
             match decl {
                 Inferring::Function(function) => {
                     let type_parameters = self.type_params_of(
@@ -14542,21 +15303,11 @@ pub mod lower {
                 if depth > 16 {
                     break;
                 }
-                let next = if held.inner || held.local && held.outer.is_some() {
+                let next = if held.inner && !held.local {
                     held.outer
                         .as_ref()
                         .and_then(|outer| self.world.class(outer))
-                        .map(|outer| {
-                            let access = if held.local {
-                                J::OuterThis {
-                                    of: named(&outer.name),
-                                    line: 0,
-                                }
-                            } else {
-                                field(j.clone(), "this$0")
-                            };
-                            (outer, access)
-                        })
+                        .map(|outer| (outer, field(j.clone(), "this$0")))
                 } else {
                     None
                 };
@@ -15038,6 +15789,12 @@ pub mod lower {
         }
 
         fn lambda_fits(&self, expr: &Expr, wanted: &Ty) -> bool {
+            if !matches!(
+                expr.unparenthesized(),
+                Expr::Lambda(_) | Expr::Anonymous(_) | Expr::Reference { .. }
+            ) {
+                return true;
+            }
             let count = match expr.unparenthesized() {
                 Expr::Lambda(lambda) => lambda
                     .parameters
@@ -15126,17 +15883,36 @@ pub mod lower {
                         vars.extend(info.type_parameters.iter().map(|one| one.name.clone()));
                     }
                 }
+                let mut receiver_cost = 0;
                 if let (Some(wanted), Some(value)) =
                     (&candidate.info.receiver, &candidate.extension)
                 {
-                    if self
-                        .assignable(&value.ty, &wanted.substitute(&candidate.subst), &vars)
-                        .is_none()
-                    {
-                        continue;
+                    let wanted = wanted.substitute(&candidate.subst);
+                    match self.assignable(&value.ty, &wanted, &vars) {
+                        Some(cost) => receiver_cost = cost,
+                        None => continue,
+                    }
+                    if let Ty::Param { name, .. } = &wanted {
+                        let bounds: Vec<Ty> = candidate
+                            .info
+                            .type_parameters
+                            .iter()
+                            .filter(|one| one.name == *name)
+                            .flat_map(|one| one.bounds.iter().cloned())
+                            .collect();
+                        if bounds
+                            .iter()
+                            .any(|bound| self.assignable(&value.ty, bound, &vars).is_none())
+                        {
+                            continue;
+                        }
+                        receiver_cost = receiver_cost.max(4);
                     }
                 }
-                if let Some(plan) = self.plan(&candidate.info, &candidate.subst, arguments, &vars) {
+                if let Some(mut plan) =
+                    self.plan(&candidate.info, &candidate.subst, arguments, &vars)
+                {
+                    plan.cost += receiver_cost;
                     if candidate.level < best_level {
                         best_level = candidate.level;
                         applicable.retain(|(held, _)| held.level <= best_level);
@@ -15180,13 +15956,15 @@ pub mod lower {
         }
 
         pub fn given_arguments(&mut self, arguments: &[tree::Argument]) -> Lowered<Vec<Given>> {
+            let defer_calls = std::mem::take(&mut self.arguments_expected);
             let mut out: Vec<Given> = Vec::new();
             let mut marks: Vec<usize> = Vec::new();
             for argument in arguments {
                 let deferred = matches!(
                     argument.value.unparenthesized(),
                     Expr::Lambda(_) | Expr::Anonymous(_) | Expr::Reference { .. }
-                ) || self.forwarded_inline(&argument.value).is_some();
+                ) || self.forwarded_inline(&argument.value).is_some()
+                    || defer_calls && holds_lambda_call(&argument.value);
                 if deferred {
                     out.push(Given {
                         name: argument.name.clone(),
@@ -15237,6 +16015,15 @@ pub mod lower {
         }
 
         pub fn call_expression(&mut self, expr: &Expr, expected: Option<&Ty>) -> Lowered<Val> {
+            self.arguments_expected = expected.is_some_and(|held| {
+                !held.is_error() && !held.is_unit() && !matches!(held, Ty::Param { .. })
+            });
+            let out = self.call_expression_inner(expr, expected);
+            self.arguments_expected = false;
+            out
+        }
+
+        fn call_expression_inner(&mut self, expr: &Expr, expected: Option<&Ty>) -> Lowered<Val> {
             let Expr::Call {
                 callee,
                 type_arguments,
@@ -15467,13 +16254,32 @@ pub mod lower {
                     if info.receiver.is_some() && info.source.is_none() {
                         continue;
                     }
-                    if info.static_ && !info.java {
+                    if info.static_ && !info.java && value_class(&info.owner).is_none() {
                         continue;
                     }
+                    let extension = match &info.receiver {
+                        Some(wanted) => {
+                            let vars: Vec<String> = info
+                                .type_parameters
+                                .iter()
+                                .map(|one| one.name.clone())
+                                .collect();
+                            let wanted = wanted.substitute(&subst);
+                            let found = receivers.iter().rev().find_map(|one| {
+                                let held = Val::new(one.j.clone(), one.ty.clone());
+                                self.assignable(&held.ty, &wanted, &vars).map(|_| held)
+                            });
+                            match found {
+                                Some(held) => Some(held),
+                                None => continue,
+                            }
+                        }
+                        None => None,
+                    };
                     candidates.push(Candidate {
                         info,
                         dispatch: Some(value.clone()),
-                        extension: None,
+                        extension,
                         subst,
                         level,
                         super_call: false,
@@ -16150,10 +16956,18 @@ pub mod lower {
             let fitting: Vec<Candidate> = applicable
                 .iter()
                 .filter(|(_, formal)| {
-                    formal.function_parts().is_some_and(|held| {
-                        held.returns.mentions_params()
-                            || self.assignable(&result, &held.returns, &[]).is_some()
-                    })
+                    formal
+                        .function_parts()
+                        .is_some_and(|held| match &held.returns {
+                            Ty::Param { .. } => true,
+                            returns => {
+                                let want = Method::class_of_ty(returns);
+                                let have = Method::class_of_ty(&result);
+                                have == want
+                                    || self.c.world.is_subclass(&have, &want)
+                                    || self.assignable(&result, returns, &[]).is_some()
+                            }
+                        })
                 })
                 .map(|(candidate, _)| candidate.clone())
                 .collect();
@@ -16381,19 +17195,26 @@ pub mod lower {
             let returns = declared_returns.substitute(&subst);
             let erased_returns = erase_params(&declared_returns);
             let rep = if info.constructor {
-                Rep::Ref(
-                    candidate
-                        .constructing
-                        .as_ref()
-                        .map(|(class, _)| class.clone())
-                        .unwrap_or_default(),
-                )
+                let class = candidate
+                    .constructing
+                    .as_ref()
+                    .map(|(class, _)| class.clone())
+                    .unwrap_or_default();
+                if value_class(&class).is_some() && !candidate.super_call {
+                    rep_of(&Ty::class(&class))
+                } else {
+                    Rep::Ref(class)
+                }
             } else if declared_returns.is_unit() && !declared_returns.is_nullable() && !info.java
                 || info.java && info.returns.is_unit() && info.returns.null() == Null::Not
             {
                 Rep::Void
             } else if declared_returns.is_nothing() {
                 Rep::Never
+            } else if candidate.invoke_on.is_some()
+                && matches!(rep_of(&erased_returns), Rep::Value(..) | Rep::Prim(_))
+            {
+                Rep::Ref(OBJECT.to_string())
             } else {
                 rep_of(&erased_returns)
             };
@@ -16436,10 +17257,77 @@ pub mod lower {
                         J::Null,
                     ));
                 }
-                J::New {
-                    what: named(class),
-                    arguments: all,
-                    outer: outer_java,
+                if value_class(class).is_some() && !candidate.super_call {
+                    let reps: Vec<Rep> = info
+                        .parameters
+                        .iter()
+                        .map(|one| rep_of(&erase_params(&one.ty)))
+                        .collect();
+                    let returns = rep_of(&Ty::class(class));
+                    match &info.descriptor {
+                        Some(descriptor) if info.source.is_none() => J::Invoke {
+                            on: None,
+                            owner: class.clone(),
+                            name: "constructor-impl".to_string(),
+                            descriptor: format!(
+                                "{}){}",
+                                descriptor.rsplit_once(')').map_or("(", |(held, _)| held),
+                                rep_descriptor(&returns)
+                            ),
+                            through: java::Through::Static,
+                            arguments: all,
+                        },
+                        _ => value_static(
+                            class,
+                            "constructor-impl",
+                            all.into_iter().zip(reps).collect(),
+                            &returns,
+                        ),
+                    }
+                } else {
+                    J::New {
+                        what: named(class),
+                        arguments: all,
+                        outer: outer_java,
+                    }
+                }
+            } else if candidate.dispatch.is_some()
+                && !info.java
+                && !candidate.super_call
+                && value_class(&info.owner).is_some()
+            {
+                let dispatch = candidate.dispatch.clone().expect("dispatch");
+                let owner_ty = Ty::class(&info.owner);
+                let holder = self.coerce(dispatch, &owner_ty);
+                let mut reps = vec![rep_of(&owner_ty)];
+                reps.extend(
+                    info.parameters
+                        .iter()
+                        .map(|one| rep_of(&erase_params(&one.ty))),
+                );
+                let mut all = vec![holder];
+                all.extend(arguments);
+                let name = value_member_name(&info.jvm_name);
+                match (&info.descriptor, info.source.is_none(), plan.defaults) {
+                    (Some(descriptor), true, false) => J::Invoke {
+                        on: None,
+                        owner: info.owner.clone(),
+                        name,
+                        descriptor: descriptor.clone(),
+                        through: java::Through::Static,
+                        arguments: all,
+                    },
+                    (_, _, true) => {
+                        all.extend(mask_ints(&plan));
+                        all.push(J::Null);
+                        static_call(&info.owner, &format!("{name}$default"), all)
+                    }
+                    _ => value_static(
+                        &info.owner,
+                        &name,
+                        all.into_iter().zip(reps).collect(),
+                        &rep,
+                    ),
                 }
             } else if plan.defaults {
                 let mut all = Vec::new();
@@ -16789,17 +17677,19 @@ pub mod lower {
                     rep,
                 ));
             }
-            if Method::class_of_ty(&holder.ty) == STRING
-                || self
-                    .c
-                    .world
-                    .is_subclass(&Method::class_of_ty(&holder.ty), "java/lang/CharSequence")
-                    && values.len() == 1
-                    && holder.ty.name().is_some_and(|name| {
-                        name == STRING
-                            || name == "java/lang/CharSequence"
-                            || name == "java/lang/StringBuilder"
-                    })
+            let int_index = values.len() == 1
+                && (values[0].ty.primitive_name() == Some(INT) || values[0].ty.is_error());
+            if int_index
+                && (Method::class_of_ty(&holder.ty) == STRING
+                    || self
+                        .c
+                        .world
+                        .is_subclass(&Method::class_of_ty(&holder.ty), "java/lang/CharSequence")
+                        && holder.ty.name().is_some_and(|name| {
+                            name == STRING
+                                || name == "java/lang/CharSequence"
+                                || name == "java/lang/StringBuilder"
+                        }))
             {
                 let j = self.coerce(holder, &Ty::class("java/lang/CharSequence"));
                 let index = self.coerce(values.remove(0), &Ty::int());
@@ -17547,6 +18437,7 @@ pub mod lower {
                         inline: self.inline.len(),
                         hides: self.hides.len(),
                         cx: self.cx.clone(),
+                        learned: RefCell::default(),
                     });
                     let local = Local {
                         name: String::new(),
@@ -18202,12 +19093,19 @@ pub mod lower {
                     cx.params.extend(info.type_parameters.iter().cloned());
                     cx
                 }
-                _ => TypeCx {
-                    file,
-                    classes: Vec::new(),
-                    params: info.type_parameters.clone(),
-                    local_classes: Vec::new(),
-                },
+                owner => {
+                    let mut params: Vec<TypeParam> = owner
+                        .and_then(|held| self.c.world.class(held))
+                        .map(|held| held.type_parameters.clone())
+                        .unwrap_or_default();
+                    params.extend(info.type_parameters.iter().cloned());
+                    TypeCx {
+                        file,
+                        classes: Vec::new(),
+                        params,
+                        local_classes: Vec::new(),
+                    }
+                }
             };
             let scopes_at = self.scopes.len();
             let receivers_at = self.receivers.len();
@@ -18215,6 +19113,7 @@ pub mod lower {
             let loops_at = self.loops.len();
             let inline_at = self.inline.len();
             let hides_at = self.hides.len();
+            let mut made_lambdas: Vec<Rc<InlineLambda>> = Vec::new();
             let mut bound: Vec<Bound> = Vec::new();
             for (slot, parameter) in plan.filled.iter().zip(info.parameters.iter()) {
                 let ty = parameter.ty.substitute(&subst);
@@ -18265,7 +19164,9 @@ pub mod lower {
                                     inline: inline_at,
                                     hides: hides_at,
                                     cx: caller_cx.clone(),
+                                    learned: RefCell::default(),
                                 });
+                                made_lambdas.push(inline.clone());
                                 bound.push((parameter.name.clone(), ty, None, Some(inline), None));
                             } else {
                                 self.label_hint = Some(info.name.clone());
@@ -18286,11 +19187,18 @@ pub mod lower {
                         let mut items = Vec::new();
                         let mut spread_value = None;
                         for index in list {
-                            if let ArgValue::Ready(value) = &given[*index].value {
-                                if given[*index].spread && list.len() == 1 {
-                                    spread_value = Some(value.clone());
-                                } else {
-                                    items.push(self.coerce(value.clone(), &element));
+                            match &given[*index].value {
+                                ArgValue::Ready(value) => {
+                                    if given[*index].spread && list.len() == 1 {
+                                        spread_value = Some(value.clone());
+                                    } else {
+                                        items.push(self.coerce(value.clone(), &element));
+                                    }
+                                }
+                                ArgValue::Deferred(expr) => {
+                                    let formal = parameter.ty.substitute(&subst);
+                                    let value = self.function_object(expr, &formal)?;
+                                    items.push(self.coerce(value, &element));
                                 }
                             }
                         }
@@ -18546,16 +19454,34 @@ pub mod lower {
             }
             let _ = dead;
             let ty = if unknown_returns {
+                let mut learned: HashMap<String, Ty> = HashMap::new();
+                for made in &made_lambdas {
+                    for (name, ty) in made.learned.borrow().iter() {
+                        learned.entry(name.clone()).or_insert_with(|| ty.clone());
+                    }
+                }
                 let mut joined: Option<Ty> = None;
                 for one in &inferred {
+                    let one = one.substitute(&learned);
                     joined = Some(match joined {
-                        None => one.clone(),
-                        Some(before) => self.common_super(&before, one),
+                        None => one,
+                        Some(before) => self.common_super(&before, &one),
                     });
                 }
                 let mut found = HashMap::new();
                 if let Some(joined) = joined {
                     self.bind(&returns, &joined, &vars, &mut found);
+                }
+                for (name, ty) in learned {
+                    if !vars.contains(&name) {
+                        continue;
+                    }
+                    let open = found
+                        .get(&name)
+                        .is_none_or(|held| held.is_error() || matches!(held, Ty::Param { .. }));
+                    if open {
+                        found.insert(name, ty);
+                    }
                 }
                 returns.substitute(&found).map_params(&|name, _| {
                     vars.contains(&name.to_string())
@@ -18742,14 +19668,17 @@ pub mod lower {
                 label: exit,
                 body: Box::new(at_line(S::Block(body), self.spot)),
             });
+            let mut joined: Option<Ty> = None;
+            for one in &inferred {
+                joined = Some(match joined {
+                    None => one.clone(),
+                    Some(before) => self.common_super(&before, one),
+                });
+            }
+            if let Some(actual) = &joined {
+                self.learn_lambda_result(&inline, actual);
+            }
             let ty = if unknown {
-                let mut joined: Option<Ty> = None;
-                for one in &inferred {
-                    joined = Some(match joined {
-                        None => one.clone(),
-                        Some(before) => self.common_super(&before, one),
-                    });
-                }
                 joined.unwrap_or_else(Ty::unit)
             } else {
                 returns
@@ -18758,6 +19687,30 @@ pub mod lower {
                 Some(name) => Val::with_rep(J::Name(name), ty, result_rep),
                 None => Val::unit(),
             })
+        }
+
+        pub fn learn_lambda_result(&self, inline: &InlineLambda, actual: &Ty) {
+            let Some(parts) = inline.function.function_parts() else {
+                return;
+            };
+            if !parts.returns.mentions_params() || actual.is_error() || actual.is_nothing() {
+                return;
+            }
+            let mut names = Vec::new();
+            parts.returns.params_mentioned(&mut names);
+            let mut found = HashMap::new();
+            self.bind(&parts.returns, actual, &names, &mut found);
+            let mut learned = inline.learned.borrow_mut();
+            for (name, ty) in found {
+                if ty.is_error() || matches!(ty, Ty::Param { .. }) {
+                    continue;
+                }
+                let joined = match learned.get(&name) {
+                    Some(before) => self.common_super(before, &ty),
+                    None => ty,
+                };
+                learned.insert(name, joined);
+            }
         }
 
         pub fn class_literal(&mut self, receiver: &Expr, java: bool) -> Lowered<Val> {
@@ -20798,12 +21751,12 @@ pub mod lower {
                             && info.kind == Kind::Object
                             && info.companion_of.is_none()
                         {
-                            unit.methods.push(static_bridge(
+                            unit.methods.extend(self.jvm_static_bridges(
                                 &found,
                                 static_field(jvm, "INSTANCE"),
                                 found.jvm_name.trim_end_matches("$jvmStatic"),
                                 tree.spot,
-                            ));
+                            )?);
                         }
                     }
                     tree::Declaration::Property(property) => {
@@ -20826,6 +21779,13 @@ pub mod lower {
                             Some(&info),
                             false,
                         )?;
+                        if info.kind == Kind::Object && info.companion_of.is_none() {
+                            unit.methods.extend(self.jvm_static_property_bridges(
+                                &found,
+                                static_field(jvm, "INSTANCE"),
+                                property.spot,
+                            )?);
+                        }
                     }
                     tree::Declaration::Class(nested) => {
                         let nested_jvm = format!("{jvm}${}", nested.name);
@@ -20857,6 +21817,12 @@ pub mod lower {
                     let ty = found.ty.clone();
                     let field_modifiers = if found.jvm_field {
                         java_modifiers(found.visibility)
+                    } else if value_class(jvm).is_some() {
+                        java::Modifiers {
+                            private: true,
+                            final_: true,
+                            ..java::Modifiers::default()
+                        }
                     } else {
                         java::Modifiers::default()
                     };
@@ -20902,7 +21868,9 @@ pub mod lower {
                     }
                 }
             }
-            if info.kind != Kind::Interface && info.kind != Kind::Annotation {
+            if let Some((underlying, property)) = value_class(jvm) {
+                self.value_class_members(&mut unit, &info, tree, &cx, jvm, &underlying, &property)?;
+            } else if info.kind != Kind::Interface && info.kind != Kind::Annotation {
                 let _ = (&inner_receivers, &bind_captures);
                 let constructors = self.constructors(&info, tree, &cx, jvm, captures)?;
                 unit.methods.extend(constructors.0);
@@ -21040,56 +22008,53 @@ pub mod lower {
             }
             if let Some(companion) = &info.companion {
                 if let Some(companion_info) = self.world.class(companion) {
+                    let simple = companion.rsplit('$').next().unwrap_or("Companion");
                     for function in &companion_info.functions {
-                        if !function.jvm_static {
+                        if !function.jvm_static || function.source.is_none() {
                             continue;
                         }
-                        let parameters: Vec<(W, String)> = function
-                            .parameters
-                            .iter()
-                            .enumerate()
-                            .map(|(at, one)| {
-                                (
-                                    written(&erase_params(&one.ty), false, &[], &[]),
-                                    format!("p{at}"),
-                                )
-                            })
-                            .collect();
-                        let arguments: Vec<J> = parameters
-                            .iter()
-                            .map(|(_, name)| J::Name(name.clone()))
-                            .collect();
-                        let simple = companion.rsplit('$').next().unwrap_or("Companion");
-                        let invocation =
-                            call(static_field(jvm, simple), &function.jvm_name, arguments);
-                        let returns =
-                            returned_written(&erase_params(&function.returns), false, &[], &[]);
-                        let body = if returns == W::Void {
-                            vec![at_line(S::Express(invocation), tree.spot)]
-                        } else {
-                            vec![at_line(S::Return(Some(invocation)), tree.spot)]
-                        };
-                        unit.methods.push(new_method(
+                        unit.methods.extend(self.jvm_static_bridges(
+                            function,
+                            static_field(jvm, simple),
                             &function.jvm_name,
-                            returns,
-                            parameters,
-                            Some(body),
-                            java::Modifiers {
-                                public: true,
-                                static_: true,
-                                ..java::Modifiers::default()
-                            },
-                            tree.spot.line,
-                        ));
+                            tree.spot,
+                        )?);
                     }
                     for property in &companion_info.properties {
-                        if property.const_ || property.jvm_field {
-                            if let Some(source) = &property.source {
-                                if let Some(initializer) = &source.initializer {
-                                    let _ = initializer;
-                                }
-                            }
+                        unit.methods.extend(self.jvm_static_property_bridges(
+                            property,
+                            static_field(jvm, simple),
+                            tree.spot,
+                        )?);
+                        let Some((holder, field_name, true)) = &property.field else {
+                            continue;
+                        };
+                        if holder != jvm || property.source.is_none() {
+                            continue;
                         }
+                        let ty = match property.infer {
+                            Some(slot) => self.inferred(slot)?,
+                            None => property.ty.clone(),
+                        };
+                        let mut modifiers = if property.visibility == Visible::Private {
+                            java::Modifiers::default()
+                        } else {
+                            java_modifiers(property.visibility)
+                        };
+                        modifiers.static_ = true;
+                        let value = if property.const_ {
+                            modifiers.final_ = true;
+                            property.constant.as_ref().map(constant_value)
+                        } else {
+                            None
+                        };
+                        unit.fields.push(new_field(
+                            field_name,
+                            written(&ty, true, &[], &[]),
+                            modifiers,
+                            value,
+                            tree.spot.line,
+                        ));
                     }
                 }
             }
@@ -21193,6 +22158,346 @@ pub mod lower {
             (parameters, returns)
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn value_bridge(
+            &self,
+            class: &ClassInfo,
+            info: &FunctionInfo,
+            returns: &Ty,
+            class_params: &[TypeParam],
+            own: &[TypeParam],
+            names: &[String],
+            spot: Spot,
+        ) -> java::Method {
+            let (underlying, property) =
+                value_class(&class.name).unwrap_or((Ty::any(), String::new()));
+            let mut arguments: Vec<(J, Rep)> =
+                vec![(field(J::This, &property), rep_of(&underlying))];
+            let mut parameters: Vec<(W, String)> = Vec::new();
+            for (parameter, name) in info.parameters.iter().zip(names.iter()) {
+                let boxed = written_inner(&parameter.ty, true, class_params, own);
+                parameters.push((boxed, name.clone()));
+                let rep = rep_of(&erase_params(&parameter.ty));
+                let j = match &rep {
+                    Rep::Value(held, inner) => {
+                        value_unbox(held, inner, cast(named(held), J::Name(name.clone())))
+                    }
+                    _ => J::Name(name.clone()),
+                };
+                arguments.push((j, rep));
+            }
+            let returned_rep = rep_of(&erase_params(returns));
+            let invoked = value_static(
+                &class.name,
+                &value_member_name(&info.jvm_name),
+                arguments,
+                &returned_rep,
+            );
+            let body = if returns.is_unit() && !returns.is_nullable() {
+                vec![
+                    at_line(S::Express(invoked), spot),
+                    at_line(S::Return(None), spot),
+                ]
+            } else {
+                let j = match &returned_rep {
+                    Rep::Value(held, inner) => value_box(held, inner, invoked),
+                    _ => invoked,
+                };
+                vec![at_line(S::Return(Some(j)), spot)]
+            };
+            let returned = if returns.is_unit() && !returns.is_nullable() {
+                W::Void
+            } else {
+                written_inner(returns, true, class_params, own)
+            };
+            new_method(
+                &info.name,
+                returned,
+                parameters,
+                Some(body),
+                java_modifiers(Visible::Public),
+                spot.line,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn value_class_members(
+            &self,
+            unit: &mut java::Unit,
+            info: &ClassInfo,
+            tree: &Rc<tree::Class>,
+            cx: &TypeCx,
+            jvm: &str,
+            underlying: &Ty,
+            property: &str,
+        ) -> Lowered<()> {
+            let spot = tree.spot;
+            let class_params = info.type_parameters.clone();
+            let inner = rep_of(underlying);
+            let held_written = written(underlying, true, &class_params, &[]);
+            let class_written = named(jvm);
+            let public_static = || {
+                let mut modifiers = java_modifiers(Visible::Public);
+                modifiers.static_ = true;
+                modifiers
+            };
+            let private = java::Modifiers {
+                private: true,
+                ..java::Modifiers::default()
+            };
+            unit.methods.push(new_method(
+                "<init>",
+                W::Void,
+                vec![(held_written.clone(), property.to_string())],
+                Some(vec![
+                    at_line(
+                        S::Chain {
+                            to_super: true,
+                            arguments: Vec::new(),
+                        },
+                        spot,
+                    ),
+                    at_line(
+                        S::Express(assign(
+                            field(J::This, property),
+                            J::Name(property.to_string()),
+                        )),
+                        spot,
+                    ),
+                    at_line(S::Return(None), spot),
+                ]),
+                private,
+                spot.line,
+            ));
+            let mut method = self.method_for(
+                cx.clone(),
+                jvm,
+                Some(jvm),
+                Some(J::Name(property.to_string())),
+            );
+            method.spot = spot;
+            method.targets.push(Target {
+                label: None,
+                returns: Ty::unit(),
+                real: true,
+                result: None,
+                exit: None,
+                lambda: false,
+                inferred: Vec::new(),
+            });
+            for member in &tree.members {
+                if let tree::Declaration::Init(block) = member {
+                    method.statements(&block.statements)?;
+                }
+            }
+            method.emit(S::Return(Some(J::Name(property.to_string()))));
+            let body = method.blocks.pop().unwrap_or_default();
+            unit.methods.push(new_method(
+                "constructor-impl",
+                held_written.clone(),
+                vec![(held_written.clone(), property.to_string())],
+                Some(body),
+                public_static(),
+                spot.line,
+            ));
+            unit.methods.push(new_method(
+                "box-impl",
+                class_written.clone(),
+                vec![(held_written.clone(), "v".to_string())],
+                Some(vec![at_line(
+                    S::Return(Some(J::New {
+                        what: named(jvm),
+                        arguments: vec![J::Name("v".to_string())],
+                        outer: None,
+                    })),
+                    spot,
+                )]),
+                public_static(),
+                spot.line,
+            ));
+            unit.methods.push(new_method(
+                "unbox-impl",
+                held_written.clone(),
+                Vec::new(),
+                Some(vec![at_line(
+                    S::Return(Some(field(J::This, property))),
+                    spot,
+                )]),
+                java_modifiers(Visible::Public),
+                spot.line,
+            ));
+            let declares = |name: &str| {
+                tree.members.iter().any(|member| {
+                    matches!(member, tree::Declaration::Function(function)
+                        if function.name == name && function.modifiers.has("override"))
+                })
+            };
+            let simple = jvm.rsplit(['/', '$']).next().unwrap_or(jvm).to_string();
+            let same = |left: J, right: J| -> J {
+                match &inner {
+                    Rep::Prim(FLOAT) => binary(
+                        java::Binary::Equal,
+                        static_call("java/lang/Float", "compare", vec![left, right]),
+                        J::Int(0),
+                    ),
+                    Rep::Prim(DOUBLE) => binary(
+                        java::Binary::Equal,
+                        static_call("java/lang/Double", "compare", vec![left, right]),
+                        J::Int(0),
+                    ),
+                    Rep::Prim(_) => binary(java::Binary::Equal, left, right),
+                    _ => static_call(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "areEqual",
+                        vec![left, right],
+                    ),
+                }
+            };
+            let v = || J::Name("v".to_string());
+            if !declares("toString") {
+                let text = binary(
+                    java::Binary::Add,
+                    binary(
+                        java::Binary::Add,
+                        J::Str(format!("{simple}({property}=")),
+                        v(),
+                    ),
+                    J::Str(")".to_string()),
+                );
+                unit.methods.push(new_method(
+                    "toString-impl",
+                    named(STRING),
+                    vec![(held_written.clone(), "v".to_string())],
+                    Some(vec![at_line(S::Return(Some(text)), spot)]),
+                    public_static(),
+                    spot.line,
+                ));
+                unit.methods.push(new_method(
+                    "toString",
+                    named(STRING),
+                    Vec::new(),
+                    Some(vec![at_line(
+                        S::Return(Some(value_static(
+                            jvm,
+                            "toString-impl",
+                            vec![(field(J::This, property), inner.clone())],
+                            &Rep::Ref(STRING.to_string()),
+                        ))),
+                        spot,
+                    )]),
+                    java_modifiers(Visible::Public),
+                    spot.line,
+                ));
+            }
+            if !declares("hashCode") {
+                let hashed = match &inner {
+                    Rep::Prim(name) => {
+                        static_call(boxed_of(name).unwrap_or(OBJECT), "hashCode", vec![v()])
+                    }
+                    _ => J::Conditional {
+                        condition: Box::new(binary(java::Binary::Equal, v(), J::Null)),
+                        then: Box::new(J::Int(0)),
+                        otherwise: Box::new(call(v(), "hashCode", Vec::new())),
+                    },
+                };
+                unit.methods.push(new_method(
+                    "hashCode-impl",
+                    W::Int,
+                    vec![(held_written.clone(), "v".to_string())],
+                    Some(vec![at_line(S::Return(Some(hashed)), spot)]),
+                    public_static(),
+                    spot.line,
+                ));
+                unit.methods.push(new_method(
+                    "hashCode",
+                    W::Int,
+                    Vec::new(),
+                    Some(vec![at_line(
+                        S::Return(Some(value_static(
+                            jvm,
+                            "hashCode-impl",
+                            vec![(field(J::This, property), inner.clone())],
+                            &Rep::Prim(INT),
+                        ))),
+                        spot,
+                    )]),
+                    java_modifiers(Visible::Public),
+                    spot.line,
+                ));
+            }
+            if !declares("equals") {
+                let other = J::Name("other".to_string());
+                let is_same = J::InstanceOf {
+                    of: Box::new(other.clone()),
+                    pattern: Box::new(java::Pattern {
+                        what: named(jvm),
+                        name: String::new(),
+                        parts: Vec::new(),
+                        taken: false,
+                    }),
+                };
+                let unboxed = value_unbox(jvm, &inner, cast(named(jvm), other.clone()));
+                unit.methods.push(new_method(
+                    "equals-impl",
+                    W::Boolean,
+                    vec![
+                        (held_written.clone(), "v".to_string()),
+                        (named(OBJECT), "other".to_string()),
+                    ],
+                    Some(vec![
+                        at_line(
+                            S::If {
+                                condition: not(is_same),
+                                then: Box::new(at_line(S::Return(Some(J::Boolean(false))), spot)),
+                                otherwise: None,
+                            },
+                            spot,
+                        ),
+                        at_line(S::Return(Some(same(v(), unboxed))), spot),
+                    ]),
+                    public_static(),
+                    spot.line,
+                ));
+                unit.methods.push(new_method(
+                    "equals",
+                    W::Boolean,
+                    vec![(named(OBJECT), "other".to_string())],
+                    Some(vec![at_line(
+                        S::Return(Some(value_static(
+                            jvm,
+                            "equals-impl",
+                            vec![
+                                (field(J::This, property), inner.clone()),
+                                (other, Rep::Ref(OBJECT.to_string())),
+                            ],
+                            &Rep::Prim(BOOLEAN),
+                        ))),
+                        spot,
+                    )]),
+                    java_modifiers(Visible::Public),
+                    spot.line,
+                ));
+            }
+            unit.methods.push(new_method(
+                "equals-impl0",
+                W::Boolean,
+                vec![
+                    (held_written.clone(), "a".to_string()),
+                    (held_written, "b".to_string()),
+                ],
+                Some(vec![at_line(
+                    S::Return(Some(same(
+                        J::Name("a".to_string()),
+                        J::Name("b".to_string()),
+                    ))),
+                    spot,
+                )]),
+                public_static(),
+                spot.line,
+            ));
+            Ok(())
+        }
+
         pub fn function_methods(
             &self,
             info: &Rc<FunctionInfo>,
@@ -21211,7 +22516,8 @@ pub mod lower {
             inner_cx.params.extend(own.iter().cloned());
             let returns = self.returns_for(info)?;
             let interface = class.is_some_and(|held| held.is_interface());
-            let static_ = top_level;
+            let value_owner = class.filter(|held| !top_level && value_class(&held.name).is_some());
+            let static_ = top_level || value_owner.is_some();
             let mut modifiers = java_modifiers(info.visibility);
             modifiers.static_ = static_;
             let abstract_ = decl.body.is_none();
@@ -21227,7 +22533,7 @@ pub mod lower {
                 info.name.replace(|one: char| !one.is_alphanumeric(), "_")
             );
             let (boxed_parameters, boxed_return) = match class {
-                Some(held) if decl.modifiers.has("override") => {
+                Some(held) if decl.modifiers.has("override") && value_owner.is_none() => {
                     self.boxed_by_overridden(held, info)
                 }
                 _ => (Vec::new(), false),
@@ -21240,6 +22546,12 @@ pub mod lower {
                 }
             };
             let mut parameters: Vec<(W, String)> = Vec::new();
+            if let Some(held) = value_owner {
+                parameters.push((
+                    written(&held.as_ty(), true, &class_params, &own),
+                    "$this".to_string(),
+                ));
+            }
             if let Some(receiver) = &info.receiver {
                 parameters.push((
                     written(receiver, true, &class_params, &own),
@@ -21282,7 +22594,13 @@ pub mod lower {
                     decl.spot,
                 )])
             } else {
-                let this = if static_ { None } else { Some(J::This) };
+                let this = if value_owner.is_some() {
+                    Some(J::Name("$this".to_string()))
+                } else if static_ {
+                    None
+                } else {
+                    Some(J::This)
+                };
                 let class_name = class.map(|held| held.name.as_str());
                 let mut method = self.method_for(inner_cx.clone(), owner, class_name, this);
                 method.spot = decl.spot;
@@ -21366,8 +22684,26 @@ pub mod lower {
                 }
                 Some(body)
             };
+            let method_name = if value_owner.is_some() {
+                value_member_name(&info.jvm_name)
+            } else {
+                info.jvm_name.clone()
+            };
+            if let Some(held) = value_owner {
+                if decl.modifiers.has("override") {
+                    out.push(self.value_bridge(
+                        held,
+                        info,
+                        &returns,
+                        &class_params,
+                        &own,
+                        &names,
+                        decl.spot,
+                    ));
+                }
+            }
             let mut built = new_method(
-                &info.jvm_name,
+                &method_name,
                 returned.clone(),
                 parameters.clone(),
                 body,
@@ -21384,6 +22720,54 @@ pub mod lower {
                 .collect();
             built.variadic = info.parameters.last().is_some_and(|one| one.vararg);
             built.annotations = self.annotations_of(&decl.modifiers, cx);
+            if decl.modifiers.annotated("JvmOverloads").is_some()
+                && info.has_defaults
+                && !abstract_
+                && !info.reified
+                && value_owner.is_none()
+            {
+                let lead = usize::from(info.receiver.is_some());
+                for keep in overload_shapes(&info.parameters) {
+                    let mut kept = parameters[..lead].to_vec();
+                    let mut arguments: Vec<J> = Vec::new();
+                    if !static_ {
+                        arguments.push(J::This);
+                    }
+                    if info.receiver.is_some() {
+                        arguments.push(J::Name(receiver_name.clone()));
+                    }
+                    for (at, parameter) in info.parameters.iter().enumerate() {
+                        let (what, name) = parameters[lead + at].clone();
+                        if keep[at] {
+                            kept.push((what, name.clone()));
+                            arguments.push(J::Name(name));
+                        } else {
+                            arguments.push(omitted_argument(parameter));
+                        }
+                    }
+                    arguments.extend(omitted_masks(&info.parameters, &keep));
+                    arguments.push(J::Null);
+                    let invocation =
+                        static_call(owner, &format!("{}$default", info.jvm_name), arguments);
+                    let body = if returned == W::Void {
+                        vec![at_line(S::Express(invocation), decl.spot)]
+                    } else {
+                        vec![at_line(S::Return(Some(invocation)), decl.spot)]
+                    };
+                    let mut overload = new_method(
+                        &method_name,
+                        returned.clone(),
+                        kept,
+                        Some(body),
+                        modifiers,
+                        decl.spot.line,
+                    );
+                    overload.own_variables.clone_from(&built.own_variables);
+                    overload.own_bounds.clone_from(&built.own_bounds);
+                    overload.variadic = keep.last().copied().unwrap_or(false) && built.variadic;
+                    out.push(overload);
+                }
+            }
             out.push(built);
             if info.has_defaults {
                 out.push(self.default_method(
@@ -21641,10 +23025,12 @@ pub mod lower {
                 None => info.ty.clone(),
             };
             let interface = class.is_some_and(|held| held.is_interface());
-            let static_ = top_level;
+            let value_owner = class.filter(|held| !top_level && value_class(&held.name).is_some());
+            let static_ = top_level || value_owner.is_some();
             let class_name = class.map(|held| held.name.as_str());
             let receiver_name = "$receiver".to_string();
-            if let Some((_, field_name, _)) = &info.field {
+            if let Some((holder, field_name, field_static)) = &info.field {
+                let moved = !top_level && holder != owner;
                 let what = if info.delegated {
                     named(OBJECT)
                 } else {
@@ -21655,22 +23041,14 @@ pub mod lower {
                 } else {
                     java::Modifiers::default()
                 };
-                modifiers.static_ = static_ || info.const_;
+                modifiers.static_ = static_ || info.const_ || *field_static;
                 let mut value = None;
                 if info.const_ {
                     modifiers.final_ = true;
                     modifiers.static_ = true;
-                    value = info.constant.as_ref().map(|constant| match constant {
-                        Constant::Int(held) => J::Int(*held),
-                        Constant::Long(held) => J::Long(*held),
-                        Constant::Float(held) => J::Float(*held),
-                        Constant::Double(held) => J::Double(*held),
-                        Constant::Char(held) => J::Char(*held),
-                        Constant::Boolean(held) => J::Boolean(*held),
-                        Constant::Text(held) => J::Str(held.clone()),
-                    });
+                    value = info.constant.as_ref().map(constant_value);
                 }
-                if !interface {
+                if !interface && !moved {
                     unit.fields.push(new_field(
                         field_name,
                         what,
@@ -21731,6 +23109,12 @@ pub mod lower {
                 out
             };
             let mut receiver_parameter = Vec::new();
+            if let Some(held) = value_owner {
+                receiver_parameter.push((
+                    written(&held.as_ty(), true, &class_params, &info.type_parameters),
+                    "$this".to_string(),
+                ));
+            }
             if let Some(receiver) = &info.receiver {
                 receiver_parameter.push((
                     written(receiver, true, &class_params, &info.type_parameters),
@@ -21751,7 +23135,13 @@ pub mod lower {
                 let body = if abstract_ {
                     None
                 } else {
-                    let this = if static_ { None } else { Some(J::This) };
+                    let this = if value_owner.is_some() {
+                        Some(J::Name("$this".to_string()))
+                    } else if static_ {
+                        None
+                    } else {
+                        Some(J::This)
+                    };
                     let mut method = self.method_for(cx.clone(), owner, class_name, this);
                     method.spot = decl.spot;
                     if let Some(receiver) = &info.receiver {
@@ -21955,6 +23345,61 @@ pub mod lower {
         J::Int(((1u32 << (index % 32)) as i32) as i64)
     }
 
+    pub fn overload_shapes(parameters: &[ParamInfo]) -> Vec<Vec<bool>> {
+        let defaulted: Vec<usize> = parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, one)| one.default)
+            .map(|(at, _)| at)
+            .collect();
+        (1..=defaulted.len())
+            .map(|count| {
+                let dropped = &defaulted[defaulted.len() - count..];
+                (0..parameters.len())
+                    .map(|at| !dropped.contains(&at))
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub fn omitted_argument(parameter: &ParamInfo) -> J {
+        let ty = if parameter.vararg {
+            Ty::array_of(parameter.ty.clone())
+        } else {
+            parameter.ty.clone()
+        };
+        match rep_of(&erase_params(&ty)) {
+            Rep::Prim(SHORT) => cast(W::Short, J::Int(0)),
+            Rep::Prim(BYTE) => cast(W::Byte, J::Int(0)),
+            other => default_value(&other),
+        }
+    }
+
+    pub fn omitted_masks(parameters: &[ParamInfo], keep: &[bool]) -> Vec<J> {
+        let mut masks = vec![0u32; parameters.len().div_ceil(32).max(1)];
+        for (at, kept) in keep.iter().enumerate() {
+            if !kept {
+                masks[at / 32] |= 1 << (at % 32);
+            }
+        }
+        masks
+            .into_iter()
+            .map(|mask| J::Int(i64::from(mask as i32)))
+            .collect()
+    }
+
+    pub fn constant_value(constant: &Constant) -> J {
+        match constant {
+            Constant::Int(held) => J::Int(*held),
+            Constant::Long(held) => J::Long(*held),
+            Constant::Float(held) => J::Float(*held),
+            Constant::Double(held) => J::Double(*held),
+            Constant::Char(held) => J::Char(*held),
+            Constant::Boolean(held) => J::Boolean(*held),
+            Constant::Text(held) => J::Str(held.clone()),
+        }
+    }
+
     impl<'c, 'w, 'a> Method<'c, 'w, 'a> {
         pub fn delegate_get(&mut self, holder: Val, ty: &Ty, info: &PropertyInfo) -> Lowered<Val> {
             let _ = info;
@@ -22105,6 +23550,50 @@ pub mod lower {
             out
         }
 
+        pub fn materialize_captured_inlines(
+            &mut self,
+            declaration: &tree::Declaration,
+        ) -> Lowered<()> {
+            let mut names: Vec<String> = Vec::new();
+            walk_declaration(declaration, &mut |one| {
+                if let Expr::Name(name, _) = one {
+                    names.push(name.clone());
+                }
+                if let Expr::Call { callee, .. } = one {
+                    if let Expr::Name(name, _) = callee.as_ref() {
+                        names.push(name.clone());
+                    }
+                }
+            });
+            names.sort();
+            names.dedup();
+            for name in names {
+                let Some(local) = self.lookup_local(&name).cloned() else {
+                    continue;
+                };
+                let Slot::Inline(inline) = &local.slot else {
+                    continue;
+                };
+                if !matches!(inline.function, Ty::Function(..)) {
+                    continue;
+                }
+                let inline = inline.clone();
+                let value = self.materialize_inline(&inline)?;
+                let rep = value.rep.clone();
+                let ty = value.ty.clone();
+                let temp = self.declare_temp("crossinline", &rep, Some(value.j));
+                self.bind_local(Local {
+                    name,
+                    jvm: temp,
+                    ty,
+                    rep,
+                    mutable: false,
+                    slot: Slot::Plain,
+                });
+            }
+            Ok(())
+        }
+
         pub fn captures_for(&self, declaration: &tree::Declaration) -> Captures {
             let mut names: Vec<String> = Vec::new();
             walk_declaration(declaration, &mut |one| {
@@ -22166,7 +23655,16 @@ pub mod lower {
                 *slot += 1;
                 *slot
             };
-            let jvm = format!("{}${}", self.unit_name, count);
+            let within = self
+                .targets
+                .iter()
+                .find(|one| one.real)
+                .and_then(|one| one.label.clone())
+                .map(|name| name.replace(|one: char| !one.is_alphanumeric() && one != '_', "_"))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "object".to_string());
+            let jvm = format!("{}${}${}", self.unit_name, within, count);
+            self.materialize_captured_inlines(&tree::Declaration::Class(class.clone()))?;
             let captures = self.captures_for(&tree::Declaration::Class(class.clone()));
             self.local_class_units(class, &jvm, &captures)?;
             let info = self.c.world.class(&jvm).expect("object class");
@@ -22261,6 +23759,7 @@ pub mod lower {
             self.cx
                 .local_classes
                 .push((class.name.clone(), jvm.clone()));
+            self.materialize_captured_inlines(&tree::Declaration::Class(class.clone()))?;
             let captures = self.captures_for(&tree::Declaration::Class(class.clone()));
             self.local_class_units(class, &jvm, &captures)
         }
@@ -22285,6 +23784,7 @@ pub mod lower {
                 entries: Vec::new(),
                 spot: function.spot,
             });
+            self.materialize_captured_inlines(&tree::Declaration::Function(function.clone()))?;
             let mut captures = self.captures_for(&tree::Declaration::Function(function.clone()));
             captures
                 .locals
@@ -22473,8 +23973,13 @@ pub mod lower {
                             if found.const_ || found.interface {
                                 continue;
                             }
-                            let Some((_, field_name, _)) = &found.field else {
+                            let Some((holder, field_name, field_static)) = &found.field else {
                                 continue;
+                            };
+                            let stored = if *field_static {
+                                static_field(holder, field_name)
+                            } else {
+                                field(J::This, field_name)
                             };
                             let source = property.delegate.clone().or(property.initializer.clone());
                             let Some(source) = source else { continue };
@@ -22485,7 +23990,7 @@ pub mod lower {
                                 method.value(&source, if delegated { None } else { Some(&ty) })?;
                             let target = if delegated { Ty::any().nullable() } else { ty };
                             let j = method.coerce(value, &target);
-                            method.emit(S::Express(assign(field(J::This, field_name), j)));
+                            method.emit(S::Express(assign(stored, j)));
                         }
                         tree::Declaration::Init(block) => {
                             method.spot = block.spot;
@@ -22502,53 +24007,79 @@ pub mod lower {
                 }
                 Ok(())
             };
-            let super_chain = |method: &mut Method,
-                               arguments: Option<&Vec<tree::Argument>>|
-             -> Lowered<()> {
-                if enum_class {
-                    return Ok(());
-                }
-                let superclass = info.supertypes.iter().find_map(|one| {
-                    let name = one.name()?;
-                    let held = method.c.world.class(name)?;
-                    (!held.is_interface()).then(|| name.to_string())
-                });
-                let Some(superclass) = superclass else {
-                    method.emit(S::Chain {
-                        to_super: true,
-                        arguments: Vec::new(),
-                    });
-                    return Ok(());
-                };
-                method.early = true;
-                let saved_receivers = method.receivers.clone();
-                for receiver in method.receivers.iter_mut() {
-                    if matches!(&receiver.j, J::Field { of, name } if matches!(of.as_ref(), J::This) && name == "this$0")
-                    {
-                        receiver.j = J::Name("this$0".to_string());
+            let super_chain =
+                |method: &mut Method, arguments: Option<&Vec<tree::Argument>>| -> Lowered<()> {
+                    if enum_class {
+                        return Ok(());
                     }
-                }
-                let given = match arguments {
-                    Some(held) => method.given_arguments(held),
-                    None => Ok(Vec::new()),
+                    let superclass = info.supertypes.iter().find_map(|one| {
+                        let name = one.name()?;
+                        let held = method.c.world.class(name)?;
+                        (!held.is_interface()).then(|| name.to_string())
+                    });
+                    let Some(superclass) = superclass else {
+                        method.emit(S::Chain {
+                            to_super: true,
+                            arguments: Vec::new(),
+                        });
+                        return Ok(());
+                    };
+                    method.early = true;
+                    let saved_receivers = method.receivers.clone();
+                    let saved_scopes = method.scopes.clone();
+                    let own_field = |j: &J| match j {
+                        J::Field { of, name }
+                            if matches!(of.as_ref(), J::This)
+                                && (name == "this$0"
+                                    || name.starts_with("$cap$")
+                                    || name.starts_with("$receiver$")) =>
+                        {
+                            Some(J::Name(name.clone()))
+                        }
+                        _ => None,
+                    };
+                    for receiver in method.receivers.iter_mut() {
+                        if let Some(held) = own_field(&receiver.j) {
+                            receiver.j = held;
+                        }
+                    }
+                    for scope in method.scopes.iter_mut() {
+                        for local in scope.iter_mut() {
+                            local.slot = match &local.slot {
+                                Slot::Fixed(held) => match own_field(held) {
+                                    Some(name) => Slot::Fixed(name),
+                                    None => Slot::Fixed(held.clone()),
+                                },
+                                Slot::BoxedIn(held) => match own_field(held) {
+                                    Some(name) => Slot::BoxedIn(name),
+                                    None => Slot::BoxedIn(held.clone()),
+                                },
+                                other => other.clone(),
+                            };
+                        }
+                    }
+                    let given = match arguments {
+                        Some(held) => method.given_arguments(held),
+                        None => Ok(Vec::new()),
+                    };
+                    let made = given
+                        .and_then(|given| method.construct(&superclass, given, &[], None, None));
+                    method.receivers = saved_receivers;
+                    method.scopes = saved_scopes;
+                    method.early = false;
+                    let made = made?;
+                    match made.j {
+                        J::New { arguments, .. } => method.emit(S::Chain {
+                            to_super: true,
+                            arguments,
+                        }),
+                        _ => method.emit(S::Chain {
+                            to_super: true,
+                            arguments: Vec::new(),
+                        }),
+                    }
+                    Ok(())
                 };
-                let made =
-                    given.and_then(|given| method.construct(&superclass, given, &[], None, None));
-                method.receivers = saved_receivers;
-                method.early = false;
-                let made = made?;
-                match made.j {
-                    J::New { arguments, .. } => method.emit(S::Chain {
-                        to_super: true,
-                        arguments,
-                    }),
-                    _ => method.emit(S::Chain {
-                        to_super: true,
-                        arguments: Vec::new(),
-                    }),
-                }
-                Ok(())
-            };
             let explicit_super_arguments: Option<Vec<tree::Argument>> =
                 tree.supertypes.iter().find_map(|one| match one {
                     tree::SuperType::Call(_, arguments) => Some(arguments.clone()),
@@ -22645,6 +24176,18 @@ pub mod lower {
                     out.push(self.default_constructor(
                         info, cx, jvm, &prefix, &kinds, &defaults, tree.spot,
                     )?);
+                    if primary
+                        .as_ref()
+                        .is_some_and(|held| held.modifiers.annotated("JvmOverloads").is_some())
+                    {
+                        out.extend(self.constructor_overloads(
+                            prefix.len(),
+                            &parameters,
+                            &kinds,
+                            modifiers,
+                            tree.spot,
+                        ));
+                    }
                 }
             }
             for constructor in &secondaries {
@@ -22750,6 +24293,19 @@ pub mod lower {
                     method.emit(S::Block(body));
                 }
                 let body = method.blocks.pop().unwrap_or_default();
+                let overloads = if constructor.modifiers.annotated("JvmOverloads").is_some()
+                    && constructor_info.parameters.iter().any(|one| one.default)
+                {
+                    self.constructor_overloads(
+                        prefix.len(),
+                        &parameters,
+                        &constructor_info.parameters,
+                        visibility_of(&constructor.modifiers),
+                        constructor.spot,
+                    )
+                } else {
+                    Vec::new()
+                };
                 let mut built = new_method(
                     "<init>",
                     W::Void,
@@ -22779,8 +24335,176 @@ pub mod lower {
                         constructor.spot,
                     )?);
                 }
+                out.extend(overloads);
             }
             Ok((out, Vec::new()))
+        }
+
+        fn constructor_overloads(
+            &self,
+            prefix: usize,
+            parameters: &[(W, String)],
+            kinds: &[ParamInfo],
+            modifiers: java::Modifiers,
+            spot: Spot,
+        ) -> Vec<java::Method> {
+            let mut out = Vec::new();
+            for keep in overload_shapes(kinds) {
+                let mut kept = parameters[..prefix].to_vec();
+                let mut arguments: Vec<J> = parameters[..prefix]
+                    .iter()
+                    .map(|(_, name)| J::Name(name.clone()))
+                    .collect();
+                for (at, kind) in kinds.iter().enumerate() {
+                    let (what, name) = parameters[prefix + at].clone();
+                    if keep[at] {
+                        kept.push((what, name.clone()));
+                        arguments.push(J::Name(name));
+                    } else {
+                        arguments.push(omitted_argument(kind));
+                    }
+                }
+                arguments.extend(omitted_masks(kinds, &keep));
+                arguments.push(cast(
+                    named("kotlin/jvm/internal/DefaultConstructorMarker"),
+                    J::Null,
+                ));
+                let body = vec![at_line(
+                    S::Chain {
+                        to_super: false,
+                        arguments,
+                    },
+                    spot,
+                )];
+                let mut built =
+                    new_method("<init>", W::Void, kept, Some(body), modifiers, spot.line);
+                built.variadic = keep.last().copied().unwrap_or(false)
+                    && kinds.last().is_some_and(|one| one.vararg);
+                out.push(built);
+            }
+            out
+        }
+
+        pub fn jvm_static_bridges(
+            &self,
+            function: &FunctionInfo,
+            holder: J,
+            name: &str,
+            spot: Spot,
+        ) -> Lowered<Vec<java::Method>> {
+            let returns = self.returns_for(function)?;
+            let own = function.type_parameters.clone();
+            let mut parameters: Vec<(W, String)> = Vec::new();
+            if let Some(receiver) = &function.receiver {
+                parameters.push((written(receiver, true, &[], &own), "p$receiver".to_string()));
+            }
+            for (at, one) in function.parameters.iter().enumerate() {
+                let ty = if one.vararg {
+                    Ty::array_of(one.ty.clone())
+                } else {
+                    one.ty.clone()
+                };
+                parameters.push((written(&ty, true, &[], &own), format!("p{at}")));
+            }
+            let returned = returned_written(&returns, true, &[], &own);
+            let lead = usize::from(function.receiver.is_some());
+            let mut shapes = vec![vec![true; function.parameters.len()]];
+            if function
+                .source
+                .as_ref()
+                .is_some_and(|held| held.modifiers.annotated("JvmOverloads").is_some())
+            {
+                shapes.extend(overload_shapes(&function.parameters));
+            }
+            let bounds: Vec<W> = own
+                .iter()
+                .map(|one| match one.bounds.first() {
+                    Some(bound) => written(bound, true, &[], &own),
+                    None => named(OBJECT),
+                })
+                .collect();
+            let mut out = Vec::new();
+            for keep in shapes {
+                let mut kept = parameters[..lead].to_vec();
+                for (at, flag) in keep.iter().enumerate() {
+                    if *flag {
+                        kept.push(parameters[lead + at].clone());
+                    }
+                }
+                let arguments: Vec<J> =
+                    kept.iter().map(|(_, held)| J::Name(held.clone())).collect();
+                let invocation = call(holder.clone(), &function.jvm_name, arguments);
+                let body = if returned == W::Void {
+                    vec![at_line(S::Express(invocation), spot)]
+                } else {
+                    vec![at_line(S::Return(Some(invocation)), spot)]
+                };
+                let mut built = new_method(
+                    name,
+                    returned.clone(),
+                    kept,
+                    Some(body),
+                    java::Modifiers {
+                        public: true,
+                        static_: true,
+                        ..java::Modifiers::default()
+                    },
+                    spot.line,
+                );
+                built.own_variables = own.iter().map(|one| one.name.clone()).collect();
+                built.own_bounds.clone_from(&bounds);
+                built.variadic = keep.last().copied().unwrap_or(false)
+                    && function.parameters.last().is_some_and(|one| one.vararg);
+                out.push(built);
+            }
+            Ok(out)
+        }
+
+        pub fn jvm_static_property_bridges(
+            &self,
+            property: &PropertyInfo,
+            holder: J,
+            spot: Spot,
+        ) -> Lowered<Vec<java::Method>> {
+            let mut out = Vec::new();
+            let Some(source) = &property.source else {
+                return Ok(out);
+            };
+            if source.modifiers.annotated("JvmStatic").is_none() || property.receiver.is_some() {
+                return Ok(out);
+            }
+            let ty = match property.infer {
+                Some(slot) => self.inferred(slot)?,
+                None => property.ty.clone(),
+            };
+            let modifiers = java::Modifiers {
+                public: true,
+                static_: true,
+                ..java::Modifiers::default()
+            };
+            if let Some((getter, _, _)) = &property.getter {
+                let invocation = call(holder.clone(), getter, Vec::new());
+                out.push(new_method(
+                    getter.trim_end_matches("$jvmStatic"),
+                    returned_written(&ty, true, &[], &[]),
+                    Vec::new(),
+                    Some(vec![at_line(S::Return(Some(invocation)), spot)]),
+                    modifiers,
+                    spot.line,
+                ));
+            }
+            if let Some((setter, _, _)) = &property.setter {
+                let invocation = call(holder, setter, vec![J::Name("value".to_string())]);
+                out.push(new_method(
+                    setter.trim_end_matches("$jvmStatic"),
+                    W::Void,
+                    vec![(written(&ty, true, &[], &[]), "value".to_string())],
+                    Some(vec![at_line(S::Express(invocation), spot)]),
+                    modifiers,
+                    spot.line,
+                ));
+            }
+            Ok(out)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -24119,6 +25843,22 @@ inline infix fun <T> Comparable<T>.compareTo(other: T): Int =
 "####,
         ),
         (
+            "Core/Source/kotlin/properties/Delegates.kt",
+            r####"package kotlin.properties
+import kotlin.reflect.KProperty
+@kotlin.internal.InlineMember inline fun <T> Delegates.observable(initialValue: T, crossinline onChange: (property: KProperty<*>, oldValue: T, newValue: T) -> Unit):
+        ReadWriteProperty<Any?, T> =
+    object : ObservableProperty<T>(initialValue) {
+        override fun afterChange(property: KProperty<*>, oldValue: T, newValue: T) = onChange(property, oldValue, newValue)
+    }
+@kotlin.internal.InlineMember inline fun <T> Delegates.vetoable(initialValue: T, crossinline onChange: (property: KProperty<*>, oldValue: T, newValue: T) -> Boolean):
+        ReadWriteProperty<Any?, T> =
+    object : ObservableProperty<T>(initialValue) {
+        override fun beforeChange(property: KProperty<*>, oldValue: T, newValue: T): Boolean = onChange(property, oldValue, newValue)
+    }
+"####,
+        ),
+        (
             "Core/Source/kotlin/properties/PropertyReferenceDelegates.kt",
             r####"package kotlin
 import kotlin.reflect.*
@@ -24182,6 +25922,12 @@ internal inline fun String.parseHexToLong(startIndex: Int, endIndex: Int, onErro
             "Core/Source/kotlin/text/HexFormat.kt",
             r####"package kotlin.text
 import kotlin.internal.InlineOnly
+@kotlin.internal.InlineMember inline fun HexFormat.Builder.bytes(builderAction: BytesHexFormat.Builder.() -> Unit) {
+    bytes.builderAction()
+}
+@kotlin.internal.InlineMember inline fun HexFormat.Builder.number(builderAction: NumberHexFormat.Builder.() -> Unit) {
+    number.builderAction()
+}
 inline fun HexFormat(builderAction: HexFormat.Builder.() -> Unit): HexFormat {
     return HexFormat.Builder().apply(builderAction).build()
 }
@@ -24284,6 +26030,21 @@ internal inline fun String.skipWhile(startIndex: Int, predicate: (Char) -> Boole
     while (i < length && predicate(this[i])) i++
     return i
 }
+"####,
+        ),
+        (
+            "Core/Source/kotlin/text/regex/MatchResult.kt",
+            r####"package kotlin.text
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component1():  String = match.groupValues[1]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component2():  String = match.groupValues[2]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component3():  String = match.groupValues[3]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component4():  String = match.groupValues[4]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component5():  String = match.groupValues[5]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component6():  String = match.groupValues[6]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component7():  String = match.groupValues[7]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component8():  String = match.groupValues[8]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component9():  String = match.groupValues[9]
+@kotlin.internal.InlineMember operator inline fun MatchResult.Destructured.component10(): String = match.groupValues[10]
 "####,
         ),
         (
@@ -24483,6 +26244,15 @@ import kotlin.internal.InlineOnly
 import kotlin.jvm.JvmField
 import kotlin.jvm.JvmInline
 import kotlin.jvm.JvmName
+@kotlin.internal.InlineMember inline fun <T> Result<T>.getOrNull(): T? =
+    when {
+        isFailure -> null
+        else -> value as T
+    }
+@kotlin.internal.InlineMember inline fun <T> Result.Companion.success(value: T): Result<T> =
+    Result(value)
+@kotlin.internal.InlineMember inline fun <T> Result.Companion.failure(exception: Throwable): Result<T> =
+    Result(createFailure(exception))
 inline fun <R> runCatching(block: () -> R): Result<R> {
     return try {
         Result.success(block())

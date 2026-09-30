@@ -15027,6 +15027,9 @@ impl Emitter<'_> {
             }
         }
 
+        if matches!(on, Expression::Conditional { .. }) {
+            self.expecting = None;
+        }
         let owner_type = self.value(on, line)?;
         if matches!(owner_type, Type::Array(_)) {
             return self.call_on_an_array(&owner_type, name, arguments, line);
@@ -19186,7 +19189,7 @@ impl Emitter<'_> {
 
         let inside_a_written_one = self.unit.stands_for_a_lambda;
         let (outer, through_the_one_around) = match () {
-            _ if self.static_ => (None, false),
+            _ if self.static_ || self.early => (None, false),
             _ if inside_a_written_one => (self.unit.outer.clone(), true),
             _ => (Some(self.this_class.clone()), false),
         };
@@ -19477,7 +19480,7 @@ impl Emitter<'_> {
 
         let inside_a_written_one = self.unit.stands_for_a_lambda;
         let (outer, through_the_one_around) = match () {
-            _ if self.static_ => (None, false),
+            _ if self.static_ || self.early => (None, false),
             _ if inside_a_written_one => (self.unit.outer.clone(), true),
             _ => (Some(self.this_class.clone()), false),
         };

@@ -41128,6 +41128,143 @@ mod kotlin {
         assert_eq!(said, "OK");
     }
 
+    #[test]
+    fn kotlin_members_reach_java_where_kotlinc_puts_them() {
+        let Some((library_path, library)) = standard_library() else {
+            eprintln!("kotlin layout: no kotlin-stdlib to compile against");
+            return;
+        };
+        let kotlin = vec![("Abi.kt".to_string(), LAYOUT_KOTLIN.to_string())];
+        let java = vec![
+            ("Beast.java".to_string(), LAYOUT_BEAST.to_string()),
+            ("Cat.java".to_string(), LAYOUT_CAT.to_string()),
+            ("Shade.java".to_string(), LAYOUT_SHADE.to_string()),
+            ("BoxMain.java".to_string(), LAYOUT_MAIN.to_string()),
+        ];
+        let made = compiled(&kotlin, &java, &library).expect("the layout project compiles");
+        let money = made
+            .iter()
+            .find(|(name, _)| name == "abi/Money.class")
+            .map(|(_, bytes)| crate::jvm::read(bytes).expect("Money reads back"))
+            .expect("Money is made");
+        for wanted in ["CURRENCY", "ZERO"] {
+            let field = money
+                .fields
+                .iter()
+                .find(|one| one.name == wanted)
+                .unwrap_or_else(|| panic!("{wanted} is not a field of Money"));
+            assert!(field.access_flags & 0x0008 != 0, "{wanted} is not static");
+        }
+        let Some(java) = find_java() else {
+            return;
+        };
+        let directory =
+            std::env::temp_dir().join(format!("builder-kotlin-layout-{}", std::process::id()));
+        written(&directory, &made);
+        let said = answer(&java, &directory, &library_path);
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(said, "OK");
+    }
+
+    const LAYOUT_KOTLIN: &str = r####"package abi
+
+import zoo.Beast
+import zoo.Shade
+
+class Money(val cents: Long) {
+    companion object {
+        const val CURRENCY = "EUR"
+
+        @JvmField
+        val ZERO = Money(0)
+
+        @JvmStatic
+        var created = 0
+
+        @JvmStatic
+        fun of(units: Int): Money = Money(units * 100L).also { created++ }
+    }
+}
+
+object Registry {
+    @JvmField
+    val names: MutableList<String> = mutableListOf()
+
+    @JvmStatic
+    var limit: Int = 3
+
+    const val VERSION = 2
+
+    @JvmStatic
+    @JvmOverloads
+    fun add(name: String, times: Int = 1, suffix: String = ""): Int {
+        repeat(times) { names += name + suffix }
+        return names.size
+    }
+}
+
+class Box @JvmOverloads constructor(val width: Int, val height: Int = width, val label: String = "box") {
+    fun area() = width * height
+}
+
+fun energyOf(animal: Beast): Int = animal.energy
+
+fun shadeCount(): Int = Shade.entries.size
+"####;
+
+    const LAYOUT_BEAST: &str = r####"package zoo;
+
+public abstract class Beast {
+    protected int energy = 5;
+
+    public int getEnergy() {
+        return energy * 2;
+    }
+}
+"####;
+
+    const LAYOUT_CAT: &str = r####"package zoo;
+
+public class Cat extends Beast {
+}
+"####;
+
+    const LAYOUT_SHADE: &str = r####"package zoo;
+
+public enum Shade {
+    LIGHT,
+    DARK
+}
+"####;
+
+    const LAYOUT_MAIN: &str = r####"import abi.AbiKt;
+import abi.Box;
+import abi.Money;
+import abi.Registry;
+import zoo.Cat;
+
+public class BoxMain {
+    public static void main(String[] args) {
+        StringBuilder bad = new StringBuilder();
+        if (!Money.CURRENCY.equals("EUR")) bad.append("const ");
+        if (Money.ZERO.getCents() != 0) bad.append("field ");
+        Money made = Money.of(3);
+        if (made.getCents() != 300 || Money.getCreated() != 1) bad.append("static ");
+        Money.setCreated(5);
+        if (Money.Companion.getCreated() != 5) bad.append("companion ");
+        if (Registry.add("a") != 1 || Registry.add("b", 2) != 3 || Registry.add("c", 1, "!") != 4) bad.append("overloads ");
+        if (!Registry.names.get(3).equals("c!")) bad.append("jvmfield ");
+        Registry.setLimit(9);
+        if (Registry.getLimit() != 9) bad.append("property ");
+        if (Registry.VERSION != 2) bad.append("objectconst ");
+        if (new Box(3).area() != 9 || new Box(2, 5).area() != 10 || !new Box(1, 1, "x").getLabel().equals("x")) bad.append("constructors ");
+        if (AbiKt.energyOf(new Cat()) != 10) bad.append("getter ");
+        if (AbiKt.shadeCount() != 2) bad.append("entries ");
+        System.out.print(bad.length() == 0 ? "OK" : "fail " + bad);
+    }
+}
+"####;
+
     const MIXED_KOTLIN: &str = r####"package shop
 
 data class Item(val name: String, val cents: Long, val tags: List<String> = emptyList())
@@ -52892,6 +53029,44 @@ fun box(): String {
         else -> "other $s"
     }
     return x
+}
+"####,
+        ),
+        (
+            "lab/lambdaResultThroughInlineChain",
+            "lambdaResultThroughInlineChain.kt",
+            r####"fun box(): String {
+    val rows = listOf(listOf("a", "bb"), listOf("ccc"))
+    val widths = (0 until 2).map { c -> rows.maxOf { (it.getOrNull(c)?.toString() ?: "").length } }
+    if ("y".padEnd(widths[0]) != "y  ") return "fail1 $widths"
+    val sizes = rows.map { it.size }
+    if (sizes.first() + 1 != 3) return "fail2"
+    val lengths = rows.flatMap { it }.map { it.length }.filter { it > 1 }
+    if (lengths.sum() != 5) return "fail3"
+    return "OK"
+}
+"####,
+        ),
+        (
+            "lab/memberAndExtensionChoice",
+            "memberAndExtensionChoice.kt",
+            r####"data class K(val n: Int) : Comparable<K> {
+    override fun compareTo(other: K) = n.compareTo(other.n)
+}
+
+operator fun String.get(vararg value: Any): String = if (value.size == 2) "two" else "fail"
+
+fun box(): String {
+    val m = mutableListOf(1, 2, 3)
+    if (!m.removeAll { it > 1 } || m != listOf(1)) return "fail1"
+    if (listOf(K(1), K(3)).maxOrNull()?.n != 3) return "fail2"
+    if ("a.b.c".split(".") != listOf("a", "b", "c")) return "fail3"
+    if ("foo"[1, "x"] != "two") return "fail4"
+    if ('+' !in "+-*/") return "fail5"
+    val kind = 7
+    val text = "n=$kind ${"ABC".lowercase()}"
+    if (text != "n=7 abc") return "fail6"
+    return "OK"
 }
 "####,
         ),
