@@ -7630,6 +7630,22 @@ pub mod lower {
         "java/lang",
     ];
 
+    thread_local! {
+        static NATIVE_PACKAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub fn default_packages() -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = DEFAULT_PACKAGES.to_vec();
+        if NATIVE_PACKAGES.with(|held| held.get()) {
+            out.push("kotlin/native");
+        }
+        out
+    }
+
+    pub fn native_packages(on: bool) {
+        NATIVE_PACKAGES.with(|held| held.set(on));
+    }
+
     pub fn builtin_class(simple: &str) -> Option<&'static str> {
         Some(match simple {
             "Any" => OBJECT,
@@ -8177,7 +8193,7 @@ pub mod lower {
             if let Some(found) = builtin_class(simple) {
                 return Some(found.to_string());
             }
-            for package in DEFAULT_PACKAGES {
+            for package in default_packages() {
                 let candidate = format!("{package}/{simple}");
                 if self.world.exists(&candidate) {
                     return Some(candidate);
@@ -8207,7 +8223,7 @@ pub mod lower {
             }
             packages.push(scope.package.clone());
             packages.extend(scope.stars.iter().cloned());
-            packages.extend(DEFAULT_PACKAGES.iter().map(|one| one.to_string()));
+            packages.extend(default_packages().iter().map(|one| one.to_string()));
             for package in packages {
                 let members = self.world.package(&package);
                 let found = members
@@ -14087,7 +14103,7 @@ pub mod lower {
             for star in &file.stars {
                 out.push((star.clone(), None));
             }
-            for package in DEFAULT_PACKAGES {
+            for package in default_packages() {
                 out.push((package.to_string(), None));
             }
             out
@@ -21553,6 +21569,30 @@ pub mod lower {
             let mut unit = new_unit(jvm, shape);
             unit.source = Some(self.files[file].source_name.clone());
             unit.annotation = info.kind == Kind::Annotation;
+            if unit.annotation {
+                let policy = tree
+                    .modifiers
+                    .annotated("Retention")
+                    .and_then(|held| held.arguments.first())
+                    .and_then(|argument| match argument.value.unparenthesized() {
+                        Expr::Member { name, .. } | Expr::Name(name, _) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .map(|name| match name.as_str() {
+                        "SOURCE" => "SOURCE",
+                        "BINARY" => "CLASS",
+                        _ => "RUNTIME",
+                    })
+                    .unwrap_or("RUNTIME");
+                unit.annotations.push(java::Annotated {
+                    name: "java.lang.annotation.Retention".to_string(),
+                    values: vec![(
+                        "value".to_string(),
+                        J::Name(format!("java.lang.annotation.RetentionPolicy.{policy}")),
+                    )],
+                    line: tree.spot.line,
+                });
+            }
             unit.modifiers.abstract_ =
                 matches!(info.modality, Modality::Abstract | Modality::Sealed)
                     || info.is_interface();
@@ -22832,13 +22872,21 @@ pub mod lower {
                     continue;
                 };
                 let Some(name) = ty.name() else { continue };
+                let declared: Vec<String> = self
+                    .world
+                    .class(name)
+                    .and_then(|held| held.constructors.first().cloned())
+                    .map(|held| held.parameters.iter().map(|one| one.name.clone()).collect())
+                    .unwrap_or_default();
                 let values = annotation
                     .arguments
                     .iter()
                     .enumerate()
                     .filter_map(|(at, argument)| {
                         let key = argument.name.clone().unwrap_or_else(|| {
-                            if at == 0 {
+                            if let Some(held) = declared.get(at) {
+                                held.clone()
+                            } else if at == 0 {
                                 "value".to_string()
                             } else {
                                 format!("arg{at}")
@@ -38257,4 +38305,6040 @@ pub fn labelled(mut error: Diagnostic, label: &str) -> Diagnostic {
         None => error.location = Some(crate::diag::Location::file(label)),
     }
     error.with_context(format!("File: {label}"))
+}
+
+pub mod native {
+    use super::ORIGIN;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+    use std::collections::BTreeMap;
+
+    pub fn fail(code: &str, message: &str) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            ORIGIN,
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    pub enum Family {
+        Osx,
+        Ios,
+        Tvos,
+        Watchos,
+        Linux,
+        Mingw,
+        Android,
+    }
+
+    impl Family {
+        pub const ALL: [Family; 7] = [
+            Family::Osx,
+            Family::Ios,
+            Family::Tvos,
+            Family::Watchos,
+            Family::Linux,
+            Family::Mingw,
+            Family::Android,
+        ];
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Family::Osx => "osx",
+                Family::Ios => "ios",
+                Family::Tvos => "tvos",
+                Family::Watchos => "watchos",
+                Family::Linux => "linux",
+                Family::Mingw => "mingw",
+                Family::Android => "android",
+            }
+        }
+
+        pub fn exe_suffix(self) -> &'static str {
+            match self {
+                Family::Mingw => "exe",
+                _ => "kexe",
+            }
+        }
+
+        pub fn dynamic_prefix(self) -> &'static str {
+            match self {
+                Family::Mingw => "",
+                _ => "lib",
+            }
+        }
+
+        pub fn dynamic_suffix(self) -> &'static str {
+            match self {
+                Family::Osx | Family::Ios | Family::Tvos | Family::Watchos => "dylib",
+                Family::Linux | Family::Android => "so",
+                Family::Mingw => "dll",
+            }
+        }
+
+        pub fn static_prefix(self) -> &'static str {
+            "lib"
+        }
+
+        pub fn static_suffix(self) -> &'static str {
+            "a"
+        }
+
+        pub fn is_apple(self) -> bool {
+            matches!(
+                self,
+                Family::Osx | Family::Ios | Family::Tvos | Family::Watchos
+            )
+        }
+
+        pub fn object_format(self) -> ObjectFormat {
+            match self {
+                Family::Osx | Family::Ios | Family::Tvos | Family::Watchos => ObjectFormat::MachO,
+                Family::Linux | Family::Android => ObjectFormat::Elf,
+                Family::Mingw => ObjectFormat::Coff,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum ObjectFormat {
+        Elf,
+        MachO,
+        Coff,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    pub enum Architecture {
+        X64,
+        X86,
+        Arm64,
+        Arm32,
+    }
+
+    impl Architecture {
+        pub fn name(self) -> &'static str {
+            match self {
+                Architecture::X64 => "x64",
+                Architecture::X86 => "x86",
+                Architecture::Arm64 => "arm64",
+                Architecture::Arm32 => "arm32",
+            }
+        }
+
+        pub fn bits(self) -> u32 {
+            match self {
+                Architecture::X64 | Architecture::Arm64 => 64,
+                Architecture::X86 | Architecture::Arm32 => 32,
+            }
+        }
+
+        pub fn pointer_bytes(self) -> u32 {
+            self.bits() / 8
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum CallingConvention {
+        SystemV,
+        Win64,
+        Cdecl,
+        Aapcs64,
+        AppleArm64,
+        AapcsVfp,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct Target {
+        pub name: &'static str,
+        pub family: Family,
+        pub architecture: Architecture,
+    }
+
+    pub const TARGETS: &[Target] = &[
+        Target {
+            name: "android_x64",
+            family: Family::Android,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "android_x86",
+            family: Family::Android,
+            architecture: Architecture::X86,
+        },
+        Target {
+            name: "android_arm32",
+            family: Family::Android,
+            architecture: Architecture::Arm32,
+        },
+        Target {
+            name: "android_arm64",
+            family: Family::Android,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "ios_arm64",
+            family: Family::Ios,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "ios_x64",
+            family: Family::Ios,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "ios_simulator_arm64",
+            family: Family::Ios,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "watchos_arm64",
+            family: Family::Watchos,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "watchos_x64",
+            family: Family::Watchos,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "watchos_simulator_arm64",
+            family: Family::Watchos,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "watchos_device_arm64",
+            family: Family::Watchos,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "tvos_arm64",
+            family: Family::Tvos,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "tvos_x64",
+            family: Family::Tvos,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "tvos_simulator_arm64",
+            family: Family::Tvos,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "linux_x64",
+            family: Family::Linux,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "mingw_x64",
+            family: Family::Mingw,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "macos_x64",
+            family: Family::Osx,
+            architecture: Architecture::X64,
+        },
+        Target {
+            name: "macos_arm64",
+            family: Family::Osx,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "linux_arm64",
+            family: Family::Linux,
+            architecture: Architecture::Arm64,
+        },
+        Target {
+            name: "linux_arm32_hfp",
+            family: Family::Linux,
+            architecture: Architecture::Arm32,
+        },
+    ];
+
+    const DEPRECATED_TARGETS: &[&str] = &[
+        "linux_arm32_hfp",
+        "watchos_x64",
+        "tvos_x64",
+        "macos_x64",
+        "android_x64",
+        "android_x86",
+        "android_arm32",
+        "android_arm64",
+    ];
+
+    const TOLERATED_TARGETS: &[&str] = &[
+        "linux_arm32_hfp",
+        "android_x64",
+        "android_x86",
+        "android_arm32",
+        "android_arm64",
+    ];
+
+    const TARGET_ALIASES: &[(&str, &str)] = &[
+        ("linux", "linux_x64"),
+        ("mingw", "mingw_x64"),
+        ("macbook", "macos_x64"),
+        ("imac", "macos_x64"),
+        ("macos", "macos_arm64"),
+        ("raspberrypi", "linux_arm32_hfp"),
+        ("iphone", "ios_arm64"),
+        ("ipad", "ios_arm64"),
+        ("iphone_sim", "ios_simulator_arm64"),
+    ];
+
+    impl Target {
+        pub fn named(name: &str) -> Option<Target> {
+            let wanted = name.trim().to_ascii_lowercase().replace('-', "_");
+            if wanted == "host" {
+                return Target::host();
+            }
+            let wanted = TARGET_ALIASES
+                .iter()
+                .find(|(alias, _)| *alias == wanted)
+                .map(|(_, real)| real.to_string())
+                .unwrap_or(wanted);
+            TARGETS.iter().find(|one| one.name == wanted).copied()
+        }
+
+        pub fn host() -> Option<Target> {
+            let family = if cfg!(target_os = "android") {
+                Family::Android
+            } else if cfg!(target_os = "linux") {
+                Family::Linux
+            } else if cfg!(target_os = "macos") {
+                Family::Osx
+            } else if cfg!(target_os = "windows") {
+                Family::Mingw
+            } else if cfg!(target_os = "ios") {
+                Family::Ios
+            } else {
+                return None;
+            };
+            let architecture = if cfg!(target_arch = "x86_64") {
+                Architecture::X64
+            } else if cfg!(target_arch = "aarch64") {
+                Architecture::Arm64
+            } else if cfg!(target_arch = "x86") {
+                Architecture::X86
+            } else if cfg!(target_arch = "arm") {
+                Architecture::Arm32
+            } else {
+                return None;
+            };
+            TARGETS
+                .iter()
+                .find(|one| {
+                    one.family == family
+                        && one.architecture == architecture
+                        && !one.name.contains("simulator")
+                        && !one.name.contains("device")
+                })
+                .copied()
+        }
+
+        pub fn is_deprecated(&self) -> bool {
+            DEPRECATED_TARGETS.contains(&self.name)
+        }
+
+        pub fn is_tolerated(&self) -> bool {
+            TOLERATED_TARGETS.contains(&self.name)
+        }
+
+        pub fn is_simulator(&self) -> bool {
+            self.name.contains("simulator")
+                || self.family.is_apple()
+                    && self.family != Family::Osx
+                    && self.architecture == Architecture::X64
+        }
+
+        pub fn pointer_bytes(&self) -> u32 {
+            if self.name == "watchos_arm64" {
+                4
+            } else {
+                self.architecture.pointer_bytes()
+            }
+        }
+
+        pub fn c_long_bytes(&self) -> u32 {
+            if self.family == Family::Mingw || self.pointer_bytes() == 4 {
+                4
+            } else {
+                8
+            }
+        }
+
+        pub fn triple(&self) -> &'static str {
+            match self.name {
+                "android_x64" => "x86_64-unknown-linux-android",
+                "android_x86" => "i686-unknown-linux-android",
+                "android_arm32" => "armv7-unknown-linux-androideabi",
+                "android_arm64" => "aarch64-unknown-linux-android",
+                "ios_arm64" => "arm64-apple-ios",
+                "ios_x64" => "x86_64-apple-ios-simulator",
+                "ios_simulator_arm64" => "arm64-apple-ios-simulator",
+                "watchos_arm64" => "arm64_32-apple-watchos",
+                "watchos_x64" => "x86_64-apple-watchos-simulator",
+                "watchos_simulator_arm64" => "arm64-apple-watchos-simulator",
+                "watchos_device_arm64" => "arm64-apple-watchos",
+                "tvos_arm64" => "arm64-apple-tvos",
+                "tvos_x64" => "x86_64-apple-tvos-simulator",
+                "tvos_simulator_arm64" => "arm64-apple-tvos-simulator",
+                "linux_x64" => "x86_64-unknown-linux-gnu",
+                "mingw_x64" => "x86_64-pc-windows-gnu",
+                "macos_x64" => "x86_64-apple-macos",
+                "macos_arm64" => "arm64-apple-macos",
+                "linux_arm64" => "aarch64-unknown-linux-gnu",
+                "linux_arm32_hfp" => "armv6-unknown-linux-gnueabihf",
+                _ => "unknown-unknown-unknown",
+            }
+        }
+
+        pub fn calling_convention(&self) -> CallingConvention {
+            match (self.architecture, self.family) {
+                (Architecture::X64, Family::Mingw) => CallingConvention::Win64,
+                (Architecture::X64, _) => CallingConvention::SystemV,
+                (Architecture::X86, _) => CallingConvention::Cdecl,
+                (Architecture::Arm64, family) if family.is_apple() => CallingConvention::AppleArm64,
+                (Architecture::Arm64, _) => CallingConvention::Aapcs64,
+                (Architecture::Arm32, _) => CallingConvention::AapcsVfp,
+            }
+        }
+
+        pub fn stack_alignment(&self) -> u32 {
+            match self.architecture {
+                Architecture::X64 | Architecture::Arm64 | Architecture::X86 => 16,
+                Architecture::Arm32 => 8,
+            }
+        }
+
+        pub fn data_layout(&self) -> DataLayout {
+            let pointer = self.pointer_bytes();
+            DataLayout {
+                pointer,
+                pointer_align: pointer,
+                long_align: if self.architecture == Architecture::X86
+                    && self.family != Family::Mingw
+                {
+                    4
+                } else {
+                    8
+                },
+                double_align: if self.architecture == Architecture::X86
+                    && self.family != Family::Mingw
+                {
+                    4
+                } else {
+                    8
+                },
+                c_long: self.c_long_bytes(),
+                little_endian: true,
+                object_header: pointer,
+                array_header: pointer + 4,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct DataLayout {
+        pub pointer: u32,
+        pub pointer_align: u32,
+        pub long_align: u32,
+        pub double_align: u32,
+        pub c_long: u32,
+        pub little_endian: bool,
+        pub object_header: u32,
+        pub array_header: u32,
+    }
+
+    impl DataLayout {
+        pub fn size_of(&self, ty: ir::Type) -> u32 {
+            match ty {
+                ir::Type::Void => 0,
+                ir::Type::Bool | ir::Type::I8 => 1,
+                ir::Type::I16 | ir::Type::Char => 2,
+                ir::Type::I32 | ir::Type::F32 => 4,
+                ir::Type::I64 | ir::Type::F64 => 8,
+                ir::Type::Ptr | ir::Type::Object => self.pointer,
+                ir::Type::Vector128 => 16,
+            }
+        }
+
+        pub fn align_of(&self, ty: ir::Type) -> u32 {
+            match ty {
+                ir::Type::I64 => self.long_align,
+                ir::Type::F64 => self.double_align,
+                ir::Type::Ptr | ir::Type::Object => self.pointer_align,
+                other => self.size_of(other).max(1),
+            }
+        }
+
+        pub fn element_size(&self, kind: ir::ArrayKind) -> u32 {
+            self.size_of(kind.element())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Produce {
+        Program,
+        Static,
+        Dynamic,
+        Framework,
+        Library,
+        TestBundle,
+    }
+
+    impl Produce {
+        pub fn named(name: &str) -> Option<Produce> {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "program" => Some(Produce::Program),
+                "static" => Some(Produce::Static),
+                "dynamic" => Some(Produce::Dynamic),
+                "framework" => Some(Produce::Framework),
+                "library" => Some(Produce::Library),
+                "test_bundle" => Some(Produce::TestBundle),
+                _ => None,
+            }
+        }
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Produce::Program => "program",
+                Produce::Static => "static",
+                Produce::Dynamic => "dynamic",
+                Produce::Framework => "framework",
+                Produce::Library => "library",
+                Produce::TestBundle => "test_bundle",
+            }
+        }
+
+        pub fn is_binary(self) -> bool {
+            self != Produce::Library
+        }
+
+        pub fn exports_c(self) -> bool {
+            matches!(self, Produce::Static | Produce::Dynamic)
+        }
+
+        pub fn needs_entry(self) -> bool {
+            matches!(self, Produce::Program)
+        }
+    }
+
+    pub fn output_file(target: &Target, produce: Produce, base: &str) -> String {
+        let family = target.family;
+        let stem = base.trim_end_matches('/');
+        let (folder, name) = match stem.rsplit_once('/') {
+            Some((folder, name)) => (format!("{folder}/"), name.to_string()),
+            None => (String::new(), stem.to_string()),
+        };
+        let ends = |suffix: &str| name.ends_with(&format!(".{suffix}"));
+        let made = match produce {
+            Produce::Program => {
+                if ends(family.exe_suffix()) {
+                    name
+                } else {
+                    format!("{name}.{}", family.exe_suffix())
+                }
+            }
+            Produce::Static => {
+                let bare = name.trim_end_matches(&format!(".{}", family.static_suffix()));
+                let bare = bare.strip_prefix(family.static_prefix()).unwrap_or(bare);
+                format!(
+                    "{}{bare}.{}",
+                    family.static_prefix(),
+                    family.static_suffix()
+                )
+            }
+            Produce::Dynamic => {
+                let bare = name.trim_end_matches(&format!(".{}", family.dynamic_suffix()));
+                let bare = if family.dynamic_prefix().is_empty() {
+                    bare
+                } else {
+                    bare.strip_prefix(family.dynamic_prefix()).unwrap_or(bare)
+                };
+                format!(
+                    "{}{bare}.{}",
+                    family.dynamic_prefix(),
+                    family.dynamic_suffix()
+                )
+            }
+            Produce::Framework => {
+                if ends("framework") {
+                    name
+                } else {
+                    format!("{name}.framework")
+                }
+            }
+            Produce::TestBundle => {
+                if ends("xctest") {
+                    name
+                } else {
+                    format!("{name}.xctest")
+                }
+            }
+            Produce::Library => {
+                if ends("klib") {
+                    name
+                } else {
+                    format!("{name}.klib")
+                }
+            }
+        };
+        format!("{folder}{made}")
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Collector {
+        Noop,
+        Stms,
+        Cms,
+        Pmcs,
+    }
+
+    impl Collector {
+        pub fn named(name: &str) -> Option<Collector> {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "noop" => Some(Collector::Noop),
+                "stms" | "same_thread_ms" => Some(Collector::Stms),
+                "cms" | "concurrent_ms" => Some(Collector::Cms),
+                "pmcs" | "parallel_mark_concurrent_sweep" => Some(Collector::Pmcs),
+                _ => None,
+            }
+        }
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Collector::Noop => "noop",
+                Collector::Stms => "stms",
+                Collector::Cms => "cms",
+                Collector::Pmcs => "pmcs",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Allocator {
+        Std,
+        Custom,
+    }
+
+    impl Allocator {
+        pub fn named(name: &str) -> Option<Allocator> {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "std" => Some(Allocator::Std),
+                "custom" => Some(Allocator::Custom),
+                _ => None,
+            }
+        }
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Allocator::Std => "std",
+                Allocator::Custom => "custom",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum TestRunner {
+        Main,
+        NoExit,
+        Worker,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Options {
+        pub target: Target,
+        pub produce: Produce,
+        pub output: String,
+        pub module_name: Option<String>,
+        pub short_module_name: Option<String>,
+        pub entry: Option<String>,
+        pub optimize: bool,
+        pub debug: bool,
+        pub assertions: bool,
+        pub no_main: bool,
+        pub no_stdlib: bool,
+        pub no_default_libs: bool,
+        pub no_pack: bool,
+        pub libraries: Vec<String>,
+        pub native_libraries: Vec<String>,
+        pub included_binaries: Vec<String>,
+        pub linker_options: Vec<String>,
+        pub friend_modules: Vec<String>,
+        pub includes: Vec<String>,
+        pub exported_libraries: Vec<String>,
+        pub collector: Collector,
+        pub allocator: Allocator,
+        pub binary: BTreeMap<String, String>,
+        pub test_runner: Option<TestRunner>,
+        pub list_targets: bool,
+        pub static_framework: bool,
+        pub omit_framework_binary: bool,
+        pub manifest: Option<String>,
+        pub runtime: Option<String>,
+        pub temporary_files: Option<String>,
+        pub cache_directories: Vec<String>,
+        pub extra: BTreeMap<String, Vec<String>>,
+        pub sources: Vec<String>,
+    }
+
+    const LLVM_ONLY: &[&str] = &[
+        "-Xllvm-lto-passes",
+        "-Xllvm-module-passes",
+        "-Xllvm-variant",
+        "-Xsave-llvm-ir-after",
+        "-Xsave-llvm-ir-directory",
+        "-Xprint-bitcode",
+        "-Xverify-bitcode",
+        "-Xcompile-from-bitcode",
+        "-Xoverride-clang-options",
+        "-Xdebug-info-version",
+        "-Xembed-bitcode",
+        "-Xembed-bitcode-marker",
+        "-Xbitcode-embedding",
+    ];
+
+    const TAKES_VALUE: &[&str] = &[
+        "-target",
+        "-produce",
+        "-p",
+        "-output",
+        "-o",
+        "-entry",
+        "-e",
+        "-library",
+        "-l",
+        "-native-library",
+        "-nl",
+        "-include-binary",
+        "-ib",
+        "-linker-option",
+        "-linker-options",
+        "-linkerOpts",
+        "-module-name",
+        "-friend-modules",
+        "-manifest",
+        "-memory-model",
+        "-repo",
+        "-r",
+        "-api-version",
+        "-language-version",
+        "-kotlin-home",
+        "-opt-in",
+    ];
+
+    const FLAGS: &[&str] = &[
+        "-opt",
+        "-g",
+        "-enable-assertions",
+        "-ea",
+        "-nomain",
+        "-nopack",
+        "-nostdlib",
+        "-no-default-libs",
+        "-no-endorsed-libs",
+        "-list-targets",
+        "-generate-test-runner",
+        "-tr",
+        "-generate-no-exit-test-runner",
+        "-trn",
+        "-generate-worker-test-runner",
+        "-trw",
+        "-Xstatic-framework",
+        "-Xomit-framework-binary",
+        "-Xno-objc-generics",
+        "-Xexport-kdoc",
+        "-Xprint-files",
+        "-Xprint-ir",
+        "-Xverify-compiler",
+        "-Xcheck-dependencies",
+        "-Xmake-per-file-cache",
+        "-Xemit-lazy-objc-header",
+        "-Xg-generate-debug-trampoline",
+        "-Xadd-light-debug",
+        "-Xir-property-lazy-initialization",
+        "-Xcheck-state-at-external-calls",
+        "-Xruntime-logs",
+        "-Werror",
+        "-nowarn",
+        "-verbose",
+        "-version",
+        "-progressive",
+        "-Xmulti-platform",
+        "-Xexpect-actual-classes",
+    ];
+
+    const SETTINGS: &[&str] = &[
+        "-Xgc",
+        "-Xallocator",
+        "-Xbinary",
+        "-Xinclude",
+        "-Xexport-library",
+        "-Xruntime",
+        "-Xtemporary-files-dir",
+        "-Xshort-module-name",
+        "-Xcache-directory",
+        "-Xcached-library",
+        "-Xadd-cache",
+        "-Xauto-cache-dir",
+        "-Xauto-cache-from",
+        "-Xbackend-threads",
+        "-Xdebug-prefix-map",
+        "-Xdump-built-caches-to",
+        "-Xdump-tests-to",
+        "-Xexternal-dependencies",
+        "-Xfile-to-cache",
+        "-Xframework-import-header",
+        "-Xheader-klib-path",
+        "-Xic-cache-dir",
+        "-Xkonan-data-dir",
+        "-Xmanifest-native-targets",
+        "-Xoverride-konan-properties",
+        "-Xpre-link-caches",
+        "-Xread-dependencies-from",
+        "-Xrefines-paths",
+        "-Xwrite-dependencies-of-produced-klib-to",
+        "-Xwrite-dependencies-to",
+        "-Xruntime-logs",
+        "-Xbundle-id",
+        "-Xopt-in",
+        "-Xsuppress-warning",
+        "-Xwarning-level",
+    ];
+
+    impl Options {
+        pub fn new(target: Target) -> Options {
+            Options {
+                target,
+                produce: Produce::Program,
+                output: "program".to_string(),
+                module_name: None,
+                short_module_name: None,
+                entry: None,
+                optimize: false,
+                debug: false,
+                assertions: false,
+                no_main: false,
+                no_stdlib: false,
+                no_default_libs: false,
+                no_pack: false,
+                libraries: Vec::new(),
+                native_libraries: Vec::new(),
+                included_binaries: Vec::new(),
+                linker_options: Vec::new(),
+                friend_modules: Vec::new(),
+                includes: Vec::new(),
+                exported_libraries: Vec::new(),
+                collector: Collector::Pmcs,
+                allocator: Allocator::Custom,
+                binary: BTreeMap::new(),
+                test_runner: None,
+                list_targets: false,
+                static_framework: false,
+                omit_framework_binary: false,
+                manifest: None,
+                runtime: None,
+                temporary_files: None,
+                cache_directories: Vec::new(),
+                extra: BTreeMap::new(),
+                sources: Vec::new(),
+            }
+        }
+
+        pub fn parse(arguments: &[String]) -> Result<Options, Diagnostic> {
+            let host = Target::host().unwrap_or(TARGETS[14]);
+            let mut options = Options::new(host);
+            let mut index = 0;
+            while index < arguments.len() {
+                let argument = arguments[index].trim();
+                index += 1;
+                if argument.is_empty() {
+                    continue;
+                }
+                if !argument.starts_with('-') {
+                    options.sources.push(argument.to_string());
+                    continue;
+                }
+                let (name, inline) = match argument.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_string())),
+                    None => (argument, None),
+                };
+                if LLVM_ONLY.contains(&name) {
+                    return Err(fail(
+                        "EK403",
+                        "This option belongs to an LLVM toolchain, and this compiler has none.",
+                    )
+                    .with_context(format!("Option: {name}")));
+                }
+                if FLAGS.contains(&name) && inline.is_none() {
+                    options.flag(name);
+                    continue;
+                }
+                let value = if TAKES_VALUE.contains(&name) {
+                    match inline {
+                        Some(held) => held,
+                        None => {
+                            let Some(next) = arguments.get(index) else {
+                                return Err(fail("EK402", "This option needs a value after it.")
+                                    .with_context(format!("Option: {name}")));
+                            };
+                            index += 1;
+                            next.clone()
+                        }
+                    }
+                } else if SETTINGS.contains(&name) {
+                    match inline {
+                        Some(held) => held,
+                        None => {
+                            return Err(fail("EK402", "This option needs a value after it.")
+                                .with_context(format!("Option: {name}")));
+                        }
+                    }
+                } else {
+                    return Err(fail("EK404", "This option is not one this compiler knows.")
+                        .with_context(format!("Option: {name}")));
+                };
+                options.setting(name, &value)?;
+            }
+            let apple_only = matches!(options.produce, Produce::Framework | Produce::TestBundle);
+            if apple_only && !options.target.family.is_apple() {
+                return Err(
+                    fail("EK405", "A framework can only be made for an Apple target.")
+                        .with_context(format!("Target: {}", options.target.name)),
+                );
+            }
+            Ok(options)
+        }
+
+        fn flag(&mut self, name: &str) {
+            match name {
+                "-opt" => self.optimize = true,
+                "-g" => self.debug = true,
+                "-enable-assertions" | "-ea" => self.assertions = true,
+                "-nomain" => self.no_main = true,
+                "-nopack" => self.no_pack = true,
+                "-nostdlib" => self.no_stdlib = true,
+                "-no-default-libs" | "-no-endorsed-libs" => self.no_default_libs = true,
+                "-list-targets" => self.list_targets = true,
+                "-generate-test-runner" | "-tr" => self.test_runner = Some(TestRunner::Main),
+                "-generate-no-exit-test-runner" | "-trn" => {
+                    self.test_runner = Some(TestRunner::NoExit)
+                }
+                "-generate-worker-test-runner" | "-trw" => {
+                    self.test_runner = Some(TestRunner::Worker)
+                }
+                "-Xstatic-framework" => self.static_framework = true,
+                "-Xomit-framework-binary" => self.omit_framework_binary = true,
+                other => {
+                    self.extra.entry(other.to_string()).or_default();
+                }
+            }
+        }
+
+        fn setting(&mut self, name: &str, value: &str) -> Result<(), Diagnostic> {
+            match name {
+                "-target" => {
+                    self.target = Target::named(value).ok_or_else(|| {
+                        fail("EK400", "This target is not one Kotlin/Native knows.")
+                            .with_context(format!("Target: {value}"))
+                    })?;
+                }
+                "-produce" | "-p" => {
+                    if value.trim().eq_ignore_ascii_case("bitcode") {
+                        return Err(fail(
+                            "EK403",
+                            "This option belongs to an LLVM toolchain, and this compiler has none.",
+                        )
+                        .with_context(format!("Option: {name}")));
+                    }
+                    self.produce = Produce::named(value).ok_or_else(|| {
+                        fail(
+                            "EK401",
+                            "This kind of output is not one Kotlin/Native makes.",
+                        )
+                        .with_context(format!("Produce: {value}"))
+                    })?;
+                }
+                "-output" | "-o" => self.output = value.to_string(),
+                "-entry" | "-e" => self.entry = Some(value.to_string()),
+                "-library" | "-l" => self.libraries.push(value.to_string()),
+                "-native-library" | "-nl" => self.native_libraries.push(value.to_string()),
+                "-include-binary" | "-ib" => self.included_binaries.push(value.to_string()),
+                "-linker-option" => self.linker_options.push(value.to_string()),
+                "-linker-options" | "-linkerOpts" => self
+                    .linker_options
+                    .extend(value.split_whitespace().map(str::to_string)),
+                "-module-name" => self.module_name = Some(value.to_string()),
+                "-Xshort-module-name" => self.short_module_name = Some(value.to_string()),
+                "-friend-modules" => self.friend_modules.extend(
+                    value
+                        .split([':', ';', ','])
+                        .filter(|one| !one.is_empty())
+                        .map(str::to_string),
+                ),
+                "-manifest" => self.manifest = Some(value.to_string()),
+                "-Xgc" => {
+                    self.collector = Collector::named(value).ok_or_else(|| {
+                        fail(
+                            "EK412",
+                            "The garbage collector named is not one Kotlin/Native offers.",
+                        )
+                        .with_context(format!("Collector: {value}"))
+                    })?;
+                }
+                "-Xallocator" => {
+                    self.allocator = Allocator::named(value).ok_or_else(|| {
+                        fail(
+                            "EK413",
+                            "The memory allocator named is not one Kotlin/Native offers.",
+                        )
+                        .with_context(format!("Allocator: {value}"))
+                    })?;
+                }
+                "-Xbinary" => {
+                    let Some((key, held)) = value.split_once('=') else {
+                        return Err(
+                            fail("EK414", "A binary option must be written as key=value.")
+                                .with_context(format!("Option: {value}")),
+                        );
+                    };
+                    match key.trim() {
+                        "gc" => {
+                            self.collector = Collector::named(held).ok_or_else(|| {
+                                fail(
+                                    "EK412",
+                                    "The garbage collector named is not one Kotlin/Native offers.",
+                                )
+                                .with_context(format!("Collector: {held}"))
+                            })?;
+                        }
+                        "allocator" => {
+                            self.allocator = Allocator::named(held).ok_or_else(|| {
+                                fail(
+                                    "EK413",
+                                    "The memory allocator named is not one Kotlin/Native offers.",
+                                )
+                                .with_context(format!("Allocator: {held}"))
+                            })?;
+                        }
+                        _ => {}
+                    }
+                    self.binary
+                        .insert(key.trim().to_string(), held.trim().to_string());
+                }
+                "-Xinclude" => self.includes.push(value.to_string()),
+                "-Xexport-library" => self.exported_libraries.push(value.to_string()),
+                "-Xruntime" => self.runtime = Some(value.to_string()),
+                "-Xtemporary-files-dir" => self.temporary_files = Some(value.to_string()),
+                "-Xcache-directory" | "-Xauto-cache-dir" | "-Xic-cache-dir" => {
+                    self.cache_directories.push(value.to_string())
+                }
+                "-memory-model" => {
+                    self.extra
+                        .entry(name.to_string())
+                        .or_default()
+                        .push(value.to_string());
+                }
+                other => {
+                    self.extra
+                        .entry(other.to_string())
+                        .or_default()
+                        .push(value.to_string());
+                }
+            }
+            Ok(())
+        }
+
+        pub fn output_file(&self) -> String {
+            output_file(&self.target, self.produce, &self.output)
+        }
+
+        pub fn module(&self) -> String {
+            if let Some(name) = &self.module_name {
+                return name.clone();
+            }
+            let base = self.output.rsplit('/').next().unwrap_or(&self.output);
+            let base = base.split('.').next().unwrap_or(base);
+            if base.is_empty() {
+                "main".to_string()
+            } else {
+                base.to_string()
+            }
+        }
+
+        pub fn listed_targets() -> Vec<String> {
+            TARGETS
+                .iter()
+                .map(|one| {
+                    let mut line = one.name.to_string();
+                    if Target::host().is_some_and(|host| host == *one) {
+                        line.push_str(" (default)");
+                    }
+                    if one.is_deprecated() {
+                        line.push_str(" (deprecated)");
+                    }
+                    line
+                })
+                .collect()
+        }
+    }
+
+    pub const DEFAULT_IMPORTS: &[&str] = &["kotlin.native.*"];
+
+    pub const EXCLUDED_IMPORTS: &[&str] = &["kotlin.native.identityHashCode"];
+
+    pub mod names {
+        pub const NATIVE_PTR: &str = "kotlin/native/internal/NativePtr";
+        pub const NON_NULL_NATIVE_PTR: &str = "kotlin/native/internal/NonNullNativePtr";
+        pub const IMMUTABLE_BLOB_OF: &str = "immutableBlobOf";
+        pub const FUNCTION: &str = "kotlin/Function";
+        pub const K_FUNCTION: &str = "kotlin/reflect/KFunction";
+        pub const PACKAGE: &str = "kotlin/native";
+        pub const INTERNAL_PACKAGE: &str = "kotlin/native/internal";
+        pub const VECTOR128: &str = "kotlinx/cinterop/Vector128";
+        pub const THROWS: &str = "kotlin/Throws";
+        pub const THROWS_ALIAS: &str = "kotlin/native/Throws";
+        pub const CANCELLATION_EXCEPTION: &str =
+            "kotlin/coroutines/cancellation/CancellationException";
+        pub const THREAD_LOCAL: &str = "kotlin/native/concurrent/ThreadLocal";
+        pub const THREAD_LOCAL_ALIAS: &str = "kotlin/native/ThreadLocal";
+        pub const SHARED_IMMUTABLE: &str = "kotlin/native/concurrent/SharedImmutable";
+        pub const SHARED_IMMUTABLE_ALIAS: &str = "kotlin/native/SharedImmutable";
+        pub const VOLATILE: &str = "kotlin/concurrent/Volatile";
+        pub const CAN_BE_PRECREATED: &str = "kotlin/native/internal/CanBePrecreated";
+        pub const TYPED_INTRINSIC: &str = "kotlin/native/internal/TypedIntrinsic";
+        pub const CONSTANT_CONSTRUCTOR_INTRINSIC: &str =
+            "kotlin/native/internal/ConstantConstructorIntrinsic";
+        pub const OBJC_METHOD: &str = "kotlinx/cinterop/ObjCMethod";
+        pub const GC_UNSAFE_CALL: &str = "kotlin/native/internal/GCUnsafeCall";
+        pub const EAGER_INITIALIZATION: &str = "kotlin/native/EagerInitialization";
+        pub const NO_REORDER_FIELDS: &str = "kotlin/native/internal/NoReorderFields";
+        pub const OBJC_NAME: &str = "kotlin/native/ObjCName";
+        pub const OBJC_ENUM: &str = "kotlin/native/ObjCEnum";
+        pub const OBJC_ENUM_ENTRY_NAME: &str = "kotlin/native/ObjCEnum$EntryName";
+        pub const HIDES_FROM_OBJC: &str = "kotlin/native/HidesFromObjC";
+        pub const HIDDEN_FROM_OBJC: &str = "kotlin/native/HiddenFromObjC";
+        pub const REFINES_IN_SWIFT: &str = "kotlin/native/RefinesInSwift";
+        pub const SHOULD_REFINE_IN_SWIFT: &str = "kotlin/native/ShouldRefineInSwift";
+        pub const NO_INLINE: &str = "kotlin/native/NoInline";
+        pub const TRANSPARENT_FOR_DEBUGGER: &str = "kotlin/native/internal/TransparentForDebugger";
+        pub const SYMBOL_NAME: &str = "kotlin/native/SymbolName";
+        pub const C_NAME: &str = "kotlin/native/CName";
+        pub const EXPORTED_BRIDGE: &str = "kotlin/native/internal/ExportedBridge";
+        pub const IMPORTED_BRIDGE: &str = "kotlin/native/internal/ImportedBridge";
+        pub const EXPORT_FOR_CPP_RUNTIME: &str = "kotlin/native/internal/ExportForCppRuntime";
+        pub const EXPORT_FOR_COMPILER: &str = "kotlin/native/internal/ExportForCompiler";
+        pub const EXPORT_TYPE_INFO: &str = "kotlin/native/internal/ExportTypeInfo";
+        pub const POINTS_TO: &str = "kotlin/native/internal/escapeAnalysis/PointsTo";
+        pub const ESCAPES: &str = "kotlin/native/internal/escapeAnalysis/Escapes";
+        pub const ESCAPES_NOTHING: &str = "kotlin/native/internal/escapeAnalysis/Escapes$Nothing";
+        pub const HAS_FINALIZER: &str = "kotlin/native/internal/HasFinalizer";
+        pub const BIND_CLASS_TO_OBJC_NAME: &str = "kotlin/native/internal/objc/BindClassToObjCName";
+        pub const BIND_REVERSE_BRIDGE_TO_METHOD: &str =
+            "kotlin/native/internal/objc/BindReverseBridgeToMethod";
+        pub const ATOMIC_INT: &str = "kotlin/concurrent/AtomicInt";
+        pub const ATOMIC_LONG: &str = "kotlin/concurrent/AtomicLong";
+        pub const ATOMIC_REFERENCE: &str = "kotlin/concurrent/AtomicReference";
+        pub const ATOMIC_ARRAY: &str = "kotlin/concurrent/AtomicArray";
+        pub const ATOMIC_INT_ARRAY: &str = "kotlin/concurrent/AtomicIntArray";
+        pub const ATOMIC_LONG_ARRAY: &str = "kotlin/concurrent/AtomicLongArray";
+        pub const EXPERIMENTAL_NATIVE_API: &str = "kotlin/experimental/ExperimentalNativeApi";
+        pub const FREEZING_IS_DEPRECATED: &str = "kotlin/native/FreezingIsDeprecated";
+    }
+
+    macro_rules! intrinsics {
+        ($($variant:ident => $spelled:literal),* $(,)?) => {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+            pub enum Intrinsic {
+                $($variant),*
+            }
+
+            impl Intrinsic {
+                pub const ALL: &'static [Intrinsic] = &[$(Intrinsic::$variant),*];
+
+                pub fn name(self) -> &'static str {
+                    match self {
+                        $(Intrinsic::$variant => $spelled),*
+                    }
+                }
+
+                pub fn named(name: &str) -> Option<Intrinsic> {
+                    match name {
+                        $($spelled => Some(Intrinsic::$variant),)*
+                        _ => None,
+                    }
+                }
+            }
+        };
+    }
+
+    intrinsics! {
+        Plus => "PLUS",
+        Minus => "MINUS",
+        Times => "TIMES",
+        SignedDiv => "SIGNED_DIV",
+        SignedRem => "SIGNED_REM",
+        Inc => "INC",
+        Dec => "DEC",
+        UnaryPlus => "UNARY_PLUS",
+        UnaryMinus => "UNARY_MINUS",
+        Shl => "SHL",
+        Shr => "SHR",
+        Ushr => "USHR",
+        And => "AND",
+        Or => "OR",
+        Xor => "XOR",
+        Inv => "INV",
+        SignExtend => "SIGN_EXTEND",
+        ZeroExtend => "ZERO_EXTEND",
+        IntTruncate => "INT_TRUNCATE",
+        FloatTruncate => "FLOAT_TRUNCATE",
+        FloatExtend => "FLOAT_EXTEND",
+        SignedToFloat => "SIGNED_TO_FLOAT",
+        UnsignedToFloat => "UNSIGNED_TO_FLOAT",
+        SignedCompareTo => "SIGNED_COMPARE_TO",
+        UnsignedCompareTo => "UNSIGNED_COMPARE_TO",
+        Not => "NOT",
+        Reinterpret => "REINTERPRET",
+        ExtractElement => "EXTRACT_ELEMENT",
+        AreEqualByValue => "ARE_EQUAL_BY_VALUE",
+        Ieee754Equals => "IEEE_754_EQUALS",
+        ObjcGetMessenger => "OBJC_GET_MESSENGER",
+        ObjcGetMessengerStret => "OBJC_GET_MESSENGER_STRET",
+        ObjcGetObjcClass => "OBJC_GET_OBJC_CLASS",
+        ObjcCreateSuperStruct => "OBJC_CREATE_SUPER_STRUCT",
+        ObjcInitBy => "OBJC_INIT_BY",
+        ObjcGetSelector => "OBJC_GET_SELECTOR",
+        BlockPtrToFunctionObject => "BLOCK_PTR_TO_FUNCTION_OBJECT",
+        CreateUninitializedInstance => "CREATE_UNINITIALIZED_INSTANCE",
+        CreateUninitializedArray => "CREATE_UNINITIALIZED_ARRAY",
+        CreateEmptyString => "CREATE_EMPTY_STRING",
+        Identity => "IDENTITY",
+        ImmutableBlob => "IMMUTABLE_BLOB",
+        InitInstance => "INIT_INSTANCE",
+        IsSubtype => "IS_SUBTYPE",
+        TheUnitInstance => "THE_UNIT_INSTANCE",
+        EnumValues => "ENUM_VALUES",
+        EnumValueOf => "ENUM_VALUE_OF",
+        EnumEntries => "ENUM_ENTRIES",
+        GetContinuation => "GET_CONTINUATION",
+        ReturnIfSuspended => "RETURN_IF_SUSPENDED",
+        SaveCoroutineState => "SAVE_COROUTINE_STATE",
+        RestoreCoroutineState => "RESTORE_COROUTINE_STATE",
+        InteropReadBits => "INTEROP_READ_BITS",
+        InteropWriteBits => "INTEROP_WRITE_BITS",
+        InteropReadPrimitive => "INTEROP_READ_PRIMITIVE",
+        InteropWritePrimitive => "INTEROP_WRITE_PRIMITIVE",
+        InteropGetPointerSize => "INTEROP_GET_POINTER_SIZE",
+        InteropNativePtrToLong => "INTEROP_NATIVE_PTR_TO_LONG",
+        InteropNativePtrPlusLong => "INTEROP_NATIVE_PTR_PLUS_LONG",
+        InteropGetNativeNullPtr => "INTEROP_GET_NATIVE_NULL_PTR",
+        InteropConvert => "INTEROP_CONVERT",
+        InteropBitsToFloat => "INTEROP_BITS_TO_FLOAT",
+        InteropBitsToDouble => "INTEROP_BITS_TO_DOUBLE",
+        InteropSignExtend => "INTEROP_SIGN_EXTEND",
+        InteropNarrow => "INTEROP_NARROW",
+        InteropStaticCFunction => "INTEROP_STATIC_C_FUNCTION",
+        InteropFunptrInvoke => "INTEROP_FUNPTR_INVOKE",
+        WorkerExecute => "WORKER_EXECUTE",
+        AtomicGetField => "ATOMIC_GET_FIELD",
+        AtomicSetField => "ATOMIC_SET_FIELD",
+        CompareAndSetField => "COMPARE_AND_SET_FIELD",
+        CompareAndExchangeField => "COMPARE_AND_EXCHANGE_FIELD",
+        GetAndSetField => "GET_AND_SET_FIELD",
+        GetAndAddField => "GET_AND_ADD_FIELD",
+        CompareAndSet => "COMPARE_AND_SET",
+        CompareAndExchange => "COMPARE_AND_EXCHANGE",
+        GetAndSet => "GET_AND_SET",
+        GetAndAdd => "GET_AND_ADD",
+        AtomicGetArrayElement => "ATOMIC_GET_ARRAY_ELEMENT",
+        AtomicSetArrayElement => "ATOMIC_SET_ARRAY_ELEMENT",
+        CompareAndExchangeArrayElement => "COMPARE_AND_EXCHANGE_ARRAY_ELEMENT",
+        CompareAndSetArrayElement => "COMPARE_AND_SET_ARRAY_ELEMENT",
+        GetAndSetArrayElement => "GET_AND_SET_ARRAY_ELEMENT",
+        GetAndAddArrayElement => "GET_AND_ADD_ARRAY_ELEMENT",
+    }
+
+    macro_rules! runtime_functions {
+        ($($variant:ident => $symbol:literal ($($parameter:ident),*) -> $returns:ident),* $(,)?) => {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+            pub enum Runtime {
+                $($variant),*
+            }
+
+            impl Runtime {
+                pub const ALL: &'static [Runtime] = &[$(Runtime::$variant),*];
+
+                pub fn symbol(self) -> &'static str {
+                    match self {
+                        $(Runtime::$variant => $symbol),*
+                    }
+                }
+
+                pub fn parameters(self) -> Vec<ir::Type> {
+                    match self {
+                        $(Runtime::$variant => vec![$(ir::Type::$parameter),*]),*
+                    }
+                }
+
+                pub fn returns(self) -> ir::Type {
+                    match self {
+                        $(Runtime::$variant => ir::Type::$returns),*
+                    }
+                }
+
+                pub fn named(symbol: &str) -> Option<Runtime> {
+                    match symbol {
+                        $($symbol => Some(Runtime::$variant),)*
+                        _ => None,
+                    }
+                }
+            }
+        };
+    }
+
+    runtime_functions! {
+        AllocInstance => "AllocInstance"(Ptr) -> Object,
+        AllocArrayInstance => "AllocArrayInstance"(Ptr, I32) -> Object,
+        AllocMultiArray => "Kotlin_allocMultiArray"(Ptr, Object) -> Object,
+        InitSingleton => "InitSingleton"(Ptr, Ptr) -> Object,
+        InitThreadLocalSingleton => "InitThreadLocalSingleton"(Ptr, Ptr) -> Object,
+        CallInitGlobalPossiblyLock => "CallInitGlobalPossiblyLock"(Ptr, Ptr) -> Void,
+        CallInitThreadLocal => "CallInitThreadLocal"(Ptr, Ptr) -> Void,
+        InitAndRegisterGlobal => "InitAndRegisterGlobal"(Ptr, Object) -> Void,
+        UpdateHeapRef => "UpdateHeapRef"(Ptr, Object) -> Void,
+        UpdateStackRef => "UpdateStackRef"(Ptr, Object) -> Void,
+        UpdateVolatileHeapRef => "UpdateVolatileHeapRef"(Ptr, Object) -> Void,
+        ZeroHeapRef => "ZeroHeapRef"(Ptr) -> Void,
+        EnterFrame => "EnterFrame"(Ptr, I32, I32) -> Void,
+        LeaveFrame => "LeaveFrame"(Ptr, I32, I32) -> Void,
+        SafePointFunctionPrologue => "Kotlin_mm_safePointFunctionPrologue"() -> Void,
+        SafePointWhileLoopBody => "Kotlin_mm_safePointWhileLoopBody"() -> Void,
+        SwitchThreadStateNative => "Kotlin_mm_switchThreadStateNative"() -> Void,
+        SwitchThreadStateRunnable => "Kotlin_mm_switchThreadStateRunnable"() -> Void,
+        InitRuntimeIfNeeded => "Kotlin_initRuntimeIfNeeded"() -> Void,
+        ThrowException => "ThrowException"(Object) -> Void,
+        ThrowNullPointerException => "ThrowNullPointerException"() -> Void,
+        ThrowArrayIndexOutOfBoundsException => "ThrowArrayIndexOutOfBoundsException"() -> Void,
+        ThrowClassCastException => "ThrowClassCastException"(Object, Ptr) -> Void,
+        ThrowArithmeticException => "ThrowArithmeticException"() -> Void,
+        ThrowNumberFormatException => "ThrowNumberFormatException"() -> Void,
+        ThrowOutOfMemoryError => "ThrowOutOfMemoryError"() -> Void,
+        ThrowNotImplementedError => "ThrowNotImplementedError"() -> Void,
+        ThrowIllegalArgumentException => "ThrowIllegalArgumentException"() -> Void,
+        ThrowIllegalStateException => "ThrowIllegalStateException"() -> Void,
+        ThrowNegativeArraySizeException => "ThrowNegativeArraySizeException"() -> Void,
+        ThrowInvalidReceiverTypeException => "ThrowInvalidReceiverTypeException"(Ptr) -> Void,
+        TerminateWithUnhandledException => "TerminateWithUnhandledException"(Object) -> Void,
+        IsInstance => "IsInstance"(Object, Ptr) -> Bool,
+        IsInstanceOfClassFast => "IsInstanceOfClassFast"(Object, I32, I32) -> Bool,
+        CheckInstance => "CheckInstance"(Object, Ptr) -> Void,
+        LookupInterfaceTableRecord => "LookupInterfaceTableRecord"(Ptr, I32) -> Ptr,
+        GetObjectTypeInfo => "Kotlin_Any_getTypeInfo"(Object) -> Ptr,
+        IdentityHashCode => "Kotlin_Any_hashCode"(Object) -> I32,
+        CreateStringFromUtf16 => "CreateStringFromUtf16"(Ptr, I32) -> Object,
+        CreateStringFromUtf8 => "CreateStringFromUtf8"(Ptr, I32) -> Object,
+        StringConcat => "Kotlin_String_plusImpl"(Object, Object) -> Object,
+        StringLength => "Kotlin_String_getStringLength"(Object) -> I32,
+        StringCharAt => "Kotlin_String_get"(Object, I32) -> Char,
+        StringEquals => "Kotlin_String_equals"(Object, Object) -> Bool,
+        StringHashCode => "Kotlin_String_hashCode"(Object) -> I32,
+        ArrayCopy => "Kotlin_Array_copyImpl"(Object, I32, Object, I32, I32) -> Void,
+        ArrayClone => "Kotlin_Array_clone"(Object) -> Object,
+        ConsolePrint => "Kotlin_io_Console_print"(Object) -> Void,
+        ConsolePrintln => "Kotlin_io_Console_println"(Object) -> Void,
+        ConsolePrintError => "Kotlin_io_Console_printToStdErr"(Object) -> Void,
+        ConsoleReadLine => "Kotlin_io_Console_readLine"() -> Object,
+        ExitProcess => "Kotlin_system_exitProcess"(I32) -> Void,
+        TimeMillis => "Kotlin_system_getTimeMillis"() -> I64,
+        TimeNanos => "Kotlin_system_getTimeNanos"() -> I64,
+        DoubleToString => "Kotlin_DoubleToString"(F64) -> Object,
+        FloatToString => "Kotlin_FloatToString"(F32) -> Object,
+        StringToDouble => "Kotlin_native_FloatingPointParser_parseDoubleImpl"(Object) -> F64,
+        MathSqrt => "Kotlin_math_sqrt"(F64) -> F64,
+        MathSin => "Kotlin_math_sin"(F64) -> F64,
+        MathCos => "Kotlin_math_cos"(F64) -> F64,
+        MathTan => "Kotlin_math_tan"(F64) -> F64,
+        MathAsin => "Kotlin_math_asin"(F64) -> F64,
+        MathAcos => "Kotlin_math_acos"(F64) -> F64,
+        MathAtan => "Kotlin_math_atan"(F64) -> F64,
+        MathAtan2 => "Kotlin_math_atan2"(F64, F64) -> F64,
+        MathExp => "Kotlin_math_exp"(F64) -> F64,
+        MathLog => "Kotlin_math_ln"(F64) -> F64,
+        MathLog10 => "Kotlin_math_log10"(F64) -> F64,
+        MathPow => "Kotlin_math_pow"(F64, F64) -> F64,
+        MathFloor => "Kotlin_math_floor"(F64) -> F64,
+        MathCeil => "Kotlin_math_ceil"(F64) -> F64,
+        MathRint => "Kotlin_math_rint"(F64) -> F64,
+        MathCbrt => "Kotlin_math_cbrt"(F64) -> F64,
+        MathHypot => "Kotlin_math_hypot"(F64, F64) -> F64,
+        MathSinh => "Kotlin_math_sinh"(F64) -> F64,
+        MathCosh => "Kotlin_math_cosh"(F64) -> F64,
+        MathTanh => "Kotlin_math_tanh"(F64) -> F64,
+        MathExpm1 => "Kotlin_math_expm1"(F64) -> F64,
+        MathLog1p => "Kotlin_math_ln1p"(F64) -> F64,
+        MathIeeeRemainder => "Kotlin_math_IEEErem"(F64, F64) -> F64,
+        MonitorEnter => "Kotlin_monitorEnter"(Object) -> Void,
+        MonitorExit => "Kotlin_monitorExit"(Object) -> Void,
+        Main => "Konan_main"(I32, Ptr) -> I32,
+        RunStart => "Konan_start"(Object) -> I32,
+        ProcessArguments => "Kotlin_getProcessArguments"() -> Object,
+    }
+
+    pub mod ir {
+        use super::{Intrinsic, Runtime};
+        use std::collections::HashMap;
+        use std::fmt::Write as _;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct ClassRef(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct FunctionRef(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct FieldRef(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct StringRef(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct BlockRef(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct Value(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct LocalRef(pub u32);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Type {
+            Void,
+            Bool,
+            I8,
+            I16,
+            Char,
+            I32,
+            I64,
+            F32,
+            F64,
+            Ptr,
+            Object,
+            Vector128,
+        }
+
+        impl Type {
+            pub fn of_descriptor(descriptor: &str) -> Type {
+                match descriptor.as_bytes().first() {
+                    Some(b'V') => Type::Void,
+                    Some(b'Z') => Type::Bool,
+                    Some(b'B') => Type::I8,
+                    Some(b'S') => Type::I16,
+                    Some(b'C') => Type::Char,
+                    Some(b'I') => Type::I32,
+                    Some(b'J') => Type::I64,
+                    Some(b'F') => Type::F32,
+                    Some(b'D') => Type::F64,
+                    _ => Type::Object,
+                }
+            }
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    Type::Void => "void",
+                    Type::Bool => "bool",
+                    Type::I8 => "i8",
+                    Type::I16 => "i16",
+                    Type::Char => "char",
+                    Type::I32 => "i32",
+                    Type::I64 => "i64",
+                    Type::F32 => "f32",
+                    Type::F64 => "f64",
+                    Type::Ptr => "ptr",
+                    Type::Object => "obj",
+                    Type::Vector128 => "v128",
+                }
+            }
+
+            pub fn named(name: &str) -> Option<Type> {
+                Some(match name {
+                    "void" => Type::Void,
+                    "bool" => Type::Bool,
+                    "i8" => Type::I8,
+                    "i16" => Type::I16,
+                    "char" => Type::Char,
+                    "i32" => Type::I32,
+                    "i64" => Type::I64,
+                    "f32" => Type::F32,
+                    "f64" => Type::F64,
+                    "ptr" => Type::Ptr,
+                    "obj" => Type::Object,
+                    "v128" => Type::Vector128,
+                    _ => return None,
+                })
+            }
+
+            pub fn is_integer(self) -> bool {
+                matches!(
+                    self,
+                    Type::Bool | Type::I8 | Type::I16 | Type::Char | Type::I32 | Type::I64
+                )
+            }
+
+            pub fn is_float(self) -> bool {
+                matches!(self, Type::F32 | Type::F64)
+            }
+
+            pub fn is_reference(self) -> bool {
+                self == Type::Object
+            }
+
+            pub fn stack(self) -> Type {
+                match self {
+                    Type::Bool | Type::I8 | Type::I16 | Type::Char => Type::I32,
+                    other => other,
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum ArrayKind {
+            Bool,
+            Byte,
+            Char,
+            Short,
+            Int,
+            Long,
+            Float,
+            Double,
+            Object,
+        }
+
+        impl ArrayKind {
+            pub fn element(self) -> Type {
+                match self {
+                    ArrayKind::Bool => Type::Bool,
+                    ArrayKind::Byte => Type::I8,
+                    ArrayKind::Char => Type::Char,
+                    ArrayKind::Short => Type::I16,
+                    ArrayKind::Int => Type::I32,
+                    ArrayKind::Long => Type::I64,
+                    ArrayKind::Float => Type::F32,
+                    ArrayKind::Double => Type::F64,
+                    ArrayKind::Object => Type::Object,
+                }
+            }
+
+            pub fn of_newarray(code: u8) -> Option<ArrayKind> {
+                Some(match code {
+                    4 => ArrayKind::Bool,
+                    5 => ArrayKind::Char,
+                    6 => ArrayKind::Float,
+                    7 => ArrayKind::Double,
+                    8 => ArrayKind::Byte,
+                    9 => ArrayKind::Short,
+                    10 => ArrayKind::Int,
+                    11 => ArrayKind::Long,
+                    _ => return None,
+                })
+            }
+
+            pub fn of_element_descriptor(descriptor: &str) -> ArrayKind {
+                match descriptor.as_bytes().first() {
+                    Some(b'Z') => ArrayKind::Bool,
+                    Some(b'B') => ArrayKind::Byte,
+                    Some(b'C') => ArrayKind::Char,
+                    Some(b'S') => ArrayKind::Short,
+                    Some(b'I') => ArrayKind::Int,
+                    Some(b'J') => ArrayKind::Long,
+                    Some(b'F') => ArrayKind::Float,
+                    Some(b'D') => ArrayKind::Double,
+                    _ => ArrayKind::Object,
+                }
+            }
+
+            pub fn native_class(self) -> &'static str {
+                match self {
+                    ArrayKind::Bool => "kotlin/BooleanArray",
+                    ArrayKind::Byte => "kotlin/ByteArray",
+                    ArrayKind::Char => "kotlin/CharArray",
+                    ArrayKind::Short => "kotlin/ShortArray",
+                    ArrayKind::Int => "kotlin/IntArray",
+                    ArrayKind::Long => "kotlin/LongArray",
+                    ArrayKind::Float => "kotlin/FloatArray",
+                    ArrayKind::Double => "kotlin/DoubleArray",
+                    ArrayKind::Object => "kotlin/Array",
+                }
+            }
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    ArrayKind::Bool => "bool",
+                    ArrayKind::Byte => "byte",
+                    ArrayKind::Char => "char",
+                    ArrayKind::Short => "short",
+                    ArrayKind::Int => "int",
+                    ArrayKind::Long => "long",
+                    ArrayKind::Float => "float",
+                    ArrayKind::Double => "double",
+                    ArrayKind::Object => "object",
+                }
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub enum Constant {
+            Bool(bool),
+            I32(i32),
+            I64(i64),
+            F32(u32),
+            F64(u64),
+            Char(u16),
+            Null,
+            Unit,
+            String(StringRef),
+            Class(ClassRef),
+            ArrayClass(ArrayKind, u32),
+        }
+
+        impl Constant {
+            pub fn ty(&self) -> Type {
+                match self {
+                    Constant::Bool(_) => Type::Bool,
+                    Constant::I32(_) => Type::I32,
+                    Constant::I64(_) => Type::I64,
+                    Constant::F32(_) => Type::F32,
+                    Constant::F64(_) => Type::F64,
+                    Constant::Char(_) => Type::Char,
+                    _ => Type::Object,
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum UnaryOp {
+            Neg,
+            Not,
+            Inv,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum BinaryOp {
+            Add,
+            Sub,
+            Mul,
+            Div,
+            Rem,
+            UDiv,
+            URem,
+            Shl,
+            Shr,
+            UShr,
+            And,
+            Or,
+            Xor,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum CompareOp {
+            Eq,
+            Ne,
+            Lt,
+            Le,
+            Gt,
+            Ge,
+            ULt,
+            ULe,
+            UGt,
+            UGe,
+        }
+
+        impl CompareOp {
+            pub fn negated(self) -> CompareOp {
+                match self {
+                    CompareOp::Eq => CompareOp::Ne,
+                    CompareOp::Ne => CompareOp::Eq,
+                    CompareOp::Lt => CompareOp::Ge,
+                    CompareOp::Le => CompareOp::Gt,
+                    CompareOp::Gt => CompareOp::Le,
+                    CompareOp::Ge => CompareOp::Lt,
+                    CompareOp::ULt => CompareOp::UGe,
+                    CompareOp::ULe => CompareOp::UGt,
+                    CompareOp::UGt => CompareOp::ULe,
+                    CompareOp::UGe => CompareOp::ULt,
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum ThreeWay {
+            Long,
+            FloatLess,
+            FloatGreater,
+            DoubleLess,
+            DoubleGreater,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Conversion {
+            I32ToI64,
+            I32ToF32,
+            I32ToF64,
+            I64ToI32,
+            I64ToF32,
+            I64ToF64,
+            F32ToI32,
+            F32ToI64,
+            F32ToF64,
+            F64ToI32,
+            F64ToI64,
+            F64ToF32,
+            I32ToI8,
+            I32ToChar,
+            I32ToI16,
+            BoolToI32,
+            I32ToBool,
+            I8ToI32,
+            I16ToI32,
+            CharToI32,
+            F32Bits,
+            BitsToF32,
+            F64Bits,
+            BitsToF64,
+        }
+
+        impl Conversion {
+            pub fn result(self) -> Type {
+                match self {
+                    Conversion::I32ToI64
+                    | Conversion::F32ToI64
+                    | Conversion::F64ToI64
+                    | Conversion::F64Bits => Type::I64,
+                    Conversion::I32ToF32
+                    | Conversion::I64ToF32
+                    | Conversion::F64ToF32
+                    | Conversion::BitsToF32 => Type::F32,
+                    Conversion::I32ToF64
+                    | Conversion::I64ToF64
+                    | Conversion::F32ToF64
+                    | Conversion::BitsToF64 => Type::F64,
+                    Conversion::I32ToBool => Type::Bool,
+                    Conversion::I32ToI8 => Type::I8,
+                    Conversion::I32ToChar => Type::Char,
+                    Conversion::I32ToI16 => Type::I16,
+                    _ => Type::I32,
+                }
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub enum TypeTest {
+            Class(ClassRef),
+            PrimitiveArray(ArrayKind),
+            ObjectArray,
+            MultiArray(ArrayKind, u32),
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub enum Op {
+            Constant(Constant),
+            Parameter(u32),
+            LoadLocal(LocalRef),
+            StoreLocal(LocalRef, Value),
+            Unary(UnaryOp, Value),
+            Binary(BinaryOp, Value, Value),
+            Compare(CompareOp, Value, Value),
+            ThreeWay(ThreeWay, Value, Value),
+            Convert(Conversion, Value),
+            New(ClassRef),
+            NewArray(ArrayKind, Value),
+            NewMultiArray(ArrayKind, u32, Vec<Value>),
+            ArrayLength(Value),
+            ArrayGet(ArrayKind, Value, Value),
+            ArraySet(ArrayKind, Value, Value, Value),
+            GetField(FieldRef, Value),
+            SetField(FieldRef, Value, Value),
+            GetStatic(FieldRef),
+            SetStatic(FieldRef, Value),
+            InitClass(ClassRef),
+            Call(FunctionRef, Vec<Value>),
+            CallVirtual(ClassRef, u32, Vec<Value>),
+            CallInterface(ClassRef, u32, Vec<Value>),
+            CallRuntime(Runtime, Vec<Value>),
+            CallIntrinsic(Intrinsic, Vec<Value>),
+            CallExternal(String, Vec<Value>),
+            InstanceOf(TypeTest, Value),
+            Cast(TypeTest, Value),
+            NullCheck(Value),
+            Caught,
+            MonitorEnter(Value),
+            MonitorExit(Value),
+            Phi(Vec<(BlockRef, Value)>),
+            Safepoint,
+        }
+
+        impl Op {
+            pub fn operands(&self) -> Vec<Value> {
+                match self {
+                    Op::Constant(_)
+                    | Op::Parameter(_)
+                    | Op::LoadLocal(_)
+                    | Op::New(_)
+                    | Op::GetStatic(_)
+                    | Op::InitClass(_)
+                    | Op::Caught
+                    | Op::Safepoint => Vec::new(),
+                    Op::StoreLocal(_, value)
+                    | Op::Unary(_, value)
+                    | Op::Convert(_, value)
+                    | Op::NewArray(_, value)
+                    | Op::ArrayLength(value)
+                    | Op::GetField(_, value)
+                    | Op::SetStatic(_, value)
+                    | Op::InstanceOf(_, value)
+                    | Op::Cast(_, value)
+                    | Op::NullCheck(value)
+                    | Op::MonitorEnter(value)
+                    | Op::MonitorExit(value) => vec![*value],
+                    Op::Binary(_, left, right)
+                    | Op::Compare(_, left, right)
+                    | Op::ThreeWay(_, left, right)
+                    | Op::ArrayGet(_, left, right)
+                    | Op::SetField(_, left, right) => vec![*left, *right],
+                    Op::ArraySet(_, array, index, value) => vec![*array, *index, *value],
+                    Op::NewMultiArray(_, _, values)
+                    | Op::Call(_, values)
+                    | Op::CallVirtual(_, _, values)
+                    | Op::CallInterface(_, _, values)
+                    | Op::CallRuntime(_, values)
+                    | Op::CallIntrinsic(_, values)
+                    | Op::CallExternal(_, values) => values.clone(),
+                    Op::Phi(incoming) => incoming.iter().map(|(_, value)| *value).collect(),
+                }
+            }
+
+            pub fn may_throw(&self) -> bool {
+                matches!(
+                    self,
+                    Op::Binary(
+                        BinaryOp::Div | BinaryOp::Rem | BinaryOp::UDiv | BinaryOp::URem,
+                        _,
+                        _
+                    ) | Op::New(_)
+                        | Op::NewArray(..)
+                        | Op::NewMultiArray(..)
+                        | Op::ArrayLength(_)
+                        | Op::ArrayGet(..)
+                        | Op::ArraySet(..)
+                        | Op::GetField(..)
+                        | Op::SetField(..)
+                        | Op::GetStatic(_)
+                        | Op::SetStatic(..)
+                        | Op::InitClass(_)
+                        | Op::Call(..)
+                        | Op::CallVirtual(..)
+                        | Op::CallInterface(..)
+                        | Op::CallRuntime(..)
+                        | Op::CallIntrinsic(..)
+                        | Op::CallExternal(..)
+                        | Op::Cast(..)
+                        | Op::NullCheck(_)
+                        | Op::MonitorEnter(_)
+                        | Op::MonitorExit(_)
+                )
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Instruction {
+            pub result: Option<Value>,
+            pub ty: Type,
+            pub op: Op,
+            pub line: u32,
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub enum Terminator {
+            Return(Option<Value>),
+            Jump(BlockRef),
+            Branch(Value, BlockRef, BlockRef),
+            Switch(Value, Vec<(i32, BlockRef)>, BlockRef),
+            Throw(Value),
+            Unreachable,
+        }
+
+        impl Terminator {
+            pub fn successors(&self) -> Vec<BlockRef> {
+                match self {
+                    Terminator::Return(_) | Terminator::Throw(_) | Terminator::Unreachable => {
+                        Vec::new()
+                    }
+                    Terminator::Jump(to) => vec![*to],
+                    Terminator::Branch(_, then, otherwise) => vec![*then, *otherwise],
+                    Terminator::Switch(_, cases, fallback) => {
+                        let mut out: Vec<BlockRef> = cases.iter().map(|(_, to)| *to).collect();
+                        out.push(*fallback);
+                        out
+                    }
+                }
+            }
+
+            pub fn operands(&self) -> Vec<Value> {
+                match self {
+                    Terminator::Return(Some(value))
+                    | Terminator::Throw(value)
+                    | Terminator::Branch(value, _, _)
+                    | Terminator::Switch(value, _, _) => vec![*value],
+                    _ => Vec::new(),
+                }
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Handler {
+            pub class: Option<ClassRef>,
+            pub target: BlockRef,
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Block {
+            pub instructions: Vec<Instruction>,
+            pub terminator: Terminator,
+            pub handlers: Vec<Handler>,
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Local {
+            pub ty: Type,
+            pub name: String,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum FunctionKind {
+            Static,
+            Direct,
+            Virtual(u32),
+            Abstract(u32),
+            Constructor,
+            Initializer,
+            External,
+            Bridge,
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Function {
+            pub name: String,
+            pub owner: Option<ClassRef>,
+            pub jvm: Option<(String, String, String)>,
+            pub parameters: Vec<Type>,
+            pub returns: Type,
+            pub locals: Vec<Local>,
+            pub blocks: Vec<Block>,
+            pub kind: FunctionKind,
+            pub export: Option<String>,
+            pub intrinsic: Option<Intrinsic>,
+            pub values: u32,
+            pub source: Option<String>,
+        }
+
+        impl Function {
+            pub fn has_body(&self) -> bool {
+                !self.blocks.is_empty()
+            }
+
+            pub fn value_types(&self) -> HashMap<Value, Type> {
+                let mut out = HashMap::new();
+                for block in &self.blocks {
+                    for instruction in &block.instructions {
+                        if let Some(value) = instruction.result {
+                            out.insert(value, instruction.ty);
+                        }
+                    }
+                }
+                out
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Field {
+            pub name: String,
+            pub owner: ClassRef,
+            pub ty: Type,
+            pub is_static: bool,
+            pub volatile: bool,
+            pub thread_local: bool,
+            pub constant: Option<Constant>,
+            pub descriptor: String,
+        }
+
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+        pub struct ClassFlags {
+            pub interface: bool,
+            pub abstract_: bool,
+            pub final_: bool,
+            pub enum_: bool,
+            pub object: bool,
+            pub annotation: bool,
+            pub synthetic: bool,
+            pub thread_local: bool,
+            pub instantiated: bool,
+            pub external: bool,
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Class {
+            pub name: String,
+            pub super_class: Option<ClassRef>,
+            pub interfaces: Vec<ClassRef>,
+            pub fields: Vec<FieldRef>,
+            pub statics: Vec<FieldRef>,
+            pub methods: Vec<FunctionRef>,
+            pub vtable: Vec<(String, String, Option<FunctionRef>)>,
+            pub slots: Vec<(String, String)>,
+            pub itable: Vec<(ClassRef, Vec<Option<FunctionRef>>)>,
+            pub flags: ClassFlags,
+            pub initializer: Option<FunctionRef>,
+            pub array: Option<ArrayKind>,
+            pub size: u32,
+            pub align: u32,
+            pub offsets: Vec<(FieldRef, u32)>,
+            pub depth: u32,
+            pub interface_id: Option<u32>,
+            pub source: Option<String>,
+        }
+
+        impl Class {
+            pub fn new(name: &str) -> Class {
+                Class {
+                    name: name.to_string(),
+                    super_class: None,
+                    interfaces: Vec::new(),
+                    fields: Vec::new(),
+                    statics: Vec::new(),
+                    methods: Vec::new(),
+                    vtable: Vec::new(),
+                    slots: Vec::new(),
+                    itable: Vec::new(),
+                    flags: ClassFlags::default(),
+                    initializer: None,
+                    array: None,
+                    size: 0,
+                    align: 1,
+                    offsets: Vec::new(),
+                    depth: 0,
+                    interface_id: None,
+                    source: None,
+                }
+            }
+
+            pub fn slot_of(&self, name: &str, descriptor: &str) -> Option<u32> {
+                self.vtable
+                    .iter()
+                    .position(|(held, described, _)| held == name && described == descriptor)
+                    .map(|at| at as u32)
+            }
+
+            pub fn interface_slot(&self, name: &str, descriptor: &str) -> Option<u32> {
+                self.slots
+                    .iter()
+                    .position(|(held, described)| held == name && described == descriptor)
+                    .map(|at| at as u32)
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Export {
+            pub symbol: String,
+            pub function: FunctionRef,
+        }
+
+        #[derive(Clone, Debug, Default, PartialEq)]
+        pub struct Module {
+            pub name: String,
+            pub target: String,
+            pub classes: Vec<Class>,
+            pub functions: Vec<Function>,
+            pub fields: Vec<Field>,
+            pub strings: Vec<String>,
+            pub entry: Option<FunctionRef>,
+            pub exports: Vec<Export>,
+            pub externals: Vec<(String, Vec<Type>, Type)>,
+            string_index: HashMap<String, u32>,
+            class_index: HashMap<String, u32>,
+        }
+
+        impl Module {
+            pub fn new(name: &str, target: &str) -> Module {
+                Module {
+                    name: name.to_string(),
+                    target: target.to_string(),
+                    ..Module::default()
+                }
+            }
+
+            pub fn intern(&mut self, text: &str) -> StringRef {
+                if let Some(at) = self.string_index.get(text) {
+                    return StringRef(*at);
+                }
+                let at = self.strings.len() as u32;
+                self.strings.push(text.to_string());
+                self.string_index.insert(text.to_string(), at);
+                StringRef(at)
+            }
+
+            pub fn class_named(&self, name: &str) -> Option<ClassRef> {
+                self.class_index.get(name).map(|at| ClassRef(*at))
+            }
+
+            pub fn add_class(&mut self, class: Class) -> ClassRef {
+                let at = self.classes.len() as u32;
+                self.class_index.insert(class.name.clone(), at);
+                self.classes.push(class);
+                ClassRef(at)
+            }
+
+            pub fn class(&self, reference: ClassRef) -> &Class {
+                &self.classes[reference.0 as usize]
+            }
+
+            pub fn class_mut(&mut self, reference: ClassRef) -> &mut Class {
+                &mut self.classes[reference.0 as usize]
+            }
+
+            pub fn add_function(&mut self, function: Function) -> FunctionRef {
+                let at = self.functions.len() as u32;
+                self.functions.push(function);
+                FunctionRef(at)
+            }
+
+            pub fn function(&self, reference: FunctionRef) -> &Function {
+                &self.functions[reference.0 as usize]
+            }
+
+            pub fn function_mut(&mut self, reference: FunctionRef) -> &mut Function {
+                &mut self.functions[reference.0 as usize]
+            }
+
+            pub fn add_field(&mut self, field: Field) -> FieldRef {
+                let at = self.fields.len() as u32;
+                self.fields.push(field);
+                FieldRef(at)
+            }
+
+            pub fn field(&self, reference: FieldRef) -> &Field {
+                &self.fields[reference.0 as usize]
+            }
+
+            pub fn string(&self, reference: StringRef) -> &str {
+                &self.strings[reference.0 as usize]
+            }
+
+            pub fn is_subclass(&self, class: ClassRef, of: ClassRef) -> bool {
+                let mut waiting = vec![class];
+                let mut seen = Vec::new();
+                while let Some(current) = waiting.pop() {
+                    if current == of {
+                        return true;
+                    }
+                    if seen.contains(&current) {
+                        continue;
+                    }
+                    seen.push(current);
+                    let held = self.class(current);
+                    if let Some(parent) = held.super_class {
+                        waiting.push(parent);
+                    }
+                    waiting.extend(held.interfaces.iter().copied());
+                }
+                false
+            }
+
+            pub fn find_method(
+                &self,
+                class: ClassRef,
+                name: &str,
+                descriptor: &str,
+            ) -> Option<FunctionRef> {
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    let found =
+                        self.class(held).methods.iter().copied().find(|one| {
+                            self.function(*one).jvm.as_ref().is_some_and(
+                                |(_, method, described)| method == name && described == descriptor,
+                            )
+                        });
+                    if found.is_some() {
+                        return found;
+                    }
+                    current = self.class(held).super_class;
+                }
+                None
+            }
+
+            pub fn verify(&self) -> Result<(), String> {
+                for (index, function) in self.functions.iter().enumerate() {
+                    if function.blocks.is_empty() {
+                        continue;
+                    }
+                    let mut defined: HashMap<Value, Type> = HashMap::new();
+                    for block in &function.blocks {
+                        for instruction in &block.instructions {
+                            if let Some(value) = instruction.result {
+                                if defined.insert(value, instruction.ty).is_some() {
+                                    return Err(format!(
+                                        "{} defines v{} twice",
+                                        function.name, value.0
+                                    ));
+                                }
+                                if value.0 >= function.values {
+                                    return Err(format!(
+                                        "{} uses v{} beyond its count",
+                                        function.name, value.0
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    let blocks = function.blocks.len() as u32;
+                    for (at, block) in function.blocks.iter().enumerate() {
+                        for instruction in &block.instructions {
+                            for operand in instruction.op.operands() {
+                                if !defined.contains_key(&operand) {
+                                    return Err(format!(
+                                        "{} block {at} reads v{} nobody defines",
+                                        function.name, operand.0
+                                    ));
+                                }
+                            }
+                            match &instruction.op {
+                                Op::LoadLocal(local) | Op::StoreLocal(local, _)
+                                    if local.0 as usize >= function.locals.len() =>
+                                {
+                                    return Err(format!(
+                                        "{} names local {} it does not have",
+                                        function.name, local.0
+                                    ));
+                                }
+                                Op::Call(callee, _)
+                                    if callee.0 as usize >= self.functions.len() =>
+                                {
+                                    return Err(format!(
+                                        "{} calls function {} that is not in the module",
+                                        function.name, callee.0
+                                    ));
+                                }
+                                Op::Parameter(at) if *at as usize >= function.parameters.len() => {
+                                    return Err(format!(
+                                        "{} reads parameter {at} it does not have",
+                                        function.name
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                        for operand in block.terminator.operands() {
+                            if !defined.contains_key(&operand) {
+                                return Err(format!(
+                                    "{} block {at} ends on v{} nobody defines",
+                                    function.name, operand.0
+                                ));
+                            }
+                        }
+                        for next in block.terminator.successors() {
+                            if next.0 >= blocks {
+                                return Err(format!(
+                                    "{} block {at} jumps to block {} it does not have",
+                                    function.name, next.0
+                                ));
+                            }
+                        }
+                        for handler in &block.handlers {
+                            if handler.target.0 >= blocks {
+                                return Err(format!(
+                                    "{} block {at} hands exceptions to block {} it does not have",
+                                    function.name, handler.target.0
+                                ));
+                            }
+                        }
+                        if let Terminator::Return(value) = &block.terminator {
+                            if value.is_some() == (function.returns == Type::Void) {
+                                return Err(format!(
+                                    "{} block {at} returns in a way its type does not allow",
+                                    function.name
+                                ));
+                            }
+                        }
+                    }
+                    let _ = index;
+                }
+                Ok(())
+            }
+
+            pub fn print(&self) -> String {
+                let mut out = String::new();
+                let _ = writeln!(out, "module {} target {}", self.name, self.target);
+                for (at, text) in self.strings.iter().enumerate() {
+                    let _ = writeln!(out, "string s{at} {text:?}");
+                }
+                for (at, class) in self.classes.iter().enumerate() {
+                    let _ = write!(out, "class c{at} {}", class.name);
+                    if let Some(parent) = class.super_class {
+                        let _ = write!(out, " : {}", self.class(parent).name);
+                    }
+                    if !class.interfaces.is_empty() {
+                        let names: Vec<&str> = class
+                            .interfaces
+                            .iter()
+                            .map(|one| self.class(*one).name.as_str())
+                            .collect();
+                        let _ = write!(out, " implements {}", names.join(", "));
+                    }
+                    let _ = writeln!(out, " size {} align {}", class.size, class.align);
+                    for (field, offset) in &class.offsets {
+                        let held = self.field(*field);
+                        let _ =
+                            writeln!(out, "  field {} {} at {offset}", held.name, held.ty.name());
+                    }
+                    for field in &class.statics {
+                        let held = self.field(*field);
+                        let _ = writeln!(out, "  static {} {}", held.name, held.ty.name());
+                    }
+                    for (slot, (name, descriptor, function)) in class.vtable.iter().enumerate() {
+                        let target = function
+                            .map(|one| self.function(one).name.clone())
+                            .unwrap_or_else(|| "abstract".to_string());
+                        let _ = writeln!(out, "  slot {slot} {name}{descriptor} -> {target}");
+                    }
+                }
+                for (at, function) in self.functions.iter().enumerate() {
+                    out.push_str(&self.print_function(FunctionRef(at as u32), function));
+                }
+                out
+            }
+
+            fn print_function(&self, reference: FunctionRef, function: &Function) -> String {
+                let mut out = String::new();
+                let parameters: Vec<&str> =
+                    function.parameters.iter().map(|one| one.name()).collect();
+                let _ = write!(
+                    out,
+                    "fun f{} {}({}) {} {:?}",
+                    reference.0,
+                    function.name,
+                    parameters.join(", "),
+                    function.returns.name(),
+                    function.kind
+                );
+                if let Some(symbol) = &function.export {
+                    let _ = write!(out, " export {symbol}");
+                }
+                if function.blocks.is_empty() {
+                    out.push('\n');
+                    return out;
+                }
+                out.push_str(" {\n");
+                for (at, local) in function.locals.iter().enumerate() {
+                    let _ = writeln!(out, "  local l{at} {} {}", local.ty.name(), local.name);
+                }
+                for (at, block) in function.blocks.iter().enumerate() {
+                    let _ = write!(out, "  b{at}:");
+                    for handler in &block.handlers {
+                        let class = handler
+                            .class
+                            .map(|one| self.class(one).name.clone())
+                            .unwrap_or_else(|| "*".to_string());
+                        let _ = write!(out, " catch {class} -> b{}", handler.target.0);
+                    }
+                    out.push('\n');
+                    for instruction in &block.instructions {
+                        out.push_str("    ");
+                        if let Some(value) = instruction.result {
+                            let _ = write!(out, "v{} {} = ", value.0, instruction.ty.name());
+                        }
+                        let _ = writeln!(out, "{}", self.print_op(&instruction.op));
+                    }
+                    let _ = writeln!(out, "    {}", print_terminator(&block.terminator));
+                }
+                out.push_str("}\n");
+                out
+            }
+
+            fn print_op(&self, op: &Op) -> String {
+                let values = |list: &[Value]| {
+                    list.iter()
+                        .map(|one| format!("v{}", one.0))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                match op {
+                    Op::Constant(Constant::String(text)) => {
+                        format!("const {:?}", self.string(*text))
+                    }
+                    Op::Constant(Constant::Class(class)) => {
+                        format!("const class {}", self.class(*class).name)
+                    }
+                    Op::Constant(constant) => format!("const {constant:?}"),
+                    Op::Parameter(at) => format!("param {at}"),
+                    Op::LoadLocal(local) => format!("load l{}", local.0),
+                    Op::StoreLocal(local, value) => format!("store l{} v{}", local.0, value.0),
+                    Op::Unary(op, value) => format!("{op:?} v{}", value.0),
+                    Op::Binary(op, left, right) => format!("{op:?} v{} v{}", left.0, right.0),
+                    Op::Compare(op, left, right) => format!("cmp {op:?} v{} v{}", left.0, right.0),
+                    Op::ThreeWay(kind, left, right) => {
+                        format!("cmp3 {kind:?} v{} v{}", left.0, right.0)
+                    }
+                    Op::Convert(kind, value) => format!("convert {kind:?} v{}", value.0),
+                    Op::New(class) => format!("new {}", self.class(*class).name),
+                    Op::NewArray(kind, length) => format!("newarray {} v{}", kind.name(), length.0),
+                    Op::NewMultiArray(kind, depth, lengths) => {
+                        format!(
+                            "newmultiarray {} {depth} [{}]",
+                            kind.name(),
+                            values(lengths)
+                        )
+                    }
+                    Op::ArrayLength(array) => format!("length v{}", array.0),
+                    Op::ArrayGet(kind, array, index) => {
+                        format!("aget {} v{} v{}", kind.name(), array.0, index.0)
+                    }
+                    Op::ArraySet(kind, array, index, value) => {
+                        format!(
+                            "aset {} v{} v{} v{}",
+                            kind.name(),
+                            array.0,
+                            index.0,
+                            value.0
+                        )
+                    }
+                    Op::GetField(field, object) => {
+                        format!("getfield {} v{}", self.field(*field).name, object.0)
+                    }
+                    Op::SetField(field, object, value) => {
+                        format!(
+                            "setfield {} v{} v{}",
+                            self.field(*field).name,
+                            object.0,
+                            value.0
+                        )
+                    }
+                    Op::GetStatic(field) => {
+                        let held = self.field(*field);
+                        format!("getstatic {}.{}", self.class(held.owner).name, held.name)
+                    }
+                    Op::SetStatic(field, value) => {
+                        let held = self.field(*field);
+                        format!(
+                            "setstatic {}.{} v{}",
+                            self.class(held.owner).name,
+                            held.name,
+                            value.0
+                        )
+                    }
+                    Op::InitClass(class) => format!("init {}", self.class(*class).name),
+                    Op::Call(function, arguments) => {
+                        format!(
+                            "call {} ({})",
+                            self.function(*function).name,
+                            values(arguments)
+                        )
+                    }
+                    Op::CallVirtual(class, slot, arguments) => format!(
+                        "callvirtual {}#{slot} ({})",
+                        self.class(*class).name,
+                        values(arguments)
+                    ),
+                    Op::CallInterface(class, slot, arguments) => format!(
+                        "callinterface {}#{slot} ({})",
+                        self.class(*class).name,
+                        values(arguments)
+                    ),
+                    Op::CallRuntime(runtime, arguments) => {
+                        format!("runtime {} ({})", runtime.symbol(), values(arguments))
+                    }
+                    Op::CallIntrinsic(intrinsic, arguments) => {
+                        format!("intrinsic {} ({})", intrinsic.name(), values(arguments))
+                    }
+                    Op::CallExternal(symbol, arguments) => {
+                        format!("external {symbol} ({})", values(arguments))
+                    }
+                    Op::InstanceOf(test, value) => {
+                        format!("instanceof {} v{}", self.print_test(test), value.0)
+                    }
+                    Op::Cast(test, value) => format!("cast {} v{}", self.print_test(test), value.0),
+                    Op::NullCheck(value) => format!("nullcheck v{}", value.0),
+                    Op::Caught => "caught".to_string(),
+                    Op::MonitorEnter(value) => format!("monitorenter v{}", value.0),
+                    Op::MonitorExit(value) => format!("monitorexit v{}", value.0),
+                    Op::Phi(incoming) => format!(
+                        "phi {}",
+                        incoming
+                            .iter()
+                            .map(|(block, value)| format!("[b{} v{}]", block.0, value.0))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    Op::Safepoint => "safepoint".to_string(),
+                }
+            }
+
+            fn print_test(&self, test: &TypeTest) -> String {
+                match test {
+                    TypeTest::Class(class) => self.class(*class).name.clone(),
+                    TypeTest::PrimitiveArray(kind) => format!("{}[]", kind.name()),
+                    TypeTest::ObjectArray => "object[]".to_string(),
+                    TypeTest::MultiArray(kind, depth) => {
+                        format!("{}{}", kind.name(), "[]".repeat(*depth as usize))
+                    }
+                }
+            }
+        }
+
+        fn print_terminator(terminator: &Terminator) -> String {
+            match terminator {
+                Terminator::Return(Some(value)) => format!("return v{}", value.0),
+                Terminator::Return(None) => "return".to_string(),
+                Terminator::Jump(to) => format!("jump b{}", to.0),
+                Terminator::Branch(value, then, otherwise) => {
+                    format!("branch v{} b{} b{}", value.0, then.0, otherwise.0)
+                }
+                Terminator::Switch(value, cases, fallback) => format!(
+                    "switch v{} [{}] b{}",
+                    value.0,
+                    cases
+                        .iter()
+                        .map(|(key, to)| format!("{key}: b{}", to.0))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    fallback.0
+                ),
+                Terminator::Throw(value) => format!("throw v{}", value.0),
+                Terminator::Unreachable => "unreachable".to_string(),
+            }
+        }
+    }
+
+    pub mod translate {
+        use super::fail;
+        use super::ir::{
+            ArrayKind, BinaryOp, Block, BlockRef, Class, ClassRef, CompareOp, Constant, Conversion,
+            Field, FieldRef, Function, FunctionKind, FunctionRef, Handler, Instruction, Local,
+            LocalRef, Module, Op, Terminator, ThreeWay, Type, TypeTest, UnaryOp, Value,
+        };
+        use super::{Intrinsic, Runtime};
+        use crate::diag::Diagnostic;
+        use crate::jvm;
+        use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+        use std::rc::Rc;
+
+        pub const ROOT: &str = "java/lang/Object";
+
+        #[derive(Default)]
+        pub struct ClassFiles {
+            bytes: HashMap<String, Vec<u8>>,
+            parsed: HashMap<String, Rc<jvm::Class>>,
+            own: HashSet<String>,
+        }
+
+        impl ClassFiles {
+            pub fn new() -> ClassFiles {
+                ClassFiles::default()
+            }
+
+            pub fn add_class(&mut self, bytes: Vec<u8>) -> Result<String, Diagnostic> {
+                let class = jvm::read(&bytes)?;
+                let name = internal(&class.name);
+                self.own.insert(name.clone());
+                self.parsed.insert(name.clone(), Rc::new(class));
+                Ok(name)
+            }
+
+            pub fn add_jar(&mut self, bytes: &[u8]) -> Result<usize, Diagnostic> {
+                let mut sink = crate::diag::Sink::new();
+                let Some(archive) = crate::archive::read(bytes, &mut sink) else {
+                    return Err(fail(
+                        "EK416",
+                        "A library given to the native compiler is not an archive it can read.",
+                    ));
+                };
+                let mut count = 0;
+                for entry in archive.entries() {
+                    if entry.is_directory() || !entry.name.ends_with(".class") {
+                        continue;
+                    }
+                    if entry.name.starts_with("META-INF/") {
+                        continue;
+                    }
+                    let from = entry.data_offset as usize;
+                    let to = from.saturating_add(entry.compressed_size as usize);
+                    let Some(held) = bytes.get(from..to) else {
+                        continue;
+                    };
+                    let held = match entry.compression {
+                        crate::archive::Compression::Stored => held.to_vec(),
+                        crate::archive::Compression::Deflate => match crate::inflate::raw(held) {
+                            Ok(found) => found,
+                            Err(_) => continue,
+                        },
+                        crate::archive::Compression::Other(_) => continue,
+                    };
+                    let name = entry.name.trim_end_matches(".class").to_string();
+                    if self.own.contains(&name) {
+                        continue;
+                    }
+                    self.bytes.entry(name).or_insert(held);
+                    count += 1;
+                }
+                Ok(count)
+            }
+
+            pub fn owns(&self, name: &str) -> bool {
+                self.own.contains(name)
+            }
+
+            pub fn own_names(&self) -> Vec<String> {
+                let mut out: Vec<String> = self.own.iter().cloned().collect();
+                out.sort();
+                out
+            }
+
+            pub fn get(&mut self, name: &str) -> Option<Rc<jvm::Class>> {
+                if let Some(found) = self.parsed.get(name) {
+                    return Some(found.clone());
+                }
+                let bytes = self.bytes.remove(name)?;
+                let class = Rc::new(jvm::read(&bytes).ok()?);
+                self.parsed.insert(name.to_string(), class.clone());
+                Some(class)
+            }
+        }
+
+        pub fn internal(name: &str) -> String {
+            name.replace('.', "/")
+        }
+
+        pub fn split_descriptor(descriptor: &str) -> (Vec<String>, String) {
+            let mut parameters = Vec::new();
+            let bytes = descriptor.as_bytes();
+            let mut at = 1;
+            while at < bytes.len() && bytes[at] != b')' {
+                let start = at;
+                while bytes[at] == b'[' {
+                    at += 1;
+                }
+                if bytes[at] == b'L' {
+                    while bytes[at] != b';' {
+                        at += 1;
+                    }
+                }
+                at += 1;
+                parameters.push(descriptor[start..at].to_string());
+            }
+            let returns = descriptor.get(at + 1..).unwrap_or("V").to_string();
+            (parameters, returns)
+        }
+
+        fn class_of_descriptor(descriptor: &str) -> Option<String> {
+            descriptor
+                .strip_prefix('L')
+                .and_then(|rest| rest.strip_suffix(';'))
+                .map(str::to_string)
+        }
+
+        fn widen(ty: Type) -> Option<Conversion> {
+            match ty {
+                Type::Bool => Some(Conversion::BoolToI32),
+                Type::I8 => Some(Conversion::I8ToI32),
+                Type::I16 => Some(Conversion::I16ToI32),
+                Type::Char => Some(Conversion::CharToI32),
+                _ => None,
+            }
+        }
+
+        fn narrow(ty: Type) -> Option<Conversion> {
+            match ty {
+                Type::Bool => Some(Conversion::I32ToBool),
+                Type::I8 => Some(Conversion::I32ToI8),
+                Type::I16 => Some(Conversion::I32ToI16),
+                Type::Char => Some(Conversion::I32ToChar),
+                _ => None,
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        enum Operand {
+            None,
+            Int(i32),
+            Local(u16),
+            Iinc(u16, i32),
+            Branch(u32),
+            Table(u32, i32, Vec<u32>),
+            Lookup(u32, Vec<(i32, u32)>),
+            Pool(u16),
+            MultiArray(u16, u8),
+            NewArray(u8),
+        }
+
+        #[derive(Clone, Debug)]
+        struct Decoded {
+            pc: u32,
+            opcode: u8,
+            operand: Operand,
+            next: u32,
+        }
+
+        fn decode(code: &[u8]) -> Result<Vec<Decoded>, (u32, u8)> {
+            let mut out = Vec::new();
+            let mut pc = 0usize;
+            let byte = |at: usize| -> Result<u8, (u32, u8)> {
+                code.get(at).copied().ok_or((at as u32, 0))
+            };
+            let short = |at: usize| -> Result<i32, (u32, u8)> {
+                Ok(i32::from(i16::from_be_bytes([byte(at)?, byte(at + 1)?])))
+            };
+            let word = |at: usize| -> Result<i32, (u32, u8)> {
+                Ok(i32::from_be_bytes([
+                    byte(at)?,
+                    byte(at + 1)?,
+                    byte(at + 2)?,
+                    byte(at + 3)?,
+                ]))
+            };
+            while pc < code.len() {
+                let opcode = code[pc];
+                let start = pc as i64;
+                let target = |offset: i32| -> u32 { (start + i64::from(offset)) as u32 };
+                let (operand, length) = match opcode {
+                    0x10 => (Operand::Int(i32::from(byte(pc + 1)? as i8)), 2),
+                    0x11 => (Operand::Int(short(pc + 1)?), 3),
+                    0x12 => (Operand::Pool(u16::from(byte(pc + 1)?)), 2),
+                    0x13 | 0x14 => (Operand::Pool(short(pc + 1)? as u16), 3),
+                    0x15..=0x19 | 0x36..=0x3a | 0xa9 => {
+                        (Operand::Local(u16::from(byte(pc + 1)?)), 2)
+                    }
+                    0x84 => (
+                        Operand::Iinc(u16::from(byte(pc + 1)?), i32::from(byte(pc + 2)? as i8)),
+                        3,
+                    ),
+                    0x99..=0xa8 | 0xc6 | 0xc7 => (Operand::Branch(target(short(pc + 1)?)), 3),
+                    0xc8 | 0xc9 => (Operand::Branch(target(word(pc + 1)?)), 5),
+                    0xaa => {
+                        let mut at = pc + 1;
+                        while !at.is_multiple_of(4) {
+                            at += 1;
+                        }
+                        let default = target(word(at)?);
+                        let low = word(at + 4)?;
+                        let high = word(at + 8)?;
+                        let count = (i64::from(high) - i64::from(low) + 1).max(0) as usize;
+                        let mut targets = Vec::with_capacity(count);
+                        for index in 0..count {
+                            targets.push(target(word(at + 12 + index * 4)?));
+                        }
+                        (
+                            Operand::Table(default, low, targets),
+                            at + 12 + count * 4 - pc,
+                        )
+                    }
+                    0xab => {
+                        let mut at = pc + 1;
+                        while !at.is_multiple_of(4) {
+                            at += 1;
+                        }
+                        let default = target(word(at)?);
+                        let count = word(at + 4)?.max(0) as usize;
+                        let mut pairs = Vec::with_capacity(count);
+                        for index in 0..count {
+                            let key = word(at + 8 + index * 8)?;
+                            let to = target(word(at + 12 + index * 8)?);
+                            pairs.push((key, to));
+                        }
+                        (Operand::Lookup(default, pairs), at + 8 + count * 8 - pc)
+                    }
+                    0xb2..=0xb8 | 0xbb | 0xbd | 0xc0 | 0xc1 => {
+                        (Operand::Pool(short(pc + 1)? as u16), 3)
+                    }
+                    0xb9 | 0xba => (Operand::Pool(short(pc + 1)? as u16), 5),
+                    0xbc => (Operand::NewArray(byte(pc + 1)?), 2),
+                    0xc5 => (Operand::MultiArray(short(pc + 1)? as u16, byte(pc + 3)?), 4),
+                    0xc4 => {
+                        let inner = byte(pc + 1)?;
+                        let index = short(pc + 2)? as u16;
+                        if inner == 0x84 {
+                            let delta = short(pc + 4)?;
+                            out.push(Decoded {
+                                pc: pc as u32,
+                                opcode: 0x84,
+                                operand: Operand::Iinc(index, delta),
+                                next: (pc + 6) as u32,
+                            });
+                            pc += 6;
+                            continue;
+                        }
+                        out.push(Decoded {
+                            pc: pc as u32,
+                            opcode: inner,
+                            operand: Operand::Local(index),
+                            next: (pc + 4) as u32,
+                        });
+                        pc += 4;
+                        continue;
+                    }
+                    0x00..=0x0f
+                    | 0x1a..=0x35
+                    | 0x3b..=0x83
+                    | 0x85..=0x98
+                    | 0xac..=0xb1
+                    | 0xbe
+                    | 0xbf
+                    | 0xc2
+                    | 0xc3 => (Operand::None, 1),
+                    other => return Err((pc as u32, other)),
+                };
+                out.push(Decoded {
+                    pc: pc as u32,
+                    opcode,
+                    operand,
+                    next: (pc + length) as u32,
+                });
+                pc += length;
+            }
+            Ok(out)
+        }
+
+        fn utf8(class: &jvm::Class, index: u16) -> Option<String> {
+            match class.constants.get(index as usize)? {
+                jvm::Constant::Utf8(text) => Some(text.clone()),
+                _ => None,
+            }
+        }
+
+        fn class_name(class: &jvm::Class, index: u16) -> Option<String> {
+            match class.constants.get(index as usize)? {
+                jvm::Constant::Class(name) => utf8(class, *name),
+                _ => None,
+            }
+        }
+
+        fn name_and_type(class: &jvm::Class, index: u16) -> Option<(String, String)> {
+            match class.constants.get(index as usize)? {
+                jvm::Constant::NameAndType(name, descriptor) => {
+                    Some((utf8(class, *name)?, utf8(class, *descriptor)?))
+                }
+                _ => None,
+            }
+        }
+
+        fn member(class: &jvm::Class, index: u16) -> Option<(String, String, String, bool)> {
+            match class.constants.get(index as usize)? {
+                jvm::Constant::FieldRef(owner, typed) | jvm::Constant::MethodRef(owner, typed) => {
+                    let (name, descriptor) = name_and_type(class, *typed)?;
+                    Some((class_name(class, *owner)?, name, descriptor, false))
+                }
+                jvm::Constant::InterfaceMethodRef(owner, typed) => {
+                    let (name, descriptor) = name_and_type(class, *typed)?;
+                    Some((class_name(class, *owner)?, name, descriptor, true))
+                }
+                _ => None,
+            }
+        }
+
+        fn method_handle(
+            class: &jvm::Class,
+            index: u16,
+        ) -> Option<(u8, String, String, String, bool)> {
+            match class.constants.get(index as usize)? {
+                jvm::Constant::MethodHandle(kind, reference) => {
+                    let (owner, name, descriptor, interface) = member(class, *reference)?;
+                    Some((*kind, owner, name, descriptor, interface))
+                }
+                _ => None,
+            }
+        }
+
+        fn method_type(class: &jvm::Class, index: u16) -> Option<String> {
+            match class.constants.get(index as usize)? {
+                jvm::Constant::MethodType(descriptor) => utf8(class, *descriptor),
+                _ => None,
+            }
+        }
+
+        pub struct Translator<'a> {
+            pub files: &'a mut ClassFiles,
+            pub module: Module,
+            functions: HashMap<(String, String, String), FunctionRef>,
+            fields: HashMap<(String, String), FieldRef>,
+            pending: VecDeque<FunctionRef>,
+            queued: HashSet<FunctionRef>,
+            instantiated: HashSet<ClassRef>,
+            pub missing: BTreeSet<String>,
+            lambdas: u32,
+            interfaces: u32,
+        }
+
+        impl<'a> Translator<'a> {
+            pub fn new(files: &'a mut ClassFiles, name: &str, target: &str) -> Translator<'a> {
+                let mut made = Translator {
+                    files,
+                    module: Module::new(name, target),
+                    functions: HashMap::new(),
+                    fields: HashMap::new(),
+                    pending: VecDeque::new(),
+                    queued: HashSet::new(),
+                    instantiated: HashSet::new(),
+                    missing: BTreeSet::new(),
+                    lambdas: 0,
+                    interfaces: 0,
+                };
+                made.root();
+                made
+            }
+
+            fn root(&mut self) {
+                let mut class = Class::new(ROOT);
+                class.flags.external = self.files.get(ROOT).is_none();
+                let root = self.module.add_class(class);
+                if !self.module.class(root).flags.external {
+                    return;
+                }
+                for (name, descriptor, symbol, returns, parameters, dispatched) in [
+                    (
+                        "equals",
+                        "(Ljava/lang/Object;)Z",
+                        "Kotlin_Any_equals",
+                        Type::Bool,
+                        vec![Type::Object, Type::Object],
+                        true,
+                    ),
+                    (
+                        "hashCode",
+                        "()I",
+                        "Kotlin_Any_hashCode",
+                        Type::I32,
+                        vec![Type::Object],
+                        true,
+                    ),
+                    (
+                        "toString",
+                        "()Ljava/lang/String;",
+                        "Kotlin_Any_toString",
+                        Type::Object,
+                        vec![Type::Object],
+                        true,
+                    ),
+                    (
+                        "clone",
+                        "()Ljava/lang/Object;",
+                        "Kotlin_Any_clone",
+                        Type::Object,
+                        vec![Type::Object],
+                        true,
+                    ),
+                    (
+                        "finalize",
+                        "()V",
+                        "Kotlin_Any_finalize",
+                        Type::Void,
+                        vec![Type::Object],
+                        true,
+                    ),
+                    (
+                        "getClass",
+                        "()Ljava/lang/Class;",
+                        "Kotlin_Any_getClass",
+                        Type::Object,
+                        vec![Type::Object],
+                        false,
+                    ),
+                    (
+                        "notify",
+                        "()V",
+                        "Kotlin_Any_notify",
+                        Type::Void,
+                        vec![Type::Object],
+                        false,
+                    ),
+                    (
+                        "notifyAll",
+                        "()V",
+                        "Kotlin_Any_notifyAll",
+                        Type::Void,
+                        vec![Type::Object],
+                        false,
+                    ),
+                    (
+                        "wait",
+                        "()V",
+                        "Kotlin_Any_wait",
+                        Type::Void,
+                        vec![Type::Object],
+                        false,
+                    ),
+                    (
+                        "wait",
+                        "(J)V",
+                        "Kotlin_Any_waitTimed",
+                        Type::Void,
+                        vec![Type::Object, Type::I64],
+                        false,
+                    ),
+                ] {
+                    let function = self.module.add_function(Function {
+                        name: format!("{ROOT}.{name}"),
+                        owner: Some(root),
+                        jvm: Some((ROOT.to_string(), name.to_string(), descriptor.to_string())),
+                        parameters,
+                        returns,
+                        locals: Vec::new(),
+                        blocks: Vec::new(),
+                        kind: FunctionKind::External,
+                        export: Some(symbol.to_string()),
+                        intrinsic: None,
+                        values: 0,
+                        source: None,
+                    });
+                    let held = self.module.class_mut(root);
+                    held.methods.push(function);
+                    if dispatched {
+                        held.vtable.push((
+                            name.to_string(),
+                            descriptor.to_string(),
+                            Some(function),
+                        ));
+                    }
+                    self.functions.insert(
+                        (ROOT.to_string(), name.to_string(), descriptor.to_string()),
+                        function,
+                    );
+                }
+                let init = self.module.add_function(Function {
+                    name: format!("{ROOT}.<init>"),
+                    owner: Some(root),
+                    jvm: Some((ROOT.to_string(), "<init>".to_string(), "()V".to_string())),
+                    parameters: vec![Type::Object],
+                    returns: Type::Void,
+                    locals: Vec::new(),
+                    blocks: vec![Block {
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return(None),
+                        handlers: Vec::new(),
+                    }],
+                    kind: FunctionKind::Constructor,
+                    export: None,
+                    intrinsic: None,
+                    values: 0,
+                    source: None,
+                });
+                self.module.class_mut(root).methods.push(init);
+                self.functions.insert(
+                    (ROOT.to_string(), "<init>".to_string(), "()V".to_string()),
+                    init,
+                );
+            }
+
+            pub fn declare(&mut self, name: &str) -> Result<ClassRef, Diagnostic> {
+                if let Some(found) = self.module.class_named(name) {
+                    return Ok(found);
+                }
+                let Some(jvm_class) = self.files.get(name) else {
+                    return Ok(self.declare_missing(name));
+                };
+                let super_class = match &jvm_class.superclass {
+                    Some(parent) => Some(self.declare(&internal(parent))?),
+                    None if name != ROOT => Some(self.declare(ROOT)?),
+                    None => None,
+                };
+                let mut interfaces = Vec::new();
+                for one in &jvm_class.interfaces {
+                    interfaces.push(self.declare(&internal(one))?);
+                }
+                if let Some(found) = self.module.class_named(name) {
+                    return Ok(found);
+                }
+                let flags = jvm_class.access_flags;
+                let mut class = Class::new(name);
+                class.super_class = super_class;
+                class.interfaces = interfaces.clone();
+                class.flags.interface = flags & 0x0200 != 0;
+                class.flags.abstract_ = flags & 0x0400 != 0;
+                class.flags.final_ = flags & 0x0010 != 0;
+                class.flags.enum_ = flags & 0x4000 != 0;
+                class.flags.annotation = flags & 0x2000 != 0;
+                class.flags.synthetic = flags & 0x1000 != 0;
+                class.source = jvm_class.source_file.clone();
+                if let Some(parent) = super_class {
+                    class.depth = self.module.class(parent).depth + 1;
+                    class.vtable = self.module.class(parent).vtable.clone();
+                }
+                if class.flags.interface {
+                    class.interface_id = Some(self.interfaces);
+                    self.interfaces += 1;
+                    for parent in &interfaces {
+                        for slot in self.module.class(*parent).slots.clone() {
+                            if !class.slots.contains(&slot) {
+                                class.slots.push(slot);
+                            }
+                        }
+                    }
+                }
+                let reference = self.module.add_class(class);
+                for field in &jvm_class.fields {
+                    let is_static = field.access_flags & 0x0008 != 0;
+                    let constant = field.constant.as_ref().and_then(|element| match element {
+                        jvm::Element::Int(held) => Some(Constant::I32(*held)),
+                        jvm::Element::Long(held) => Some(Constant::I64(*held)),
+                        jvm::Element::Float(held) => Some(Constant::F32(*held)),
+                        jvm::Element::Double(held) => Some(Constant::F64(*held)),
+                        jvm::Element::Byte(held) => Some(Constant::I32(i32::from(*held))),
+                        jvm::Element::Short(held) => Some(Constant::I32(i32::from(*held))),
+                        jvm::Element::Char(held) => Some(Constant::I32(i32::from(*held))),
+                        jvm::Element::Boolean(held) => Some(Constant::I32(i32::from(*held))),
+                        jvm::Element::Text(held) => {
+                            Some(Constant::String(self.module.intern(held)))
+                        }
+                        _ => None,
+                    });
+                    let thread_local = field
+                        .annotations
+                        .iter()
+                        .any(|one| one.descriptor == "Lkotlin/native/concurrent/ThreadLocal;");
+                    let made = self.module.add_field(Field {
+                        name: field.name.clone(),
+                        owner: reference,
+                        ty: Type::of_descriptor(&field.descriptor),
+                        is_static,
+                        volatile: field.access_flags & 0x0040 != 0,
+                        thread_local,
+                        constant,
+                        descriptor: field.descriptor.clone(),
+                    });
+                    self.fields
+                        .insert((name.to_string(), field.name.clone()), made);
+                    let held = self.module.class_mut(reference);
+                    if is_static {
+                        held.statics.push(made);
+                    } else {
+                        held.fields.push(made);
+                    }
+                }
+                for method in &jvm_class.methods {
+                    let access = method.access_flags;
+                    let is_static = access & 0x0008 != 0;
+                    let (parameters, returns) = split_descriptor(&method.descriptor);
+                    let mut types: Vec<Type> = Vec::new();
+                    if !is_static {
+                        types.push(Type::Object);
+                    }
+                    types.extend(parameters.iter().map(|one| Type::of_descriptor(one)));
+                    let interface = self.module.class(reference).flags.interface;
+                    let kind = if method.name == "<clinit>" {
+                        FunctionKind::Initializer
+                    } else if method.name == "<init>" {
+                        FunctionKind::Constructor
+                    } else if is_static {
+                        FunctionKind::Static
+                    } else if access & 0x0002 != 0 {
+                        FunctionKind::Direct
+                    } else if access & 0x0400 != 0 {
+                        FunctionKind::Abstract(0)
+                    } else if access & 0x0040 != 0 {
+                        FunctionKind::Bridge
+                    } else {
+                        FunctionKind::Virtual(0)
+                    };
+                    let kind = if access & 0x0100 != 0 {
+                        FunctionKind::External
+                    } else {
+                        kind
+                    };
+                    let export = method.annotations.iter().find_map(|one| {
+                        let named = one.descriptor == "Lkotlin/native/CName;"
+                            || one.descriptor == "Lkotlin/native/SymbolName;";
+                        if !named {
+                            return None;
+                        }
+                        one.values.iter().find_map(|(key, value)| match value {
+                            jvm::Element::Text(text)
+                                if !text.is_empty() && (key == "externName" || key == "name") =>
+                            {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    let intrinsic = method.annotations.iter().find_map(|one| {
+                        if one.descriptor != "Lkotlin/native/internal/TypedIntrinsic;" {
+                            return None;
+                        }
+                        one.values.iter().find_map(|(_, value)| match value {
+                            jvm::Element::Text(text) => Intrinsic::named(text),
+                            _ => None,
+                        })
+                    });
+                    let function = self.module.add_function(Function {
+                        name: format!("{name}.{}{}", method.name, method.descriptor),
+                        owner: Some(reference),
+                        jvm: Some((
+                            name.to_string(),
+                            method.name.clone(),
+                            method.descriptor.clone(),
+                        )),
+                        parameters: types,
+                        returns: Type::of_descriptor(&returns),
+                        locals: Vec::new(),
+                        blocks: Vec::new(),
+                        kind,
+                        export,
+                        intrinsic,
+                        values: 0,
+                        source: jvm_class.source_file.clone(),
+                    });
+                    self.functions.insert(
+                        (
+                            name.to_string(),
+                            method.name.clone(),
+                            method.descriptor.clone(),
+                        ),
+                        function,
+                    );
+                    let held = self.module.class_mut(reference);
+                    held.methods.push(function);
+                    if method.name == "<clinit>" {
+                        held.initializer = Some(function);
+                        continue;
+                    }
+                    if is_static || method.name == "<init>" || access & 0x0002 != 0 {
+                        continue;
+                    }
+                    if interface {
+                        let slot = (method.name.clone(), method.descriptor.clone());
+                        if !held.slots.contains(&slot) {
+                            held.slots.push(slot);
+                        }
+                        continue;
+                    }
+                    let entry = if access & 0x0400 != 0 {
+                        None
+                    } else {
+                        Some(function)
+                    };
+                    let slot = match held.slot_of(&method.name, &method.descriptor) {
+                        Some(at) => {
+                            held.vtable[at as usize].2 = entry;
+                            at
+                        }
+                        None => {
+                            held.vtable.push((
+                                method.name.clone(),
+                                method.descriptor.clone(),
+                                entry,
+                            ));
+                            (held.vtable.len() - 1) as u32
+                        }
+                    };
+                    let function_kind = &mut self.module.function_mut(function).kind;
+                    *function_kind = match *function_kind {
+                        FunctionKind::Abstract(_) => FunctionKind::Abstract(slot),
+                        FunctionKind::Virtual(_) => FunctionKind::Virtual(slot),
+                        other => other,
+                    };
+                }
+                if !self.module.class(reference).flags.interface {
+                    self.complete_vtable(reference);
+                }
+                Ok(reference)
+            }
+
+            fn declare_missing(&mut self, name: &str) -> ClassRef {
+                if let Some(found) = self.module.class_named(name) {
+                    return found;
+                }
+                self.missing.insert(name.to_string());
+                let root = self.module.class_named(ROOT);
+                let mut class = Class::new(name);
+                class.flags.external = true;
+                if name != ROOT {
+                    class.super_class = root;
+                    if let Some(parent) = root {
+                        class.vtable = self.module.class(parent).vtable.clone();
+                        class.depth = 1;
+                    }
+                }
+                self.module.add_class(class)
+            }
+
+            fn interface_closure(&self, class: ClassRef) -> Vec<ClassRef> {
+                let mut out: Vec<ClassRef> = Vec::new();
+                let mut waiting: Vec<ClassRef> = Vec::new();
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    waiting.extend(self.module.class(held).interfaces.iter().copied());
+                    current = self.module.class(held).super_class;
+                }
+                while let Some(one) = waiting.pop() {
+                    if out.contains(&one) {
+                        continue;
+                    }
+                    out.push(one);
+                    waiting.extend(self.module.class(one).interfaces.iter().copied());
+                }
+                out
+            }
+
+            fn default_method(
+                &self,
+                interfaces: &[ClassRef],
+                name: &str,
+                descriptor: &str,
+            ) -> Option<FunctionRef> {
+                for interface in interfaces {
+                    for method in &self.module.class(*interface).methods {
+                        let function = self.module.function(*method);
+                        let matches = function.jvm.as_ref().is_some_and(|(_, held, described)| {
+                            held == name && described == descriptor
+                        });
+                        if matches
+                            && !matches!(
+                                function.kind,
+                                FunctionKind::Abstract(_) | FunctionKind::Static
+                            )
+                        {
+                            return Some(*method);
+                        }
+                    }
+                }
+                None
+            }
+
+            fn complete_vtable(&mut self, class: ClassRef) {
+                let interfaces = self.interface_closure(class);
+                for interface in &interfaces {
+                    for (name, descriptor) in self.module.class(*interface).slots.clone() {
+                        let known = self.module.class(class).slot_of(&name, &descriptor);
+                        match known {
+                            Some(at) => {
+                                if self.module.class(class).vtable[at as usize].2.is_none() {
+                                    let found =
+                                        self.default_method(&interfaces, &name, &descriptor);
+                                    self.module.class_mut(class).vtable[at as usize].2 = found;
+                                }
+                            }
+                            None => {
+                                let found = self.default_method(&interfaces, &name, &descriptor);
+                                self.module
+                                    .class_mut(class)
+                                    .vtable
+                                    .push((name, descriptor, found));
+                            }
+                        }
+                    }
+                }
+                let mut itable = Vec::new();
+                for interface in interfaces {
+                    let entries: Vec<Option<FunctionRef>> = self
+                        .module
+                        .class(interface)
+                        .slots
+                        .iter()
+                        .map(|(name, descriptor)| {
+                            let held = self.module.class(class);
+                            held.slot_of(name, descriptor)
+                                .and_then(|at| held.vtable[at as usize].2)
+                        })
+                        .collect();
+                    itable.push((interface, entries));
+                }
+                self.module.class_mut(class).itable = itable;
+            }
+
+            pub fn function(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+            ) -> Result<Option<FunctionRef>, Diagnostic> {
+                let class = self.declare(owner)?;
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    let held_name = self.module.class(held).name.clone();
+                    if let Some(found) =
+                        self.functions
+                            .get(&(held_name, name.to_string(), descriptor.to_string()))
+                    {
+                        return Ok(Some(*found));
+                    }
+                    current = self.module.class(held).super_class;
+                }
+                let interfaces = self.interface_closure(class);
+                for interface in interfaces {
+                    let held_name = self.module.class(interface).name.clone();
+                    if let Some(found) =
+                        self.functions
+                            .get(&(held_name, name.to_string(), descriptor.to_string()))
+                    {
+                        return Ok(Some(*found));
+                    }
+                }
+                Ok(None)
+            }
+
+            fn external_function(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+            ) -> FunctionRef {
+                let key = (owner.to_string(), name.to_string(), descriptor.to_string());
+                if let Some(found) = self.functions.get(&key) {
+                    return *found;
+                }
+                let class = self.declare_missing(owner);
+                self.missing.insert(format!("{owner}.{name}{descriptor}"));
+                let (parameters, returns) = split_descriptor(descriptor);
+                let mut types = Vec::new();
+                if !is_static {
+                    types.push(Type::Object);
+                }
+                types.extend(parameters.iter().map(|one| Type::of_descriptor(one)));
+                let function = self.module.add_function(Function {
+                    name: format!("{owner}.{name}{descriptor}"),
+                    owner: Some(class),
+                    jvm: Some(key.clone()),
+                    parameters: types,
+                    returns: Type::of_descriptor(&returns),
+                    locals: Vec::new(),
+                    blocks: Vec::new(),
+                    kind: FunctionKind::External,
+                    export: Some(external_symbol(owner, name, descriptor)),
+                    intrinsic: None,
+                    values: 0,
+                    source: None,
+                });
+                self.functions.insert(key, function);
+                self.module.class_mut(class).methods.push(function);
+                function
+            }
+
+            pub fn field(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+            ) -> Result<FieldRef, Diagnostic> {
+                let class = self.declare(owner)?;
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    let held_name = self.module.class(held).name.clone();
+                    if let Some(found) = self.fields.get(&(held_name, name.to_string())) {
+                        return Ok(*found);
+                    }
+                    current = self.module.class(held).super_class;
+                }
+                for interface in self.interface_closure(class) {
+                    let held_name = self.module.class(interface).name.clone();
+                    if let Some(found) = self.fields.get(&(held_name, name.to_string())) {
+                        return Ok(*found);
+                    }
+                }
+                self.missing.insert(format!("{owner}.{name}:{descriptor}"));
+                let made = self.module.add_field(Field {
+                    name: name.to_string(),
+                    owner: class,
+                    ty: Type::of_descriptor(descriptor),
+                    is_static,
+                    volatile: false,
+                    thread_local: false,
+                    constant: None,
+                    descriptor: descriptor.to_string(),
+                });
+                self.fields
+                    .insert((owner.to_string(), name.to_string()), made);
+                let held = self.module.class_mut(class);
+                if is_static {
+                    held.statics.push(made);
+                } else {
+                    held.fields.push(made);
+                }
+                Ok(made)
+            }
+
+            fn enqueue(&mut self, function: FunctionRef) {
+                if self.queued.insert(function) {
+                    self.pending.push_back(function);
+                }
+            }
+
+            fn instantiate(&mut self, class: ClassRef) {
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if !self.instantiated.insert(held) {
+                        break;
+                    }
+                    self.module.class_mut(held).flags.instantiated = true;
+                    current = self.module.class(held).super_class;
+                }
+                let entries: Vec<FunctionRef> = self
+                    .module
+                    .class(class)
+                    .vtable
+                    .iter()
+                    .filter_map(|(_, _, function)| *function)
+                    .collect();
+                for function in entries {
+                    self.enqueue(function);
+                }
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if let Some(initializer) = self.module.class(held).initializer {
+                        self.enqueue(initializer);
+                    }
+                    current = self.module.class(held).super_class;
+                }
+            }
+
+            pub fn root_function(&mut self, function: FunctionRef) {
+                self.enqueue(function);
+                if let Some(owner) = self.module.function(function).owner {
+                    if let Some(initializer) = self.module.class(owner).initializer {
+                        self.enqueue(initializer);
+                    }
+                }
+            }
+
+            pub fn run(&mut self) -> Result<(), Diagnostic> {
+                while let Some(function) = self.pending.pop_front() {
+                    self.body(function)?;
+                }
+                Ok(())
+            }
+
+            fn body(&mut self, reference: FunctionRef) -> Result<(), Diagnostic> {
+                let function = self.module.function(reference).clone();
+                if function.has_body()
+                    || matches!(
+                        function.kind,
+                        FunctionKind::External | FunctionKind::Abstract(_)
+                    )
+                {
+                    return Ok(());
+                }
+                let Some((owner, name, descriptor)) = function.jvm.clone() else {
+                    return Ok(());
+                };
+                let Some(class) = self.files.get(&owner) else {
+                    return Ok(());
+                };
+                let Some(method) = class
+                    .methods
+                    .iter()
+                    .find(|one| one.name == name && one.descriptor == descriptor)
+                else {
+                    return Ok(());
+                };
+                let Some(code) = &method.code else {
+                    return Ok(());
+                };
+                let built = MethodBuilder::build(self, &class, method, code, &function, reference)?;
+                let held = self.module.function_mut(reference);
+                held.locals = built.locals;
+                held.blocks = built.blocks;
+                held.values = built.values;
+                Ok(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn lambda_class(
+                &mut self,
+                caller: &jvm::Class,
+                interface: &str,
+                method_name: &str,
+                sam: &str,
+                captured: &[String],
+                implementation: (u8, String, String, String, bool),
+                bridges: &[String],
+            ) -> Result<ClassRef, Diagnostic> {
+                let interface_ref = self.declare(interface)?;
+                let root = self.declare(ROOT)?;
+                self.lambdas += 1;
+                let name = format!("{}$$Lambda${}", internal(&caller.name), self.lambdas);
+                let mut class = Class::new(&name);
+                class.super_class = Some(root);
+                class.interfaces = vec![interface_ref];
+                class.flags.final_ = true;
+                class.flags.synthetic = true;
+                class.vtable = self.module.class(root).vtable.clone();
+                class.depth = 1;
+                let reference = self.module.add_class(class);
+                let mut captures = Vec::new();
+                for (index, descriptor) in captured.iter().enumerate() {
+                    let field = self.module.add_field(Field {
+                        name: format!("cap${index}"),
+                        owner: reference,
+                        ty: Type::of_descriptor(descriptor),
+                        is_static: false,
+                        volatile: false,
+                        thread_local: false,
+                        constant: None,
+                        descriptor: descriptor.clone(),
+                    });
+                    self.fields
+                        .insert((name.clone(), format!("cap${index}")), field);
+                    self.module.class_mut(reference).fields.push(field);
+                    captures.push(field);
+                }
+                let mut descriptors = vec![sam.to_string()];
+                descriptors.extend(bridges.iter().cloned());
+                for descriptor in descriptors {
+                    let function = self.lambda_method(
+                        reference,
+                        &name,
+                        method_name,
+                        &descriptor,
+                        &captures,
+                        captured,
+                        &implementation,
+                    )?;
+                    let held = self.module.class_mut(reference);
+                    held.methods.push(function);
+                    let slot = match held.slot_of(method_name, &descriptor) {
+                        Some(at) => {
+                            held.vtable[at as usize].2 = Some(function);
+                            at
+                        }
+                        None => {
+                            held.vtable.push((
+                                method_name.to_string(),
+                                descriptor.clone(),
+                                Some(function),
+                            ));
+                            (held.vtable.len() - 1) as u32
+                        }
+                    };
+                    self.module.function_mut(function).kind = FunctionKind::Virtual(slot);
+                    self.functions.insert(
+                        (name.clone(), method_name.to_string(), descriptor.clone()),
+                        function,
+                    );
+                }
+                self.complete_vtable(reference);
+                Ok(reference)
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            fn lambda_method(
+                &mut self,
+                class: ClassRef,
+                class_name: &str,
+                method_name: &str,
+                descriptor: &str,
+                captures: &[FieldRef],
+                captured: &[String],
+                implementation: &(u8, String, String, String, bool),
+            ) -> Result<FunctionRef, Diagnostic> {
+                let (kind, owner, target, target_descriptor, interface) = implementation.clone();
+                let (sam_parameters, sam_returns) = split_descriptor(descriptor);
+                let (target_parameters, target_returns) = split_descriptor(&target_descriptor);
+                let mut code = Emitter::new();
+                let this = code.emit(Type::Object, Op::Parameter(0));
+                let mut arguments: Vec<(Value, String)> = Vec::new();
+                for (index, field) in captures.iter().enumerate() {
+                    let ty = self.module.field(*field).ty;
+                    let value = code.emit(ty, Op::GetField(*field, this));
+                    arguments.push((value, captured[index].clone()));
+                }
+                for (index, parameter) in sam_parameters.iter().enumerate() {
+                    let value = code.emit(
+                        Type::of_descriptor(parameter),
+                        Op::Parameter(index as u32 + 1),
+                    );
+                    arguments.push((value, parameter.clone()));
+                }
+                let mut wanted: Vec<String> = Vec::new();
+                let receiver_first = matches!(kind, 5 | 7 | 9);
+                if receiver_first {
+                    wanted.push(format!("L{owner};"));
+                }
+                wanted.extend(target_parameters.iter().cloned());
+                let mut values = Vec::new();
+                for (index, (value, have)) in arguments.iter().enumerate() {
+                    let want = wanted.get(index).cloned().unwrap_or_else(|| have.clone());
+                    values.push(self.adapt(&mut code, *value, have, &want)?);
+                }
+                let result = match kind {
+                    6 => {
+                        let function = self.resolve_call(
+                            &owner,
+                            &target,
+                            &target_descriptor,
+                            true,
+                            interface,
+                        )?;
+                        code.call(
+                            function,
+                            values,
+                            Type::of_descriptor(&target_returns),
+                            &self.module,
+                        )
+                    }
+                    7 => {
+                        let function = self.resolve_call(
+                            &owner,
+                            &target,
+                            &target_descriptor,
+                            false,
+                            interface,
+                        )?;
+                        code.call(
+                            function,
+                            values,
+                            Type::of_descriptor(&target_returns),
+                            &self.module,
+                        )
+                    }
+                    5 | 9 => self.virtual_call(
+                        &mut code,
+                        &owner,
+                        &target,
+                        &target_descriptor,
+                        values,
+                        interface || kind == 9,
+                    )?,
+                    8 => {
+                        let made_class = self.declare(&owner)?;
+                        self.instantiate(made_class);
+                        let object = code.emit(Type::Object, Op::New(made_class));
+                        let mut all = vec![object];
+                        all.extend(values);
+                        let constructor =
+                            self.resolve_call(&owner, "<init>", &target_descriptor, false, false)?;
+                        code.call(constructor, all, Type::Void, &self.module);
+                        Some(object)
+                    }
+                    _ => {
+                        return Err(fail("EK415", "This compiled code asks for a bootstrap the native compiler does not provide.")
+                            .with_context(format!("Bootstrap: {owner}.{target}")));
+                    }
+                };
+                let returned = Type::of_descriptor(&sam_returns);
+                let produced = if kind == 8 {
+                    format!("L{owner};")
+                } else {
+                    target_returns.clone()
+                };
+                if returned == Type::Void {
+                    code.finish(Terminator::Return(None));
+                } else {
+                    let value = match result {
+                        Some(held) => self.adapt(&mut code, held, &produced, &sam_returns)?,
+                        None => code.emit(Type::Object, Op::Constant(Constant::Unit)),
+                    };
+                    code.finish(Terminator::Return(Some(value)));
+                }
+                let mut parameters = vec![Type::Object];
+                parameters.extend(sam_parameters.iter().map(|one| Type::of_descriptor(one)));
+                let function = self.module.add_function(Function {
+                    name: format!("{class_name}.{method_name}{descriptor}"),
+                    owner: Some(class),
+                    jvm: Some((
+                        class_name.to_string(),
+                        method_name.to_string(),
+                        descriptor.to_string(),
+                    )),
+                    parameters,
+                    returns: returned,
+                    locals: Vec::new(),
+                    blocks: code.blocks,
+                    kind: FunctionKind::Virtual(0),
+                    export: None,
+                    intrinsic: None,
+                    values: code.next,
+                    source: None,
+                });
+                Ok(function)
+            }
+
+            fn adapt(
+                &mut self,
+                code: &mut Emitter,
+                value: Value,
+                have: &str,
+                want: &str,
+            ) -> Result<Value, Diagnostic> {
+                let have_ty = Type::of_descriptor(have);
+                let want_ty = Type::of_descriptor(want);
+                if have_ty == want_ty {
+                    if want_ty == Type::Object && have != want {
+                        if let Some(class) = class_of_descriptor(want) {
+                            if class != ROOT {
+                                let reference = self.declare(&class)?;
+                                return Ok(code.emit(
+                                    Type::Object,
+                                    Op::Cast(TypeTest::Class(reference), value),
+                                ));
+                            }
+                        }
+                    }
+                    return Ok(value);
+                }
+                if have_ty == Type::Object && want_ty != Type::Object {
+                    let (boxed, getter) = boxed_class(want_ty);
+                    let class = self.declare(boxed)?;
+                    let object = code.emit(Type::Object, Op::Cast(TypeTest::Class(class), value));
+                    let descriptor = format!("(){}", descriptor_of(want_ty));
+                    let result =
+                        self.virtual_call(code, boxed, getter, &descriptor, vec![object], false)?;
+                    return Ok(result.unwrap_or(value));
+                }
+                if have_ty != Type::Object && want_ty == Type::Object {
+                    let (boxed, _) = boxed_class(have_ty);
+                    let descriptor = format!("({})L{boxed};", descriptor_of(have_ty));
+                    let function = self.resolve_call(boxed, "valueOf", &descriptor, true, false)?;
+                    return Ok(code
+                        .call(function, vec![value], Type::Object, &self.module)
+                        .unwrap_or(value));
+                }
+                let widened = match widen(have_ty) {
+                    Some(conversion) => code.emit(Type::I32, Op::Convert(conversion, value)),
+                    None => value,
+                };
+                let converted = match (have_ty.stack(), want_ty.stack()) {
+                    (Type::I32, Type::I64) => {
+                        code.emit(Type::I64, Op::Convert(Conversion::I32ToI64, widened))
+                    }
+                    (Type::I32, Type::F32) => {
+                        code.emit(Type::F32, Op::Convert(Conversion::I32ToF32, widened))
+                    }
+                    (Type::I32, Type::F64) => {
+                        code.emit(Type::F64, Op::Convert(Conversion::I32ToF64, widened))
+                    }
+                    (Type::I64, Type::F32) => {
+                        code.emit(Type::F32, Op::Convert(Conversion::I64ToF32, widened))
+                    }
+                    (Type::I64, Type::F64) => {
+                        code.emit(Type::F64, Op::Convert(Conversion::I64ToF64, widened))
+                    }
+                    (Type::F32, Type::F64) => {
+                        code.emit(Type::F64, Op::Convert(Conversion::F32ToF64, widened))
+                    }
+                    _ => widened,
+                };
+                Ok(match narrow(want_ty) {
+                    Some(conversion) => code.emit(want_ty, Op::Convert(conversion, converted)),
+                    None => converted,
+                })
+            }
+
+            pub fn resolve_call(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+                interface: bool,
+            ) -> Result<FunctionRef, Diagnostic> {
+                let _ = interface;
+                match self.function(owner, name, descriptor)? {
+                    Some(found) => {
+                        self.enqueue(found);
+                        if is_static {
+                            if let Some(class) = self.module.function(found).owner {
+                                if let Some(initializer) = self.module.class(class).initializer {
+                                    self.enqueue(initializer);
+                                }
+                            }
+                        }
+                        Ok(found)
+                    }
+                    None => Ok(self.external_function(owner, name, descriptor, is_static)),
+                }
+            }
+
+            pub fn virtual_call(
+                &mut self,
+                code: &mut Emitter,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                arguments: Vec<Value>,
+                interface: bool,
+            ) -> Result<Option<Value>, Diagnostic> {
+                let (_, returns) = split_descriptor(descriptor);
+                let returns = Type::of_descriptor(&returns);
+                let class = self.declare(owner)?;
+                let resolved = self.function(owner, name, descriptor)?;
+                if let Some(found) = resolved {
+                    let direct = match self.module.function(found).kind {
+                        FunctionKind::Direct | FunctionKind::External | FunctionKind::Static => {
+                            true
+                        }
+                        _ => {
+                            let owner_class = self.module.function(found).owner;
+                            let final_method = self.files.get(owner).is_some_and(|held| {
+                                held.methods.iter().any(|one| {
+                                    one.name == name
+                                        && one.descriptor == descriptor
+                                        && one.access_flags & 0x0010 != 0
+                                })
+                            });
+                            final_method
+                                || owner_class
+                                    .is_some_and(|held| self.module.class(held).flags.final_)
+                        }
+                    };
+                    if direct && !self.module.class(class).flags.interface {
+                        self.enqueue(found);
+                        return Ok(code.call(found, arguments, returns, &self.module));
+                    }
+                }
+                if self.module.class(class).flags.interface || interface {
+                    if let Some(slot) = self.module.class(class).interface_slot(name, descriptor) {
+                        let value = code.emit(returns, Op::CallInterface(class, slot, arguments));
+                        return Ok((returns != Type::Void).then_some(value));
+                    }
+                    let root = self.declare(ROOT)?;
+                    if let Some(slot) = self.module.class(root).slot_of(name, descriptor) {
+                        let value = code.emit(returns, Op::CallVirtual(root, slot, arguments));
+                        return Ok((returns != Type::Void).then_some(value));
+                    }
+                }
+                if let Some(slot) = self.module.class(class).slot_of(name, descriptor) {
+                    let value = code.emit(returns, Op::CallVirtual(class, slot, arguments));
+                    return Ok((returns != Type::Void).then_some(value));
+                }
+                let function = match resolved {
+                    Some(found) => found,
+                    None => self.external_function(owner, name, descriptor, false),
+                };
+                self.enqueue(function);
+                Ok(code.call(function, arguments, returns, &self.module))
+            }
+
+            pub fn instantiated(&mut self, class: ClassRef) {
+                self.instantiate(class);
+            }
+
+            pub fn initializer_of(&mut self, class: ClassRef) -> Option<FunctionRef> {
+                let found = self.module.class(class).initializer;
+                if let Some(held) = found {
+                    self.enqueue(held);
+                }
+                found
+            }
+
+            pub fn finish(self) -> (Module, BTreeSet<String>) {
+                (self.module, self.missing)
+            }
+        }
+
+        pub fn external_symbol(owner: &str, name: &str, descriptor: &str) -> String {
+            let mut out = String::from("Kjvm_");
+            for one in format!("{owner}.{name}{descriptor}").chars() {
+                match one {
+                    'a'..='z' | 'A'..='Z' | '0'..='9' => out.push(one),
+                    '/' | '.' => out.push('_'),
+                    _ => out.push_str(&format!("_{:02x}", one as u32)),
+                }
+            }
+            out
+        }
+
+        pub fn boxed_class(ty: Type) -> (&'static str, &'static str) {
+            match ty {
+                Type::Bool => ("java/lang/Boolean", "booleanValue"),
+                Type::I8 => ("java/lang/Byte", "byteValue"),
+                Type::I16 => ("java/lang/Short", "shortValue"),
+                Type::Char => ("java/lang/Character", "charValue"),
+                Type::I64 => ("java/lang/Long", "longValue"),
+                Type::F32 => ("java/lang/Float", "floatValue"),
+                Type::F64 => ("java/lang/Double", "doubleValue"),
+                _ => ("java/lang/Integer", "intValue"),
+            }
+        }
+
+        pub fn descriptor_of(ty: Type) -> &'static str {
+            match ty {
+                Type::Void => "V",
+                Type::Bool => "Z",
+                Type::I8 => "B",
+                Type::I16 => "S",
+                Type::Char => "C",
+                Type::I32 => "I",
+                Type::I64 => "J",
+                Type::F32 => "F",
+                Type::F64 => "D",
+                _ => "Ljava/lang/Object;",
+            }
+        }
+
+        pub struct Emitter {
+            pub blocks: Vec<Block>,
+            current: Vec<Instruction>,
+            pub next: u32,
+            line: u32,
+        }
+
+        impl Emitter {
+            pub fn new() -> Emitter {
+                Emitter {
+                    blocks: Vec::new(),
+                    current: Vec::new(),
+                    next: 0,
+                    line: 0,
+                }
+            }
+
+            pub fn emit(&mut self, ty: Type, op: Op) -> Value {
+                let value = Value(self.next);
+                self.next += 1;
+                self.current.push(Instruction {
+                    result: (ty != Type::Void).then_some(value),
+                    ty,
+                    op,
+                    line: self.line,
+                });
+                value
+            }
+
+            pub fn effect(&mut self, op: Op) {
+                self.current.push(Instruction {
+                    result: None,
+                    ty: Type::Void,
+                    op,
+                    line: self.line,
+                });
+            }
+
+            pub fn call(
+                &mut self,
+                function: FunctionRef,
+                arguments: Vec<Value>,
+                returns: Type,
+                module: &Module,
+            ) -> Option<Value> {
+                let declared = module.function(function).returns;
+                let ty = if declared == Type::Void {
+                    Type::Void
+                } else {
+                    declared
+                };
+                if ty == Type::Void {
+                    self.effect(Op::Call(function, arguments));
+                    let _ = returns;
+                    None
+                } else {
+                    Some(self.emit(ty, Op::Call(function, arguments)))
+                }
+            }
+
+            pub fn finish(&mut self, terminator: Terminator) {
+                let instructions = std::mem::take(&mut self.current);
+                self.blocks.push(Block {
+                    instructions,
+                    terminator,
+                    handlers: Vec::new(),
+                });
+            }
+        }
+
+        impl Default for Emitter {
+            fn default() -> Emitter {
+                Emitter::new()
+            }
+        }
+
+        struct Built {
+            locals: Vec<Local>,
+            blocks: Vec<Block>,
+            values: u32,
+        }
+
+        struct MethodBuilder<'m, 't, 'a> {
+            translator: &'t mut Translator<'a>,
+            class: &'m jvm::Class,
+            code: Emitter,
+            locals: Vec<Local>,
+            local_index: HashMap<(u16, Type), LocalRef>,
+            stack_locals: HashMap<(usize, Type), LocalRef>,
+            stack: Vec<(Value, Type)>,
+            lines: &'m [(u16, u16)],
+            this_class: ClassRef,
+        }
+
+        impl<'m, 't, 'a> MethodBuilder<'m, 't, 'a> {
+            fn build(
+                translator: &'t mut Translator<'a>,
+                class: &'m jvm::Class,
+                method: &'m jvm::Member,
+                code: &'m jvm::Code,
+                function: &Function,
+                reference: FunctionRef,
+            ) -> Result<Built, Diagnostic> {
+                let decoded = decode(&code.bytes).map_err(|(pc, opcode)| {
+                    fail(
+                        "EK410",
+                        "An instruction this compiler does not know was found in compiled code.",
+                    )
+                    .with_context(format!("Opcode: 0x{opcode:02x}"))
+                    .with_context(format!("Offset: {pc}"))
+                    .with_context(format!(
+                        "Method: {}.{}{}",
+                        internal(&class.name),
+                        method.name,
+                        method.descriptor
+                    ))
+                })?;
+                let this_class = translator.declare(&internal(&class.name))?;
+                let mut leaders: BTreeSet<u32> = BTreeSet::new();
+                leaders.insert(0);
+                for one in &decoded {
+                    match &one.operand {
+                        Operand::Branch(to) => {
+                            leaders.insert(*to);
+                            leaders.insert(one.next);
+                        }
+                        Operand::Table(default, _, targets) => {
+                            leaders.insert(*default);
+                            leaders.extend(targets.iter().copied());
+                            leaders.insert(one.next);
+                        }
+                        Operand::Lookup(default, pairs) => {
+                            leaders.insert(*default);
+                            leaders.extend(pairs.iter().map(|(_, to)| *to));
+                            leaders.insert(one.next);
+                        }
+                        _ => {}
+                    }
+                    if matches!(one.opcode, 0xac..=0xb1 | 0xbf) {
+                        leaders.insert(one.next);
+                    }
+                }
+                for (start, end, handler, _) in &code.handlers {
+                    leaders.insert(u32::from(*start));
+                    leaders.insert(u32::from(*end));
+                    leaders.insert(u32::from(*handler));
+                }
+                let end_pc = code.bytes.len() as u32;
+                leaders.retain(|at| *at < end_pc);
+                let starts: Vec<u32> = leaders.iter().copied().collect();
+                let block_of: HashMap<u32, u32> = starts
+                    .iter()
+                    .enumerate()
+                    .map(|(at, pc)| (*pc, at as u32))
+                    .collect();
+                let mut builder = MethodBuilder {
+                    translator,
+                    class,
+                    code: Emitter::new(),
+                    locals: Vec::new(),
+                    local_index: HashMap::new(),
+                    stack_locals: HashMap::new(),
+                    stack: Vec::new(),
+                    lines: &code.lines,
+                    this_class,
+                };
+                let count = starts.len();
+                let mut entry_stack: Vec<Option<Vec<Type>>> = vec![None; count];
+                let mut handler_blocks: HashSet<u32> = HashSet::new();
+                for (_, _, handler, _) in &code.handlers {
+                    if let Some(at) = block_of.get(&u32::from(*handler)) {
+                        handler_blocks.insert(*at);
+                        entry_stack[*at as usize] = Some(vec![Type::Object]);
+                    }
+                }
+                entry_stack[0] = Some(Vec::new());
+                let mut produced: Vec<Option<Block>> = vec![None; count];
+                let mut prologue: Vec<Instruction> = Vec::new();
+                {
+                    let mut slot: u16 = 0;
+                    for (index, ty) in function.parameters.iter().enumerate() {
+                        let value = builder.code.emit(*ty, Op::Parameter(index as u32));
+                        let (value, stack_ty) = match widen(*ty) {
+                            Some(conversion) => (
+                                builder.code.emit(Type::I32, Op::Convert(conversion, value)),
+                                Type::I32,
+                            ),
+                            None => (value, *ty),
+                        };
+                        let local = builder.local(slot, stack_ty);
+                        builder.code.effect(Op::StoreLocal(local, value));
+                        slot += if matches!(ty, Type::I64 | Type::F64) {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                    prologue.append(&mut builder.code.current);
+                }
+                let mut work: VecDeque<u32> = VecDeque::new();
+                work.push_back(0);
+                for at in &handler_blocks {
+                    work.push_back(*at);
+                }
+                let mut done: HashSet<u32> = HashSet::new();
+                while let Some(index) = work.pop_front() {
+                    if done.contains(&index) {
+                        continue;
+                    }
+                    let Some(stack_types) = entry_stack[index as usize].clone() else {
+                        continue;
+                    };
+                    done.insert(index);
+                    let start = starts[index as usize];
+                    let end = starts.get(index as usize + 1).copied().unwrap_or(end_pc);
+                    builder.stack.clear();
+                    if handler_blocks.contains(&index) {
+                        let caught = builder.code.emit(Type::Object, Op::Caught);
+                        builder.stack.push((caught, Type::Object));
+                    } else {
+                        for (depth, ty) in stack_types.iter().enumerate() {
+                            let local = builder.stack_local(depth, *ty);
+                            let value = builder.code.emit(*ty, Op::LoadLocal(local));
+                            builder.stack.push((value, *ty));
+                        }
+                    }
+                    let mut terminator: Option<Terminator> = None;
+                    let mut fallthrough = true;
+                    for one in decoded.iter().filter(|one| one.pc >= start && one.pc < end) {
+                        builder.code.line = builder.line_of(one.pc);
+                        let outcome = builder.instruction(one, function, &block_of)?;
+                        if let Some(held) = outcome {
+                            terminator = Some(held);
+                            fallthrough = false;
+                            break;
+                        }
+                    }
+                    let exit_types: Vec<Type> = builder.stack.iter().map(|(_, ty)| *ty).collect();
+                    let terminator = match terminator {
+                        Some(held) => held,
+                        None if fallthrough && end < end_pc => {
+                            Terminator::Jump(BlockRef(block_of[&end]))
+                        }
+                        None => Terminator::Unreachable,
+                    };
+                    let mut successors = terminator.successors();
+                    successors.dedup();
+                    if !successors.is_empty() {
+                        builder.spill_stack();
+                    }
+                    for next in &successors {
+                        let slot = &mut entry_stack[next.0 as usize];
+                        if slot.is_none() {
+                            *slot = Some(exit_types.clone());
+                        }
+                        work.push_back(next.0);
+                    }
+                    let mut handlers = Vec::new();
+                    for (from, to, handler, catch_type) in &code.handlers {
+                        if start >= u32::from(*from) && start < u32::from(*to) {
+                            let class_ref = if *catch_type == 0 {
+                                None
+                            } else {
+                                match class_name(class, *catch_type) {
+                                    Some(caught) => Some(builder.translator.declare(&caught)?),
+                                    None => None,
+                                }
+                            };
+                            if let Some(target) = block_of.get(&u32::from(*handler)) {
+                                handlers.push(Handler {
+                                    class: class_ref,
+                                    target: BlockRef(*target),
+                                });
+                            }
+                        }
+                    }
+                    let instructions = std::mem::take(&mut builder.code.current);
+                    produced[index as usize] = Some(Block {
+                        instructions,
+                        terminator,
+                        handlers,
+                    });
+                }
+                let mut blocks: Vec<Block> = Vec::with_capacity(count + 1);
+                blocks.push(Block {
+                    instructions: prologue,
+                    terminator: Terminator::Jump(BlockRef(1)),
+                    handlers: Vec::new(),
+                });
+                for held in produced {
+                    let mut block = held.unwrap_or(Block {
+                        instructions: Vec::new(),
+                        terminator: Terminator::Unreachable,
+                        handlers: Vec::new(),
+                    });
+                    shift_blocks(&mut block, 1);
+                    blocks.push(block);
+                }
+                let _ = reference;
+                Ok(Built {
+                    locals: builder.locals,
+                    blocks,
+                    values: builder.code.next,
+                })
+            }
+
+            fn line_of(&self, pc: u32) -> u32 {
+                let mut line = 0;
+                for (start, number) in self.lines {
+                    if u32::from(*start) <= pc {
+                        line = u32::from(*number);
+                    }
+                }
+                line
+            }
+
+            fn local(&mut self, slot: u16, ty: Type) -> LocalRef {
+                let ty = ty.stack();
+                if let Some(found) = self.local_index.get(&(slot, ty)) {
+                    return *found;
+                }
+                let made = LocalRef(self.locals.len() as u32);
+                self.locals.push(Local {
+                    ty,
+                    name: format!("slot{slot}_{}", ty.name()),
+                });
+                self.local_index.insert((slot, ty), made);
+                made
+            }
+
+            fn stack_local(&mut self, depth: usize, ty: Type) -> LocalRef {
+                if let Some(found) = self.stack_locals.get(&(depth, ty)) {
+                    return *found;
+                }
+                let made = LocalRef(self.locals.len() as u32);
+                self.locals.push(Local {
+                    ty,
+                    name: format!("stack{depth}_{}", ty.name()),
+                });
+                self.stack_locals.insert((depth, ty), made);
+                made
+            }
+
+            fn spill_stack(&mut self) {
+                let held: Vec<(Value, Type)> = self.stack.clone();
+                for (depth, (value, ty)) in held.iter().enumerate() {
+                    let local = self.stack_local(depth, *ty);
+                    self.code.effect(Op::StoreLocal(local, *value));
+                }
+            }
+
+            fn push(&mut self, value: Value, ty: Type) {
+                self.stack.push((value, ty.stack()));
+            }
+
+            fn pop(&mut self) -> (Value, Type) {
+                self.stack.pop().unwrap_or((Value(u32::MAX), Type::Void))
+            }
+
+            fn value(&mut self, ty: Type, op: Op) -> Value {
+                let value = self.code.emit(ty, op);
+                match widen(ty) {
+                    Some(conversion) => self.code.emit(Type::I32, Op::Convert(conversion, value)),
+                    None => value,
+                }
+            }
+
+            fn constant(&mut self, constant: Constant) {
+                let ty = constant.ty().stack();
+                let constant = match constant {
+                    Constant::Bool(held) => Constant::I32(i32::from(held)),
+                    Constant::Char(held) => Constant::I32(i32::from(held)),
+                    other => other,
+                };
+                let value = self.code.emit(ty, Op::Constant(constant));
+                self.push(value, ty);
+            }
+
+            fn binary(&mut self, op: BinaryOp, ty: Type) {
+                let (right, _) = self.pop();
+                let (left, _) = self.pop();
+                let value = self.code.emit(ty, Op::Binary(op, left, right));
+                self.push(value, ty);
+            }
+
+            fn convert(&mut self, conversion: Conversion) {
+                let (value, _) = self.pop();
+                let result = conversion.result();
+                let made = self.code.emit(result, Op::Convert(conversion, value));
+                let made = match widen(result) {
+                    Some(back) => self.code.emit(Type::I32, Op::Convert(back, made)),
+                    None => made,
+                };
+                self.push(made, result.stack());
+            }
+
+            fn branch_to(&self, block_of: &HashMap<u32, u32>, pc: u32) -> BlockRef {
+                BlockRef(block_of.get(&pc).copied().unwrap_or(0))
+            }
+
+            fn class_reference(&mut self, name: &str) -> Result<TypeTest, Diagnostic> {
+                if let Some(element) = name.strip_prefix('[') {
+                    let depth = name.chars().take_while(|one| *one == '[').count() as u32;
+                    let inner = name.trim_start_matches('[');
+                    let kind = ArrayKind::of_element_descriptor(inner);
+                    if depth > 1 {
+                        return Ok(TypeTest::MultiArray(kind, depth));
+                    }
+                    let _ = element;
+                    return Ok(if kind == ArrayKind::Object {
+                        TypeTest::ObjectArray
+                    } else {
+                        TypeTest::PrimitiveArray(kind)
+                    });
+                }
+                Ok(TypeTest::Class(self.translator.declare(name)?))
+            }
+
+            fn arguments(&mut self, descriptor: &str, receiver: bool) -> Vec<Value> {
+                let (parameters, _) = split_descriptor(descriptor);
+                let mut values = Vec::with_capacity(parameters.len() + 1);
+                for parameter in parameters.iter().rev() {
+                    let (value, _) = self.pop();
+                    let ty = Type::of_descriptor(parameter);
+                    let value = match narrow(ty) {
+                        Some(conversion) => self.code.emit(ty, Op::Convert(conversion, value)),
+                        None => value,
+                    };
+                    values.push(value);
+                }
+                if receiver {
+                    let (value, _) = self.pop();
+                    values.push(value);
+                }
+                values.reverse();
+                values
+            }
+
+            fn returned(&mut self, value: Option<Value>, descriptor: &str) {
+                let (_, returns) = split_descriptor(descriptor);
+                let ty = Type::of_descriptor(&returns);
+                if let Some(held) = value {
+                    let held = match widen(ty) {
+                        Some(conversion) => {
+                            self.code.emit(Type::I32, Op::Convert(conversion, held))
+                        }
+                        None => held,
+                    };
+                    self.push(held, ty);
+                }
+            }
+
+            fn needs_init(&mut self, owner: ClassRef) -> bool {
+                if owner == self.this_class {
+                    return false;
+                }
+                let mut current = Some(owner);
+                while let Some(held) = current {
+                    if self.translator.initializer_of(held).is_some() {
+                        return true;
+                    }
+                    current = self.translator.module.class(held).super_class;
+                }
+                false
+            }
+
+            fn instruction(
+                &mut self,
+                one: &Decoded,
+                function: &Function,
+                block_of: &HashMap<u32, u32>,
+            ) -> Result<Option<Terminator>, Diagnostic> {
+                let opcode = one.opcode;
+                let local_slot = |operand: &Operand, fixed: u8, base: u8| -> u16 {
+                    match operand {
+                        Operand::Local(slot) => *slot,
+                        _ => u16::from(fixed - base),
+                    }
+                };
+                match opcode {
+                    0x00 => {}
+                    0x01 => self.constant(Constant::Null),
+                    0x02..=0x08 => self.constant(Constant::I32(i32::from(opcode) - 3)),
+                    0x09 | 0x0a => self.constant(Constant::I64(i64::from(opcode) - 9)),
+                    0x0b..=0x0d => {
+                        self.constant(Constant::F32((f32::from(opcode - 0x0b)).to_bits()))
+                    }
+                    0x0e | 0x0f => {
+                        self.constant(Constant::F64((f64::from(opcode - 0x0e)).to_bits()))
+                    }
+                    0x10 | 0x11 => {
+                        if let Operand::Int(held) = one.operand {
+                            self.constant(Constant::I32(held));
+                        }
+                    }
+                    0x12..=0x14 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        let constant = match self.class.constants.get(index as usize) {
+                            Some(jvm::Constant::Integer(held)) => Constant::I32(*held),
+                            Some(jvm::Constant::Float(held)) => Constant::F32(*held),
+                            Some(jvm::Constant::Long(held)) => Constant::I64(*held),
+                            Some(jvm::Constant::Double(held)) => Constant::F64(*held),
+                            Some(jvm::Constant::String(text)) => {
+                                let text = utf8(self.class, *text).unwrap_or_default();
+                                Constant::String(self.translator.module.intern(&text))
+                            }
+                            Some(jvm::Constant::Class(name)) => {
+                                let name = utf8(self.class, *name).unwrap_or_default();
+                                match self.class_reference(&name)? {
+                                    TypeTest::Class(class) => Constant::Class(class),
+                                    TypeTest::PrimitiveArray(kind) => Constant::ArrayClass(kind, 1),
+                                    TypeTest::ObjectArray => {
+                                        Constant::ArrayClass(ArrayKind::Object, 1)
+                                    }
+                                    TypeTest::MultiArray(kind, depth) => {
+                                        Constant::ArrayClass(kind, depth)
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(fail("EK415", "This compiled code asks for a bootstrap the native compiler does not provide.")
+                                    .with_context(format!("Bootstrap: {}.constant", internal(&self.class.name))));
+                            }
+                        };
+                        self.constant(constant);
+                    }
+                    0x15..=0x2d => {
+                        let (ty, slot) = match opcode {
+                            0x15 => (Type::I32, local_slot(&one.operand, 0, 0)),
+                            0x16 => (Type::I64, local_slot(&one.operand, 0, 0)),
+                            0x17 => (Type::F32, local_slot(&one.operand, 0, 0)),
+                            0x18 => (Type::F64, local_slot(&one.operand, 0, 0)),
+                            0x19 => (Type::Object, local_slot(&one.operand, 0, 0)),
+                            0x1a..=0x1d => (Type::I32, u16::from(opcode - 0x1a)),
+                            0x1e..=0x21 => (Type::I64, u16::from(opcode - 0x1e)),
+                            0x22..=0x25 => (Type::F32, u16::from(opcode - 0x22)),
+                            0x26..=0x29 => (Type::F64, u16::from(opcode - 0x26)),
+                            _ => (Type::Object, u16::from(opcode - 0x2a)),
+                        };
+                        let local = self.local(slot, ty);
+                        let value = self.code.emit(ty, Op::LoadLocal(local));
+                        self.push(value, ty);
+                    }
+                    0x2e..=0x35 => {
+                        let kind = match opcode {
+                            0x2e => ArrayKind::Int,
+                            0x2f => ArrayKind::Long,
+                            0x30 => ArrayKind::Float,
+                            0x31 => ArrayKind::Double,
+                            0x32 => ArrayKind::Object,
+                            0x33 => ArrayKind::Byte,
+                            0x34 => ArrayKind::Char,
+                            _ => ArrayKind::Short,
+                        };
+                        let (index, _) = self.pop();
+                        let (array, _) = self.pop();
+                        let value = self.value(kind.element(), Op::ArrayGet(kind, array, index));
+                        self.push(value, kind.element());
+                    }
+                    0x36..=0x4e => {
+                        let (ty, slot) = match opcode {
+                            0x36 => (Type::I32, local_slot(&one.operand, 0, 0)),
+                            0x37 => (Type::I64, local_slot(&one.operand, 0, 0)),
+                            0x38 => (Type::F32, local_slot(&one.operand, 0, 0)),
+                            0x39 => (Type::F64, local_slot(&one.operand, 0, 0)),
+                            0x3a => (Type::Object, local_slot(&one.operand, 0, 0)),
+                            0x3b..=0x3e => (Type::I32, u16::from(opcode - 0x3b)),
+                            0x3f..=0x42 => (Type::I64, u16::from(opcode - 0x3f)),
+                            0x43..=0x46 => (Type::F32, u16::from(opcode - 0x43)),
+                            0x47..=0x4a => (Type::F64, u16::from(opcode - 0x47)),
+                            _ => (Type::Object, u16::from(opcode - 0x4b)),
+                        };
+                        let (value, _) = self.pop();
+                        let local = self.local(slot, ty);
+                        self.code.effect(Op::StoreLocal(local, value));
+                    }
+                    0x4f..=0x56 => {
+                        let kind = match opcode {
+                            0x4f => ArrayKind::Int,
+                            0x50 => ArrayKind::Long,
+                            0x51 => ArrayKind::Float,
+                            0x52 => ArrayKind::Double,
+                            0x53 => ArrayKind::Object,
+                            0x54 => ArrayKind::Byte,
+                            0x55 => ArrayKind::Char,
+                            _ => ArrayKind::Short,
+                        };
+                        let (value, _) = self.pop();
+                        let (index, _) = self.pop();
+                        let (array, _) = self.pop();
+                        let value = match narrow(kind.element()) {
+                            Some(conversion) => self
+                                .code
+                                .emit(kind.element(), Op::Convert(conversion, value)),
+                            None => value,
+                        };
+                        self.code.effect(Op::ArraySet(kind, array, index, value));
+                    }
+                    0x57 => {
+                        self.pop();
+                    }
+                    0x58 => {
+                        let (_, ty) = self.pop();
+                        if !matches!(ty, Type::I64 | Type::F64) {
+                            self.pop();
+                        }
+                    }
+                    0x59 => {
+                        let top = self.pop();
+                        self.stack.push(top);
+                        self.stack.push(top);
+                    }
+                    0x5a => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        self.stack.push(first);
+                        self.stack.push(second);
+                        self.stack.push(first);
+                    }
+                    0x5b => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        if matches!(second.1, Type::I64 | Type::F64) {
+                            self.stack.push(first);
+                            self.stack.push(second);
+                            self.stack.push(first);
+                        } else {
+                            let third = self.pop();
+                            self.stack.push(first);
+                            self.stack.push(third);
+                            self.stack.push(second);
+                            self.stack.push(first);
+                        }
+                    }
+                    0x5c => {
+                        let first = self.pop();
+                        if matches!(first.1, Type::I64 | Type::F64) {
+                            self.stack.push(first);
+                            self.stack.push(first);
+                        } else {
+                            let second = self.pop();
+                            self.stack.push(second);
+                            self.stack.push(first);
+                            self.stack.push(second);
+                            self.stack.push(first);
+                        }
+                    }
+                    0x5d => {
+                        let first = self.pop();
+                        if matches!(first.1, Type::I64 | Type::F64) {
+                            let second = self.pop();
+                            self.stack.push(first);
+                            self.stack.push(second);
+                            self.stack.push(first);
+                        } else {
+                            let second = self.pop();
+                            let third = self.pop();
+                            self.stack.push(second);
+                            self.stack.push(first);
+                            self.stack.push(third);
+                            self.stack.push(second);
+                            self.stack.push(first);
+                        }
+                    }
+                    0x5e => {
+                        let first = self.pop();
+                        if matches!(first.1, Type::I64 | Type::F64) {
+                            let second = self.pop();
+                            if matches!(second.1, Type::I64 | Type::F64) {
+                                self.stack.push(first);
+                                self.stack.push(second);
+                                self.stack.push(first);
+                            } else {
+                                let third = self.pop();
+                                self.stack.push(first);
+                                self.stack.push(third);
+                                self.stack.push(second);
+                                self.stack.push(first);
+                            }
+                        } else {
+                            let second = self.pop();
+                            let third = self.pop();
+                            if matches!(third.1, Type::I64 | Type::F64) {
+                                self.stack.push(second);
+                                self.stack.push(first);
+                                self.stack.push(third);
+                                self.stack.push(second);
+                                self.stack.push(first);
+                            } else {
+                                let fourth = self.pop();
+                                self.stack.push(second);
+                                self.stack.push(first);
+                                self.stack.push(fourth);
+                                self.stack.push(third);
+                                self.stack.push(second);
+                                self.stack.push(first);
+                            }
+                        }
+                    }
+                    0x5f => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        self.stack.push(first);
+                        self.stack.push(second);
+                    }
+                    0x60..=0x83 => {
+                        let base = opcode - 0x60;
+                        let family = base / 4;
+                        let ty = match base % 4 {
+                            0 => Type::I32,
+                            1 => Type::I64,
+                            2 => Type::F32,
+                            _ => Type::F64,
+                        };
+                        match opcode {
+                            0x60..=0x73 => {
+                                let op = match family {
+                                    0 => BinaryOp::Add,
+                                    1 => BinaryOp::Sub,
+                                    2 => BinaryOp::Mul,
+                                    3 => BinaryOp::Div,
+                                    _ => BinaryOp::Rem,
+                                };
+                                self.binary(op, ty);
+                            }
+                            0x74..=0x77 => {
+                                let (value, _) = self.pop();
+                                let made = self.code.emit(ty, Op::Unary(UnaryOp::Neg, value));
+                                self.push(made, ty);
+                            }
+                            0x78 | 0x79 => self.binary(
+                                BinaryOp::Shl,
+                                if opcode == 0x78 { Type::I32 } else { Type::I64 },
+                            ),
+                            0x7a | 0x7b => self.binary(
+                                BinaryOp::Shr,
+                                if opcode == 0x7a { Type::I32 } else { Type::I64 },
+                            ),
+                            0x7c | 0x7d => self.binary(
+                                BinaryOp::UShr,
+                                if opcode == 0x7c { Type::I32 } else { Type::I64 },
+                            ),
+                            0x7e | 0x7f => self.binary(
+                                BinaryOp::And,
+                                if opcode == 0x7e { Type::I32 } else { Type::I64 },
+                            ),
+                            0x80 | 0x81 => self.binary(
+                                BinaryOp::Or,
+                                if opcode == 0x80 { Type::I32 } else { Type::I64 },
+                            ),
+                            _ => self.binary(
+                                BinaryOp::Xor,
+                                if opcode == 0x82 { Type::I32 } else { Type::I64 },
+                            ),
+                        }
+                    }
+                    0x84 => {
+                        if let Operand::Iinc(slot, delta) = one.operand {
+                            let local = self.local(slot, Type::I32);
+                            let value = self.code.emit(Type::I32, Op::LoadLocal(local));
+                            let amount = self
+                                .code
+                                .emit(Type::I32, Op::Constant(Constant::I32(delta)));
+                            let sum = self
+                                .code
+                                .emit(Type::I32, Op::Binary(BinaryOp::Add, value, amount));
+                            self.code.effect(Op::StoreLocal(local, sum));
+                        }
+                    }
+                    0x85 => self.convert(Conversion::I32ToI64),
+                    0x86 => self.convert(Conversion::I32ToF32),
+                    0x87 => self.convert(Conversion::I32ToF64),
+                    0x88 => self.convert(Conversion::I64ToI32),
+                    0x89 => self.convert(Conversion::I64ToF32),
+                    0x8a => self.convert(Conversion::I64ToF64),
+                    0x8b => self.convert(Conversion::F32ToI32),
+                    0x8c => self.convert(Conversion::F32ToI64),
+                    0x8d => self.convert(Conversion::F32ToF64),
+                    0x8e => self.convert(Conversion::F64ToI32),
+                    0x8f => self.convert(Conversion::F64ToI64),
+                    0x90 => self.convert(Conversion::F64ToF32),
+                    0x91 => self.convert(Conversion::I32ToI8),
+                    0x92 => self.convert(Conversion::I32ToChar),
+                    0x93 => self.convert(Conversion::I32ToI16),
+                    0x94..=0x98 => {
+                        let kind = match opcode {
+                            0x94 => ThreeWay::Long,
+                            0x95 => ThreeWay::FloatLess,
+                            0x96 => ThreeWay::FloatGreater,
+                            0x97 => ThreeWay::DoubleLess,
+                            _ => ThreeWay::DoubleGreater,
+                        };
+                        let (right, _) = self.pop();
+                        let (left, _) = self.pop();
+                        let value = self.code.emit(Type::I32, Op::ThreeWay(kind, left, right));
+                        self.push(value, Type::I32);
+                    }
+                    0x99..=0xa6 | 0xc6 | 0xc7 => {
+                        let Operand::Branch(to) = one.operand else {
+                            return Ok(None);
+                        };
+                        let op = match opcode {
+                            0x99 | 0x9f | 0xa5 | 0xc6 => CompareOp::Eq,
+                            0x9a | 0xa0 | 0xa6 | 0xc7 => CompareOp::Ne,
+                            0x9b | 0xa1 => CompareOp::Lt,
+                            0x9c | 0xa2 => CompareOp::Ge,
+                            0x9d | 0xa3 => CompareOp::Gt,
+                            _ => CompareOp::Le,
+                        };
+                        let (right, left) = match opcode {
+                            0x99..=0x9e => {
+                                let (left, _) = self.pop();
+                                let zero =
+                                    self.code.emit(Type::I32, Op::Constant(Constant::I32(0)));
+                                (zero, left)
+                            }
+                            0xc6 | 0xc7 => {
+                                let (left, _) = self.pop();
+                                let null =
+                                    self.code.emit(Type::Object, Op::Constant(Constant::Null));
+                                (null, left)
+                            }
+                            _ => {
+                                let (right, _) = self.pop();
+                                let (left, _) = self.pop();
+                                (right, left)
+                            }
+                        };
+                        let condition = self.code.emit(Type::Bool, Op::Compare(op, left, right));
+                        return Ok(Some(Terminator::Branch(
+                            condition,
+                            self.branch_to(block_of, to),
+                            self.branch_to(block_of, one.next),
+                        )));
+                    }
+                    0xa7 | 0xc8 => {
+                        if let Operand::Branch(to) = one.operand {
+                            return Ok(Some(Terminator::Jump(self.branch_to(block_of, to))));
+                        }
+                    }
+                    0xa8 | 0xa9 | 0xc9 => {
+                        return Err(fail("EK410", "An instruction this compiler does not know was found in compiled code.")
+                            .with_context(format!("Opcode: 0x{opcode:02x}"))
+                            .with_context(format!("Offset: {}", one.pc))
+                            .with_context(format!("Method: {}", function.name)));
+                    }
+                    0xaa => {
+                        if let Operand::Table(default, low, targets) = &one.operand {
+                            let (value, _) = self.pop();
+                            let cases = targets
+                                .iter()
+                                .enumerate()
+                                .map(|(at, to)| {
+                                    (low.wrapping_add(at as i32), self.branch_to(block_of, *to))
+                                })
+                                .collect();
+                            return Ok(Some(Terminator::Switch(
+                                value,
+                                cases,
+                                self.branch_to(block_of, *default),
+                            )));
+                        }
+                    }
+                    0xab => {
+                        if let Operand::Lookup(default, pairs) = &one.operand {
+                            let (value, _) = self.pop();
+                            let cases = pairs
+                                .iter()
+                                .map(|(key, to)| (*key, self.branch_to(block_of, *to)))
+                                .collect();
+                            return Ok(Some(Terminator::Switch(
+                                value,
+                                cases,
+                                self.branch_to(block_of, *default),
+                            )));
+                        }
+                    }
+                    0xac..=0xb0 => {
+                        let (value, _) = self.pop();
+                        let value = match narrow(function.returns) {
+                            Some(conversion) => self
+                                .code
+                                .emit(function.returns, Op::Convert(conversion, value)),
+                            None => value,
+                        };
+                        return Ok(Some(Terminator::Return(Some(value))));
+                    }
+                    0xb1 => return Ok(Some(Terminator::Return(None))),
+                    0xb2..=0xb5 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        let Some((owner, name, descriptor, _)) = member(self.class, index) else {
+                            return Ok(None);
+                        };
+                        let is_static = matches!(opcode, 0xb2 | 0xb3);
+                        let field = self
+                            .translator
+                            .field(&owner, &name, &descriptor, is_static)?;
+                        let ty = Type::of_descriptor(&descriptor);
+                        if is_static {
+                            let owner_ref = self.translator.module.field(field).owner;
+                            if self.needs_init(owner_ref) {
+                                self.code.effect(Op::InitClass(owner_ref));
+                            }
+                        }
+                        match opcode {
+                            0xb2 => {
+                                let value = self.value(ty, Op::GetStatic(field));
+                                self.push(value, ty);
+                            }
+                            0xb3 => {
+                                let (value, _) = self.pop();
+                                let value = match narrow(ty) {
+                                    Some(conversion) => {
+                                        self.code.emit(ty, Op::Convert(conversion, value))
+                                    }
+                                    None => value,
+                                };
+                                self.code.effect(Op::SetStatic(field, value));
+                            }
+                            0xb4 => {
+                                let (object, _) = self.pop();
+                                let value = self.value(ty, Op::GetField(field, object));
+                                self.push(value, ty);
+                            }
+                            _ => {
+                                let (value, _) = self.pop();
+                                let (object, _) = self.pop();
+                                let value = match narrow(ty) {
+                                    Some(conversion) => {
+                                        self.code.emit(ty, Op::Convert(conversion, value))
+                                    }
+                                    None => value,
+                                };
+                                self.code.effect(Op::SetField(field, object, value));
+                            }
+                        }
+                    }
+                    0xb6..=0xb9 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        let Some((owner, name, descriptor, interface)) = member(self.class, index)
+                        else {
+                            return Ok(None);
+                        };
+                        self.invoke(opcode, &owner, &name, &descriptor, interface)?;
+                    }
+                    0xba => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        self.dynamic(index)?;
+                    }
+                    0xbb => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        let name = class_name(self.class, index).unwrap_or_default();
+                        let class = self.translator.declare(&name)?;
+                        self.translator.instantiated(class);
+                        if self.needs_init(class) {
+                            self.code.effect(Op::InitClass(class));
+                        }
+                        let value = self.code.emit(Type::Object, Op::New(class));
+                        self.push(value, Type::Object);
+                    }
+                    0xbc => {
+                        if let Operand::NewArray(code) = one.operand {
+                            let kind = ArrayKind::of_newarray(code).unwrap_or(ArrayKind::Int);
+                            let (length, _) = self.pop();
+                            let value = self.code.emit(Type::Object, Op::NewArray(kind, length));
+                            self.push(value, Type::Object);
+                        }
+                    }
+                    0xbd => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        let name = class_name(self.class, index).unwrap_or_default();
+                        if !name.starts_with('[') {
+                            self.translator.declare(&name)?;
+                        }
+                        let (length, _) = self.pop();
+                        let value = self
+                            .code
+                            .emit(Type::Object, Op::NewArray(ArrayKind::Object, length));
+                        self.push(value, Type::Object);
+                    }
+                    0xbe => {
+                        let (array, _) = self.pop();
+                        let value = self.code.emit(Type::I32, Op::ArrayLength(array));
+                        self.push(value, Type::I32);
+                    }
+                    0xbf => {
+                        let (value, _) = self.pop();
+                        return Ok(Some(Terminator::Throw(value)));
+                    }
+                    0xc0 | 0xc1 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(None);
+                        };
+                        let name = class_name(self.class, index).unwrap_or_default();
+                        let test = self.class_reference(&name)?;
+                        let (value, _) = self.pop();
+                        if opcode == 0xc0 {
+                            let made = self.code.emit(Type::Object, Op::Cast(test, value));
+                            self.push(made, Type::Object);
+                        } else {
+                            let made = self.code.emit(Type::Bool, Op::InstanceOf(test, value));
+                            let made = self
+                                .code
+                                .emit(Type::I32, Op::Convert(Conversion::BoolToI32, made));
+                            self.push(made, Type::I32);
+                        }
+                    }
+                    0xc2 => {
+                        let (value, _) = self.pop();
+                        self.code.effect(Op::MonitorEnter(value));
+                    }
+                    0xc3 => {
+                        let (value, _) = self.pop();
+                        self.code.effect(Op::MonitorExit(value));
+                    }
+                    0xc5 => {
+                        if let Operand::MultiArray(index, dimensions) = one.operand {
+                            let name = class_name(self.class, index).unwrap_or_default();
+                            let depth = name.chars().take_while(|one| *one == '[').count() as u32;
+                            let kind =
+                                ArrayKind::of_element_descriptor(name.trim_start_matches('['));
+                            let mut lengths = Vec::new();
+                            for _ in 0..dimensions {
+                                lengths.push(self.pop().0);
+                            }
+                            lengths.reverse();
+                            let value = self
+                                .code
+                                .emit(Type::Object, Op::NewMultiArray(kind, depth, lengths));
+                            self.push(value, Type::Object);
+                        }
+                    }
+                    other => {
+                        return Err(fail("EK410", "An instruction this compiler does not know was found in compiled code.")
+                            .with_context(format!("Opcode: 0x{other:02x}"))
+                            .with_context(format!("Offset: {}", one.pc))
+                            .with_context(format!("Method: {}", function.name)));
+                    }
+                }
+                Ok(None)
+            }
+
+            fn invoke(
+                &mut self,
+                opcode: u8,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                interface: bool,
+            ) -> Result<(), Diagnostic> {
+                if owner.starts_with('[') {
+                    let arguments = self.arguments(descriptor, true);
+                    if name == "clone" {
+                        let value = self.code.emit(
+                            Type::Object,
+                            Op::CallRuntime(Runtime::ArrayClone, arguments),
+                        );
+                        self.push(value, Type::Object);
+                        return Ok(());
+                    }
+                    let root = self.translator.declare(ROOT)?;
+                    let value = match self.translator.module.class(root).slot_of(name, descriptor) {
+                        Some(slot) => {
+                            let (_, returns) = split_descriptor(descriptor);
+                            let ty = Type::of_descriptor(&returns);
+                            Some(self.code.emit(ty, Op::CallVirtual(root, slot, arguments)))
+                        }
+                        None => None,
+                    };
+                    self.returned(value, descriptor);
+                    return Ok(());
+                }
+                if opcode == 0xb7 && name == "<init>" && owner == ROOT {
+                    self.arguments(descriptor, true);
+                    return Ok(());
+                }
+                if let Some(result) = self.platform(owner, name, descriptor)? {
+                    if let Some(value) = result {
+                        self.returned(Some(value), descriptor);
+                    }
+                    return Ok(());
+                }
+                match opcode {
+                    0xb8 => {
+                        let arguments = self.arguments(descriptor, false);
+                        let function = self
+                            .translator
+                            .resolve_call(owner, name, descriptor, true, interface)?;
+                        if let Some(class) = self.translator.module.function(function).owner {
+                            if self.needs_init(class) {
+                                self.code.effect(Op::InitClass(class));
+                            }
+                        }
+                        let (_, returns) = split_descriptor(descriptor);
+                        let value = self.code.call(
+                            function,
+                            arguments,
+                            Type::of_descriptor(&returns),
+                            &self.translator.module,
+                        );
+                        self.returned(value, descriptor);
+                    }
+                    0xb7 => {
+                        let arguments = self.arguments(descriptor, true);
+                        let function = self
+                            .translator
+                            .resolve_call(owner, name, descriptor, false, interface)?;
+                        let (_, returns) = split_descriptor(descriptor);
+                        let value = self.code.call(
+                            function,
+                            arguments,
+                            Type::of_descriptor(&returns),
+                            &self.translator.module,
+                        );
+                        self.returned(value, descriptor);
+                    }
+                    _ => {
+                        let arguments = self.arguments(descriptor, true);
+                        let value = self.translator.virtual_call(
+                            &mut self.code,
+                            owner,
+                            name,
+                            descriptor,
+                            arguments,
+                            opcode == 0xb9,
+                        )?;
+                        self.returned(value, descriptor);
+                    }
+                }
+                Ok(())
+            }
+
+            fn platform(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+            ) -> Result<Option<Option<Value>>, Diagnostic> {
+                if owner != "kotlin/jvm/internal/Intrinsics" {
+                    return Ok(None);
+                }
+                match (name, descriptor) {
+                    ("checkNotNull", "(Ljava/lang/Object;)V")
+                    | ("checkNotNullParameter", "(Ljava/lang/Object;Ljava/lang/String;)V")
+                    | ("checkParameterIsNotNull", "(Ljava/lang/Object;Ljava/lang/String;)V")
+                    | ("checkNotNullExpressionValue", "(Ljava/lang/Object;Ljava/lang/String;)V")
+                    | (
+                        "checkExpressionValueIsNotNull",
+                        "(Ljava/lang/Object;Ljava/lang/String;)V",
+                    )
+                    | ("checkNotNull", "(Ljava/lang/Object;Ljava/lang/String;)V") => {
+                        let arguments = self.arguments(descriptor, false);
+                        let checked = self.code.emit(Type::Object, Op::NullCheck(arguments[0]));
+                        let _ = checked;
+                        Ok(Some(None))
+                    }
+                    _ => Ok(None),
+                }
+            }
+
+            fn dynamic(&mut self, index: u16) -> Result<(), Diagnostic> {
+                let Some(jvm::Constant::InvokeDynamic(bootstrap, typed)) =
+                    self.class.constants.get(index as usize).cloned()
+                else {
+                    return Ok(());
+                };
+                let Some((name, descriptor)) = name_and_type(self.class, typed) else {
+                    return Ok(());
+                };
+                let Some(entry) = self.class.bootstrap.get(bootstrap as usize).cloned() else {
+                    return Ok(());
+                };
+                let Some((_, bootstrap_owner, bootstrap_name, _, _)) =
+                    method_handle(self.class, entry.handle)
+                else {
+                    return Ok(());
+                };
+                let (captured, returns) = split_descriptor(&descriptor);
+                match (bootstrap_owner.as_str(), bootstrap_name.as_str()) {
+                    ("java/lang/invoke/LambdaMetafactory", "metafactory" | "altMetafactory") => {
+                        let sam = entry
+                            .arguments
+                            .first()
+                            .and_then(|at| method_type(self.class, *at))
+                            .unwrap_or_default();
+                        let implementation = entry
+                            .arguments
+                            .get(1)
+                            .and_then(|at| method_handle(self.class, *at))
+                            .ok_or_else(|| {
+                                fail("EK415", "This compiled code asks for a bootstrap the native compiler does not provide.")
+                                    .with_context(format!("Bootstrap: {bootstrap_owner}.{bootstrap_name}"))
+                            })?;
+                        let mut bridges = Vec::new();
+                        if bootstrap_name == "altMetafactory" {
+                            let flags = entry.arguments.get(3).and_then(|at| {
+                                match self.class.constants.get(*at as usize) {
+                                    Some(jvm::Constant::Integer(held)) => Some(*held),
+                                    _ => None,
+                                }
+                            });
+                            if let Some(flags) = flags {
+                                let mut at = 4;
+                                if flags & 2 != 0 {
+                                    let markers = entry.arguments.get(at).and_then(|index| {
+                                        match self.class.constants.get(*index as usize) {
+                                            Some(jvm::Constant::Integer(held)) => {
+                                                Some(*held as usize)
+                                            }
+                                            _ => None,
+                                        }
+                                    });
+                                    at += 1 + markers.unwrap_or(0);
+                                }
+                                if flags & 4 != 0 {
+                                    let count =
+                                        entry.arguments.get(at).and_then(|index| {
+                                            match self.class.constants.get(*index as usize) {
+                                                Some(jvm::Constant::Integer(held)) => {
+                                                    Some(*held as usize)
+                                                }
+                                                _ => None,
+                                            }
+                                        });
+                                    at += 1;
+                                    for offset in 0..count.unwrap_or(0) {
+                                        if let Some(bridge) = entry
+                                            .arguments
+                                            .get(at + offset)
+                                            .and_then(|index| method_type(self.class, *index))
+                                        {
+                                            bridges.push(bridge);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let interface =
+                            class_of_descriptor(&returns).unwrap_or_else(|| ROOT.to_string());
+                        let class = self.translator.lambda_class(
+                            self.class,
+                            &interface,
+                            &name,
+                            &sam,
+                            &captured,
+                            implementation,
+                            &bridges,
+                        )?;
+                        self.translator.instantiated(class);
+                        let mut values = Vec::new();
+                        for _ in &captured {
+                            values.push(self.pop().0);
+                        }
+                        values.reverse();
+                        let object = self.code.emit(Type::Object, Op::New(class));
+                        let fields = self.translator.module.class(class).fields.clone();
+                        for (field, value) in fields.iter().zip(values) {
+                            let ty = self.translator.module.field(*field).ty;
+                            let value = match narrow(ty) {
+                                Some(conversion) => {
+                                    self.code.emit(ty, Op::Convert(conversion, value))
+                                }
+                                None => value,
+                            };
+                            self.code.effect(Op::SetField(*field, object, value));
+                        }
+                        self.push(object, Type::Object);
+                    }
+                    (
+                        "java/lang/invoke/StringConcatFactory",
+                        "makeConcatWithConstants" | "makeConcat",
+                    ) => {
+                        let recipe = if bootstrap_name == "makeConcatWithConstants" {
+                            entry.arguments.first().and_then(|at| {
+                                match self.class.constants.get(*at as usize) {
+                                    Some(jvm::Constant::String(text)) => utf8(self.class, *text),
+                                    _ => None,
+                                }
+                            })
+                        } else {
+                            None
+                        }
+                        .unwrap_or_else(|| "\u{1}".repeat(captured.len()));
+                        let mut values = Vec::new();
+                        for parameter in captured.iter().rev() {
+                            let (value, _) = self.pop();
+                            values.push((value, parameter.clone()));
+                        }
+                        values.reverse();
+                        let mut constants: Vec<String> = entry
+                            .arguments
+                            .iter()
+                            .skip(1)
+                            .filter_map(|at| match self.class.constants.get(*at as usize) {
+                                Some(jvm::Constant::String(text)) => utf8(self.class, *text),
+                                _ => None,
+                            })
+                            .collect();
+                        constants.reverse();
+                        let mut pieces: Vec<Value> = Vec::new();
+                        let mut text = String::new();
+                        let mut next = values.into_iter();
+                        for one in recipe.chars() {
+                            match one {
+                                '\u{1}' => {
+                                    if !text.is_empty() {
+                                        let literal = self.translator.module.intern(&text);
+                                        pieces.push(self.code.emit(
+                                            Type::Object,
+                                            Op::Constant(Constant::String(literal)),
+                                        ));
+                                        text.clear();
+                                    }
+                                    if let Some((value, parameter)) = next.next() {
+                                        pieces.push(self.stringify(value, &parameter)?);
+                                    }
+                                }
+                                '\u{2}' => text.push_str(&constants.pop().unwrap_or_default()),
+                                other => text.push(other),
+                            }
+                        }
+                        if !text.is_empty() {
+                            let literal = self.translator.module.intern(&text);
+                            pieces.push(
+                                self.code
+                                    .emit(Type::Object, Op::Constant(Constant::String(literal))),
+                            );
+                        }
+                        let mut joined = match pieces.first() {
+                            Some(first) => *first,
+                            None => {
+                                let empty = self.translator.module.intern("");
+                                self.code
+                                    .emit(Type::Object, Op::Constant(Constant::String(empty)))
+                            }
+                        };
+                        for piece in pieces.into_iter().skip(1) {
+                            joined = self.code.emit(
+                                Type::Object,
+                                Op::CallRuntime(Runtime::StringConcat, vec![joined, piece]),
+                            );
+                        }
+                        self.push(joined, Type::Object);
+                    }
+                    _ => {
+                        return Err(fail("EK415", "This compiled code asks for a bootstrap the native compiler does not provide.")
+                            .with_context(format!("Bootstrap: {bootstrap_owner}.{bootstrap_name}")));
+                    }
+                }
+                Ok(())
+            }
+
+            fn stringify(&mut self, value: Value, descriptor: &str) -> Result<Value, Diagnostic> {
+                let ty = Type::of_descriptor(descriptor);
+                let (argument, parameter) = match ty {
+                    Type::Object => (value, "Ljava/lang/Object;".to_string()),
+                    Type::Bool | Type::Char | Type::I64 | Type::F32 | Type::F64 => {
+                        let narrowed = match narrow(ty) {
+                            Some(conversion) => self.code.emit(ty, Op::Convert(conversion, value)),
+                            None => value,
+                        };
+                        (narrowed, descriptor.to_string())
+                    }
+                    _ => (value, "I".to_string()),
+                };
+                let function = self.translator.resolve_call(
+                    "java/lang/String",
+                    "valueOf",
+                    &format!("({parameter})Ljava/lang/String;"),
+                    true,
+                    false,
+                )?;
+                Ok(self
+                    .code
+                    .call(
+                        function,
+                        vec![argument],
+                        Type::Object,
+                        &self.translator.module,
+                    )
+                    .unwrap_or(value))
+            }
+        }
+
+        fn shift_blocks(block: &mut Block, by: u32) {
+            let shift = |one: &mut BlockRef| one.0 += by;
+            match &mut block.terminator {
+                Terminator::Jump(to) => shift(to),
+                Terminator::Branch(_, then, otherwise) => {
+                    shift(then);
+                    shift(otherwise);
+                }
+                Terminator::Switch(_, cases, fallback) => {
+                    for (_, to) in cases.iter_mut() {
+                        shift(to);
+                    }
+                    shift(fallback);
+                }
+                _ => {}
+            }
+            for handler in &mut block.handlers {
+                shift(&mut handler.target);
+            }
+            for instruction in &mut block.instructions {
+                if let Op::Phi(incoming) = &mut instruction.op {
+                    for (from, _) in incoming.iter_mut() {
+                        shift(from);
+                    }
+                }
+            }
+        }
+
+        pub fn layout(module: &mut Module, data: &super::DataLayout) {
+            let count = module.classes.len();
+            let mut done = vec![false; count];
+            for index in 0..count {
+                lay(module, data, index, &mut done);
+            }
+        }
+
+        fn lay(module: &mut Module, data: &super::DataLayout, index: usize, done: &mut Vec<bool>) {
+            if done[index] {
+                return;
+            }
+            done[index] = true;
+            let parent = module.classes[index].super_class;
+            let (mut size, mut align, mut offsets) = match parent {
+                Some(held) => {
+                    lay(module, data, held.0 as usize, done);
+                    let parent = &module.classes[held.0 as usize];
+                    (parent.size, parent.align, parent.offsets.clone())
+                }
+                None => (data.object_header, data.pointer_align, Vec::new()),
+            };
+            if module.classes[index].flags.interface {
+                module.classes[index].size = 0;
+                module.classes[index].align = 1;
+                return;
+            }
+            let mut fields: Vec<FieldRef> = module.classes[index].fields.clone();
+            fields.sort_by_key(|one| std::cmp::Reverse(data.align_of(module.field(*one).ty)));
+            for field in fields {
+                let ty = module.field(field).ty;
+                let field_align = data.align_of(ty).max(1);
+                size = size.div_ceil(field_align) * field_align;
+                offsets.push((field, size));
+                size += data.size_of(ty);
+                align = align.max(field_align);
+            }
+            size = size.div_ceil(align) * align;
+            let class = &mut module.classes[index];
+            class.size = size;
+            class.align = align;
+            class.offsets = offsets;
+        }
+
+        pub fn find_entry(
+            files: &mut ClassFiles,
+            entry: Option<&str>,
+        ) -> Option<(String, String, String)> {
+            let names = files.own_names();
+            let wanted: Option<(String, String)> = entry.map(|held| {
+                let held = held.replace('.', "/");
+                match held.rsplit_once('/') {
+                    Some((package, name)) => (package.to_string(), name.to_string()),
+                    None => (String::new(), held),
+                }
+            });
+            let mut fallback = None;
+            for name in names {
+                let Some(class) = files.get(&name) else {
+                    continue;
+                };
+                let package = name
+                    .rsplit_once('/')
+                    .map(|(package, _)| package.to_string())
+                    .unwrap_or_default();
+                for method in &class.methods {
+                    if method.access_flags & 0x0008 == 0 {
+                        continue;
+                    }
+                    let matches = match &wanted {
+                        Some((wanted_package, wanted_name)) => {
+                            *wanted_package == package && method.name == *wanted_name
+                        }
+                        None => method.name == "main",
+                    };
+                    if !matches {
+                        continue;
+                    }
+                    if method.descriptor == "([Ljava/lang/String;)V" {
+                        return Some((
+                            name.clone(),
+                            method.name.clone(),
+                            method.descriptor.clone(),
+                        ));
+                    }
+                    if method.descriptor == "()V" && fallback.is_none() {
+                        fallback =
+                            Some((name.clone(), method.name.clone(), method.descriptor.clone()));
+                    }
+                }
+            }
+            fallback
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum ArtifactKind {
+        Object,
+        Executable,
+        StaticLibrary,
+        DynamicLibrary,
+        Header,
+        Framework,
+        Klib,
+        DebugInfo,
+        Other,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Artifact {
+        pub name: String,
+        pub kind: ArtifactKind,
+        pub bytes: Vec<u8>,
+    }
+
+    pub trait CodeGenerator {
+        fn name(&self) -> &str;
+
+        fn supports(&self, target: &Target) -> bool;
+
+        fn generate(
+            &mut self,
+            module: &ir::Module,
+            options: &Options,
+        ) -> Result<Vec<Artifact>, Diagnostic>;
+    }
+
+    pub trait Linker {
+        fn link(
+            &mut self,
+            objects: Vec<Artifact>,
+            module: &ir::Module,
+            options: &Options,
+        ) -> Result<Vec<Artifact>, Diagnostic>;
+    }
+
+    pub struct Toolchain<'t> {
+        pub code: &'t mut dyn CodeGenerator,
+        pub linker: &'t mut dyn Linker,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Compiled {
+        pub module: ir::Module,
+        pub missing: Vec<String>,
+        pub artifacts: Vec<Artifact>,
+        pub output: String,
+    }
+
+    pub fn prelude(options: &Options) -> Vec<(String, String)> {
+        let family = match options.target.family {
+            Family::Osx => "MACOSX",
+            Family::Ios => "IOS",
+            Family::Tvos => "TVOS",
+            Family::Watchos => "WATCHOS",
+            Family::Linux => "LINUX",
+            Family::Mingw => "WINDOWS",
+            Family::Android => "ANDROID",
+        };
+        let architecture = match options.target.architecture {
+            Architecture::X64 => "X64",
+            Architecture::X86 => "X86",
+            Architecture::Arm64 => "ARM64",
+            Architecture::Arm32 => "ARM32",
+        };
+        let unaligned = options.target.architecture != Architecture::Arm32;
+        let platform = NATIVE_PLATFORM
+            .replace("FAMILY_HERE", family)
+            .replace("ARCHITECTURE_HERE", architecture)
+            .replace("DEBUG_HERE", if options.debug { "true" } else { "false" })
+            .replace("UNALIGNED_HERE", if unaligned { "true" } else { "false" })
+            .replace("POINTER_HERE", &options.target.pointer_bytes().to_string())
+            .replace("TARGET_HERE", options.target.name);
+        vec![
+            ("<native>/kotlin/native/Platform.kt".to_string(), platform),
+            (
+                "<native>/kotlin/native/Annotations.kt".to_string(),
+                NATIVE_ANNOTATIONS.to_string(),
+            ),
+            (
+                "<native>/kotlin/native/concurrent/Concurrent.kt".to_string(),
+                NATIVE_CONCURRENT.to_string(),
+            ),
+        ]
+    }
+
+    const NATIVE_PLATFORM: &str = r####"package kotlin.native
+
+enum class OsFamily {
+    UNKNOWN,
+    MACOSX,
+    IOS,
+    LINUX,
+    WINDOWS,
+    ANDROID,
+    WASM,
+    TVOS,
+    WATCHOS,
+}
+
+enum class CpuArchitecture(val bitness: Int) {
+    UNKNOWN(-1),
+    ARM32(32),
+    ARM64(64),
+    X86(32),
+    X64(64),
+    MIPS32(32),
+    MIPSEL32(32),
+    WASM32(32),
+}
+
+enum class MemoryModel {
+    STRICT,
+    RELAXED,
+    EXPERIMENTAL,
+}
+
+object Platform {
+    val osFamily: OsFamily
+        get() = OsFamily.FAMILY_HERE
+
+    val cpuArchitecture: CpuArchitecture
+        get() = CpuArchitecture.ARCHITECTURE_HERE
+
+    val memoryModel: MemoryModel
+        get() = MemoryModel.EXPERIMENTAL
+
+    val isDebugBinary: Boolean
+        get() = DEBUG_HERE
+
+    val isLittleEndian: Boolean
+        get() = true
+
+    val canAccessUnaligned: Boolean
+        get() = UNALIGNED_HERE
+
+    val pointerSize: Int
+        get() = POINTER_HERE
+
+    val targetName: String
+        get() = "TARGET_HERE"
+
+    var isMemoryLeakCheckerActive: Boolean = false
+
+    var isCleanersLeakCheckerActive: Boolean = false
+
+    fun getAvailableProcessors(): Int = java.lang.Runtime.getRuntime().availableProcessors()
+}
+
+fun Any?.identityHashCode(): Int = System.identityHashCode(this)
+"####;
+
+    const NATIVE_ANNOTATIONS: &str = r####"package kotlin.native
+
+@Target(AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class CName(val externName: String = "", val shortName: String = "")
+
+@Target(AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class SymbolName(val name: String)
+
+@Target(AnnotationTarget.CLASS, AnnotationTarget.PROPERTY, AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class ObjCName(val name: String = "", val swiftName: String = "", val exact: Boolean = false)
+
+@Target(AnnotationTarget.CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class ObjCEnum(val name: String = "", val swiftName: String = "")
+
+@Target(AnnotationTarget.ANNOTATION_CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class HidesFromObjC
+
+@HidesFromObjC
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FUNCTION, AnnotationTarget.CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class HiddenFromObjC
+
+@Target(AnnotationTarget.ANNOTATION_CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class RefinesInSwift
+
+@RefinesInSwift
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.RUNTIME)
+@MustBeDocumented
+annotation class ShouldRefineInSwift
+
+@Target(AnnotationTarget.PROPERTY)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class EagerInitialization
+
+@Target(AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class NoInline
+
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class ThreadLocal
+
+@Target(AnnotationTarget.PROPERTY)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class SharedImmutable
+
+@Target(AnnotationTarget.CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class FreezingIsDeprecated
+"####;
+
+    const NATIVE_CONCURRENT: &str = r####"package kotlin.native.concurrent
+
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class ThreadLocal
+
+@Target(AnnotationTarget.PROPERTY)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class SharedImmutable
+"####;
+
+    pub fn lower_to_ir(
+        kotlin: &[(String, String)],
+        java: &[(String, String)],
+        options: &Options,
+        libraries: Vec<Vec<u8>>,
+    ) -> Result<(ir::Module, Vec<String>), Diagnostic> {
+        let mut classpath = crate::compilers::java::Classpath::new();
+        for library in &libraries {
+            classpath.learn_jar(library)?;
+        }
+        let mut sources = prelude(options);
+        sources.extend(kotlin.iter().cloned());
+        super::lower::native_packages(true);
+        let classes = super::compile_mixed(&sources, java, &classpath, libraries.clone());
+        super::lower::native_packages(false);
+        let classes = classes?;
+        let mut files = translate::ClassFiles::new();
+        for (_, bytes) in classes {
+            files.add_class(bytes)?;
+        }
+        for library in &libraries {
+            files.add_jar(library)?;
+        }
+        lower_classes(&mut files, options)
+    }
+
+    pub fn lower_classes(
+        files: &mut translate::ClassFiles,
+        options: &Options,
+    ) -> Result<(ir::Module, Vec<String>), Diagnostic> {
+        let module_name = options.module();
+        let mut translator = translate::Translator::new(files, &module_name, options.target.name);
+        let mut roots: Vec<ir::FunctionRef> = Vec::new();
+        if options.produce.needs_entry() && !options.no_main {
+            let Some((owner, name, descriptor)) =
+                translate::find_entry(translator.files, options.entry.as_deref())
+            else {
+                return Err(match &options.entry {
+                    Some(entry) => fail(
+                        "EK406",
+                        "The entry point names no function this program has.",
+                    )
+                    .with_context(format!("Entry: {entry}")),
+                    None => fail("EK407", "A program needs a main function to start from."),
+                });
+            };
+            let function = translator.resolve_call(&owner, &name, &descriptor, true, false)?;
+            translator.root_function(function);
+            roots.push(function);
+        } else {
+            for name in translator.files.own_names() {
+                let Some(class) = translator.files.get(&name) else {
+                    continue;
+                };
+                translator.declare(&name)?;
+                for method in &class.methods {
+                    if method.access_flags & 0x0001 == 0 || method.access_flags & 0x0400 != 0 {
+                        continue;
+                    }
+                    let is_static = method.access_flags & 0x0008 != 0;
+                    let function = translator.resolve_call(
+                        &name,
+                        &method.name,
+                        &method.descriptor,
+                        is_static,
+                        false,
+                    )?;
+                    translator.root_function(function);
+                    roots.push(function);
+                }
+            }
+        }
+        translator.run()?;
+        let (mut module, missing) = translator.finish();
+        translate::layout(&mut module, &options.target.data_layout());
+        module.entry = if options.produce.needs_entry() {
+            roots.first().copied()
+        } else {
+            None
+        };
+        let exports: Vec<ir::Export> = module
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(_, function)| function.kind != ir::FunctionKind::External)
+            .filter_map(|(at, function)| {
+                function.export.clone().map(|symbol| ir::Export {
+                    symbol,
+                    function: ir::FunctionRef(at as u32),
+                })
+            })
+            .collect();
+        module.exports = exports;
+        module.externals = module
+            .functions
+            .iter()
+            .filter(|function| function.kind == ir::FunctionKind::External)
+            .filter_map(|function| {
+                function
+                    .export
+                    .clone()
+                    .map(|symbol| (symbol, function.parameters.clone(), function.returns))
+            })
+            .collect();
+        if let Err(reason) = module.verify() {
+            return Err(fail(
+                "EK411",
+                "The native program broke a rule of the intermediate form it was lowered to.",
+            )
+            .with_context(format!("Reason: {reason}")));
+        }
+        Ok((module, missing.into_iter().collect()))
+    }
+
+    pub fn compile(
+        kotlin: &[(String, String)],
+        java: &[(String, String)],
+        options: &Options,
+        libraries: Vec<Vec<u8>>,
+        toolchain: Option<Toolchain<'_>>,
+    ) -> Result<Compiled, Diagnostic> {
+        let (module, missing) = lower_to_ir(kotlin, java, options, libraries)?;
+        finish(module, missing, options, toolchain)
+    }
+
+    pub fn finish(
+        module: ir::Module,
+        missing: Vec<String>,
+        options: &Options,
+        toolchain: Option<Toolchain<'_>>,
+    ) -> Result<Compiled, Diagnostic> {
+        let output = options.output_file();
+        if options.produce == Produce::Library {
+            let artifact = klib(&module, options, &output)?;
+            return Ok(Compiled {
+                module,
+                missing,
+                artifacts: vec![artifact],
+                output,
+            });
+        }
+        let Some(toolchain) = toolchain else {
+            return Err(fail(
+                "EK408",
+                "No machine backend is attached to turn this into native code.",
+            )
+            .with_context(format!("Target: {}", options.target.name)));
+        };
+        if !toolchain.code.supports(&options.target) {
+            return Err(fail(
+                "EK409",
+                "The machine backend attached does not make code for this target.",
+            )
+            .with_context(format!("Target: {}", options.target.name)));
+        }
+        let objects = toolchain.code.generate(&module, options)?;
+        let mut artifacts = toolchain.linker.link(objects, &module, options)?;
+        if options.produce.exports_c() {
+            artifacts.push(header(&module, options));
+        }
+        Ok(Compiled {
+            module,
+            missing,
+            artifacts,
+            output,
+        })
+    }
+
+    pub fn c_prefix(options: &Options) -> String {
+        let base = options
+            .short_module_name
+            .clone()
+            .unwrap_or_else(|| options.module());
+        let cleaned: String = base
+            .chars()
+            .map(|one| {
+                if one.is_ascii_alphanumeric() {
+                    one
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if cleaned.is_empty() {
+            "konan".to_string()
+        } else {
+            cleaned
+        }
+    }
+
+    fn c_type(prefix: &str, ty: ir::Type) -> String {
+        match ty {
+            ir::Type::Void => "void".to_string(),
+            ir::Type::Bool => format!("{prefix}_KBoolean"),
+            ir::Type::I8 => format!("{prefix}_KByte"),
+            ir::Type::I16 => format!("{prefix}_KShort"),
+            ir::Type::Char => format!("{prefix}_KChar"),
+            ir::Type::I32 => format!("{prefix}_KInt"),
+            ir::Type::I64 => format!("{prefix}_KLong"),
+            ir::Type::F32 => format!("{prefix}_KFloat"),
+            ir::Type::F64 => format!("{prefix}_KDouble"),
+            ir::Type::Ptr => format!("{prefix}_KNativePtr"),
+            ir::Type::Object => format!("{prefix}_KObject"),
+            ir::Type::Vector128 => format!("{prefix}_KVector128"),
+        }
+    }
+
+    pub fn header(module: &ir::Module, options: &Options) -> Artifact {
+        let prefix = c_prefix(options);
+        let guard = format!("KONAN_{}_H", prefix.to_ascii_uppercase());
+        let mut out = String::new();
+        out.push_str(&format!("#ifndef {guard}\n#define {guard}\n"));
+        out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n");
+        out.push_str("#ifdef __cplusplus\n");
+        out.push_str(&format!("typedef bool {prefix}_KBoolean;\n"));
+        out.push_str("#else\n");
+        out.push_str(&format!("typedef _Bool {prefix}_KBoolean;\n"));
+        out.push_str("#endif\n");
+        for (name, c) in [
+            ("KChar", "unsigned short"),
+            ("KByte", "signed char"),
+            ("KShort", "short"),
+            ("KInt", "int"),
+            ("KLong", "long long"),
+            ("KUByte", "unsigned char"),
+            ("KUShort", "unsigned short"),
+            ("KUInt", "unsigned int"),
+            ("KULong", "unsigned long long"),
+            ("KFloat", "float"),
+            ("KDouble", "double"),
+            ("KNativePtr", "void*"),
+        ] {
+            out.push_str(&format!("typedef {c} {prefix}_{name};\n"));
+        }
+        out.push_str(&format!(
+            "typedef float __attribute__ ((__vector_size__ (16))) {prefix}_KVector128;\n"
+        ));
+        out.push_str(&format!(
+            "struct {prefix}_KType;\ntypedef struct {prefix}_KType {prefix}_KType;\n"
+        ));
+        out.push_str(&format!(
+            "typedef struct {{ {prefix}_KNativePtr pinned; }} {prefix}_KObject;\n"
+        ));
+        for export in &module.exports {
+            let function = module.function(export.function);
+            let parameters: Vec<String> = function
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(at, ty)| format!("{} p{at}", c_type(&prefix, *ty)))
+                .collect();
+            let parameters = if parameters.is_empty() {
+                "void".to_string()
+            } else {
+                parameters.join(", ")
+            };
+            out.push_str(&format!(
+                "extern {} {}({});\n",
+                c_type(&prefix, function.returns),
+                export.symbol,
+                parameters
+            ));
+        }
+        out.push_str("#ifdef __cplusplus\n}\n#endif\n#endif\n");
+        let family = options.target.family;
+        let base = options.output_file();
+        let stem = base
+            .trim_end_matches(&format!(".{}", family.dynamic_suffix()))
+            .trim_end_matches(&format!(".{}", family.static_suffix()));
+        Artifact {
+            name: format!("{stem}_api.h"),
+            kind: ArtifactKind::Header,
+            bytes: out.into_bytes(),
+        }
+    }
+
+    pub fn klib(
+        module: &ir::Module,
+        options: &Options,
+        output: &str,
+    ) -> Result<Artifact, Diagnostic> {
+        let manifest = format!(
+            "unique_name={}\nabi_version=native-ir-1\nnative_targets={}\ncompiler_version=apk-builder\nbuiltins_platform=NATIVE\nir_provider=kotlin.native.ir\n",
+            options.module(),
+            options.target.name
+        );
+        let items = vec![
+            crate::packer::Item {
+                name: "default/manifest".to_string(),
+                bytes: manifest.into_bytes(),
+                folder: false,
+                changed: 0,
+            },
+            crate::packer::Item {
+                name: "default/ir/module.kir".to_string(),
+                bytes: module.print().into_bytes(),
+                folder: false,
+                changed: 0,
+            },
+            crate::packer::Item {
+                name: format!("default/targets/{}/included/", options.target.name),
+                bytes: Vec::new(),
+                folder: true,
+                changed: 0,
+            },
+        ];
+        let (bytes, _) = crate::packer::zipped(items, "")?;
+        Ok(Artifact {
+            name: output.to_string(),
+            kind: ArtifactKind::Klib,
+            bytes,
+        })
+    }
 }

@@ -50447,7 +50447,7 @@ pub mod packer {
         out
     }
 
-    fn zipped(items: Vec<Item>, password: &str) -> Result<(Vec<u8>, Packed), Diagnostic> {
+    pub fn zipped(items: Vec<Item>, password: &str) -> Result<(Vec<u8>, Packed), Diagnostic> {
         let mut out: Vec<u8> = Vec::new();
         let mut directory: Vec<u8> = Vec::new();
         let mut counted = Packed {

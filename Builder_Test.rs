@@ -41166,6 +41166,340 @@ mod kotlin {
         assert_eq!(said, "OK");
     }
 
+    fn native_options(arguments: &[&str]) -> Result<native::Options, crate::diag::Diagnostic> {
+        let owned: Vec<String> = arguments.iter().map(|one| one.to_string()).collect();
+        native::Options::parse(&owned)
+    }
+
+    #[test]
+    fn the_native_targets_are_the_konan_ones() {
+        assert_eq!(native::TARGETS.len(), 20);
+        for target in native::TARGETS {
+            assert_eq!(native::Target::named(target.name), Some(*target));
+            assert!(!target.triple().starts_with("unknown"), "{}", target.name);
+        }
+        let watch = native::Target::named("watchos_arm64").expect("watchos_arm64");
+        assert_eq!(watch.pointer_bytes(), 4);
+        assert_eq!(watch.data_layout().pointer, 4);
+        let linux = native::Target::named("linux_x64").expect("linux_x64");
+        assert_eq!(linux.data_layout().pointer, 8);
+        assert_eq!(linux.c_long_bytes(), 8);
+        let windows = native::Target::named("mingw_x64").expect("mingw_x64");
+        assert_eq!(windows.c_long_bytes(), 4);
+        assert_eq!(
+            windows.calling_convention(),
+            native::CallingConvention::Win64
+        );
+        assert!(native::Target::named("android_arm64")
+            .expect("android")
+            .is_deprecated());
+        assert!(native::Target::named("android_arm64")
+            .expect("android")
+            .is_tolerated());
+        assert!(!native::Target::named("macos_arm64")
+            .expect("mac")
+            .is_deprecated());
+        assert_eq!(
+            native::Target::named("raspberrypi").map(|one| one.name),
+            Some("linux_arm32_hfp")
+        );
+        assert!(native::Target::named("wasm32").is_none());
+        let listed = native::Options::listed_targets();
+        assert_eq!(listed.len(), 20);
+        assert!(listed
+            .iter()
+            .any(|one| one.starts_with("macos_x64") && one.contains("deprecated")));
+    }
+
+    #[test]
+    fn native_options_name_outputs_and_refuse_what_needs_llvm() {
+        let options = native_options(&[
+            "-target",
+            "linux_x64",
+            "-o",
+            "out/hello",
+            "-opt",
+            "-g",
+            "Main.kt",
+        ])
+        .expect("parses");
+        assert_eq!(options.output_file(), "out/hello.kexe");
+        assert!(options.optimize && options.debug);
+        assert_eq!(options.sources, vec!["Main.kt".to_string()]);
+        assert_eq!(options.module(), "hello");
+        let dynamic = native_options(&[
+            "-target",
+            "mingw_x64",
+            "-produce",
+            "dynamic",
+            "-output",
+            "calc",
+        ])
+        .expect("parses");
+        assert_eq!(dynamic.output_file(), "calc.dll");
+        let apple = native_options(&["-target=macos_arm64", "-p", "static", "-o", "libmath"])
+            .expect("parses");
+        assert_eq!(apple.output_file(), "libmath.a");
+        let shared = native_options(&["-target", "android_arm64", "-p", "dynamic", "-o", "core"])
+            .expect("parses");
+        assert_eq!(shared.output_file(), "libcore.so");
+        let library = native_options(&["-p", "library", "-o", "shapes"]).expect("parses");
+        assert_eq!(library.output_file(), "shapes.klib");
+        let framework = native_options(&["-target", "ios_arm64", "-p", "framework", "-o", "Kit"])
+            .expect("parses");
+        assert_eq!(framework.output_file(), "Kit.framework");
+        let tuned = native_options(&[
+            "-Xgc=cms",
+            "-Xallocator=std",
+            "-Xbinary=bundleId=com.example",
+        ])
+        .expect("parses");
+        assert_eq!(tuned.collector, native::Collector::Cms);
+        assert_eq!(tuned.allocator, native::Allocator::Std);
+        assert_eq!(
+            tuned.binary.get("bundleId").map(String::as_str),
+            Some("com.example")
+        );
+        for (arguments, code) in [
+            (vec!["-Xsave-llvm-ir-after=Codegen"], "EK403"),
+            (vec!["-produce", "bitcode"], "EK403"),
+            (vec!["-Xnot-a-real-option"], "EK404"),
+            (vec!["-target"], "EK402"),
+            (vec!["-target", "pdp11"], "EK400"),
+            (vec!["-produce", "applet"], "EK401"),
+            (
+                vec!["-target", "linux_x64", "-produce", "framework"],
+                "EK405",
+            ),
+            (vec!["-Xgc=refcount"], "EK412"),
+            (vec!["-Xallocator=tcmalloc"], "EK413"),
+            (vec!["-Xbinary=nokey"], "EK414"),
+        ] {
+            let refused = native_options(&arguments).expect_err("refused");
+            assert_eq!(refused.code, code, "{arguments:?}");
+            assert!(crate::compilers::kotlin_diagnostic::known(&refused.code));
+        }
+    }
+
+    #[test]
+    fn every_intrinsic_and_runtime_function_is_named_once() {
+        let mut names = std::collections::HashSet::new();
+        for intrinsic in native::Intrinsic::ALL {
+            assert!(names.insert(intrinsic.name()), "{}", intrinsic.name());
+            assert_eq!(native::Intrinsic::named(intrinsic.name()), Some(*intrinsic));
+        }
+        assert!(native::Intrinsic::named("GET_AND_ADD_ARRAY_ELEMENT").is_some());
+        assert!(native::Intrinsic::named("OBJC_GET_SELECTOR").is_some());
+        let mut symbols = std::collections::HashSet::new();
+        for runtime in native::Runtime::ALL {
+            assert!(symbols.insert(runtime.symbol()), "{}", runtime.symbol());
+            assert_eq!(native::Runtime::named(runtime.symbol()), Some(*runtime));
+        }
+    }
+
+    struct PretendCode {
+        seen: usize,
+    }
+
+    impl native::CodeGenerator for PretendCode {
+        fn name(&self) -> &str {
+            "pretend"
+        }
+
+        fn supports(&self, target: &native::Target) -> bool {
+            target.family == native::Family::Linux
+        }
+
+        fn generate(
+            &mut self,
+            module: &native::ir::Module,
+            options: &native::Options,
+        ) -> Result<Vec<native::Artifact>, crate::diag::Diagnostic> {
+            self.seen = module.functions.iter().filter(|one| one.has_body()).count();
+            Ok(vec![native::Artifact {
+                name: format!("{}.o", options.module()),
+                kind: native::ArtifactKind::Object,
+                bytes: module.print().into_bytes(),
+            }])
+        }
+    }
+
+    struct PretendLinker;
+
+    impl native::Linker for PretendLinker {
+        fn link(
+            &mut self,
+            objects: Vec<native::Artifact>,
+            _: &native::ir::Module,
+            options: &native::Options,
+        ) -> Result<Vec<native::Artifact>, crate::diag::Diagnostic> {
+            let bytes = objects.into_iter().flat_map(|one| one.bytes).collect();
+            Ok(vec![native::Artifact {
+                name: options.output_file(),
+                kind: native::ArtifactKind::Executable,
+                bytes,
+            }])
+        }
+    }
+
+    const NATIVE_PROGRAM: &str = r####"package shapes
+
+interface Shape {
+    val area: Double
+    fun describe(): String = "shape of $area"
+}
+
+data class Square(val side: Double) : Shape {
+    override val area: Double get() = side * side
+}
+
+class Circle(private val radius: Double) : Shape {
+    override val area: Double get() = 3.0 * radius * radius
+    override fun describe(): String = "circle " + super.describe()
+}
+
+@CName("shapes_total")
+fun total(count: Int): Int {
+    var sum = 0
+    for (i in 0 until count) sum += i
+    return sum
+}
+
+fun main() {
+    val shapes: List<Shape> = listOf(Square(2.0), Circle(1.0))
+    val areas = shapes.map { it.area }.filter { it > 1.0 }
+    val names = shapes.joinToString { it.describe() }
+    try {
+        check(areas.size == 2) { "two areas" }
+    } catch (e: IllegalStateException) {
+        println(e.message)
+    }
+    println("$names ${total(4)} ${Platform.osFamily} ${Platform.cpuArchitecture.bitness}")
+}
+"####;
+
+    #[test]
+    fn a_kotlin_program_lowers_to_native_ir_that_holds_together() {
+        let Some((_, library)) = standard_library() else {
+            eprintln!("kotlin native: no kotlin-stdlib to compile against");
+            return;
+        };
+        let kotlin = vec![("Shapes.kt".to_string(), NATIVE_PROGRAM.to_string())];
+        let options = native_options(&["-target", "linux_x64", "-o", "shapes"]).expect("parses");
+        let (module, missing) = native::lower_to_ir(&kotlin, &[], &options, vec![library.clone()])
+            .expect("the program lowers");
+        module.verify().expect("the module verifies");
+        let entry = module.entry.expect("a program has an entry");
+        assert!(module.function(entry).name.contains("main"));
+        assert!(module.functions.iter().filter(|one| one.has_body()).count() > 20);
+        assert!(module.strings.iter().any(|one| one == "two areas"));
+        let square = module
+            .class_named("shapes/Square")
+            .expect("Square is a class");
+        let shape = module
+            .class_named("shapes/Shape")
+            .expect("Shape is an interface");
+        assert!(module.class(shape).flags.interface);
+        assert!(module.class(square).flags.instantiated);
+        assert!(module.is_subclass(square, shape));
+        assert!(module.class(square).size >= 16);
+        assert!(module
+            .class(square)
+            .itable
+            .iter()
+            .any(|(interface, _)| *interface == shape));
+        assert!(module
+            .exports
+            .iter()
+            .any(|one| one.symbol == "shapes_total"));
+        assert!(module
+            .functions
+            .iter()
+            .any(|one| one.blocks.iter().any(|block| !block.handlers.is_empty())));
+        assert!(missing.iter().any(|one| one.starts_with("java/")));
+        let platform = module
+            .class_named("kotlin/native/Platform")
+            .expect("Platform is carried");
+        assert!(module
+            .class(platform)
+            .methods
+            .iter()
+            .any(|one| module.function(*one).name.contains("getOsFamily")));
+        assert!(module.class_named("kotlin/native/OsFamily").is_some());
+        let refused = native::finish(module.clone(), missing.clone(), &options, None)
+            .expect_err("no backend");
+        assert_eq!(refused.code, "EK408");
+        let mut code = PretendCode { seen: 0 };
+        let mut linker = PretendLinker;
+        let made = native::finish(
+            module.clone(),
+            missing.clone(),
+            &options,
+            Some(native::Toolchain {
+                code: &mut code,
+                linker: &mut linker,
+            }),
+        )
+        .expect("the pretend toolchain runs");
+        assert!(code.seen > 20);
+        assert_eq!(made.output, "shapes.kexe");
+        assert_eq!(made.artifacts[0].name, "shapes.kexe");
+        let windows = native_options(&["-target", "mingw_x64", "-o", "shapes"]).expect("parses");
+        let mut code = PretendCode { seen: 0 };
+        let refused = native::finish(
+            module.clone(),
+            missing.clone(),
+            &windows,
+            Some(native::Toolchain {
+                code: &mut code,
+                linker: &mut linker,
+            }),
+        )
+        .expect_err("the pretend backend makes linux only");
+        assert_eq!(refused.code, "EK409");
+        let static_options =
+            native_options(&["-target", "linux_x64", "-p", "static", "-o", "shapes"])
+                .expect("parses");
+        let (library_module, _) =
+            native::lower_to_ir(&kotlin, &[], &static_options, vec![library.clone()])
+                .expect("a library lowers");
+        let header = native::header(&library_module, &static_options);
+        let text = String::from_utf8(header.bytes).expect("header text");
+        assert_eq!(header.name, "libshapes_api.h");
+        assert!(
+            text.contains("extern shapes_KInt shapes_total(shapes_KInt p0);"),
+            "{text}"
+        );
+        let klib_options =
+            native_options(&["-target", "linux_x64", "-p", "library", "-o", "shapes"])
+                .expect("parses");
+        let packed = native::finish(library_module, Vec::new(), &klib_options, None)
+            .expect("a klib needs no backend");
+        assert_eq!(packed.artifacts[0].name, "shapes.klib");
+        let mut sink = Sink::new();
+        let archive =
+            crate::archive::read(&packed.artifacts[0].bytes, &mut sink).expect("the klib is a zip");
+        assert!(archive.entry("default/manifest").is_some());
+        assert!(archive.entry("default/ir/module.kir").is_some());
+    }
+
+    #[test]
+    fn a_native_program_without_main_is_refused() {
+        let Some((_, library)) = standard_library() else {
+            return;
+        };
+        let kotlin = vec![("Lib.kt".to_string(), "fun helper() = 1\n".to_string())];
+        let options = native_options(&["-target", "linux_x64"]).expect("parses");
+        let refused = native::lower_to_ir(&kotlin, &[], &options, vec![library.clone()])
+            .expect_err("no main");
+        assert_eq!(refused.code, "EK407");
+        let named =
+            native_options(&["-target", "linux_x64", "-e", "nowhere.start"]).expect("parses");
+        let refused =
+            native::lower_to_ir(&kotlin, &[], &named, vec![library]).expect_err("no such entry");
+        assert_eq!(refused.code, "EK406");
+    }
+
     const LAYOUT_KOTLIN: &str = r####"package abi
 
 import zoo.Beast

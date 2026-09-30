@@ -96,6 +96,56 @@ pub const CATALOGUE: &[(&str, &str)] = &[
         "Kotlin source was found and the Kotlin standard library is not among the dependencies.",
     ),
     ("EK302", "A Kotlin source file is not text."),
+    ("EK400", "This target is not one Kotlin/Native knows."),
+    (
+        "EK401",
+        "This kind of output is not one Kotlin/Native makes.",
+    ),
+    ("EK402", "This option needs a value after it."),
+    (
+        "EK403",
+        "This option belongs to an LLVM toolchain, and this compiler has none.",
+    ),
+    ("EK404", "This option is not one this compiler knows."),
+    ("EK405", "A framework can only be made for an Apple target."),
+    (
+        "EK406",
+        "The entry point names no function this program has.",
+    ),
+    ("EK407", "A program needs a main function to start from."),
+    (
+        "EK408",
+        "No machine backend is attached to turn this into native code.",
+    ),
+    (
+        "EK409",
+        "The machine backend attached does not make code for this target.",
+    ),
+    (
+        "EK410",
+        "An instruction this compiler does not know was found in compiled code.",
+    ),
+    (
+        "EK411",
+        "The native program broke a rule of the intermediate form it was lowered to.",
+    ),
+    (
+        "EK412",
+        "The garbage collector named is not one Kotlin/Native offers.",
+    ),
+    (
+        "EK413",
+        "The memory allocator named is not one Kotlin/Native offers.",
+    ),
+    ("EK414", "A binary option must be written as key=value."),
+    (
+        "EK415",
+        "This compiled code asks for a bootstrap the native compiler does not provide.",
+    ),
+    (
+        "EK416",
+        "A library given to the native compiler is not an archive it can read.",
+    ),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
