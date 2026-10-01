@@ -12,6 +12,12 @@
       "passed": 87,
       "total": 90
     },
+    "kotlin-omni": {
+      "failed": 0,
+      "out_of_scope": 3921,
+      "passed": 3790,
+      "total": 7711
+    },
     "regex-oracle": {
       "failed": 0,
       "out_of_scope": 2,
