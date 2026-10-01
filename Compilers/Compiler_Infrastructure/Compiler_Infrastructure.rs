@@ -6403,6 +6403,7 @@ pub enum Object {
         items: Vec<Datum>,
     },
     Text(String),
+    Released,
 }
 
 const LOWEST_ADDRESS: u64 = 0x1_0000;
@@ -6420,6 +6421,8 @@ pub struct Machine {
     memory_limit: u64,
     references: BTreeMap<u64, u32>,
     objects: Vec<Object>,
+    charges: Vec<u64>,
+    released: Vec<u32>,
     object_limit: usize,
     texts: BTreeMap<u32, u32>,
     stdout: Vec<u8>,
@@ -6444,6 +6447,8 @@ impl Machine {
             memory_limit: limits.memory,
             references: BTreeMap::new(),
             objects: Vec::new(),
+            charges: Vec::new(),
+            released: Vec::new(),
             object_limit: limits.objects,
             texts: BTreeMap::new(),
             stdout: Vec::new(),
@@ -6723,15 +6728,75 @@ impl Machine {
         Ok(())
     }
 
-    fn new_object(&mut self, object: Object, bytes: u64) -> Result<u32, Trap> {
-        if self.objects.len() >= self.object_limit
+    fn pressed(&self, bytes: u64) -> bool {
+        self.objects.len() - self.released.len() >= self.object_limit
             || self.live.saturating_add(bytes) > self.memory_limit
-        {
+    }
+
+    fn new_object(&mut self, object: Object, bytes: u64) -> Result<u32, Trap> {
+        if self.pressed(bytes) {
             return Err(Trap::MemoryExhausted);
         }
         self.live += bytes;
+        if let Some(handle) = self.released.pop() {
+            let at = handle as usize - 1;
+            self.objects[at] = object;
+            self.charges[at] = bytes;
+            return Ok(handle);
+        }
         self.objects.push(object);
+        self.charges.push(bytes);
         Ok(self.objects.len() as u32)
+    }
+
+    fn gather(datum: &Datum, out: &mut Vec<u32>) {
+        match datum {
+            Datum::Reference(handle) if *handle != 0 => out.push(*handle),
+            Datum::Vector(items) => {
+                for item in items {
+                    Self::gather(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect(&mut self, mut waiting: Vec<u32>) {
+        waiting.extend(self.references.values().copied());
+        waiting.extend(self.texts.values().copied());
+        let mut marked = vec![false; self.objects.len()];
+        while let Some(handle) = waiting.pop() {
+            let Some(at) = (handle as usize).checked_sub(1) else {
+                continue;
+            };
+            if at >= marked.len() || marked[at] {
+                continue;
+            }
+            marked[at] = true;
+            match &self.objects[at] {
+                Object::Instance { fields, .. } => {
+                    for field in fields {
+                        Self::gather(field, &mut waiting);
+                    }
+                }
+                Object::Array { items, .. } => {
+                    for item in items {
+                        Self::gather(item, &mut waiting);
+                    }
+                }
+                Object::Text(_) | Object::Released => {}
+            }
+        }
+        for (at, kept) in marked.iter().enumerate() {
+            if *kept || matches!(self.objects[at], Object::Released) {
+                continue;
+            }
+            self.live = self.live.saturating_sub(self.charges[at]);
+            self.objects[at] = Object::Released;
+            self.released.push(at as u32 + 1);
+        }
+        self.released
+            .sort_unstable_by(|left, right| right.cmp(left));
     }
 
     pub fn object(&self, handle: u32) -> Option<&Object> {
@@ -6749,7 +6814,7 @@ impl Machine {
     pub fn class_of(&self, handle: u32) -> Option<ClassId> {
         match self.object(handle)? {
             Object::Instance { class, .. } | Object::Array { class, .. } => Some(*class),
-            Object::Text(_) => None,
+            Object::Text(_) | Object::Released => None,
         }
     }
 
@@ -6764,6 +6829,20 @@ impl Machine {
         let bytes = text.len() as u64 + 16;
         self.new_object(Object::Text(text.to_string()), bytes)
             .map(Datum::Reference)
+    }
+
+    pub fn items(&self, handle: u32) -> Option<&[Datum]> {
+        match self.object(handle)? {
+            Object::Array { items, .. } => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn items_mut(&mut self, handle: u32) -> Option<&mut [Datum]> {
+        match self.object_mut(handle)? {
+            Object::Array { items, .. } => Some(items),
+            _ => None,
+        }
     }
 }
 
@@ -6812,6 +6891,230 @@ impl StandardHost {
 
     fn address(datum: Option<&Datum>) -> Option<u64> {
         datum?.as_pointer()
+    }
+
+    fn handle(datum: Option<&Datum>) -> Result<u32, Trap> {
+        match datum {
+            Some(Datum::Reference(0)) => Err(Trap::NullReference),
+            Some(Datum::Reference(handle)) => Ok(*handle),
+            _ => Err(Trap::TypeConfusion),
+        }
+    }
+
+    fn float(datum: Option<&Datum>) -> Option<f64> {
+        match datum? {
+            Datum::Float(bits) => Some(f64::from_bits(*bits)),
+            _ => None,
+        }
+    }
+
+    fn units(machine: &Machine, handle: u32, from: u64, count: u64) -> Result<Vec<u16>, Trap> {
+        let items = machine.items(handle).ok_or(Trap::TypeConfusion)?;
+        let end = from.checked_add(count).ok_or(Trap::IndexOutOfBounds)?;
+        if end > items.len() as u64 {
+            return Err(Trap::IndexOutOfBounds);
+        }
+        items[from as usize..end as usize]
+            .iter()
+            .map(|item| match item {
+                Datum::Integer(value) => Ok(*value as u16),
+                _ => Err(Trap::TypeConfusion),
+            })
+            .collect()
+    }
+
+    fn put_units(machine: &mut Machine, handle: u32, text: &str) -> Result<usize, Trap> {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let items = machine.items_mut(handle).ok_or(Trap::TypeConfusion)?;
+        if units.len() > items.len() {
+            return Err(Trap::IndexOutOfBounds);
+        }
+        for (slot, unit) in items.iter_mut().zip(&units) {
+            *slot = Datum::Integer(u128::from(*unit));
+        }
+        Ok(units.len())
+    }
+
+    fn scientific(text: &str) -> (String, i32) {
+        let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
+        let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+        (digits, exponent.parse().unwrap_or(0))
+    }
+
+    fn shortest_digits(value: f64, single: bool) -> (String, i32) {
+        let narrow = value as f32;
+        let text = if single {
+            format!("{narrow:e}")
+        } else {
+            format!("{value:e}")
+        };
+        let (digits, exponent) = Self::scientific(&text);
+        if digits.len() != 1 {
+            return (digits, exponent);
+        }
+        let wider = if single {
+            format!("{narrow:.1e}")
+        } else {
+            format!("{value:.1e}")
+        };
+        let faithful = if single {
+            wider.parse::<f32>() == Ok(narrow)
+        } else {
+            wider.parse::<f64>() == Ok(value)
+        };
+        if !faithful {
+            return (digits, exponent);
+        }
+        let (wide, at) = Self::scientific(&wider);
+        let trimmed = wide.trim_end_matches('0');
+        if trimmed.is_empty() {
+            return (digits, exponent);
+        }
+        (trimmed.to_string(), at)
+    }
+
+    pub fn decimal_text(value: f64, single: bool) -> String {
+        if value.is_nan() {
+            return "NaN".to_string();
+        }
+        if value.is_infinite() {
+            return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+        }
+        let mut made = String::new();
+        if value.is_sign_negative() {
+            made.push('-');
+        }
+        if value == 0.0 {
+            made.push_str("0.0");
+            return made;
+        }
+        let (digits, exponent) = Self::shortest_digits(value.abs(), single);
+        let count = digits.len() as i32;
+        if (-3..7).contains(&exponent) {
+            if exponent >= 0 {
+                let whole = (exponent + 1) as usize;
+                if digits.len() <= whole {
+                    made.push_str(&digits);
+                    made.extend(std::iter::repeat_n('0', whole - digits.len()));
+                    made.push_str(".0");
+                } else {
+                    made.push_str(&digits[..whole]);
+                    made.push('.');
+                    made.push_str(&digits[whole..]);
+                }
+            } else {
+                made.push_str("0.");
+                made.extend(std::iter::repeat_n('0', (-exponent - 1) as usize));
+                made.push_str(&digits);
+            }
+            return made;
+        }
+        made.push_str(&digits[..1]);
+        made.push('.');
+        if count > 1 {
+            made.push_str(&digits[1..]);
+        } else {
+            made.push('0');
+        }
+        made.push('E');
+        made.push_str(&exponent.to_string());
+        made
+    }
+
+    fn mathematics(name: &str, first: f64, second: f64) -> Option<f64> {
+        Some(match name {
+            "sin" => first.sin(),
+            "cos" => first.cos(),
+            "tan" => first.tan(),
+            "asin" => first.asin(),
+            "acos" => first.acos(),
+            "atan" => first.atan(),
+            "atan2" => first.atan2(second),
+            "exp" => first.exp(),
+            "log" => first.ln(),
+            "log10" => first.log10(),
+            "sinh" => first.sinh(),
+            "cosh" => first.cosh(),
+            "tanh" => first.tanh(),
+            "cbrt" => first.cbrt(),
+            "hypot" => first.hypot(second),
+            "expm1" => first.exp_m1(),
+            "log1p" => first.ln_1p(),
+            "pow" => {
+                if second == 0.0 {
+                    1.0
+                } else if second.is_nan() || (first.abs() == 1.0 && second.is_infinite()) {
+                    f64::NAN
+                } else {
+                    first.powf(second)
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    fn runtime(
+        name: &str,
+        arguments: &[Datum],
+        machine: &mut Machine,
+    ) -> Result<Option<Datum>, Trap> {
+        let first = arguments.first();
+        let second = arguments.get(1);
+        match name {
+            "omni.identity" => {
+                let handle = Self::handle(first)?;
+                Ok(Some(Datum::integer(Type::I64, i128::from(handle))))
+            }
+            "omni.write_chars" => {
+                let descriptor = Self::number(first).ok_or(Trap::TypeConfusion)?;
+                let handle = Self::handle(second)?;
+                let from = Self::number(arguments.get(2)).ok_or(Trap::TypeConfusion)?;
+                let count = Self::number(arguments.get(3)).ok_or(Trap::TypeConfusion)?;
+                let units = Self::units(machine, handle, from, count)?;
+                let text: String = char::decode_utf16(units)
+                    .map(|unit| unit.unwrap_or('?'))
+                    .collect();
+                machine.emit(descriptor as u32, text.as_bytes());
+                Ok(None)
+            }
+            "omni.format_double" | "omni.format_float" => {
+                let single = name == "omni.format_float";
+                let value = match first {
+                    Some(Datum::Float(bits)) if single => f64::from(f32::from_bits(*bits as u32)),
+                    Some(Datum::Float(bits)) => f64::from_bits(*bits),
+                    _ => return Err(Trap::TypeConfusion),
+                };
+                let handle = Self::handle(second)?;
+                let text = Self::decimal_text(value, single);
+                let written = Self::put_units(machine, handle, &text)?;
+                Ok(Some(Datum::integer(Type::I32, written as i128)))
+            }
+            "omni.parse_double" => {
+                let handle = Self::handle(first)?;
+                let count = Self::number(second).ok_or(Trap::TypeConfusion)?;
+                let units = Self::units(machine, handle, 0, count)?;
+                let text = String::from_utf16_lossy(&units);
+                let value = text.trim().parse::<f64>().unwrap_or(f64::NAN);
+                Ok(Some(Datum::f64(value)))
+            }
+            "omni.clock" => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos() as i128)
+                    .unwrap_or(0);
+                Ok(Some(Datum::integer(Type::I64, now)))
+            }
+            _ => {
+                let Some(operation) = name.strip_prefix("omni.math.") else {
+                    return Err(Trap::MissingImplementation);
+                };
+                let left = Self::float(first).ok_or(Trap::TypeConfusion)?;
+                let right = Self::float(second).unwrap_or(0.0);
+                Self::mathematics(operation, left, right)
+                    .map(|value| Some(Datum::f64(value)))
+                    .ok_or(Trap::MissingImplementation)
+            }
+        }
     }
 }
 
@@ -6981,7 +7284,11 @@ impl Host for StandardHost {
                 Some(code) => HostAnswer::Exited(code as u32 as i32),
                 None => HostAnswer::Trapped(Trap::TypeConfusion),
             },
-            _ => HostAnswer::Missing,
+            _ => match Self::runtime(name, arguments, machine) {
+                Ok(answer) => HostAnswer::Returned(answer),
+                Err(Trap::MissingImplementation) => HostAnswer::Missing,
+                Err(trap) => HostAnswer::Trapped(trap),
+            },
         }
     }
 }
@@ -7035,6 +7342,88 @@ pub struct Interpreter<'m, 'h> {
     globals: Vec<u64>,
     frames: Vec<Frame<'m>>,
     fuel: u64,
+    liveness: BTreeMap<u32, Vec<Vec<Value>>>,
+}
+
+fn terminator_operands(terminator: &Terminator) -> Vec<Value> {
+    let mut out = Vec::new();
+    match terminator {
+        Terminator::Branch { condition, .. } => out.push(*condition),
+        Terminator::Switch { value, .. } => out.push(*value),
+        Terminator::Return(Some(value)) | Terminator::Throw(value) => out.push(*value),
+        Terminator::Invoke { call, .. } => out.extend(call.arguments.iter().copied()),
+        _ => {}
+    }
+    for edge in terminator.successors() {
+        out.extend(edge.arguments.iter().copied());
+    }
+    out
+}
+
+fn live_after_blocks(function: &Function) -> Vec<Vec<Value>> {
+    let count = function.blocks.len();
+    let mut defined: Vec<BTreeSet<Value>> = Vec::with_capacity(count);
+    let mut used: Vec<BTreeSet<Value>> = Vec::with_capacity(count);
+    for data in &function.blocks {
+        let mut made: BTreeSet<Value> = data.parameters.iter().copied().collect();
+        let mut wanted = BTreeSet::new();
+        for inst in &data.instructions {
+            let instruction = &function.instructions[inst.index()];
+            for argument in &instruction.arguments {
+                if !made.contains(argument) {
+                    wanted.insert(*argument);
+                }
+            }
+            if let Some(result) = instruction.result {
+                made.insert(result);
+            }
+        }
+        for operand in terminator_operands(&data.terminator) {
+            if !made.contains(&operand) {
+                wanted.insert(operand);
+            }
+        }
+        if let Terminator::Invoke { call, .. } = &data.terminator {
+            if let Some(result) = call.result {
+                made.insert(result);
+                wanted.remove(&result);
+            }
+        }
+        defined.push(made);
+        used.push(wanted);
+    }
+    let mut live_in: Vec<BTreeSet<Value>> = used.clone();
+    let mut live_out: Vec<BTreeSet<Value>> = vec![BTreeSet::new(); count];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in (0..count).rev() {
+            let mut out = BTreeSet::new();
+            for edge in function.blocks[block].terminator.successors() {
+                if let Some(seen) = live_in.get(edge.block.index()) {
+                    out.extend(seen.iter().copied());
+                }
+            }
+            let mut fresh = used[block].clone();
+            for value in &out {
+                if !defined[block].contains(value) {
+                    fresh.insert(*value);
+                }
+            }
+            if fresh != live_in[block] {
+                live_in[block] = fresh;
+                changed = true;
+            }
+            if out != live_out[block] {
+                live_out[block] = out;
+                changed = true;
+            }
+        }
+    }
+    live_out
+        .into_iter()
+        .map(|set| set.into_iter().collect())
+        .collect()
 }
 
 fn lane_wise(
@@ -7167,6 +7556,7 @@ impl<'m, 'h> Interpreter<'m, 'h> {
             globals,
             frames: Vec::new(),
             fuel: 0,
+            liveness: BTreeMap::new(),
         })
     }
 
@@ -7263,6 +7653,41 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                 }
             }
         }
+    }
+
+    fn make_room(&mut self, bytes: u64) {
+        if !self.machine.pressed(bytes) {
+            return;
+        }
+        let module = self.module;
+        let mut roots = Vec::new();
+        for at in 0..self.frames.len() {
+            let function_id = self.frames[at].function;
+            let function = &module.functions[function_id.index()];
+            let after = self
+                .liveness
+                .entry(function_id.0)
+                .or_insert_with(|| live_after_blocks(function));
+            let block = self.frames[at].block;
+            let data = &function.blocks[block];
+            let mut wanted: Vec<Value> = after.get(block).cloned().unwrap_or_default();
+            let position = self.frames[at].position.min(data.instructions.len());
+            for inst in &data.instructions[position..] {
+                wanted.extend(
+                    function.instructions[inst.index()]
+                        .arguments
+                        .iter()
+                        .copied(),
+                );
+            }
+            wanted.extend(terminator_operands(&data.terminator));
+            for value in wanted {
+                if let Some(Some(datum)) = self.frames[at].values.get(value.index()) {
+                    Machine::gather(datum, &mut roots);
+                }
+            }
+        }
+        self.machine.collect(roots);
     }
 
     fn run(&mut self, function: FunctionId, arguments: Vec<Datum>) -> Result<Option<Datum>, Stop> {
@@ -7905,6 +8330,7 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                     .map(Datum::zero)
                     .collect();
                 let bytes = 16 + (std::mem::size_of::<Datum>() * fields.len()) as u64;
+                self.make_room(bytes);
                 Datum::Reference(self.machine.new_object(
                     Object::Instance {
                         class: *class,
@@ -7925,7 +8351,8 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                     .saturating_mul(item)
                     .saturating_add(16)
                     .min(u128::from(u64::MAX)) as u64;
-                if self.machine.live.saturating_add(bytes) > self.machine.memory_limit {
+                self.make_room(bytes);
+                if self.machine.pressed(bytes) {
                     return Err(Stop::from(Trap::MemoryExhausted));
                 }
                 let items = vec![Datum::zero(*ty); length as usize];

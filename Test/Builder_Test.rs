@@ -27002,6 +27002,138 @@ mod java {
     }
 
     #[test]
+    fn a_less_than_comparison_treats_not_a_number_as_false() {
+        let source = r#"
+            package com.my.app;
+
+            final class Order {
+                static boolean below(double left, double right) {
+                    return left < right;
+                }
+
+                static boolean atMost(float left, float right) {
+                    return left <= right;
+                }
+
+                static boolean above(double left, double right) {
+                    return left > right;
+                }
+            }
+        "#;
+        let (_, bytes) = compile_one(source, &empty()).expect("the comparisons compile");
+        let class = crate::jvm::read(&bytes).expect("the class file reads back");
+        let code_of = |name: &str| {
+            class
+                .methods
+                .iter()
+                .find(|method| method.name == name)
+                .and_then(|method| method.code.as_ref())
+                .map(|code| code.bytes.clone())
+                .expect("the method has code")
+        };
+        let below = code_of("below");
+        assert!(
+            below.contains(&0x98),
+            "a double below uses the greater-on-NaN compare"
+        );
+        assert!(
+            !below.contains(&0x97),
+            "a double below never uses the less-on-NaN compare"
+        );
+        let at_most = code_of("atMost");
+        assert!(
+            at_most.contains(&0x96),
+            "a float at-most uses the greater-on-NaN compare"
+        );
+        assert!(
+            !at_most.contains(&0x95),
+            "a float at-most never uses the less-on-NaN compare"
+        );
+        let above = code_of("above");
+        assert!(
+            above.contains(&0x97),
+            "a double above uses the less-on-NaN compare"
+        );
+    }
+
+    #[test]
+    fn the_root_class_has_no_parent_and_calls_no_parent_constructor() {
+        let source = r#"
+            package java.lang;
+
+            public class Object {
+                public Object() {
+                }
+
+                public boolean equals(Object other) {
+                    return this == other;
+                }
+            }
+        "#;
+        let (name, bytes) = compile_one(source, &empty()).expect("the root class compiles");
+        assert_eq!(name, "java/lang/Object.class");
+        let class = crate::jvm::read(&bytes).expect("the class file reads back");
+        assert_eq!(class.superclass, None, "the root class names no parent");
+        let constructor = class
+            .methods
+            .iter()
+            .find(|method| method.name == "<init>")
+            .expect("the constructor is kept");
+        let code = constructor.code.as_ref().expect("the constructor has code");
+        assert!(
+            !code.bytes.contains(&0xb7),
+            "the root constructor calls no other constructor"
+        );
+    }
+
+    #[test]
+    fn a_loop_walks_a_list_of_arrays() {
+        let source = r#"
+            package com.my.app;
+
+            import java.util.List;
+
+            final class Rows {
+                int total(List<int[]> rows) {
+                    int sum = 0;
+                    for (int[] row : rows) {
+                        for (int cell : row) {
+                            sum += cell;
+                        }
+                    }
+                    return sum;
+                }
+            }
+        "#;
+        let (_, bytes) = compile_one(source, &empty()).expect("each element is cast to int[]");
+        assert!(
+            bytes.windows(2).any(|pair| pair == b"[I"),
+            "the cast names the array class"
+        );
+    }
+
+    #[test]
+    fn the_root_class_answers_what_an_interface_repeats_from_it() {
+        let source = r#"
+            package com.my.app;
+
+            interface Keyed {
+                int key();
+                boolean equals(Object other);
+                int hashCode();
+                String toString();
+            }
+
+            final class Door implements Keyed {
+                public int key() {
+                    return 7;
+                }
+            }
+        "#;
+        compile(source, &empty()).expect("equals, hashCode and toString come from Object");
+    }
+
+    #[test]
     fn a_class_that_answers_everything_is_accepted() {
         let source = r#"
             package com.my.app;
@@ -41377,6 +41509,119 @@ fun main() {
     println("$names ${total(4)} ${Platform.osFamily} ${Platform.cpuArchitecture.bitness}")
 }
 "####;
+
+    const OMNI_PROGRAM: &str = r####"package omni.sample
+
+interface Shape {
+    val area: Double
+}
+
+data class Square(val side: Double) : Shape {
+    override val area: Double
+        get() = side * side
+}
+
+data class Circle(val radius: Double) : Shape {
+    override val area: Double
+        get() = 3.0 * radius * radius
+}
+
+sealed class Token {
+    data class Number(val value: Int) : Token()
+    data class Word(val text: String) : Token()
+}
+
+fun tokens(text: String): List<Token> =
+    Regex("\\d+|[a-z]+").findAll(text).map { found ->
+        if (found.value[0].isDigit()) Token.Number(found.value.toInt()) else Token.Word(found.value)
+    }.toList()
+
+fun main() {
+    val shapes = listOf(Square(2.0), Circle(1.0), Square(0.5))
+    println(shapes.filter { it.area > 1.0 }.joinToString { it.toString() })
+    println(shapes.sumOf { it.area })
+    val counts = HashMap<String, Int>()
+    for (word in "the quick brown fox jumps over the lazy dog the end".split(" ")) {
+        counts[word] = (counts[word] ?: 0) + 1
+    }
+    println(counts.entries.sortedBy { it.key }.joinToString(",") { "${it.key}=${it.value}" })
+    println(counts)
+    println(tokens("abc 12 de 345"))
+    val sorted = mutableListOf(5, 3, 9, 1, 7).apply { sort() }
+    println(sorted)
+    try {
+        listOf<Int>().first()
+    } catch (e: NoSuchElementException) {
+        println("empty: ${e.message}")
+    }
+    val builder = StringBuilder()
+    for (i in 1..5) builder.append(i * i).append(' ')
+    println(builder.toString().trim())
+    println("x".repeat(3) + 1.5 + 'c' + 10L)
+    println(if (sorted.size == 5) "five" else "other")
+    println("a1b22c333".replace(Regex("[0-9]+"), "#"))
+    println(1.0 / 3)
+    println(100.0f / 3)
+    println(Long.MAX_VALUE)
+    println(listOf(3, 1, 2).sortedDescending().map { it * 2 })
+    println("Kotlin".lowercase().uppercase().reversed())
+    println(setOf(4, 2, 4, 8).size)
+}
+"####;
+
+    const OMNI_PROGRAM_PRINTS: &str = "Square(side=2.0), Circle(radius=1.0)
+7.25
+brown=1,dog=1,end=1,fox=1,jumps=1,lazy=1,over=1,quick=1,the=3
+{the=3, over=1, quick=1, lazy=1, jumps=1, end=1, brown=1, dog=1, fox=1}
+[Word(text=abc), Number(value=12), Word(text=de), Number(value=345)]
+[1, 3, 5, 7, 9]
+empty: List is empty.
+1 4 9 16 25
+xxx1.5c10
+five
+a#b#c#
+0.3333333333333333
+33.333332
+9223372036854775807
+[6, 4, 2]
+NILTOK
+3
+";
+
+    #[test]
+    fn a_kotlin_program_runs_on_omni_ir_as_it_runs_on_the_jvm() {
+        use crate::compilers::compiler_infrastructure::{
+            Datum, Finish, Interpreter, Limits, StandardHost,
+        };
+        let Some((_, library)) = standard_library() else {
+            eprintln!("kotlin omni: no kotlin-stdlib to compile against");
+            return;
+        };
+        let kotlin = vec![("Sample.kt".to_string(), OMNI_PROGRAM.to_string())];
+        let options = native_options(&["-target", "linux_x64", "-o", "sample"]).expect("parses");
+        let (module, entries, _) = native::lower_to_omni(&kotlin, &[], &options, vec![library])
+            .expect("the program lowers to Omni IR");
+        module.verify().expect("the module keeps every rule");
+        let text = module.to_text();
+        assert_eq!(
+            crate::compilers::compiler_infrastructure::Module::from_text(&text)
+                .expect("the text reads back")
+                .to_text(),
+            text,
+            "the module round-trips through its text form"
+        );
+        let mut host = StandardHost;
+        let mut interpreter =
+            Interpreter::new(&module, &mut host, Limits::default()).expect("the module loads");
+        let finish = interpreter
+            .call(entries[0], vec![Datum::Reference(0)])
+            .expect("main finishes");
+        assert_eq!(finish, Finish::Returned(None));
+        assert_eq!(
+            String::from_utf8_lossy(interpreter.machine().stdout()),
+            OMNI_PROGRAM_PRINTS
+        );
+    }
 
     #[test]
     fn a_kotlin_program_lowers_to_native_ir_that_holds_together() {
@@ -65209,6 +65454,47 @@ block0:
             missed,
             vec!["abstract-method"],
             "these traps were never reached"
+        );
+    }
+
+    #[test]
+    fn unreachable_objects_are_collected_when_memory_runs_short() {
+        let churn = module(
+            "class %Longs array i64 { fields [] methods [] }\nclass %Box { fields [ref] methods [] }\nfunction @f() -> i64 export {\nblock0:\n    %keep: ref = allocate %Box\n    %n: i32 = const 1000\n    %first: ref = allocate_array %Longs %n\n    %zero: i32 = const 0\n    %seven: i64 = const 7\n    store_element i64 %first, %zero, %seven\n    store_field %Box 0 %keep, %first\n    jump block1(%zero)\nblock1(%i: i32):\n    %limit: i32 = const 1000\n    %more: bool = icmp slt %i, %limit\n    branch %more, block2, block3\nblock2:\n    %junk: ref = allocate_array %Longs %n\n    %one: i32 = const 1\n    %next: i32 = add %i, %one\n    jump block1(%next)\nblock3:\n    %held: ref = load_field %Box 0 %keep\n    %v: i64 = load_element i64 %held, %zero\n    return %v\n}\n",
+        );
+        let limits = Limits {
+            memory: 1 << 20,
+            objects: 64,
+            ..Limits::default()
+        };
+        let (outcome, _) = execute(&churn, "f", Vec::new(), limits);
+        assert_eq!(
+            outcome.expect("the garbage is collected"),
+            Finish::Returned(Some(Datum::integer(Type::I64, 7))),
+            "what is still reachable survives every collection"
+        );
+        let mut straight = String::from(
+            "class %Longs array i64 { fields [] methods [] }\nfunction @f() -> i32 export {\nblock0:\n    %n: i32 = const 1000\n",
+        );
+        for index in 0..40 {
+            straight.push_str(&format!("    %a{index}: ref = allocate_array %Longs %n\n"));
+        }
+        straight.push_str("    %length: i32 = array_length %a39\n    return %length\n}\n");
+        let (outcome, _) = execute(&module(&straight), "f", Vec::new(), limits);
+        assert_eq!(
+            outcome.expect("values no later instruction reads are not kept"),
+            Finish::Returned(Some(Datum::integer(Type::I32, 1000)))
+        );
+        let hoard = module(
+            "class %Longs array i64 { fields [] methods [] }\nclass %Node { fields [ref, ref] methods [] }\nfunction @f() -> i64 export {\nblock0:\n    %zero: i32 = const 0\n    %n: i32 = const 1000\n    %none: ref = null\n    jump block1(%zero, %none)\nblock1(%i: i32, %list: ref):\n    %limit: i32 = const 1000\n    %more: bool = icmp slt %i, %limit\n    branch %more, block2, block3\nblock2:\n    %node: ref = allocate %Node\n    %data: ref = allocate_array %Longs %n\n    store_field %Node 0 %node, %data\n    store_field %Node 1 %node, %list\n    %one: i32 = const 1\n    %next: i32 = add %i, %one\n    jump block1(%next, %node)\nblock3:\n    %v: i64 = const 0\n    return %v\n}\n",
+        );
+        let (outcome, _) = execute(&hoard, "f", Vec::new(), limits);
+        let error = outcome.expect_err("everything stays reachable");
+        assert!(
+            error
+                .context
+                .contains(&"Reason: memory-exhausted".to_string()),
+            "{error:?}"
         );
     }
 

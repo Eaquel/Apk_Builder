@@ -38709,6 +38709,15 @@ pub mod native {
             }
         }
 
+        pub fn omni_layout(&self) -> crate::compilers::compiler_infrastructure::Layout {
+            use crate::compilers::compiler_infrastructure::Layout;
+            match (self.pointer_bytes(), self.architecture, self.family) {
+                (8, _, _) => Layout::Lp64,
+                (_, Architecture::X86, family) if family != Family::Mingw => Layout::I386,
+                _ => Layout::Ilp32,
+            }
+        }
+
         pub fn stack_alignment(&self) -> u32 {
             match self.architecture {
                 Architecture::X64 | Architecture::Arm64 | Architecture::X86 => 16,
@@ -40897,6 +40906,14 @@ pub mod native {
                 Ok(count)
             }
 
+            pub fn add_library_class(&mut self, bytes: &[u8]) -> Result<String, Diagnostic> {
+                let class = jvm::read(bytes)?;
+                let name = internal(&class.name);
+                self.bytes.remove(&name);
+                self.parsed.insert(name.clone(), Rc::new(class));
+                Ok(name)
+            }
+
             pub fn owns(&self, name: &str) -> bool {
                 self.own.contains(name)
             }
@@ -40943,7 +40960,7 @@ pub mod native {
             (parameters, returns)
         }
 
-        fn class_of_descriptor(descriptor: &str) -> Option<String> {
+        pub(super) fn class_of_descriptor(descriptor: &str) -> Option<String> {
             descriptor
                 .strip_prefix('L')
                 .and_then(|rest| rest.strip_suffix(';'))
@@ -40971,7 +40988,7 @@ pub mod native {
         }
 
         #[derive(Clone, Debug)]
-        enum Operand {
+        pub(super) enum Operand {
             None,
             Int(i32),
             Local(u16),
@@ -40985,14 +41002,14 @@ pub mod native {
         }
 
         #[derive(Clone, Debug)]
-        struct Decoded {
-            pc: u32,
-            opcode: u8,
-            operand: Operand,
-            next: u32,
+        pub(super) struct Decoded {
+            pub(super) pc: u32,
+            pub(super) opcode: u8,
+            pub(super) operand: Operand,
+            pub(super) next: u32,
         }
 
-        fn decode(code: &[u8]) -> Result<Vec<Decoded>, (u32, u8)> {
+        pub(super) fn decode(code: &[u8]) -> Result<Vec<Decoded>, (u32, u8)> {
             let mut out = Vec::new();
             let mut pc = 0usize;
             let byte = |at: usize| -> Result<u8, (u32, u8)> {
@@ -41111,21 +41128,21 @@ pub mod native {
             Ok(out)
         }
 
-        fn utf8(class: &jvm::Class, index: u16) -> Option<String> {
+        pub(super) fn utf8(class: &jvm::Class, index: u16) -> Option<String> {
             match class.constants.get(index as usize)? {
                 jvm::Constant::Utf8(text) => Some(text.clone()),
                 _ => None,
             }
         }
 
-        fn class_name(class: &jvm::Class, index: u16) -> Option<String> {
+        pub(super) fn class_name(class: &jvm::Class, index: u16) -> Option<String> {
             match class.constants.get(index as usize)? {
                 jvm::Constant::Class(name) => utf8(class, *name),
                 _ => None,
             }
         }
 
-        fn name_and_type(class: &jvm::Class, index: u16) -> Option<(String, String)> {
+        pub(super) fn name_and_type(class: &jvm::Class, index: u16) -> Option<(String, String)> {
             match class.constants.get(index as usize)? {
                 jvm::Constant::NameAndType(name, descriptor) => {
                     Some((utf8(class, *name)?, utf8(class, *descriptor)?))
@@ -41134,7 +41151,10 @@ pub mod native {
             }
         }
 
-        fn member(class: &jvm::Class, index: u16) -> Option<(String, String, String, bool)> {
+        pub(super) fn member(
+            class: &jvm::Class,
+            index: u16,
+        ) -> Option<(String, String, String, bool)> {
             match class.constants.get(index as usize)? {
                 jvm::Constant::FieldRef(owner, typed) | jvm::Constant::MethodRef(owner, typed) => {
                     let (name, descriptor) = name_and_type(class, *typed)?;
@@ -41148,7 +41168,7 @@ pub mod native {
             }
         }
 
-        fn method_handle(
+        pub(super) fn method_handle(
             class: &jvm::Class,
             index: u16,
         ) -> Option<(u8, String, String, String, bool)> {
@@ -41161,7 +41181,7 @@ pub mod native {
             }
         }
 
-        fn method_type(class: &jvm::Class, index: u16) -> Option<String> {
+        pub(super) fn method_type(class: &jvm::Class, index: u16) -> Option<String> {
             match class.constants.get(index as usize)? {
                 jvm::Constant::MethodType(descriptor) => utf8(class, *descriptor),
                 _ => None,
@@ -43796,6 +43816,17529 @@ pub mod native {
         }
     }
 
+    pub mod lowering {
+        use super::fail;
+        use super::translate::{
+            class_name, class_of_descriptor, decode, internal, member, method_handle, method_type,
+            name_and_type, split_descriptor, utf8, ClassFiles, Decoded, Operand, ROOT,
+        };
+        use crate::compilers::compiler_infrastructure::{
+            BinaryOp, Block, BlockCall, ClassId, ClassType, Comparison, Conversion,
+            FloatComparison, Function, FunctionBuilder, FunctionId, Global, GlobalContent,
+            GlobalId, Instruction, Layout, Linkage, Module, Operation, Signature, Terminator, Type,
+            UnaryOp, Value, Variable,
+        };
+        use crate::diag::Diagnostic;
+        use crate::jvm;
+        use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+        pub const FAULTS: &str = "omni/runtime/Faults";
+        pub const CLASSES: &str = "omni/runtime/Classes";
+        pub const STRING: &str = "java/lang/String";
+        pub const BUILDER: &str = "java/lang/StringBuilder";
+
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+        pub enum Kind {
+            Int,
+            Long,
+            Float,
+            Double,
+            Reference,
+        }
+
+        impl Kind {
+            pub fn of(descriptor: &str) -> Option<Kind> {
+                Some(match descriptor.as_bytes().first() {
+                    Some(b'V') => return None,
+                    Some(b'Z' | b'B' | b'C' | b'S' | b'I') => Kind::Int,
+                    Some(b'J') => Kind::Long,
+                    Some(b'F') => Kind::Float,
+                    Some(b'D') => Kind::Double,
+                    _ => Kind::Reference,
+                })
+            }
+
+            pub fn ty(self) -> Type {
+                match self {
+                    Kind::Int => Type::I32,
+                    Kind::Long => Type::I64,
+                    Kind::Float => Type::F32,
+                    Kind::Double => Type::F64,
+                    Kind::Reference => Type::REFERENCE,
+                }
+            }
+
+            pub fn wide(self) -> bool {
+                matches!(self, Kind::Long | Kind::Double)
+            }
+        }
+
+        pub fn storage(descriptor: &str) -> Type {
+            match descriptor.as_bytes().first() {
+                Some(b'Z') => Type::BOOL,
+                Some(b'B') => Type::I8,
+                Some(b'C' | b'S') => Type::I16,
+                Some(b'I') => Type::I32,
+                Some(b'J') => Type::I64,
+                Some(b'F') => Type::F32,
+                Some(b'D') => Type::F64,
+                _ => Type::REFERENCE,
+            }
+        }
+
+        pub fn signature_of(descriptor: &str, is_static: bool) -> Signature {
+            let (parameters, returns) = split_descriptor(descriptor);
+            let mut types = Vec::with_capacity(parameters.len() + 1);
+            if !is_static {
+                types.push(Type::REFERENCE);
+            }
+            types.extend(
+                parameters
+                    .iter()
+                    .map(|one| Kind::of(one).unwrap_or(Kind::Int).ty()),
+            );
+            Signature::new(types, Kind::of(&returns).map(Kind::ty))
+        }
+
+        pub type Root = (String, String, String, bool);
+
+        pub fn runtime_classes() -> Result<&'static [(String, Vec<u8>)], Diagnostic> {
+            static COMPILED: std::sync::OnceLock<Vec<(String, Vec<u8>)>> =
+                std::sync::OnceLock::new();
+            if let Some(found) = COMPILED.get() {
+                return Ok(found);
+            }
+            let sources: Vec<(String, String)> = RUNTIME
+                .iter()
+                .map(|(label, text)| (label.to_string(), text.to_string()))
+                .collect();
+            let classpath = crate::compilers::java::Classpath::new();
+            let made = crate::compilers::java::compile_together(&sources, &classpath)?;
+            Ok(COMPILED.get_or_init(|| made))
+        }
+
+        pub fn add_runtime(files: &mut ClassFiles) -> Result<(), Diagnostic> {
+            for (_, bytes) in runtime_classes()? {
+                files.add_library_class(bytes)?;
+            }
+            Ok(())
+        }
+
+        pub const RUNTIME: &[(&str, &str)] = &[
+            (
+                "java/io/ByteArrayOutputStream.java",
+                r####"package java.io;
+
+public class ByteArrayOutputStream extends OutputStream {
+    protected byte[] buf;
+    protected int count;
+
+    public ByteArrayOutputStream() {
+        this(32);
+    }
+
+    public ByteArrayOutputStream(int size) {
+        buf = new byte[size];
+    }
+
+    public void write(int value) {
+        if (count == buf.length) {
+            byte[] larger = new byte[buf.length * 2 + 1];
+            for (int at = 0; at < count; at++) {
+                larger[at] = buf[at];
+            }
+            buf = larger;
+        }
+        buf[count++] = (byte) value;
+    }
+
+    public void write(byte[] bytes, int offset, int length) {
+        for (int at = 0; at < length; at++) {
+            write(bytes[offset + at]);
+        }
+    }
+
+    public byte[] toByteArray() {
+        byte[] copy = new byte[count];
+        for (int at = 0; at < count; at++) {
+            copy[at] = buf[at];
+        }
+        return copy;
+    }
+
+    public int size() {
+        return count;
+    }
+
+    public void reset() {
+        count = 0;
+    }
+
+    public String toString() {
+        return new String(buf, 0, count);
+    }
+}
+"####,
+            ),
+            (
+                "java/io/Closeable.java",
+                r####"package java.io;
+
+public interface Closeable extends AutoCloseable {
+    void close() throws IOException;
+}
+"####,
+            ),
+            (
+                "java/io/IOException.java",
+                r####"package java.io;
+
+public class IOException extends Exception {
+    public IOException() {
+        super();
+    }
+
+    public IOException(String message) {
+        super(message);
+    }
+
+    public IOException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IOException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/io/OutputStream.java",
+                r####"package java.io;
+
+public abstract class OutputStream implements Closeable {
+    public OutputStream() {
+    }
+
+    public abstract void write(int value) throws IOException;
+
+    public void write(byte[] bytes) throws IOException {
+        write(bytes, 0, bytes.length);
+    }
+
+    public void write(byte[] bytes, int offset, int length) throws IOException {
+        for (int at = 0; at < length; at++) {
+            write(bytes[offset + at]);
+        }
+    }
+
+    public void flush() throws IOException {
+    }
+
+    public void close() throws IOException {
+    }
+}
+"####,
+            ),
+            (
+                "java/io/PrintStream.java",
+                r####"package java.io;
+
+public class PrintStream extends OutputStream {
+    private final int descriptor;
+
+    public PrintStream(int descriptor) {
+        this.descriptor = descriptor;
+    }
+
+    public void write(int value) {
+        char[] one = new char[] {(char) (value & 0xff)};
+        omni.runtime.Console.write(descriptor, one, 0, 1);
+    }
+
+    public void print(String text) {
+        String shown = String.valueOf(text);
+        char[] chars = shown.toCharArray();
+        omni.runtime.Console.write(descriptor, chars, 0, chars.length);
+    }
+
+    public void print(Object value) {
+        print(String.valueOf(value));
+    }
+
+    public void print(char[] chars) {
+        omni.runtime.Console.write(descriptor, chars, 0, chars.length);
+    }
+
+    public void print(boolean value) {
+        print(String.valueOf(value));
+    }
+
+    public void print(char value) {
+        print(String.valueOf(value));
+    }
+
+    public void print(int value) {
+        print(String.valueOf(value));
+    }
+
+    public void print(long value) {
+        print(String.valueOf(value));
+    }
+
+    public void print(float value) {
+        print(String.valueOf(value));
+    }
+
+    public void print(double value) {
+        print(String.valueOf(value));
+    }
+
+    public void println() {
+        print("\n");
+    }
+
+    public void println(String text) {
+        print(String.valueOf(text) + "\n");
+    }
+
+    public void println(Object value) {
+        println(String.valueOf(value));
+    }
+
+    public void println(char[] chars) {
+        print(chars);
+        println();
+    }
+
+    public void println(boolean value) {
+        println(String.valueOf(value));
+    }
+
+    public void println(char value) {
+        println(String.valueOf(value));
+    }
+
+    public void println(int value) {
+        println(String.valueOf(value));
+    }
+
+    public void println(long value) {
+        println(String.valueOf(value));
+    }
+
+    public void println(float value) {
+        println(String.valueOf(value));
+    }
+
+    public void println(double value) {
+        println(String.valueOf(value));
+    }
+
+    public void flush() {
+    }
+}
+"####,
+            ),
+            (
+                "java/io/Serializable.java",
+                r####"package java.io;
+
+public interface Serializable {
+}
+"####,
+            ),
+            (
+                "java/lang/AbstractMethodError.java",
+                r####"package java.lang;
+
+public class AbstractMethodError extends IncompatibleClassChangeError {
+    public AbstractMethodError() {
+        super();
+    }
+
+    public AbstractMethodError(String message) {
+        super(message);
+    }
+
+    public AbstractMethodError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public AbstractMethodError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Appendable.java",
+                r####"package java.lang;
+
+public interface Appendable {
+    Appendable append(CharSequence text);
+
+    Appendable append(CharSequence text, int start, int end);
+
+    Appendable append(char one);
+}
+"####,
+            ),
+            (
+                "java/lang/ArithmeticException.java",
+                r####"package java.lang;
+
+public class ArithmeticException extends RuntimeException {
+    public ArithmeticException() {
+        super();
+    }
+
+    public ArithmeticException(String message) {
+        super(message);
+    }
+
+    public ArithmeticException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ArithmeticException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/ArrayIndexOutOfBoundsException.java",
+                r####"package java.lang;
+
+public class ArrayIndexOutOfBoundsException extends IndexOutOfBoundsException {
+    public ArrayIndexOutOfBoundsException() {
+        super();
+    }
+
+    public ArrayIndexOutOfBoundsException(String message) {
+        super(message);
+    }
+
+    public ArrayIndexOutOfBoundsException(int index) {
+        super("Array index out of range: " + index);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/ArrayStoreException.java",
+                r####"package java.lang;
+
+public class ArrayStoreException extends RuntimeException {
+    public ArrayStoreException() {
+        super();
+    }
+
+    public ArrayStoreException(String message) {
+        super(message);
+    }
+
+    public ArrayStoreException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ArrayStoreException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/AssertionError.java",
+                r####"package java.lang;
+
+public class AssertionError extends Error {
+    public AssertionError() {
+        super();
+    }
+
+    public AssertionError(Object detail) {
+        super(String.valueOf(detail));
+        if (detail instanceof Throwable) {
+            initCause((Throwable) detail);
+        }
+    }
+
+    public AssertionError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public AssertionError(boolean detail) {
+        this(String.valueOf(detail));
+    }
+
+    public AssertionError(char detail) {
+        this(String.valueOf(detail));
+    }
+
+    public AssertionError(int detail) {
+        this(String.valueOf(detail));
+    }
+
+    public AssertionError(long detail) {
+        this(String.valueOf(detail));
+    }
+
+    public AssertionError(float detail) {
+        this(String.valueOf(detail));
+    }
+
+    public AssertionError(double detail) {
+        this(String.valueOf(detail));
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/AutoCloseable.java",
+                r####"package java.lang;
+
+public interface AutoCloseable {
+    void close() throws Exception;
+}
+"####,
+            ),
+            (
+                "java/lang/Boolean.java",
+                r####"package java.lang;
+
+public final class Boolean implements java.io.Serializable, Comparable<Boolean> {
+    public static final Boolean TRUE = new Boolean(true);
+    public static final Boolean FALSE = new Boolean(false);
+    public static final Class<Boolean> TYPE = Class.primitive("boolean");
+
+    private final boolean value;
+
+    public Boolean(boolean value) {
+        this.value = value;
+    }
+
+    public static Boolean valueOf(boolean value) {
+        return value ? TRUE : FALSE;
+    }
+
+    public static Boolean valueOf(String text) {
+        return parseBoolean(text) ? TRUE : FALSE;
+    }
+
+    public static boolean parseBoolean(String text) {
+        return text != null && text.equalsIgnoreCase("true");
+    }
+
+    public boolean booleanValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return value ? 1231 : 1237;
+    }
+
+    public static int hashCode(boolean value) {
+        return value ? 1231 : 1237;
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Boolean && ((Boolean) other).value == value;
+    }
+
+    public String toString() {
+        return value ? "true" : "false";
+    }
+
+    public static String toString(boolean value) {
+        return value ? "true" : "false";
+    }
+
+    public int compareTo(Boolean other) {
+        return compare(value, other.value);
+    }
+
+    public static int compare(boolean left, boolean right) {
+        return left == right ? 0 : (left ? 1 : -1);
+    }
+
+    public static boolean logicalAnd(boolean left, boolean right) {
+        return left && right;
+    }
+
+    public static boolean logicalOr(boolean left, boolean right) {
+        return left || right;
+    }
+
+    public static boolean logicalXor(boolean left, boolean right) {
+        return left ^ right;
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Byte.java",
+                r####"package java.lang;
+
+public final class Byte extends Number implements Comparable<Byte> {
+    public static final byte MIN_VALUE = -128;
+    public static final byte MAX_VALUE = 127;
+    public static final int SIZE = 8;
+    public static final int BYTES = 1;
+    public static final Class<Byte> TYPE = Class.primitive("byte");
+
+    private static Byte[] cache;
+
+    private final byte value;
+
+    public Byte(byte value) {
+        this.value = value;
+    }
+
+    public static Byte valueOf(byte value) {
+        if (cache == null) {
+            Byte[] made = new Byte[256];
+            for (int at = 0; at < 256; at++) {
+                made[at] = new Byte((byte) (at - 128));
+            }
+            cache = made;
+        }
+        return cache[value + 128];
+    }
+
+    public static byte parseByte(String text) {
+        return (byte) Long.parse(text, 10, MIN_VALUE, MAX_VALUE);
+    }
+
+    public static byte parseByte(String text, int radix) {
+        return (byte) Long.parse(text, radix, MIN_VALUE, MAX_VALUE);
+    }
+
+    public byte byteValue() {
+        return value;
+    }
+
+    public short shortValue() {
+        return value;
+    }
+
+    public int intValue() {
+        return value;
+    }
+
+    public long longValue() {
+        return value;
+    }
+
+    public float floatValue() {
+        return value;
+    }
+
+    public double doubleValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return value;
+    }
+
+    public static int hashCode(byte value) {
+        return value;
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Byte && ((Byte) other).value == value;
+    }
+
+    public String toString() {
+        return Integer.toString(value);
+    }
+
+    public static String toString(byte value) {
+        return Integer.toString(value);
+    }
+
+    public int compareTo(Byte other) {
+        return value - other.value;
+    }
+
+    public static int compare(byte left, byte right) {
+        return left - right;
+    }
+
+    public static int toUnsignedInt(byte value) {
+        return value & 0xff;
+    }
+
+    public static long toUnsignedLong(byte value) {
+        return value & 0xffL;
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/CharSequence.java",
+                r####"package java.lang;
+
+public interface CharSequence {
+    int length();
+
+    char charAt(int index);
+
+    CharSequence subSequence(int start, int end);
+
+    String toString();
+
+    default boolean isEmpty() {
+        return length() == 0;
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Character.java",
+                r####"package java.lang;
+
+public final class Character implements java.io.Serializable, Comparable<Character> {
+    public static final char MIN_VALUE = '\u0000';
+    public static final char MAX_VALUE = '￿';
+    public static final int MIN_RADIX = 2;
+    public static final int MAX_RADIX = 36;
+    public static final char MIN_HIGH_SURROGATE = '\ud800';
+    public static final char MAX_HIGH_SURROGATE = '\udbff';
+    public static final char MIN_LOW_SURROGATE = '\udc00';
+    public static final char MAX_LOW_SURROGATE = '\udfff';
+    public static final char MIN_SURROGATE = '\ud800';
+    public static final char MAX_SURROGATE = '\udfff';
+    public static final int MIN_SUPPLEMENTARY_CODE_POINT = 0x010000;
+    public static final int MIN_CODE_POINT = 0x000000;
+    public static final int MAX_CODE_POINT = 0x10ffff;
+    public static final int SIZE = 16;
+    public static final int BYTES = 2;
+    public static final Class<Character> TYPE = Class.primitive("char");
+
+    private static Character[] cache;
+
+    private final char value;
+
+    public Character(char value) {
+        this.value = value;
+    }
+
+    public static Character valueOf(char value) {
+        if (value < 128) {
+            if (cache == null) {
+                Character[] made = new Character[128];
+                for (int at = 0; at < 128; at++) {
+                    made[at] = new Character((char) at);
+                }
+                cache = made;
+            }
+            return cache[value];
+        }
+        return new Character(value);
+    }
+
+    public char charValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return value;
+    }
+
+    public static int hashCode(char value) {
+        return value;
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Character && ((Character) other).value == value;
+    }
+
+    public String toString() {
+        return String.valueOf(value);
+    }
+
+    public static String toString(char value) {
+        return String.valueOf(value);
+    }
+
+    public static String toString(int point) {
+        return new String(toChars(point));
+    }
+
+    public int compareTo(Character other) {
+        return value - other.value;
+    }
+
+    public static int compare(char left, char right) {
+        return left - right;
+    }
+
+    public static boolean isHighSurrogate(char one) {
+        return one >= MIN_HIGH_SURROGATE && one <= MAX_HIGH_SURROGATE;
+    }
+
+    public static boolean isLowSurrogate(char one) {
+        return one >= MIN_LOW_SURROGATE && one <= MAX_LOW_SURROGATE;
+    }
+
+    public static boolean isSurrogate(char one) {
+        return one >= MIN_SURROGATE && one <= MAX_SURROGATE;
+    }
+
+    public static boolean isSurrogatePair(char high, char low) {
+        return isHighSurrogate(high) && isLowSurrogate(low);
+    }
+
+    public static boolean isBmpCodePoint(int point) {
+        return point >>> 16 == 0;
+    }
+
+    public static boolean isValidCodePoint(int point) {
+        return point >= 0 && point <= MAX_CODE_POINT;
+    }
+
+    public static boolean isSupplementaryCodePoint(int point) {
+        return point >= MIN_SUPPLEMENTARY_CODE_POINT && point <= MAX_CODE_POINT;
+    }
+
+    public static int charCount(int point) {
+        return point >= MIN_SUPPLEMENTARY_CODE_POINT ? 2 : 1;
+    }
+
+    public static int toCodePoint(char high, char low) {
+        return ((high - MIN_HIGH_SURROGATE) << 10) + (low - MIN_LOW_SURROGATE) + MIN_SUPPLEMENTARY_CODE_POINT;
+    }
+
+    public static char highSurrogate(int point) {
+        return (char) ((point >>> 10) + (MIN_HIGH_SURROGATE - (MIN_SUPPLEMENTARY_CODE_POINT >>> 10)));
+    }
+
+    public static char lowSurrogate(int point) {
+        return (char) ((point & 0x3ff) + MIN_LOW_SURROGATE);
+    }
+
+    public static char[] toChars(int point) {
+        if (isBmpCodePoint(point)) {
+            return new char[] {(char) point};
+        }
+        return new char[] {highSurrogate(point), lowSurrogate(point)};
+    }
+
+    public static int codePointAt(CharSequence text, int index) {
+        char high = text.charAt(index);
+        if (isHighSurrogate(high) && index + 1 < text.length()) {
+            char low = text.charAt(index + 1);
+            if (isLowSurrogate(low)) {
+                return toCodePoint(high, low);
+            }
+        }
+        return high;
+    }
+
+    public static int codePointBefore(CharSequence text, int index) {
+        char low = text.charAt(index - 1);
+        if (isLowSurrogate(low) && index - 2 >= 0) {
+            char high = text.charAt(index - 2);
+            if (isHighSurrogate(high)) {
+                return toCodePoint(high, low);
+            }
+        }
+        return low;
+    }
+
+    public static int codePointAt(char[] text, int index) {
+        char high = text[index];
+        if (isHighSurrogate(high) && index + 1 < text.length) {
+            char low = text[index + 1];
+            if (isLowSurrogate(low)) {
+                return toCodePoint(high, low);
+            }
+        }
+        return high;
+    }
+
+    public static boolean isDigit(char one) {
+        return isDigit((int) one);
+    }
+
+    public static boolean isDigit(int point) {
+        if (point >= '0' && point <= '9') {
+            return true;
+        }
+        if (point < 0x660) {
+            return false;
+        }
+        return digitValue(point) >= 0;
+    }
+
+    private static int digitValue(int point) {
+        int[] zeros = {0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66, 0xe50, 0xed0, 0xf20, 0x1040, 0x17e0, 0x1810, 0xff10};
+        for (int zero : zeros) {
+            if (point >= zero && point <= zero + 9) {
+                return point - zero;
+            }
+        }
+        return -1;
+    }
+
+    public static boolean isLetter(char one) {
+        return isLetter((int) one);
+    }
+
+    public static boolean isLetter(int point) {
+        if ((point >= 'a' && point <= 'z') || (point >= 'A' && point <= 'Z')) {
+            return true;
+        }
+        if (point < 0xaa) {
+            return false;
+        }
+        if (point == 0xd7 || point == 0xf7) {
+            return false;
+        }
+        if (point == 0xaa || point == 0xb5 || point == 0xba) {
+            return true;
+        }
+        if (point >= 0xc0 && point <= 0x24f) {
+            return true;
+        }
+        if (point >= 0x370 && point <= 0x3ff) {
+            return point != 0x375 && point != 0x37e && point != 0x384 && point != 0x385 && point != 0x387;
+        }
+        if (point >= 0x400 && point <= 0x52f) {
+            return point < 0x482 || point > 0x489;
+        }
+        if (point >= 0x5d0 && point <= 0x5ea) {
+            return true;
+        }
+        if (point >= 0x620 && point <= 0x64a) {
+            return true;
+        }
+        if (point >= 0x4e00 && point <= 0x9fff) {
+            return true;
+        }
+        if (point >= 0x3040 && point <= 0x30ff) {
+            return point != 0x30a0 && point != 0x30fb;
+        }
+        if (point >= 0xac00 && point <= 0xd7a3) {
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean isLetterOrDigit(char one) {
+        return isLetter(one) || isDigit(one);
+    }
+
+    public static boolean isLetterOrDigit(int point) {
+        return isLetter(point) || isDigit(point);
+    }
+
+    public static boolean isAlphabetic(int point) {
+        return isLetter(point);
+    }
+
+    public static boolean isJavaIdentifierStart(char one) {
+        return isLetter(one) || one == '_' || one == '$';
+    }
+
+    public static boolean isJavaIdentifierPart(char one) {
+        return isLetterOrDigit(one) || one == '_' || one == '$';
+    }
+
+    public static boolean isWhitespace(char one) {
+        return isWhitespace((int) one);
+    }
+
+    public static boolean isWhitespace(int point) {
+        if (point == ' ' || (point >= 0x09 && point <= 0x0d) || (point >= 0x1c && point <= 0x1f)) {
+            return true;
+        }
+        if (point == 0x00a0 || point == 0x2007 || point == 0x202f) {
+            return false;
+        }
+        return point == 0x1680 || (point >= 0x2000 && point <= 0x200a) || point == 0x2028 || point == 0x2029 || point == 0x205f || point == 0x3000;
+    }
+
+    public static boolean isSpaceChar(char one) {
+        return one == ' ' || one == 0x00a0 || one == 0x1680 || (one >= 0x2000 && one <= 0x200a) || one == 0x2028 || one == 0x2029 || one == 0x202f || one == 0x205f || one == 0x3000;
+    }
+
+    public static boolean isISOControl(char one) {
+        return one <= 0x1f || (one >= 0x7f && one <= 0x9f);
+    }
+
+    public static boolean isUpperCase(char one) {
+        return isUpperCase((int) one);
+    }
+
+    public static boolean isUpperCase(int point) {
+        return toLowerCase(point) != point && toUpperCase(point) == point;
+    }
+
+    public static boolean isLowerCase(char one) {
+        return isLowerCase((int) one);
+    }
+
+    public static boolean isLowerCase(int point) {
+        if (point == 0xdf || point == 0xaa || point == 0xba) {
+            return true;
+        }
+        return toUpperCase(point) != point && toLowerCase(point) == point;
+    }
+
+    public static boolean isTitleCase(int point) {
+        return point == 0x01c5 || point == 0x01c8 || point == 0x01cb || point == 0x01f2
+            || (point >= 0x1f88 && point <= 0x1f8f) || (point >= 0x1f98 && point <= 0x1f9f)
+            || (point >= 0x1fa8 && point <= 0x1faf) || point == 0x1fbc || point == 0x1fcc || point == 0x1ffc;
+    }
+
+    public static boolean isTitleCase(char one) {
+        return one == 0x1c5 || one == 0x1c8 || one == 0x1cb || one == 0x1f2;
+    }
+
+    public static char toUpperCase(char one) {
+        return (char) toUpperCase((int) one);
+    }
+
+    public static int toUpperCase(int point) {
+        if (point >= 'a' && point <= 'z') {
+            return point - 32;
+        }
+        if (point < 0xb5) {
+            return point;
+        }
+        if (point == 0xb5) {
+            return 0x39c;
+        }
+        if (point == 0xff) {
+            return 0x178;
+        }
+        if (point >= 0xe0 && point <= 0xfe && point != 0xf7) {
+            return point - 32;
+        }
+        if (point >= 0x100 && point <= 0x17f) {
+            if (point == 0x131) {
+                return 'I';
+            }
+            if (point == 0x17f) {
+                return 'S';
+            }
+            if ((point >= 0x139 && point <= 0x148) || (point >= 0x179 && point <= 0x17e)) {
+                return point % 2 == 0 ? point - 1 : point;
+            }
+            if (point == 0x138 || point == 0x149) {
+                return point;
+            }
+            return point % 2 == 1 ? point - 1 : point;
+        }
+        if (point >= 0x3b1 && point <= 0x3c9 && point != 0x3c2) {
+            return point - 32;
+        }
+        if (point == 0x3c2) {
+            return 0x3a3;
+        }
+        if (point >= 0x430 && point <= 0x44f) {
+            return point - 32;
+        }
+        if (point >= 0x450 && point <= 0x45f) {
+            return point - 80;
+        }
+        if (point >= 0x460 && point <= 0x4ff) {
+            return point % 2 == 1 ? point - 1 : point;
+        }
+        if (point >= 0xff41 && point <= 0xff5a) {
+            return point - 32;
+        }
+        return point;
+    }
+
+    public static char toLowerCase(char one) {
+        return (char) toLowerCase((int) one);
+    }
+
+    public static int toLowerCase(int point) {
+        if (point >= 'A' && point <= 'Z') {
+            return point + 32;
+        }
+        if (point < 0xc0) {
+            return point;
+        }
+        if (point >= 0xc0 && point <= 0xde && point != 0xd7) {
+            return point + 32;
+        }
+        if (point >= 0x100 && point <= 0x17f) {
+            if (point == 0x130) {
+                return 'i';
+            }
+            if (point == 0x178) {
+                return 0xff;
+            }
+            if ((point >= 0x139 && point <= 0x148) || (point >= 0x179 && point <= 0x17e)) {
+                return point % 2 == 1 ? point + 1 : point;
+            }
+            if (point == 0x138 || point == 0x149 || point == 0x17f) {
+                return point;
+            }
+            return point % 2 == 0 ? point + 1 : point;
+        }
+        if (point >= 0x391 && point <= 0x3a9 && point != 0x3a2) {
+            return point + 32;
+        }
+        if (point >= 0x410 && point <= 0x42f) {
+            return point + 32;
+        }
+        if (point >= 0x400 && point <= 0x40f) {
+            return point + 80;
+        }
+        if (point >= 0x460 && point <= 0x4ff) {
+            return point % 2 == 0 ? point + 1 : point;
+        }
+        if (point >= 0xff21 && point <= 0xff3a) {
+            return point + 32;
+        }
+        return point;
+    }
+
+    public static char toTitleCase(char one) {
+        return toUpperCase(one);
+    }
+
+    public static int digit(char one, int radix) {
+        return digit((int) one, radix);
+    }
+
+    public static int digit(int point, int radix) {
+        if (radix < MIN_RADIX || radix > MAX_RADIX) {
+            return -1;
+        }
+        int found = -1;
+        if (point >= '0' && point <= '9') {
+            found = point - '0';
+        } else if (point >= 'a' && point <= 'z') {
+            found = point - 'a' + 10;
+        } else if (point >= 'A' && point <= 'Z') {
+            found = point - 'A' + 10;
+        } else if (point >= 0xff21 && point <= 0xff3a) {
+            found = point - 0xff21 + 10;
+        } else if (point >= 0xff41 && point <= 0xff5a) {
+            found = point - 0xff41 + 10;
+        } else {
+            found = digitValue(point);
+        }
+        return found < radix ? found : -1;
+    }
+
+    public static char forDigit(int digit, int radix) {
+        if (digit >= radix || digit < 0 || radix < MIN_RADIX || radix > MAX_RADIX) {
+            return '\0';
+        }
+        if (digit < 10) {
+            return (char) ('0' + digit);
+        }
+        return (char) ('a' - 10 + digit);
+    }
+
+    public static int getNumericValue(char one) {
+        return digit(one, MAX_RADIX);
+    }
+
+    public static int getType(char one) {
+        if (isUpperCase(one)) {
+            return 1;
+        }
+        if (isLowerCase(one)) {
+            return 2;
+        }
+        if (isDigit(one)) {
+            return 9;
+        }
+        if (isLetter(one)) {
+            return 5;
+        }
+        if (isWhitespace(one)) {
+            return 12;
+        }
+        if (isISOControl(one)) {
+            return 15;
+        }
+        return 0;
+    }
+
+    public static boolean isDefined(char one) {
+        return true;
+    }
+
+    public static char reverseBytes(char one) {
+        return (char) (((one & 0xff) << 8) | ((one >> 8) & 0xff));
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Class.java",
+                r####"package java.lang;
+
+public final class Class<T> implements java.io.Serializable {
+    private final String name;
+    private final boolean primitive;
+
+    private Class(String name, boolean primitive) {
+        this.name = name;
+        this.primitive = primitive;
+    }
+
+    static <T> Class<T> primitive(String name) {
+        return new Class<T>(name, true);
+    }
+
+    public static <T> Class<T> ofName(String name) {
+        return new Class<T>(name, false);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String getTypeName() {
+        if (isArray()) {
+            return getComponentType().getTypeName() + "[]";
+        }
+        return name;
+    }
+
+    public String getSimpleName() {
+        if (isArray()) {
+            return getComponentType().getSimpleName() + "[]";
+        }
+        int dot = name.lastIndexOf('.');
+        String simple = name.substring(dot + 1);
+        int dollar = simple.lastIndexOf('$');
+        if (dollar >= 0 && dollar + 1 < simple.length()) {
+            String rest = simple.substring(dollar + 1);
+            boolean digits = true;
+            for (int at = 0; at < rest.length(); at++) {
+                if (!Character.isDigit(rest.charAt(at))) {
+                    digits = false;
+                }
+            }
+            return digits ? "" : rest;
+        }
+        return simple;
+    }
+
+    public String getCanonicalName() {
+        return getTypeName().replace('$', '.');
+    }
+
+    public String getPackageName() {
+        int dot = name.lastIndexOf('.');
+        return dot < 0 ? "" : name.substring(0, dot);
+    }
+
+    public boolean isPrimitive() {
+        return primitive;
+    }
+
+    public boolean isArray() {
+        return name.startsWith("[");
+    }
+
+    public boolean isInterface() {
+        return false;
+    }
+
+    public Class<?> getComponentType() {
+        if (!isArray()) {
+            return null;
+        }
+        String rest = name.substring(1);
+        switch (rest.charAt(0)) {
+            case 'Z':
+                return Boolean.TYPE;
+            case 'B':
+                return Byte.TYPE;
+            case 'C':
+                return Character.TYPE;
+            case 'S':
+                return Short.TYPE;
+            case 'I':
+                return Integer.TYPE;
+            case 'J':
+                return Long.TYPE;
+            case 'F':
+                return Float.TYPE;
+            case 'D':
+                return Double.TYPE;
+            case '[':
+                return omni.runtime.Classes.named(rest);
+            default:
+                return omni.runtime.Classes.named(rest.substring(1, rest.length() - 1));
+        }
+    }
+
+    public boolean desiredAssertionStatus() {
+        return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    public T cast(Object value) {
+        return (T) value;
+    }
+
+    public boolean isInstance(Object value) {
+        return value != null && omni.runtime.Classes.of(value) == this;
+    }
+
+    public String toString() {
+        return (primitive ? "" : "class ") + name;
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/ClassCastException.java",
+                r####"package java.lang;
+
+public class ClassCastException extends RuntimeException {
+    public ClassCastException() {
+        super();
+    }
+
+    public ClassCastException(String message) {
+        super(message);
+    }
+
+    public ClassCastException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ClassCastException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/ClassNotFoundException.java",
+                r####"package java.lang;
+
+public class ClassNotFoundException extends ReflectiveOperationException {
+    public ClassNotFoundException() {
+        super();
+    }
+
+    public ClassNotFoundException(String message) {
+        super(message);
+    }
+
+    public ClassNotFoundException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ClassNotFoundException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/CloneNotSupportedException.java",
+                r####"package java.lang;
+
+public class CloneNotSupportedException extends Exception {
+    public CloneNotSupportedException() {
+        super();
+    }
+
+    public CloneNotSupportedException(String message) {
+        super(message);
+    }
+
+    public CloneNotSupportedException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public CloneNotSupportedException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Cloneable.java",
+                r####"package java.lang;
+
+public interface Cloneable {
+}
+"####,
+            ),
+            (
+                "java/lang/Comparable.java",
+                r####"package java.lang;
+
+public interface Comparable<T> {
+    int compareTo(T other);
+}
+"####,
+            ),
+            (
+                "java/lang/Double.java",
+                r####"package java.lang;
+
+public final class Double extends Number implements Comparable<Double> {
+    public static final double POSITIVE_INFINITY = 1.0 / 0.0;
+    public static final double NEGATIVE_INFINITY = -1.0 / 0.0;
+    public static final double NaN = 0.0d / 0.0;
+    public static final double MAX_VALUE = 1.7976931348623157E308;
+    public static final double MIN_NORMAL = 2.2250738585072014E-308;
+    public static final double MIN_VALUE = 4.9E-324;
+    public static final int MAX_EXPONENT = 1023;
+    public static final int MIN_EXPONENT = -1022;
+    public static final int SIZE = 64;
+    public static final int BYTES = 8;
+    public static final Class<Double> TYPE = Class.primitive("double");
+
+    private final double value;
+
+    public Double(double value) {
+        this.value = value;
+    }
+
+    public static Double valueOf(double value) {
+        return new Double(value);
+    }
+
+    public static Double valueOf(String text) {
+        return new Double(parseDouble(text));
+    }
+
+    public static double parseDouble(String text) {
+        return omni.runtime.Numbers.parse(text);
+    }
+
+    public static String toString(double value) {
+        char[] buffer = new char[32];
+        int length = omni.runtime.Numbers.formatDouble(value, buffer);
+        return new String(buffer, 0, length);
+    }
+
+    public static String toHexString(double value) {
+        return toString(value);
+    }
+
+    public static boolean isNaN(double value) {
+        return value != value;
+    }
+
+    public static boolean isInfinite(double value) {
+        return value == POSITIVE_INFINITY || value == NEGATIVE_INFINITY;
+    }
+
+    public static boolean isFinite(double value) {
+        return Math.abs(value) <= MAX_VALUE;
+    }
+
+    public boolean isNaN() {
+        return isNaN(value);
+    }
+
+    public boolean isInfinite() {
+        return isInfinite(value);
+    }
+
+    public byte byteValue() {
+        return (byte) value;
+    }
+
+    public short shortValue() {
+        return (short) value;
+    }
+
+    public int intValue() {
+        return (int) value;
+    }
+
+    public long longValue() {
+        return (long) value;
+    }
+
+    public float floatValue() {
+        return (float) value;
+    }
+
+    public double doubleValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return hashCode(value);
+    }
+
+    public static int hashCode(double value) {
+        long bits = doubleToLongBits(value);
+        return (int) (bits ^ (bits >>> 32));
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Double && doubleToLongBits(((Double) other).value) == doubleToLongBits(value);
+    }
+
+    public String toString() {
+        return toString(value);
+    }
+
+    public int compareTo(Double other) {
+        return compare(value, other.value);
+    }
+
+    public static int compare(double left, double right) {
+        if (left < right) {
+            return -1;
+        }
+        if (left > right) {
+            return 1;
+        }
+        long leftBits = doubleToLongBits(left);
+        long rightBits = doubleToLongBits(right);
+        return leftBits == rightBits ? 0 : (leftBits < rightBits ? -1 : 1);
+    }
+
+    public static long doubleToLongBits(double value) {
+        if (value != value) {
+            return 0x7ff8000000000000L;
+        }
+        return doubleToRawLongBits(value);
+    }
+
+    public static native long doubleToRawLongBits(double value);
+
+    public static native double longBitsToDouble(long bits);
+
+    public static double sum(double left, double right) {
+        return left + right;
+    }
+
+    public static double max(double left, double right) {
+        return Math.max(left, right);
+    }
+
+    public static double min(double left, double right) {
+        return Math.min(left, right);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Enum.java",
+                r####"package java.lang;
+
+public abstract class Enum<E extends Enum<E>> implements Comparable<E>, java.io.Serializable {
+    private final String name;
+    private final int ordinal;
+
+    protected Enum(String name, int ordinal) {
+        this.name = name;
+        this.ordinal = ordinal;
+    }
+
+    public final String name() {
+        return name;
+    }
+
+    public final int ordinal() {
+        return ordinal;
+    }
+
+    public String toString() {
+        return name;
+    }
+
+    public final boolean equals(Object other) {
+        return this == other;
+    }
+
+    public final int hashCode() {
+        return super.hashCode();
+    }
+
+    public final int compareTo(E other) {
+        return ordinal - ((Enum<?>) other).ordinal;
+    }
+
+    @SuppressWarnings("unchecked")
+    public final Class<E> getDeclaringClass() {
+        return (Class<E>) getClass();
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Error.java",
+                r####"package java.lang;
+
+public class Error extends Throwable {
+    public Error() {
+        super();
+    }
+
+    public Error(String message) {
+        super(message);
+    }
+
+    public Error(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public Error(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Exception.java",
+                r####"package java.lang;
+
+public class Exception extends Throwable {
+    public Exception() {
+        super();
+    }
+
+    public Exception(String message) {
+        super(message);
+    }
+
+    public Exception(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public Exception(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/ExceptionInInitializerError.java",
+                r####"package java.lang;
+
+public class ExceptionInInitializerError extends LinkageError {
+    public ExceptionInInitializerError() {
+        super();
+    }
+
+    public ExceptionInInitializerError(String message) {
+        super(message);
+    }
+
+    public ExceptionInInitializerError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ExceptionInInitializerError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Float.java",
+                r####"package java.lang;
+
+public final class Float extends Number implements Comparable<Float> {
+    public static final float POSITIVE_INFINITY = 1.0f / 0.0f;
+    public static final float NEGATIVE_INFINITY = -1.0f / 0.0f;
+    public static final float NaN = 0.0f / 0.0f;
+    public static final float MAX_VALUE = 3.4028235E38f;
+    public static final float MIN_NORMAL = 1.17549435E-38f;
+    public static final float MIN_VALUE = 1.4E-45f;
+    public static final int MAX_EXPONENT = 127;
+    public static final int MIN_EXPONENT = -126;
+    public static final int SIZE = 32;
+    public static final int BYTES = 4;
+    public static final Class<Float> TYPE = Class.primitive("float");
+
+    private final float value;
+
+    public Float(float value) {
+        this.value = value;
+    }
+
+    public Float(double value) {
+        this.value = (float) value;
+    }
+
+    public static Float valueOf(float value) {
+        return new Float(value);
+    }
+
+    public static Float valueOf(String text) {
+        return new Float(parseFloat(text));
+    }
+
+    public static float parseFloat(String text) {
+        return (float) omni.runtime.Numbers.parse(text);
+    }
+
+    public static String toString(float value) {
+        char[] buffer = new char[32];
+        int length = omni.runtime.Numbers.formatFloat(value, buffer);
+        return new String(buffer, 0, length);
+    }
+
+    public static boolean isNaN(float value) {
+        return value != value;
+    }
+
+    public static boolean isInfinite(float value) {
+        return value == POSITIVE_INFINITY || value == NEGATIVE_INFINITY;
+    }
+
+    public static boolean isFinite(float value) {
+        return Math.abs(value) <= MAX_VALUE;
+    }
+
+    public boolean isNaN() {
+        return isNaN(value);
+    }
+
+    public boolean isInfinite() {
+        return isInfinite(value);
+    }
+
+    public byte byteValue() {
+        return (byte) value;
+    }
+
+    public short shortValue() {
+        return (short) value;
+    }
+
+    public int intValue() {
+        return (int) value;
+    }
+
+    public long longValue() {
+        return (long) value;
+    }
+
+    public float floatValue() {
+        return value;
+    }
+
+    public double doubleValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return floatToIntBits(value);
+    }
+
+    public static int hashCode(float value) {
+        return floatToIntBits(value);
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Float && floatToIntBits(((Float) other).value) == floatToIntBits(value);
+    }
+
+    public String toString() {
+        return toString(value);
+    }
+
+    public int compareTo(Float other) {
+        return compare(value, other.value);
+    }
+
+    public static int compare(float left, float right) {
+        if (left < right) {
+            return -1;
+        }
+        if (left > right) {
+            return 1;
+        }
+        int leftBits = floatToIntBits(left);
+        int rightBits = floatToIntBits(right);
+        return leftBits == rightBits ? 0 : (leftBits < rightBits ? -1 : 1);
+    }
+
+    public static int floatToIntBits(float value) {
+        if (value != value) {
+            return 0x7fc00000;
+        }
+        return floatToRawIntBits(value);
+    }
+
+    public static native int floatToRawIntBits(float value);
+
+    public static native float intBitsToFloat(int bits);
+
+    public static float sum(float left, float right) {
+        return left + right;
+    }
+
+    public static float max(float left, float right) {
+        return Math.max(left, right);
+    }
+
+    public static float min(float left, float right) {
+        return Math.min(left, right);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/IllegalArgumentException.java",
+                r####"package java.lang;
+
+public class IllegalArgumentException extends RuntimeException {
+    public IllegalArgumentException() {
+        super();
+    }
+
+    public IllegalArgumentException(String message) {
+        super(message);
+    }
+
+    public IllegalArgumentException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IllegalArgumentException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/IllegalStateException.java",
+                r####"package java.lang;
+
+public class IllegalStateException extends RuntimeException {
+    public IllegalStateException() {
+        super();
+    }
+
+    public IllegalStateException(String message) {
+        super(message);
+    }
+
+    public IllegalStateException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IllegalStateException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/IncompatibleClassChangeError.java",
+                r####"package java.lang;
+
+public class IncompatibleClassChangeError extends LinkageError {
+    public IncompatibleClassChangeError() {
+        super();
+    }
+
+    public IncompatibleClassChangeError(String message) {
+        super(message);
+    }
+
+    public IncompatibleClassChangeError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IncompatibleClassChangeError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/IndexOutOfBoundsException.java",
+                r####"package java.lang;
+
+public class IndexOutOfBoundsException extends RuntimeException {
+    public IndexOutOfBoundsException() {
+        super();
+    }
+
+    public IndexOutOfBoundsException(String message) {
+        super(message);
+    }
+
+    public IndexOutOfBoundsException(int index) {
+        super("Index out of range: " + index);
+    }
+
+    public IndexOutOfBoundsException(long index) {
+        super("Index out of range: " + index);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Integer.java",
+                r####"package java.lang;
+
+public final class Integer extends Number implements Comparable<Integer> {
+    public static final int MIN_VALUE = 0x80000000;
+    public static final int MAX_VALUE = 0x7fffffff;
+    public static final int SIZE = 32;
+    public static final int BYTES = 4;
+    public static final Class<Integer> TYPE = Class.primitive("int");
+
+    private static Integer[] cache;
+
+    private final int value;
+
+    public Integer(int value) {
+        this.value = value;
+    }
+
+    public static Integer valueOf(int value) {
+        if (value >= -128 && value <= 127) {
+            if (cache == null) {
+                Integer[] made = new Integer[256];
+                for (int at = 0; at < 256; at++) {
+                    made[at] = new Integer(at - 128);
+                }
+                cache = made;
+            }
+            return cache[value + 128];
+        }
+        return new Integer(value);
+    }
+
+    public static Integer valueOf(String text) {
+        return valueOf(parseInt(text, 10));
+    }
+
+    public static Integer valueOf(String text, int radix) {
+        return valueOf(parseInt(text, radix));
+    }
+
+    public static int parseInt(String text) {
+        return parseInt(text, 10);
+    }
+
+    public static int parseInt(String text, int radix) {
+        long parsed = Long.parse(text, radix, MIN_VALUE, MAX_VALUE);
+        return (int) parsed;
+    }
+
+    public static int parseUnsignedInt(String text) {
+        return parseUnsignedInt(text, 10);
+    }
+
+    public static int parseUnsignedInt(String text, int radix) {
+        if (text != null && text.length() > 0 && text.charAt(0) == '-') {
+            throw new NumberFormatException("Illegal leading minus sign on unsigned string " + text + ".");
+        }
+        return (int) Long.parse(text, radix, 0, 0xffffffffL);
+    }
+
+    public byte byteValue() {
+        return (byte) value;
+    }
+
+    public short shortValue() {
+        return (short) value;
+    }
+
+    public int intValue() {
+        return value;
+    }
+
+    public long longValue() {
+        return value;
+    }
+
+    public float floatValue() {
+        return value;
+    }
+
+    public double doubleValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return value;
+    }
+
+    public static int hashCode(int value) {
+        return value;
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Integer && ((Integer) other).value == value;
+    }
+
+    public String toString() {
+        return toString(value);
+    }
+
+    public static String toString(int value) {
+        return Long.toString(value, 10);
+    }
+
+    public static String toString(int value, int radix) {
+        return Long.toString(value, radix);
+    }
+
+    public static String toUnsignedString(int value) {
+        return Long.toString(toUnsignedLong(value));
+    }
+
+    public static String toUnsignedString(int value, int radix) {
+        return Long.toString(toUnsignedLong(value), radix);
+    }
+
+    public static String toHexString(int value) {
+        return Long.unsigned(toUnsignedLong(value), 4);
+    }
+
+    public static String toOctalString(int value) {
+        return Long.unsigned(toUnsignedLong(value), 3);
+    }
+
+    public static String toBinaryString(int value) {
+        return Long.unsigned(toUnsignedLong(value), 1);
+    }
+
+    public static long toUnsignedLong(int value) {
+        return value & 0xffffffffL;
+    }
+
+    public int compareTo(Integer other) {
+        return compare(value, other.value);
+    }
+
+    public static int compare(int left, int right) {
+        return left < right ? -1 : (left == right ? 0 : 1);
+    }
+
+    public static int compareUnsigned(int left, int right) {
+        return compare(left + MIN_VALUE, right + MIN_VALUE);
+    }
+
+    public static int divideUnsigned(int dividend, int divisor) {
+        return (int) (toUnsignedLong(dividend) / toUnsignedLong(divisor));
+    }
+
+    public static int remainderUnsigned(int dividend, int divisor) {
+        return (int) (toUnsignedLong(dividend) % toUnsignedLong(divisor));
+    }
+
+    public static int signum(int value) {
+        return (value >> 31) | (-value >>> 31);
+    }
+
+    public static int abs(int value) {
+        return value < 0 ? -value : value;
+    }
+
+    public static int sum(int left, int right) {
+        return left + right;
+    }
+
+    public static int max(int left, int right) {
+        return Math.max(left, right);
+    }
+
+    public static int min(int left, int right) {
+        return Math.min(left, right);
+    }
+
+    public static int bitCount(int value) {
+        int count = 0;
+        int rest = value;
+        while (rest != 0) {
+            rest &= rest - 1;
+            count++;
+        }
+        return count;
+    }
+
+    public static int numberOfLeadingZeros(int value) {
+        if (value == 0) {
+            return 32;
+        }
+        int count = 0;
+        int rest = value;
+        while (rest > 0) {
+            rest <<= 1;
+            count++;
+        }
+        return count;
+    }
+
+    public static int numberOfTrailingZeros(int value) {
+        if (value == 0) {
+            return 32;
+        }
+        int count = 0;
+        int rest = value;
+        while ((rest & 1) == 0) {
+            rest >>>= 1;
+            count++;
+        }
+        return count;
+    }
+
+    public static int highestOneBit(int value) {
+        return value & (MIN_VALUE >>> numberOfLeadingZeros(value));
+    }
+
+    public static int lowestOneBit(int value) {
+        return value & -value;
+    }
+
+    public static int rotateLeft(int value, int distance) {
+        return (value << distance) | (value >>> -distance);
+    }
+
+    public static int rotateRight(int value, int distance) {
+        return (value >>> distance) | (value << -distance);
+    }
+
+    public static int reverse(int value) {
+        int result = 0;
+        for (int at = 0; at < 32; at++) {
+            result = (result << 1) | ((value >>> at) & 1);
+        }
+        return result;
+    }
+
+    public static int reverseBytes(int value) {
+        return (value << 24) | ((value & 0xff00) << 8) | ((value >>> 8) & 0xff00) | (value >>> 24);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/InterruptedException.java",
+                r####"package java.lang;
+
+public class InterruptedException extends Exception {
+    public InterruptedException() {
+        super();
+    }
+
+    public InterruptedException(String message) {
+        super(message);
+    }
+
+    public InterruptedException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public InterruptedException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Iterable.java",
+                r####"package java.lang;
+
+import java.util.Iterator;
+import java.util.function.Consumer;
+
+public interface Iterable<T> {
+    Iterator<T> iterator();
+
+    default void forEach(Consumer<? super T> action) {
+        Iterator<T> walk = iterator();
+        while (walk.hasNext()) {
+            action.accept(walk.next());
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/LinkageError.java",
+                r####"package java.lang;
+
+public class LinkageError extends Error {
+    public LinkageError() {
+        super();
+    }
+
+    public LinkageError(String message) {
+        super(message);
+    }
+
+    public LinkageError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public LinkageError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Long.java",
+                r####"package java.lang;
+
+public final class Long extends Number implements Comparable<Long> {
+    public static final long MIN_VALUE = 0x8000000000000000L;
+    public static final long MAX_VALUE = 0x7fffffffffffffffL;
+    public static final int SIZE = 64;
+    public static final int BYTES = 8;
+    public static final Class<Long> TYPE = Class.primitive("long");
+
+    private static Long[] cache;
+
+    private final long value;
+
+    public Long(long value) {
+        this.value = value;
+    }
+
+    public static Long valueOf(long value) {
+        if (value >= -128 && value <= 127) {
+            if (cache == null) {
+                Long[] made = new Long[256];
+                for (int at = 0; at < 256; at++) {
+                    made[at] = new Long(at - 128);
+                }
+                cache = made;
+            }
+            return cache[(int) value + 128];
+        }
+        return new Long(value);
+    }
+
+    public static Long valueOf(String text) {
+        return valueOf(parseLong(text, 10));
+    }
+
+    public static long parseLong(String text) {
+        return parseLong(text, 10);
+    }
+
+    public static long parseLong(String text, int radix) {
+        return parse(text, radix, MIN_VALUE, MAX_VALUE);
+    }
+
+    static long parse(String text, int radix, long lowest, long highest) {
+        if (text == null) {
+            throw new NumberFormatException("Cannot parse null string: null");
+        }
+        if (radix < Character.MIN_RADIX || radix > Character.MAX_RADIX) {
+            throw new NumberFormatException("radix " + radix + " out of range");
+        }
+        int length = text.length();
+        if (length == 0) {
+            throw new NumberFormatException("For input string: \"\"" + (radix == 10 ? "" : " under radix " + radix));
+        }
+        int at = 0;
+        boolean negative = false;
+        char first = text.charAt(0);
+        if (first == '-' || first == '+') {
+            negative = first == '-';
+            at = 1;
+            if (length == 1) {
+                throw failure(text, radix);
+            }
+        }
+        long limit = negative ? lowest : -highest;
+        long result = 0;
+        long multiplied = limit / radix;
+        while (at < length) {
+            int digit = Character.digit(text.charAt(at++), radix);
+            if (digit < 0 || result < multiplied) {
+                throw failure(text, radix);
+            }
+            result *= radix;
+            if (result < limit + digit) {
+                throw failure(text, radix);
+            }
+            result -= digit;
+        }
+        long parsed = negative ? result : -result;
+        if (parsed < lowest || parsed > highest) {
+            throw failure(text, radix);
+        }
+        return parsed;
+    }
+
+    private static NumberFormatException failure(String text, int radix) {
+        return new NumberFormatException("For input string: \"" + text + "\"" + (radix == 10 ? "" : " under radix " + radix));
+    }
+
+    public byte byteValue() {
+        return (byte) value;
+    }
+
+    public short shortValue() {
+        return (short) value;
+    }
+
+    public int intValue() {
+        return (int) value;
+    }
+
+    public long longValue() {
+        return value;
+    }
+
+    public float floatValue() {
+        return value;
+    }
+
+    public double doubleValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return hashCode(value);
+    }
+
+    public static int hashCode(long value) {
+        return (int) (value ^ (value >>> 32));
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Long && ((Long) other).value == value;
+    }
+
+    public String toString() {
+        return toString(value, 10);
+    }
+
+    public static String toString(long value) {
+        return toString(value, 10);
+    }
+
+    public static String toString(long value, int radix) {
+        if (radix < Character.MIN_RADIX || radix > Character.MAX_RADIX) {
+            radix = 10;
+        }
+        if (value == 0) {
+            return "0";
+        }
+        char[] digits = new char[65];
+        int at = 65;
+        boolean negative = value < 0;
+        long rest = value;
+        while (rest != 0) {
+            int digit = (int) (rest % radix);
+            if (digit < 0) {
+                digit = -digit;
+            }
+            digits[--at] = Character.forDigit(digit, radix);
+            rest /= radix;
+        }
+        if (negative) {
+            digits[--at] = '-';
+        }
+        return new String(digits, at, 65 - at);
+    }
+
+    static String unsigned(long value, int shift) {
+        if (value == 0) {
+            return "0";
+        }
+        char[] digits = new char[64];
+        int at = 64;
+        int mask = (1 << shift) - 1;
+        long rest = value;
+        while (rest != 0) {
+            digits[--at] = Character.forDigit((int) (rest & mask), 1 << shift);
+            rest >>>= shift;
+        }
+        return new String(digits, at, 64 - at);
+    }
+
+    public static String toHexString(long value) {
+        return unsigned(value, 4);
+    }
+
+    public static String toOctalString(long value) {
+        return unsigned(value, 3);
+    }
+
+    public static String toBinaryString(long value) {
+        return unsigned(value, 1);
+    }
+
+    public static String toUnsignedString(long value) {
+        if (value >= 0) {
+            return toString(value);
+        }
+        long quotient = (value >>> 1) / 5;
+        long remainder = value - quotient * 10;
+        return toString(quotient) + remainder;
+    }
+
+    public int compareTo(Long other) {
+        return compare(value, other.value);
+    }
+
+    public static int compare(long left, long right) {
+        return left < right ? -1 : (left == right ? 0 : 1);
+    }
+
+    public static int compareUnsigned(long left, long right) {
+        return compare(left + MIN_VALUE, right + MIN_VALUE);
+    }
+
+    public static long divideUnsigned(long dividend, long divisor) {
+        if (divisor < 0) {
+            return compareUnsigned(dividend, divisor) < 0 ? 0 : 1;
+        }
+        if (dividend >= 0) {
+            return dividend / divisor;
+        }
+        long quotient = ((dividend >>> 1) / divisor) << 1;
+        long remainder = dividend - quotient * divisor;
+        return quotient + (compareUnsigned(remainder, divisor) >= 0 ? 1 : 0);
+    }
+
+    public static long remainderUnsigned(long dividend, long divisor) {
+        return dividend - divideUnsigned(dividend, divisor) * divisor;
+    }
+
+    public static int signum(long value) {
+        return (int) ((value >> 63) | (-value >>> 63));
+    }
+
+    public static long abs(long value) {
+        return value < 0 ? -value : value;
+    }
+
+    public static long sum(long left, long right) {
+        return left + right;
+    }
+
+    public static long max(long left, long right) {
+        return Math.max(left, right);
+    }
+
+    public static long min(long left, long right) {
+        return Math.min(left, right);
+    }
+
+    public static int bitCount(long value) {
+        return Integer.bitCount((int) value) + Integer.bitCount((int) (value >>> 32));
+    }
+
+    public static int numberOfLeadingZeros(long value) {
+        int high = (int) (value >>> 32);
+        return high != 0 ? Integer.numberOfLeadingZeros(high) : 32 + Integer.numberOfLeadingZeros((int) value);
+    }
+
+    public static int numberOfTrailingZeros(long value) {
+        int low = (int) value;
+        return low != 0 ? Integer.numberOfTrailingZeros(low) : 32 + Integer.numberOfTrailingZeros((int) (value >>> 32));
+    }
+
+    public static long highestOneBit(long value) {
+        return value & (MIN_VALUE >>> numberOfLeadingZeros(value));
+    }
+
+    public static long lowestOneBit(long value) {
+        return value & -value;
+    }
+
+    public static long rotateLeft(long value, int distance) {
+        return (value << distance) | (value >>> -distance);
+    }
+
+    public static long rotateRight(long value, int distance) {
+        return (value >>> distance) | (value << -distance);
+    }
+
+    public static long reverse(long value) {
+        return ((long) Integer.reverse((int) value) << 32) | (Integer.reverse((int) (value >>> 32)) & 0xffffffffL);
+    }
+
+    public static long reverseBytes(long value) {
+        return ((long) Integer.reverseBytes((int) value) << 32) | (Integer.reverseBytes((int) (value >>> 32)) & 0xffffffffL);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Math.java",
+                r####"package java.lang;
+
+public final class Math {
+    public static final double E = 2.718281828459045;
+    public static final double PI = 3.141592653589793;
+    public static final double TAU = 6.283185307179586;
+
+    private Math() {
+    }
+
+    public static int abs(int value) {
+        return value < 0 ? -value : value;
+    }
+
+    public static long abs(long value) {
+        return value < 0 ? -value : value;
+    }
+
+    public static float abs(float value) {
+        return Float.intBitsToFloat(Float.floatToRawIntBits(value) & 0x7fffffff);
+    }
+
+    public static double abs(double value) {
+        return Double.longBitsToDouble(Double.doubleToRawLongBits(value) & 0x7fffffffffffffffL);
+    }
+
+    public static int max(int left, int right) {
+        return left >= right ? left : right;
+    }
+
+    public static long max(long left, long right) {
+        return left >= right ? left : right;
+    }
+
+    public static int min(int left, int right) {
+        return left <= right ? left : right;
+    }
+
+    public static long min(long left, long right) {
+        return left <= right ? left : right;
+    }
+
+    public static float max(float left, float right) {
+        if (left != left) {
+            return left;
+        }
+        if (left == 0.0f && right == 0.0f && Float.floatToRawIntBits(left) == 0x80000000) {
+            return right;
+        }
+        return left >= right ? left : right;
+    }
+
+    public static double max(double left, double right) {
+        if (left != left) {
+            return left;
+        }
+        if (left == 0.0d && right == 0.0d && Double.doubleToRawLongBits(left) == 0x8000000000000000L) {
+            return right;
+        }
+        return left >= right ? left : right;
+    }
+
+    public static float min(float left, float right) {
+        if (left != left) {
+            return left;
+        }
+        if (left == 0.0f && right == 0.0f && Float.floatToRawIntBits(right) == 0x80000000) {
+            return right;
+        }
+        return left <= right ? left : right;
+    }
+
+    public static double min(double left, double right) {
+        if (left != left) {
+            return left;
+        }
+        if (left == 0.0d && right == 0.0d && Double.doubleToRawLongBits(right) == 0x8000000000000000L) {
+            return right;
+        }
+        return left <= right ? left : right;
+    }
+
+    public static native double sqrt(double value);
+
+    public static native double floor(double value);
+
+    public static native double ceil(double value);
+
+    public static native double rint(double value);
+
+    public static native double sin(double value);
+
+    public static native double cos(double value);
+
+    public static native double tan(double value);
+
+    public static native double asin(double value);
+
+    public static native double acos(double value);
+
+    public static native double atan(double value);
+
+    public static native double atan2(double y, double x);
+
+    public static native double exp(double value);
+
+    public static native double log(double value);
+
+    public static native double log10(double value);
+
+    public static native double pow(double base, double exponent);
+
+    public static native double sinh(double value);
+
+    public static native double cosh(double value);
+
+    public static native double tanh(double value);
+
+    public static native double cbrt(double value);
+
+    public static native double hypot(double x, double y);
+
+    public static native double expm1(double value);
+
+    public static native double log1p(double value);
+
+    public static long round(double value) {
+        if (value != value) {
+            return 0;
+        }
+        double lower = floor(value);
+        double rounded = value - lower >= 0.5 ? lower + 1.0 : lower;
+        return (long) rounded;
+    }
+
+    public static int round(float value) {
+        if (value != value) {
+            return 0;
+        }
+        double lower = floor(value);
+        double rounded = value - lower >= 0.5 ? lower + 1.0 : lower;
+        return (int) rounded;
+    }
+
+    public static double signum(double value) {
+        return value > 0 ? 1.0 : (value < 0 ? -1.0 : value);
+    }
+
+    public static float signum(float value) {
+        return value > 0 ? 1.0f : (value < 0 ? -1.0f : value);
+    }
+
+    public static double toRadians(double degrees) {
+        return degrees / 180.0 * PI;
+    }
+
+    public static double toDegrees(double radians) {
+        return radians * 180.0 / PI;
+    }
+
+    public static double copySign(double magnitude, double sign) {
+        long bits = Double.doubleToRawLongBits(magnitude) & 0x7fffffffffffffffL;
+        return Double.longBitsToDouble(bits | (Double.doubleToRawLongBits(sign) & 0x8000000000000000L));
+    }
+
+    public static float copySign(float magnitude, float sign) {
+        int bits = Float.floatToRawIntBits(magnitude) & 0x7fffffff;
+        return Float.intBitsToFloat(bits | (Float.floatToRawIntBits(sign) & 0x80000000));
+    }
+
+    public static double ulp(double value) {
+        if (value != value) {
+            return value;
+        }
+        double magnitude = abs(value);
+        long bits = Double.doubleToRawLongBits(magnitude);
+        return Double.longBitsToDouble(bits + 1) - magnitude;
+    }
+
+    public static int addExact(int left, int right) {
+        int result = left + right;
+        if (((left ^ result) & (right ^ result)) < 0) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return result;
+    }
+
+    public static long addExact(long left, long right) {
+        long result = left + right;
+        if (((left ^ result) & (right ^ result)) < 0) {
+            throw new ArithmeticException("long overflow");
+        }
+        return result;
+    }
+
+    public static int subtractExact(int left, int right) {
+        int result = left - right;
+        if (((left ^ right) & (left ^ result)) < 0) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return result;
+    }
+
+    public static long subtractExact(long left, long right) {
+        long result = left - right;
+        if (((left ^ right) & (left ^ result)) < 0) {
+            throw new ArithmeticException("long overflow");
+        }
+        return result;
+    }
+
+    public static int multiplyExact(int left, int right) {
+        long result = (long) left * (long) right;
+        if ((int) result != result) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return (int) result;
+    }
+
+    public static long multiplyExact(long left, long right) {
+        long result = left * right;
+        if (left != 0 && (result / left != right || (left == -1 && right == Long.MIN_VALUE))) {
+            throw new ArithmeticException("long overflow");
+        }
+        return result;
+    }
+
+    public static int negateExact(int value) {
+        if (value == Integer.MIN_VALUE) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return -value;
+    }
+
+    public static long negateExact(long value) {
+        if (value == Long.MIN_VALUE) {
+            throw new ArithmeticException("long overflow");
+        }
+        return -value;
+    }
+
+    public static int toIntExact(long value) {
+        if ((int) value != value) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return (int) value;
+    }
+
+    public static int floorDiv(int left, int right) {
+        int quotient = left / right;
+        if ((left ^ right) < 0 && quotient * right != left) {
+            quotient--;
+        }
+        return quotient;
+    }
+
+    public static long floorDiv(long left, long right) {
+        long quotient = left / right;
+        if ((left ^ right) < 0 && quotient * right != left) {
+            quotient--;
+        }
+        return quotient;
+    }
+
+    public static int floorMod(int left, int right) {
+        return left - floorDiv(left, right) * right;
+    }
+
+    public static long floorMod(long left, long right) {
+        return left - floorDiv(left, right) * right;
+    }
+
+    public static double random() {
+        return omni.runtime.Numbers.random();
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NegativeArraySizeException.java",
+                r####"package java.lang;
+
+public class NegativeArraySizeException extends RuntimeException {
+    public NegativeArraySizeException() {
+        super();
+    }
+
+    public NegativeArraySizeException(String message) {
+        super(message);
+    }
+
+    public NegativeArraySizeException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public NegativeArraySizeException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NoClassDefFoundError.java",
+                r####"package java.lang;
+
+public class NoClassDefFoundError extends LinkageError {
+    public NoClassDefFoundError() {
+        super();
+    }
+
+    public NoClassDefFoundError(String message) {
+        super(message);
+    }
+
+    public NoClassDefFoundError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public NoClassDefFoundError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NoSuchFieldError.java",
+                r####"package java.lang;
+
+public class NoSuchFieldError extends IncompatibleClassChangeError {
+    public NoSuchFieldError() {
+        super();
+    }
+
+    public NoSuchFieldError(String message) {
+        super(message);
+    }
+
+    public NoSuchFieldError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public NoSuchFieldError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NoSuchMethodError.java",
+                r####"package java.lang;
+
+public class NoSuchMethodError extends IncompatibleClassChangeError {
+    public NoSuchMethodError() {
+        super();
+    }
+
+    public NoSuchMethodError(String message) {
+        super(message);
+    }
+
+    public NoSuchMethodError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public NoSuchMethodError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NullPointerException.java",
+                r####"package java.lang;
+
+public class NullPointerException extends RuntimeException {
+    public NullPointerException() {
+        super();
+    }
+
+    public NullPointerException(String message) {
+        super(message);
+    }
+
+    public NullPointerException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public NullPointerException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Number.java",
+                r####"package java.lang;
+
+public abstract class Number implements java.io.Serializable {
+    public Number() {
+    }
+
+    public abstract int intValue();
+
+    public abstract long longValue();
+
+    public abstract float floatValue();
+
+    public abstract double doubleValue();
+
+    public byte byteValue() {
+        return (byte) intValue();
+    }
+
+    public short shortValue() {
+        return (short) intValue();
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NumberFormatException.java",
+                r####"package java.lang;
+
+public class NumberFormatException extends IllegalArgumentException {
+    public NumberFormatException() {
+        super();
+    }
+
+    public NumberFormatException(String message) {
+        super(message);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Object.java",
+                r####"package java.lang;
+
+public class Object {
+    public Object() {
+    }
+
+    public native int hashCode();
+
+    public final native Class<?> getClass();
+
+    public boolean equals(Object other) {
+        return this == other;
+    }
+
+    public String toString() {
+        return getClass().getName() + "@" + Integer.toHexString(hashCode());
+    }
+
+    protected Object clone() throws CloneNotSupportedException {
+        throw new CloneNotSupportedException(getClass().getName());
+    }
+
+    protected void finalize() throws Throwable {
+    }
+
+    public final void notify() {
+    }
+
+    public final void notifyAll() {
+    }
+
+    public final void wait() throws InterruptedException {
+    }
+
+    public final void wait(long timeout) throws InterruptedException {
+    }
+
+    public final void wait(long timeout, int nanos) throws InterruptedException {
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/OutOfMemoryError.java",
+                r####"package java.lang;
+
+public class OutOfMemoryError extends VirtualMachineError {
+    public OutOfMemoryError() {
+        super();
+    }
+
+    public OutOfMemoryError(String message) {
+        super(message);
+    }
+
+    public OutOfMemoryError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public OutOfMemoryError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/ReflectiveOperationException.java",
+                r####"package java.lang;
+
+public class ReflectiveOperationException extends Exception {
+    public ReflectiveOperationException() {
+        super();
+    }
+
+    public ReflectiveOperationException(String message) {
+        super(message);
+    }
+
+    public ReflectiveOperationException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ReflectiveOperationException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Runnable.java",
+                r####"package java.lang;
+
+public interface Runnable {
+    void run();
+}
+"####,
+            ),
+            (
+                "java/lang/Runtime.java",
+                r####"package java.lang;
+
+public final class Runtime {
+    private static final Runtime current = new Runtime();
+
+    private Runtime() {
+    }
+
+    public static Runtime getRuntime() {
+        return current;
+    }
+
+    public int availableProcessors() {
+        return 1;
+    }
+
+    public long freeMemory() {
+        return 256L * 1024 * 1024;
+    }
+
+    public long totalMemory() {
+        return 256L * 1024 * 1024;
+    }
+
+    public long maxMemory() {
+        return 256L * 1024 * 1024;
+    }
+
+    public void gc() {
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/RuntimeException.java",
+                r####"package java.lang;
+
+public class RuntimeException extends Exception {
+    public RuntimeException() {
+        super();
+    }
+
+    public RuntimeException(String message) {
+        super(message);
+    }
+
+    public RuntimeException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public RuntimeException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/SecurityException.java",
+                r####"package java.lang;
+
+public class SecurityException extends RuntimeException {
+    public SecurityException() {
+        super();
+    }
+
+    public SecurityException(String message) {
+        super(message);
+    }
+
+    public SecurityException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public SecurityException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Short.java",
+                r####"package java.lang;
+
+public final class Short extends Number implements Comparable<Short> {
+    public static final short MIN_VALUE = -32768;
+    public static final short MAX_VALUE = 32767;
+    public static final int SIZE = 16;
+    public static final int BYTES = 2;
+    public static final Class<Short> TYPE = Class.primitive("short");
+
+    private static Short[] cache;
+
+    private final short value;
+
+    public Short(short value) {
+        this.value = value;
+    }
+
+    public static Short valueOf(short value) {
+        if (value >= -128 && value <= 127) {
+            if (cache == null) {
+                Short[] made = new Short[256];
+                for (int at = 0; at < 256; at++) {
+                    made[at] = new Short((short) (at - 128));
+                }
+                cache = made;
+            }
+            return cache[value + 128];
+        }
+        return new Short(value);
+    }
+
+    public static short parseShort(String text) {
+        return (short) Long.parse(text, 10, MIN_VALUE, MAX_VALUE);
+    }
+
+    public static short parseShort(String text, int radix) {
+        return (short) Long.parse(text, radix, MIN_VALUE, MAX_VALUE);
+    }
+
+    public byte byteValue() {
+        return (byte) value;
+    }
+
+    public short shortValue() {
+        return value;
+    }
+
+    public int intValue() {
+        return value;
+    }
+
+    public long longValue() {
+        return value;
+    }
+
+    public float floatValue() {
+        return value;
+    }
+
+    public double doubleValue() {
+        return value;
+    }
+
+    public int hashCode() {
+        return value;
+    }
+
+    public static int hashCode(short value) {
+        return value;
+    }
+
+    public boolean equals(Object other) {
+        return other instanceof Short && ((Short) other).value == value;
+    }
+
+    public String toString() {
+        return Integer.toString(value);
+    }
+
+    public static String toString(short value) {
+        return Integer.toString(value);
+    }
+
+    public int compareTo(Short other) {
+        return value - other.value;
+    }
+
+    public static int compare(short left, short right) {
+        return left - right;
+    }
+
+    public static int toUnsignedInt(short value) {
+        return value & 0xffff;
+    }
+
+    public static short reverseBytes(short value) {
+        return (short) (((value & 0xff) << 8) | ((value >> 8) & 0xff));
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/StackOverflowError.java",
+                r####"package java.lang;
+
+public class StackOverflowError extends VirtualMachineError {
+    public StackOverflowError() {
+        super();
+    }
+
+    public StackOverflowError(String message) {
+        super(message);
+    }
+
+    public StackOverflowError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public StackOverflowError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/StackTraceElement.java",
+                r####"package java.lang;
+
+public final class StackTraceElement implements java.io.Serializable {
+    private final String declaringClass;
+    private final String methodName;
+    private final String fileName;
+    private final int lineNumber;
+
+    public StackTraceElement(String declaringClass, String methodName, String fileName, int lineNumber) {
+        this.declaringClass = declaringClass;
+        this.methodName = methodName;
+        this.fileName = fileName;
+        this.lineNumber = lineNumber;
+    }
+
+    public String getClassName() {
+        return declaringClass;
+    }
+
+    public String getMethodName() {
+        return methodName;
+    }
+
+    public String getFileName() {
+        return fileName;
+    }
+
+    public int getLineNumber() {
+        return lineNumber;
+    }
+
+    public String toString() {
+        return declaringClass + "." + methodName + "(" + fileName + ":" + lineNumber + ")";
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/String.java",
+                r####"package java.lang;
+
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Locale;
+
+public final class String implements java.io.Serializable, Comparable<String>, CharSequence {
+    private final char[] value;
+    private int hash;
+
+    public static final Comparator<String> CASE_INSENSITIVE_ORDER = new CaseInsensitiveOrder();
+
+    private static HashMap<String, String> interned;
+
+    public String() {
+        this.value = new char[0];
+    }
+
+    public String(String original) {
+        this.value = original.value;
+        this.hash = original.hash;
+    }
+
+    public String(char[] value) {
+        this(value, 0, value.length);
+    }
+
+    public String(char[] value, int offset, int count) {
+        if (offset < 0 || count < 0 || offset > value.length - count) {
+            throw new StringIndexOutOfBoundsException("offset " + offset + ", count " + count + ", length " + value.length);
+        }
+        char[] copy = new char[count];
+        for (int at = 0; at < count; at++) {
+            copy[at] = value[offset + at];
+        }
+        this.value = copy;
+    }
+
+    public String(int[] codePoints, int offset, int count) {
+        StringBuilder made = new StringBuilder();
+        for (int at = offset; at < offset + count; at++) {
+            made.appendCodePoint(codePoints[at]);
+        }
+        this.value = made.toString().value;
+    }
+
+    public String(byte[] bytes) {
+        this(bytes, 0, bytes.length);
+    }
+
+    public String(byte[] bytes, int offset, int length) {
+        StringBuilder made = new StringBuilder();
+        int at = offset;
+        int end = offset + length;
+        while (at < end) {
+            int first = bytes[at] & 0xff;
+            if (first < 0x80) {
+                made.append((char) first);
+                at++;
+            } else if (first >= 0xc0 && first < 0xe0 && at + 1 < end) {
+                made.append((char) (((first & 0x1f) << 6) | (bytes[at + 1] & 0x3f)));
+                at += 2;
+            } else if (first >= 0xe0 && first < 0xf0 && at + 2 < end) {
+                made.append((char) (((first & 0x0f) << 12) | ((bytes[at + 1] & 0x3f) << 6) | (bytes[at + 2] & 0x3f)));
+                at += 3;
+            } else if (first >= 0xf0 && at + 3 < end) {
+                int point = ((first & 0x07) << 18) | ((bytes[at + 1] & 0x3f) << 12) | ((bytes[at + 2] & 0x3f) << 6) | (bytes[at + 3] & 0x3f);
+                made.appendCodePoint(point);
+                at += 4;
+            } else {
+                made.append('�');
+                at++;
+            }
+        }
+        this.value = made.toString().value;
+    }
+
+    public String(StringBuilder builder) {
+        this.value = builder.toString().value;
+    }
+
+    public String(StringBuffer buffer) {
+        this.value = buffer.toString().value;
+    }
+
+    String(char[] value, boolean shared) {
+        this.value = value;
+    }
+
+    public int length() {
+        return value.length;
+    }
+
+    public boolean isEmpty() {
+        return value.length == 0;
+    }
+
+    public char charAt(int index) {
+        if (index < 0 || index >= value.length) {
+            throw new StringIndexOutOfBoundsException("Index " + index + " out of bounds for length " + value.length);
+        }
+        return value[index];
+    }
+
+    public int codePointAt(int index) {
+        char high = charAt(index);
+        if (Character.isHighSurrogate(high) && index + 1 < value.length) {
+            char low = value[index + 1];
+            if (Character.isLowSurrogate(low)) {
+                return Character.toCodePoint(high, low);
+            }
+        }
+        return high;
+    }
+
+    public int codePointCount(int start, int end) {
+        int count = 0;
+        int at = start;
+        while (at < end) {
+            int point = codePointAt(at);
+            at += Character.charCount(point);
+            count++;
+        }
+        return count;
+    }
+
+    public void getChars(int start, int end, char[] target, int offset) {
+        checkRange(start, end);
+        for (int at = start; at < end; at++) {
+            target[offset + at - start] = value[at];
+        }
+    }
+
+    public byte[] getBytes() {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        int at = 0;
+        while (at < value.length) {
+            int point = codePointAt(at);
+            at += Character.charCount(point);
+            if (point < 0x80) {
+                out.write(point);
+            } else if (point < 0x800) {
+                out.write(0xc0 | (point >> 6));
+                out.write(0x80 | (point & 0x3f));
+            } else if (point < 0x10000) {
+                out.write(0xe0 | (point >> 12));
+                out.write(0x80 | ((point >> 6) & 0x3f));
+                out.write(0x80 | (point & 0x3f));
+            } else {
+                out.write(0xf0 | (point >> 18));
+                out.write(0x80 | ((point >> 12) & 0x3f));
+                out.write(0x80 | ((point >> 6) & 0x3f));
+                out.write(0x80 | (point & 0x3f));
+            }
+        }
+        return out.toByteArray();
+    }
+
+    public char[] toCharArray() {
+        char[] copy = new char[value.length];
+        for (int at = 0; at < value.length; at++) {
+            copy[at] = value[at];
+        }
+        return copy;
+    }
+
+    char[] chars() {
+        return value;
+    }
+
+    private void checkRange(int start, int end) {
+        if (start < 0 || start > end || end > value.length) {
+            throw new StringIndexOutOfBoundsException("begin " + start + ", end " + end + ", length " + value.length);
+        }
+    }
+
+    public String substring(int start) {
+        return substring(start, value.length);
+    }
+
+    public String substring(int start, int end) {
+        checkRange(start, end);
+        if (start == 0 && end == value.length) {
+            return this;
+        }
+        return new String(value, start, end - start);
+    }
+
+    public CharSequence subSequence(int start, int end) {
+        return substring(start, end);
+    }
+
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof String)) {
+            return false;
+        }
+        char[] them = ((String) other).value;
+        if (them.length != value.length) {
+            return false;
+        }
+        for (int at = 0; at < value.length; at++) {
+            if (value[at] != them[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean contentEquals(CharSequence other) {
+        if (other.length() != value.length) {
+            return false;
+        }
+        for (int at = 0; at < value.length; at++) {
+            if (value[at] != other.charAt(at)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean equalsIgnoreCase(String other) {
+        if (other == null || other.value.length != value.length) {
+            return false;
+        }
+        return regionMatches(true, 0, other, 0, value.length);
+    }
+
+    public int hashCode() {
+        int held = hash;
+        if (held == 0 && value.length > 0) {
+            for (int at = 0; at < value.length; at++) {
+                held = 31 * held + value[at];
+            }
+            hash = held;
+        }
+        return held;
+    }
+
+    public int compareTo(String other) {
+        int shorter = Math.min(value.length, other.value.length);
+        for (int at = 0; at < shorter; at++) {
+            char left = value[at];
+            char right = other.value[at];
+            if (left != right) {
+                return left - right;
+            }
+        }
+        return value.length - other.value.length;
+    }
+
+    public int compareToIgnoreCase(String other) {
+        int shorter = Math.min(value.length, other.value.length);
+        for (int at = 0; at < shorter; at++) {
+            char left = value[at];
+            char right = other.value[at];
+            if (left != right) {
+                left = Character.toLowerCase(Character.toUpperCase(left));
+                right = Character.toLowerCase(Character.toUpperCase(right));
+                if (left != right) {
+                    return left - right;
+                }
+            }
+        }
+        return value.length - other.value.length;
+    }
+
+    public boolean regionMatches(int offset, String other, int otherOffset, int length) {
+        return regionMatches(false, offset, other, otherOffset, length);
+    }
+
+    public boolean regionMatches(boolean ignoreCase, int offset, String other, int otherOffset, int length) {
+        if (otherOffset < 0 || offset < 0 || offset > (long) value.length - length || otherOffset > (long) other.value.length - length) {
+            return false;
+        }
+        for (int at = 0; at < length; at++) {
+            char left = value[offset + at];
+            char right = other.value[otherOffset + at];
+            if (left == right) {
+                continue;
+            }
+            if (!ignoreCase) {
+                return false;
+            }
+            char upperLeft = Character.toUpperCase(left);
+            char upperRight = Character.toUpperCase(right);
+            if (upperLeft != upperRight && Character.toLowerCase(upperLeft) != Character.toLowerCase(upperRight)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean startsWith(String prefix, int offset) {
+        return regionMatches(false, offset, prefix, 0, prefix.value.length);
+    }
+
+    public boolean startsWith(String prefix) {
+        return startsWith(prefix, 0);
+    }
+
+    public boolean endsWith(String suffix) {
+        return startsWith(suffix, value.length - suffix.value.length);
+    }
+
+    public int indexOf(int character) {
+        return indexOf(character, 0);
+    }
+
+    public int indexOf(int character, int from) {
+        int start = Math.max(from, 0);
+        if (character >= Character.MIN_SUPPLEMENTARY_CODE_POINT) {
+            return indexOf(new String(Character.toChars(character), true), start);
+        }
+        for (int at = start; at < value.length; at++) {
+            if (value[at] == character) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public int lastIndexOf(int character) {
+        return lastIndexOf(character, value.length - 1);
+    }
+
+    public int lastIndexOf(int character, int from) {
+        for (int at = Math.min(from, value.length - 1); at >= 0; at--) {
+            if (value[at] == character) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public int indexOf(String text) {
+        return indexOf(text, 0);
+    }
+
+    public int indexOf(String text, int from) {
+        int start = Math.max(from, 0);
+        int last = value.length - text.value.length;
+        for (int at = start; at <= last; at++) {
+            if (regionMatches(false, at, text, 0, text.value.length)) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public int lastIndexOf(String text) {
+        return lastIndexOf(text, value.length);
+    }
+
+    public int lastIndexOf(String text, int from) {
+        int start = Math.min(from, value.length - text.value.length);
+        for (int at = start; at >= 0; at--) {
+            if (regionMatches(false, at, text, 0, text.value.length)) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public boolean contains(CharSequence text) {
+        return indexOf(text.toString()) >= 0;
+    }
+
+    public String concat(String other) {
+        if (other.value.length == 0) {
+            return this;
+        }
+        char[] joined = new char[value.length + other.value.length];
+        for (int at = 0; at < value.length; at++) {
+            joined[at] = value[at];
+        }
+        for (int at = 0; at < other.value.length; at++) {
+            joined[value.length + at] = other.value[at];
+        }
+        return new String(joined, true);
+    }
+
+    public String replace(char from, char to) {
+        if (from == to || indexOf(from) < 0) {
+            return this;
+        }
+        char[] changed = toCharArray();
+        for (int at = 0; at < changed.length; at++) {
+            if (changed[at] == from) {
+                changed[at] = to;
+            }
+        }
+        return new String(changed, true);
+    }
+
+    public String replace(CharSequence target, CharSequence replacement) {
+        String from = target.toString();
+        String to = replacement.toString();
+        StringBuilder made = new StringBuilder();
+        if (from.isEmpty()) {
+            made.append(to);
+            for (int at = 0; at < value.length; at++) {
+                made.append(value[at]);
+                made.append(to);
+            }
+            return made.toString();
+        }
+        int at = 0;
+        while (true) {
+            int found = indexOf(from, at);
+            if (found < 0) {
+                break;
+            }
+            made.append(this, at, found);
+            made.append(to);
+            at = found + from.length();
+        }
+        made.append(this, at, value.length);
+        return made.toString();
+    }
+
+    public String toLowerCase() {
+        char[] changed = new char[value.length];
+        for (int at = 0; at < value.length; at++) {
+            changed[at] = Character.toLowerCase(value[at]);
+        }
+        return new String(changed, true);
+    }
+
+    public String toLowerCase(Locale locale) {
+        return toLowerCase();
+    }
+
+    public String toUpperCase() {
+        StringBuilder made = new StringBuilder();
+        for (int at = 0; at < value.length; at++) {
+            char one = value[at];
+            if (one == 'ß') {
+                made.append("SS");
+            } else {
+                made.append(Character.toUpperCase(one));
+            }
+        }
+        return made.toString();
+    }
+
+    public String toUpperCase(Locale locale) {
+        return toUpperCase();
+    }
+
+    public String trim() {
+        int start = 0;
+        int end = value.length;
+        while (start < end && value[start] <= ' ') {
+            start++;
+        }
+        while (end > start && value[end - 1] <= ' ') {
+            end--;
+        }
+        return substring(start, end);
+    }
+
+    public String strip() {
+        int start = 0;
+        int end = value.length;
+        while (start < end && Character.isWhitespace(value[start])) {
+            start++;
+        }
+        while (end > start && Character.isWhitespace(value[end - 1])) {
+            end--;
+        }
+        return substring(start, end);
+    }
+
+    public boolean isBlank() {
+        for (int at = 0; at < value.length; at++) {
+            if (!Character.isWhitespace(value[at])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public String repeat(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count is negative: " + count);
+        }
+        StringBuilder made = new StringBuilder();
+        for (int at = 0; at < count; at++) {
+            made.append(this);
+        }
+        return made.toString();
+    }
+
+    public String intern() {
+        if (interned == null) {
+            interned = new HashMap<String, String>();
+        }
+        String held = interned.get(this);
+        if (held != null) {
+            return held;
+        }
+        interned.put(this, this);
+        return this;
+    }
+
+    public String toString() {
+        return this;
+    }
+
+    public static String valueOf(Object value) {
+        return value == null ? "null" : value.toString();
+    }
+
+    public static String valueOf(char[] value) {
+        return new String(value);
+    }
+
+    public static String valueOf(char[] value, int offset, int count) {
+        return new String(value, offset, count);
+    }
+
+    public static String copyValueOf(char[] value) {
+        return new String(value);
+    }
+
+    public static String copyValueOf(char[] value, int offset, int count) {
+        return new String(value, offset, count);
+    }
+
+    public static String valueOf(boolean value) {
+        return value ? "true" : "false";
+    }
+
+    public static String valueOf(char value) {
+        return new String(new char[] {value}, true);
+    }
+
+    public static String valueOf(int value) {
+        return Integer.toString(value);
+    }
+
+    public static String valueOf(long value) {
+        return Long.toString(value);
+    }
+
+    public static String valueOf(float value) {
+        return Float.toString(value);
+    }
+
+    public static String valueOf(double value) {
+        return Double.toString(value);
+    }
+
+    public static String join(CharSequence delimiter, CharSequence... parts) {
+        StringBuilder made = new StringBuilder();
+        for (int at = 0; at < parts.length; at++) {
+            if (at > 0) {
+                made.append(delimiter);
+            }
+            made.append(parts[at]);
+        }
+        return made.toString();
+    }
+
+    public static String join(CharSequence delimiter, Iterable<? extends CharSequence> parts) {
+        StringBuilder made = new StringBuilder();
+        boolean first = true;
+        for (CharSequence part : parts) {
+            if (!first) {
+                made.append(delimiter);
+            }
+            made.append(part);
+            first = false;
+        }
+        return made.toString();
+    }
+
+    private static final class CaseInsensitiveOrder implements Comparator<String> {
+        public int compare(String left, String right) {
+            return left.compareToIgnoreCase(right);
+        }
+    }
+
+    public boolean matches(String regex) {
+        return java.util.regex.Pattern.matches(regex, this);
+    }
+
+    public String replaceAll(String regex, String replacement) {
+        return java.util.regex.Pattern.compile(regex).matcher(this).replaceAll(replacement);
+    }
+
+    public String replaceFirst(String regex, String replacement) {
+        return java.util.regex.Pattern.compile(regex).matcher(this).replaceFirst(replacement);
+    }
+
+    public String[] split(String regex) {
+        return split(regex, 0);
+    }
+
+    public String[] split(String regex, int limit) {
+        return java.util.regex.Pattern.compile(regex).split(this, limit);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/StringBuffer.java",
+                r####"package java.lang;
+
+public final class StringBuffer implements java.io.Serializable, CharSequence, Appendable {
+    private final StringBuilder held;
+
+    public StringBuffer() {
+        held = new StringBuilder();
+    }
+
+    public StringBuffer(int capacity) {
+        held = new StringBuilder(capacity);
+    }
+
+    public StringBuffer(String text) {
+        held = new StringBuilder(text);
+    }
+
+    public int length() {
+        return held.length();
+    }
+
+    public char charAt(int index) {
+        return held.charAt(index);
+    }
+
+    public CharSequence subSequence(int start, int end) {
+        return held.subSequence(start, end);
+    }
+
+    public void setLength(int length) {
+        held.setLength(length);
+    }
+
+    public void setCharAt(int index, char one) {
+        held.setCharAt(index, one);
+    }
+
+    public StringBuffer append(Object value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(String value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(CharSequence value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(CharSequence value, int start, int end) {
+        held.append(value, start, end);
+        return this;
+    }
+
+    public StringBuffer append(char[] value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(boolean value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(char value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(int value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(long value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(float value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer append(double value) {
+        held.append(value);
+        return this;
+    }
+
+    public StringBuffer insert(int offset, String value) {
+        held.insert(offset, value);
+        return this;
+    }
+
+    public StringBuffer insert(int offset, char value) {
+        held.insert(offset, value);
+        return this;
+    }
+
+    public StringBuffer insert(int offset, Object value) {
+        held.insert(offset, value);
+        return this;
+    }
+
+    public StringBuffer delete(int start, int end) {
+        held.delete(start, end);
+        return this;
+    }
+
+    public StringBuffer deleteCharAt(int index) {
+        held.deleteCharAt(index);
+        return this;
+    }
+
+    public StringBuffer reverse() {
+        held.reverse();
+        return this;
+    }
+
+    public StringBuffer replace(int start, int end, String text) {
+        held.replace(start, end, text);
+        return this;
+    }
+
+    public int indexOf(String text) {
+        return held.indexOf(text);
+    }
+
+    public String substring(int start) {
+        return held.substring(start);
+    }
+
+    public String substring(int start, int end) {
+        return held.substring(start, end);
+    }
+
+    public String toString() {
+        return held.toString();
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/StringBuilder.java",
+                r####"package java.lang;
+
+public final class StringBuilder implements java.io.Serializable, Comparable<StringBuilder>, CharSequence, Appendable {
+    private char[] value;
+    private int count;
+
+    public StringBuilder() {
+        value = new char[16];
+    }
+
+    public StringBuilder(int capacity) {
+        if (capacity < 0) {
+            throw new NegativeArraySizeException(String.valueOf(capacity));
+        }
+        value = new char[capacity];
+    }
+
+    public StringBuilder(String text) {
+        value = new char[text.length() + 16];
+        append(text);
+    }
+
+    public StringBuilder(CharSequence text) {
+        value = new char[text.length() + 16];
+        append(text);
+    }
+
+    public int length() {
+        return count;
+    }
+
+    public int capacity() {
+        return value.length;
+    }
+
+    public void ensureCapacity(int wanted) {
+        if (wanted > value.length) {
+            int grown = Math.max(wanted, value.length * 2 + 2);
+            char[] larger = new char[grown];
+            for (int at = 0; at < count; at++) {
+                larger[at] = value[at];
+            }
+            value = larger;
+        }
+    }
+
+    public void trimToSize() {
+    }
+
+    public void setLength(int length) {
+        if (length < 0) {
+            throw new StringIndexOutOfBoundsException(length);
+        }
+        ensureCapacity(length);
+        for (int at = count; at < length; at++) {
+            value[at] = '\0';
+        }
+        count = length;
+    }
+
+    public char charAt(int index) {
+        if (index < 0 || index >= count) {
+            throw new StringIndexOutOfBoundsException("index " + index + ",length " + count);
+        }
+        return value[index];
+    }
+
+    public int codePointAt(int index) {
+        return toString().codePointAt(index);
+    }
+
+    public void setCharAt(int index, char one) {
+        if (index < 0 || index >= count) {
+            throw new StringIndexOutOfBoundsException("index " + index + ",length " + count);
+        }
+        value[index] = one;
+    }
+
+    public void getChars(int start, int end, char[] target, int offset) {
+        for (int at = start; at < end; at++) {
+            target[offset + at - start] = value[at];
+        }
+    }
+
+    public StringBuilder append(Object value) {
+        return append(String.valueOf(value));
+    }
+
+    public StringBuilder append(String text) {
+        if (text == null) {
+            text = "null";
+        }
+        int length = text.length();
+        ensureCapacity(count + length);
+        char[] source = text.chars();
+        for (int at = 0; at < length; at++) {
+            value[count + at] = source[at];
+        }
+        count += length;
+        return this;
+    }
+
+    public StringBuilder append(StringBuffer buffer) {
+        return append(String.valueOf(buffer));
+    }
+
+    public StringBuilder append(CharSequence text) {
+        if (text == null) {
+            return append("null");
+        }
+        if (text instanceof String) {
+            return append((String) text);
+        }
+        return append(text, 0, text.length());
+    }
+
+    public StringBuilder append(CharSequence text, int start, int end) {
+        if (text == null) {
+            text = "null";
+        }
+        if (start < 0 || start > end || end > text.length()) {
+            throw new IndexOutOfBoundsException("start " + start + ", end " + end + ", length " + text.length());
+        }
+        ensureCapacity(count + end - start);
+        for (int at = start; at < end; at++) {
+            value[count++] = text.charAt(at);
+        }
+        return this;
+    }
+
+    public StringBuilder append(char[] text) {
+        return append(text, 0, text.length);
+    }
+
+    public StringBuilder append(char[] text, int offset, int length) {
+        ensureCapacity(count + length);
+        for (int at = 0; at < length; at++) {
+            value[count++] = text[offset + at];
+        }
+        return this;
+    }
+
+    public StringBuilder append(boolean flag) {
+        return append(flag ? "true" : "false");
+    }
+
+    public StringBuilder append(char one) {
+        ensureCapacity(count + 1);
+        value[count++] = one;
+        return this;
+    }
+
+    public StringBuilder append(int number) {
+        return append(Integer.toString(number));
+    }
+
+    public StringBuilder append(long number) {
+        return append(Long.toString(number));
+    }
+
+    public StringBuilder append(float number) {
+        return append(Float.toString(number));
+    }
+
+    public StringBuilder append(double number) {
+        return append(Double.toString(number));
+    }
+
+    public StringBuilder appendCodePoint(int point) {
+        if (Character.isBmpCodePoint(point)) {
+            return append((char) point);
+        }
+        append(Character.highSurrogate(point));
+        return append(Character.lowSurrogate(point));
+    }
+
+    public StringBuilder delete(int start, int end) {
+        if (end > count) {
+            end = count;
+        }
+        if (start < 0 || start > end) {
+            throw new StringIndexOutOfBoundsException("start " + start + ", end " + end + ", length " + count);
+        }
+        int removed = end - start;
+        for (int at = start; at + removed < count; at++) {
+            value[at] = value[at + removed];
+        }
+        count -= removed;
+        return this;
+    }
+
+    public StringBuilder deleteCharAt(int index) {
+        if (index < 0 || index >= count) {
+            throw new StringIndexOutOfBoundsException("index " + index + ",length " + count);
+        }
+        return delete(index, index + 1);
+    }
+
+    public StringBuilder replace(int start, int end, String text) {
+        if (end > count) {
+            end = count;
+        }
+        delete(start, end);
+        return insert(start, text);
+    }
+
+    public StringBuilder insert(int offset, String text) {
+        if (offset < 0 || offset > count) {
+            throw new StringIndexOutOfBoundsException("offset " + offset + ", length " + count);
+        }
+        if (text == null) {
+            text = "null";
+        }
+        int length = text.length();
+        ensureCapacity(count + length);
+        for (int at = count - 1; at >= offset; at--) {
+            value[at + length] = value[at];
+        }
+        for (int at = 0; at < length; at++) {
+            value[offset + at] = text.charAt(at);
+        }
+        count += length;
+        return this;
+    }
+
+    public StringBuilder insert(int offset, Object value) {
+        return insert(offset, String.valueOf(value));
+    }
+
+    public StringBuilder insert(int offset, char one) {
+        return insert(offset, String.valueOf(one));
+    }
+
+    public StringBuilder insert(int offset, int number) {
+        return insert(offset, String.valueOf(number));
+    }
+
+    public StringBuilder insert(int offset, long number) {
+        return insert(offset, String.valueOf(number));
+    }
+
+    public StringBuilder insert(int offset, boolean flag) {
+        return insert(offset, String.valueOf(flag));
+    }
+
+    public StringBuilder insert(int offset, double number) {
+        return insert(offset, String.valueOf(number));
+    }
+
+    public StringBuilder insert(int offset, float number) {
+        return insert(offset, String.valueOf(number));
+    }
+
+    public StringBuilder insert(int offset, char[] text) {
+        return insert(offset, new String(text));
+    }
+
+    public StringBuilder insert(int offset, CharSequence text) {
+        return insert(offset, String.valueOf(text));
+    }
+
+    public StringBuilder reverse() {
+        for (int left = 0, right = count - 1; left < right; left++, right--) {
+            char held = value[left];
+            value[left] = value[right];
+            value[right] = held;
+        }
+        for (int at = 0; at + 1 < count; at++) {
+            if (Character.isLowSurrogate(value[at]) && Character.isHighSurrogate(value[at + 1])) {
+                char held = value[at];
+                value[at] = value[at + 1];
+                value[at + 1] = held;
+                at++;
+            }
+        }
+        return this;
+    }
+
+    public int indexOf(String text) {
+        return toString().indexOf(text);
+    }
+
+    public int indexOf(String text, int from) {
+        return toString().indexOf(text, from);
+    }
+
+    public int lastIndexOf(String text) {
+        return toString().lastIndexOf(text);
+    }
+
+    public int lastIndexOf(String text, int from) {
+        return toString().lastIndexOf(text, from);
+    }
+
+    public String substring(int start) {
+        return substring(start, count);
+    }
+
+    public String substring(int start, int end) {
+        if (start < 0 || start > end || end > count) {
+            throw new StringIndexOutOfBoundsException("start " + start + ", end " + end + ", length " + count);
+        }
+        return new String(value, start, end - start);
+    }
+
+    public CharSequence subSequence(int start, int end) {
+        return substring(start, end);
+    }
+
+    public int compareTo(StringBuilder other) {
+        return toString().compareTo(other.toString());
+    }
+
+    public String toString() {
+        return new String(value, 0, count);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/StringIndexOutOfBoundsException.java",
+                r####"package java.lang;
+
+public class StringIndexOutOfBoundsException extends IndexOutOfBoundsException {
+    public StringIndexOutOfBoundsException() {
+        super();
+    }
+
+    public StringIndexOutOfBoundsException(String message) {
+        super(message);
+    }
+
+    public StringIndexOutOfBoundsException(int index) {
+        super("String index out of range: " + index);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/System.java",
+                r####"package java.lang;
+
+import java.io.PrintStream;
+
+public final class System {
+    public static final PrintStream out = new PrintStream(1);
+    public static final PrintStream err = new PrintStream(2);
+
+    private System() {
+    }
+
+    public static native int identityHashCode(Object value);
+
+    public static long currentTimeMillis() {
+        return omni.runtime.Numbers.clock() / 1000000L;
+    }
+
+    public static long nanoTime() {
+        return omni.runtime.Numbers.clock();
+    }
+
+    public static String getProperty(String key) {
+        if (key.equals("line.separator")) {
+            return "\n";
+        }
+        if (key.equals("java.version")) {
+            return "25";
+        }
+        return null;
+    }
+
+    public static String getProperty(String key, String fallback) {
+        String found = getProperty(key);
+        return found == null ? fallback : found;
+    }
+
+    public static String lineSeparator() {
+        return "\n";
+    }
+
+    public static String getenv(String name) {
+        return null;
+    }
+
+    public static void exit(int status) {
+        omni.runtime.Console.exit(status);
+    }
+
+    public static void gc() {
+    }
+
+    public static void arraycopy(Object source, int sourceAt, Object target, int targetAt, int length) {
+        if (source == null || target == null) {
+            throw new NullPointerException();
+        }
+        if (length < 0 || sourceAt < 0 || targetAt < 0) {
+            throw new ArrayIndexOutOfBoundsException("arraycopy: last source index " + (sourceAt + length) + " out of bounds");
+        }
+        if (source instanceof Object[] && target instanceof Object[]) {
+            Object[] from = (Object[]) source;
+            Object[] to = (Object[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof int[] && target instanceof int[]) {
+            int[] from = (int[]) source;
+            int[] to = (int[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof char[] && target instanceof char[]) {
+            char[] from = (char[]) source;
+            char[] to = (char[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof long[] && target instanceof long[]) {
+            long[] from = (long[]) source;
+            long[] to = (long[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof byte[] && target instanceof byte[]) {
+            byte[] from = (byte[]) source;
+            byte[] to = (byte[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof short[] && target instanceof short[]) {
+            short[] from = (short[]) source;
+            short[] to = (short[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof boolean[] && target instanceof boolean[]) {
+            boolean[] from = (boolean[]) source;
+            boolean[] to = (boolean[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof float[] && target instanceof float[]) {
+            float[] from = (float[]) source;
+            float[] to = (float[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        if (source instanceof double[] && target instanceof double[]) {
+            double[] from = (double[]) source;
+            double[] to = (double[]) target;
+            check(from.length, sourceAt, to.length, targetAt, length);
+            if (from == to && sourceAt < targetAt) {
+                for (int at = length - 1; at >= 0; at--) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            } else {
+                for (int at = 0; at < length; at++) {
+                    to[targetAt + at] = from[sourceAt + at];
+                }
+            }
+            return;
+        }
+        throw new ArrayStoreException("arraycopy: type mismatch");
+    }
+
+    private static void check(int sourceLength, int sourceAt, int targetLength, int targetAt, int length) {
+        if (sourceAt > sourceLength - length) {
+            throw new ArrayIndexOutOfBoundsException("arraycopy: last source index " + (sourceAt + length) + " out of bounds for length " + sourceLength);
+        }
+        if (targetAt > targetLength - length) {
+            throw new ArrayIndexOutOfBoundsException("arraycopy: last destination index " + (targetAt + length) + " out of bounds for length " + targetLength);
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Throwable.java",
+                r####"package java.lang;
+
+public class Throwable implements java.io.Serializable {
+    private String detailMessage;
+    private Throwable cause = this;
+    private StackTraceElement[] stackTrace = new StackTraceElement[0];
+    private java.util.ArrayList<Throwable> suppressed;
+
+    public Throwable() {
+    }
+
+    public Throwable(String message) {
+        detailMessage = message;
+    }
+
+    public Throwable(String message, Throwable cause) {
+        detailMessage = message;
+        this.cause = cause;
+    }
+
+    public Throwable(Throwable cause) {
+        detailMessage = cause == null ? null : cause.toString();
+        this.cause = cause;
+    }
+
+    protected Throwable(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+        detailMessage = message;
+        this.cause = cause;
+    }
+
+    public String getMessage() {
+        return detailMessage;
+    }
+
+    public String getLocalizedMessage() {
+        return getMessage();
+    }
+
+    public Throwable getCause() {
+        return cause == this ? null : cause;
+    }
+
+    public Throwable initCause(Throwable cause) {
+        if (this.cause != this) {
+            throw new IllegalStateException("Can't overwrite cause");
+        }
+        if (cause == this) {
+            throw new IllegalArgumentException("Self-causation not permitted");
+        }
+        this.cause = cause;
+        return this;
+    }
+
+    public String toString() {
+        String message = getLocalizedMessage();
+        String name = getClass().getName();
+        return message != null ? name + ": " + message : name;
+    }
+
+    public void printStackTrace() {
+        System.err.println(this);
+    }
+
+    public Throwable fillInStackTrace() {
+        return this;
+    }
+
+    public StackTraceElement[] getStackTrace() {
+        return stackTrace;
+    }
+
+    public void setStackTrace(StackTraceElement[] stackTrace) {
+        this.stackTrace = stackTrace;
+    }
+
+    public final void addSuppressed(Throwable exception) {
+        if (exception == this) {
+            throw new IllegalArgumentException("Self-suppression not permitted");
+        }
+        if (exception == null) {
+            throw new NullPointerException("Cannot suppress a null exception.");
+        }
+        if (suppressed == null) {
+            suppressed = new java.util.ArrayList<Throwable>();
+        }
+        suppressed.add(exception);
+    }
+
+    public final Throwable[] getSuppressed() {
+        if (suppressed == null) {
+            return new Throwable[0];
+        }
+        return suppressed.toArray(new Throwable[suppressed.size()]);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/UnsupportedOperationException.java",
+                r####"package java.lang;
+
+public class UnsupportedOperationException extends RuntimeException {
+    public UnsupportedOperationException() {
+        super();
+    }
+
+    public UnsupportedOperationException(String message) {
+        super(message);
+    }
+
+    public UnsupportedOperationException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public UnsupportedOperationException(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/VirtualMachineError.java",
+                r####"package java.lang;
+
+public class VirtualMachineError extends Error {
+    public VirtualMachineError() {
+        super();
+    }
+
+    public VirtualMachineError(String message) {
+        super(message);
+    }
+
+    public VirtualMachineError(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public VirtualMachineError(Throwable cause) {
+        super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/Void.java",
+                r####"package java.lang;
+
+public final class Void {
+    public static final Class<Void> TYPE = Class.primitive("void");
+
+    private Void() {
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/annotation/Annotation.java",
+                r####"package java.lang.annotation;
+
+public interface Annotation {
+    boolean equals(Object other);
+
+    int hashCode();
+
+    String toString();
+
+    Class<? extends Annotation> annotationType();
+}
+"####,
+            ),
+            (
+                "java/lang/reflect/Array.java",
+                r####"package java.lang.reflect;
+
+public final class Array {
+    private Array() {
+    }
+
+    public static Object newInstance(Class<?> componentType, int length) {
+        return omni.runtime.Arrays.newInstance(componentType.getName(), length);
+    }
+
+    public static int getLength(Object array) {
+        return omni.runtime.Arrays.length(array);
+    }
+}
+"####,
+            ),
+            (
+                "java/util/AbstractCollection.java",
+                r####"package java.util;
+
+public abstract class AbstractCollection<E> implements Collection<E> {
+    protected AbstractCollection() {
+    }
+
+    public abstract Iterator<E> iterator();
+
+    public abstract int size();
+
+    public boolean isEmpty() {
+        return size() == 0;
+    }
+
+    public boolean contains(Object element) {
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            if (Objects.equals(element, walk.next())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public Object[] toArray() {
+        Object[] made = new Object[size()];
+        int at = 0;
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            made[at++] = walk.next();
+        }
+        return made;
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T[] toArray(T[] array) {
+        int size = size();
+        T[] made = array.length >= size ? array : (T[]) omni.runtime.Arrays.newInstance(array.getClass().getComponentType().getName(), size);
+        int at = 0;
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            made[at++] = (T) walk.next();
+        }
+        if (made.length > size) {
+            made[size] = null;
+        }
+        return made;
+    }
+
+    public boolean add(E element) {
+        throw new UnsupportedOperationException();
+    }
+
+    public boolean remove(Object element) {
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            if (Objects.equals(element, walk.next())) {
+                walk.remove();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean containsAll(Collection<?> other) {
+        for (Object element : other) {
+            if (!contains(element)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean addAll(Collection<? extends E> other) {
+        boolean changed = false;
+        for (E element : other) {
+            if (add(element)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    public boolean removeAll(Collection<?> other) {
+        boolean changed = false;
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            if (other.contains(walk.next())) {
+                walk.remove();
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    public boolean retainAll(Collection<?> other) {
+        boolean changed = false;
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            if (!other.contains(walk.next())) {
+                walk.remove();
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    public void clear() {
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            walk.next();
+            walk.remove();
+        }
+    }
+
+    public String toString() {
+        Iterator<E> walk = iterator();
+        if (!walk.hasNext()) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        while (true) {
+            E element = walk.next();
+            made.append(element == this ? "(this Collection)" : element);
+            if (!walk.hasNext()) {
+                return made.append(']').toString();
+            }
+            made.append(',').append(' ');
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/AbstractList.java",
+                r####"package java.util;
+
+public abstract class AbstractList<E> extends AbstractCollection<E> implements List<E> {
+    protected transient int modCount;
+
+    protected AbstractList() {
+    }
+
+    public boolean add(E element) {
+        add(size(), element);
+        return true;
+    }
+
+    public abstract E get(int index);
+
+    public E set(int index, E element) {
+        throw new UnsupportedOperationException();
+    }
+
+    public void add(int index, E element) {
+        throw new UnsupportedOperationException();
+    }
+
+    public E remove(int index) {
+        throw new UnsupportedOperationException();
+    }
+
+    public int indexOf(Object element) {
+        for (int at = 0; at < size(); at++) {
+            if (Objects.equals(element, get(at))) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public int lastIndexOf(Object element) {
+        for (int at = size() - 1; at >= 0; at--) {
+            if (Objects.equals(element, get(at))) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public void clear() {
+        removeRange(0, size());
+    }
+
+    protected void removeRange(int from, int to) {
+        for (int at = to - 1; at >= from; at--) {
+            remove(at);
+        }
+    }
+
+    public boolean addAll(int index, Collection<? extends E> other) {
+        int at = index;
+        for (E element : other) {
+            add(at++, element);
+        }
+        return !other.isEmpty();
+    }
+
+    public Iterator<E> iterator() {
+        return new Walker(0);
+    }
+
+    public ListIterator<E> listIterator() {
+        return new Walker(0);
+    }
+
+    public ListIterator<E> listIterator(int index) {
+        if (index < 0 || index > size()) {
+            throw new IndexOutOfBoundsException("Index: " + index);
+        }
+        return new Walker(index);
+    }
+
+    public List<E> subList(int from, int to) {
+        if (from < 0 || to > size() || from > to) {
+            throw new IndexOutOfBoundsException("fromIndex: " + from + ", toIndex: " + to + ", size: " + size());
+        }
+        return new View<E>(this, from, to);
+    }
+
+    public boolean equals(Object other) {
+        if (other == this) {
+            return true;
+        }
+        if (!(other instanceof List)) {
+            return false;
+        }
+        Iterator<E> mine = iterator();
+        Iterator<?> theirs = ((List<?>) other).iterator();
+        while (mine.hasNext() && theirs.hasNext()) {
+            if (!Objects.equals(mine.next(), theirs.next())) {
+                return false;
+            }
+        }
+        return !(mine.hasNext() || theirs.hasNext());
+    }
+
+    public int hashCode() {
+        int hash = 1;
+        for (E element : this) {
+            hash = 31 * hash + (element == null ? 0 : element.hashCode());
+        }
+        return hash;
+    }
+
+    private class Walker implements ListIterator<E> {
+        int cursor;
+        int last = -1;
+
+        Walker(int index) {
+            cursor = index;
+        }
+
+        public boolean hasNext() {
+            return cursor != size();
+        }
+
+        public E next() {
+            if (cursor >= size()) {
+                throw new NoSuchElementException();
+            }
+            E found = get(cursor);
+            last = cursor;
+            cursor++;
+            return found;
+        }
+
+        public boolean hasPrevious() {
+            return cursor != 0;
+        }
+
+        public E previous() {
+            if (cursor <= 0) {
+                throw new NoSuchElementException();
+            }
+            cursor--;
+            last = cursor;
+            return get(cursor);
+        }
+
+        public int nextIndex() {
+            return cursor;
+        }
+
+        public int previousIndex() {
+            return cursor - 1;
+        }
+
+        public void remove() {
+            if (last < 0) {
+                throw new IllegalStateException();
+            }
+            AbstractList.this.remove(last);
+            if (last < cursor) {
+                cursor--;
+            }
+            last = -1;
+        }
+
+        public void set(E element) {
+            if (last < 0) {
+                throw new IllegalStateException();
+            }
+            AbstractList.this.set(last, element);
+        }
+
+        public void add(E element) {
+            AbstractList.this.add(cursor++, element);
+            last = -1;
+        }
+    }
+
+    private static final class View<E> extends AbstractList<E> {
+        private final AbstractList<E> root;
+        private final int offset;
+        private int size;
+
+        View(AbstractList<E> root, int from, int to) {
+            this.root = root;
+            this.offset = from;
+            this.size = to - from;
+        }
+
+        public E get(int index) {
+            Objects.checkIndex(index, size);
+            return root.get(offset + index);
+        }
+
+        public E set(int index, E element) {
+            Objects.checkIndex(index, size);
+            return root.set(offset + index, element);
+        }
+
+        public void add(int index, E element) {
+            if (index < 0 || index > size) {
+                throw new IndexOutOfBoundsException("Index: " + index);
+            }
+            root.add(offset + index, element);
+            size++;
+        }
+
+        public E remove(int index) {
+            Objects.checkIndex(index, size);
+            E removed = root.remove(offset + index);
+            size--;
+            return removed;
+        }
+
+        public int size() {
+            return size;
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/AbstractMap.java",
+                r####"package java.util;
+
+public abstract class AbstractMap<K, V> implements Map<K, V> {
+    protected AbstractMap() {
+    }
+
+    public abstract Set<Map.Entry<K, V>> entrySet();
+
+    public int size() {
+        return entrySet().size();
+    }
+
+    public boolean isEmpty() {
+        return size() == 0;
+    }
+
+    public boolean containsValue(Object value) {
+        for (Map.Entry<K, V> entry : entrySet()) {
+            if (Objects.equals(value, entry.getValue())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean containsKey(Object key) {
+        for (Map.Entry<K, V> entry : entrySet()) {
+            if (Objects.equals(key, entry.getKey())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public V get(Object key) {
+        for (Map.Entry<K, V> entry : entrySet()) {
+            if (Objects.equals(key, entry.getKey())) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    public V put(K key, V value) {
+        throw new UnsupportedOperationException();
+    }
+
+    public V remove(Object key) {
+        Iterator<Map.Entry<K, V>> walk = entrySet().iterator();
+        while (walk.hasNext()) {
+            Map.Entry<K, V> entry = walk.next();
+            if (Objects.equals(key, entry.getKey())) {
+                V held = entry.getValue();
+                walk.remove();
+                return held;
+            }
+        }
+        return null;
+    }
+
+    public void putAll(Map<? extends K, ? extends V> other) {
+        for (Map.Entry<? extends K, ? extends V> entry : other.entrySet()) {
+            put(entry.getKey(), entry.getValue());
+        }
+    }
+
+    public void clear() {
+        entrySet().clear();
+    }
+
+    public Set<K> keySet() {
+        AbstractMap<K, V> self = this;
+        return new AbstractSet<K>() {
+            public Iterator<K> iterator() {
+                Iterator<Map.Entry<K, V>> walk = self.entrySet().iterator();
+                return new Iterator<K>() {
+                    public boolean hasNext() {
+                        return walk.hasNext();
+                    }
+
+                    public K next() {
+                        return walk.next().getKey();
+                    }
+
+                    public void remove() {
+                        walk.remove();
+                    }
+                };
+            }
+
+            public int size() {
+                return self.size();
+            }
+
+            public boolean contains(Object key) {
+                return self.containsKey(key);
+            }
+        };
+    }
+
+    public Collection<V> values() {
+        AbstractMap<K, V> self = this;
+        return new AbstractCollection<V>() {
+            public Iterator<V> iterator() {
+                Iterator<Map.Entry<K, V>> walk = self.entrySet().iterator();
+                return new Iterator<V>() {
+                    public boolean hasNext() {
+                        return walk.hasNext();
+                    }
+
+                    public V next() {
+                        return walk.next().getValue();
+                    }
+
+                    public void remove() {
+                        walk.remove();
+                    }
+                };
+            }
+
+            public int size() {
+                return self.size();
+            }
+
+            public boolean contains(Object value) {
+                return self.containsValue(value);
+            }
+        };
+    }
+
+    public boolean equals(Object other) {
+        if (other == this) {
+            return true;
+        }
+        if (!(other instanceof Map)) {
+            return false;
+        }
+        Map<?, ?> that = (Map<?, ?>) other;
+        if (that.size() != size()) {
+            return false;
+        }
+        for (Map.Entry<K, V> entry : entrySet()) {
+            K key = entry.getKey();
+            V value = entry.getValue();
+            if (value == null) {
+                if (!(that.get(key) == null && that.containsKey(key))) {
+                    return false;
+                }
+            } else if (!value.equals(that.get(key))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public int hashCode() {
+        int hash = 0;
+        for (Map.Entry<K, V> entry : entrySet()) {
+            hash += entry.hashCode();
+        }
+        return hash;
+    }
+
+    public String toString() {
+        Iterator<Map.Entry<K, V>> walk = entrySet().iterator();
+        if (!walk.hasNext()) {
+            return "{}";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('{');
+        while (true) {
+            Map.Entry<K, V> entry = walk.next();
+            K key = entry.getKey();
+            V value = entry.getValue();
+            made.append(key == this ? "(this Map)" : key);
+            made.append('=');
+            made.append(value == this ? "(this Map)" : value);
+            if (!walk.hasNext()) {
+                return made.append('}').toString();
+            }
+            made.append(',').append(' ');
+        }
+    }
+
+    public static class SimpleEntry<K, V> implements Map.Entry<K, V>, java.io.Serializable {
+        private final K key;
+        private V value;
+
+        public SimpleEntry(K key, V value) {
+            this.key = key;
+            this.value = value;
+        }
+
+        public SimpleEntry(Map.Entry<? extends K, ? extends V> entry) {
+            this.key = entry.getKey();
+            this.value = entry.getValue();
+        }
+
+        public K getKey() {
+            return key;
+        }
+
+        public V getValue() {
+            return value;
+        }
+
+        public V setValue(V value) {
+            V old = this.value;
+            this.value = value;
+            return old;
+        }
+
+        public boolean equals(Object other) {
+            if (!(other instanceof Map.Entry)) {
+                return false;
+            }
+            Map.Entry<?, ?> that = (Map.Entry<?, ?>) other;
+            return Objects.equals(key, that.getKey()) && Objects.equals(value, that.getValue());
+        }
+
+        public int hashCode() {
+            return Objects.hashCode(key) ^ Objects.hashCode(value);
+        }
+
+        public String toString() {
+            return key + "=" + value;
+        }
+    }
+
+    public static class SimpleImmutableEntry<K, V> implements Map.Entry<K, V>, java.io.Serializable {
+        private final K key;
+        private final V value;
+
+        public SimpleImmutableEntry(K key, V value) {
+            this.key = key;
+            this.value = value;
+        }
+
+        public K getKey() {
+            return key;
+        }
+
+        public V getValue() {
+            return value;
+        }
+
+        public V setValue(V value) {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean equals(Object other) {
+            if (!(other instanceof Map.Entry)) {
+                return false;
+            }
+            Map.Entry<?, ?> that = (Map.Entry<?, ?>) other;
+            return Objects.equals(key, that.getKey()) && Objects.equals(value, that.getValue());
+        }
+
+        public int hashCode() {
+            return Objects.hashCode(key) ^ Objects.hashCode(value);
+        }
+
+        public String toString() {
+            return key + "=" + value;
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/AbstractSet.java",
+                r####"package java.util;
+
+public abstract class AbstractSet<E> extends AbstractCollection<E> implements Set<E> {
+    protected AbstractSet() {
+    }
+
+    public boolean equals(Object other) {
+        if (other == this) {
+            return true;
+        }
+        if (!(other instanceof Set)) {
+            return false;
+        }
+        Collection<?> that = (Collection<?>) other;
+        return that.size() == size() && containsAll(that);
+    }
+
+    public int hashCode() {
+        int hash = 0;
+        for (E element : this) {
+            if (element != null) {
+                hash += element.hashCode();
+            }
+        }
+        return hash;
+    }
+
+    public boolean removeAll(Collection<?> other) {
+        boolean changed = false;
+        for (Object element : other) {
+            if (remove(element)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+}
+"####,
+            ),
+            (
+                "java/util/ArrayDeque.java",
+                r####"package java.util;
+
+public class ArrayDeque<E> extends AbstractCollection<E> implements Deque<E>, Cloneable, java.io.Serializable {
+    transient Object[] items;
+    transient int head;
+    transient int tail;
+
+    public ArrayDeque() {
+        items = new Object[16 + 1];
+    }
+
+    public ArrayDeque(int capacity) {
+        items = new Object[(capacity < 1) ? 1 : (capacity == Integer.MAX_VALUE) ? Integer.MAX_VALUE : capacity + 1];
+    }
+
+    public ArrayDeque(Collection<? extends E> other) {
+        this(other.size());
+        for (E element : other) {
+            addLast(element);
+        }
+    }
+
+    private static int increment(int at, int modulus) {
+        return ++at >= modulus ? 0 : at;
+    }
+
+    private static int decrement(int at, int modulus) {
+        return --at < 0 ? modulus - 1 : at;
+    }
+
+    private void expand() {
+        int count = items.length;
+        Object[] fresh = new Object[count + (count < 64 ? count + 2 : count >> 1)];
+        for (int at = 0, from = head; at < count; at++, from = increment(from, count)) {
+            fresh[at] = items[from];
+        }
+        items = fresh;
+        head = 0;
+        tail = count;
+    }
+
+    public void addFirst(E element) {
+        if (element == null) {
+            throw new NullPointerException();
+        }
+        head = decrement(head, items.length);
+        items[head] = element;
+        if (head == tail) {
+            expand();
+        }
+    }
+
+    public void addLast(E element) {
+        if (element == null) {
+            throw new NullPointerException();
+        }
+        items[tail] = element;
+        tail = increment(tail, items.length);
+        if (head == tail) {
+            expand();
+        }
+    }
+
+    public boolean offerFirst(E element) {
+        addFirst(element);
+        return true;
+    }
+
+    public boolean offerLast(E element) {
+        addLast(element);
+        return true;
+    }
+
+    public E removeFirst() {
+        E element = pollFirst();
+        if (element == null) {
+            throw new NoSuchElementException();
+        }
+        return element;
+    }
+
+    public E removeLast() {
+        E element = pollLast();
+        if (element == null) {
+            throw new NoSuchElementException();
+        }
+        return element;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E pollFirst() {
+        E element = (E) items[head];
+        if (element != null) {
+            items[head] = null;
+            head = increment(head, items.length);
+        }
+        return element;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E pollLast() {
+        int at = decrement(tail, items.length);
+        E element = (E) items[at];
+        if (element != null) {
+            items[at] = null;
+            tail = at;
+        }
+        return element;
+    }
+
+    public E getFirst() {
+        E element = peekFirst();
+        if (element == null) {
+            throw new NoSuchElementException();
+        }
+        return element;
+    }
+
+    public E getLast() {
+        E element = peekLast();
+        if (element == null) {
+            throw new NoSuchElementException();
+        }
+        return element;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E peekFirst() {
+        return (E) items[head];
+    }
+
+    @SuppressWarnings("unchecked")
+    public E peekLast() {
+        return (E) items[decrement(tail, items.length)];
+    }
+
+    public boolean add(E element) {
+        addLast(element);
+        return true;
+    }
+
+    public boolean offer(E element) {
+        return offerLast(element);
+    }
+
+    public E remove() {
+        return removeFirst();
+    }
+
+    public E poll() {
+        return pollFirst();
+    }
+
+    public E element() {
+        return getFirst();
+    }
+
+    public E peek() {
+        return peekFirst();
+    }
+
+    public void push(E element) {
+        addFirst(element);
+    }
+
+    public E pop() {
+        return removeFirst();
+    }
+
+    public int size() {
+        int count = tail - head;
+        if (count < 0) {
+            count += items.length;
+        }
+        return count;
+    }
+
+    public boolean isEmpty() {
+        return head == tail;
+    }
+
+    public void clear() {
+        for (int at = head; at != tail; at = increment(at, items.length)) {
+            items[at] = null;
+        }
+        head = 0;
+        tail = 0;
+    }
+
+    private void deleteAt(int index) {
+        int count = items.length;
+        int at = index;
+        int following = increment(at, count);
+        while (following != tail) {
+            items[at] = items[following];
+            at = following;
+            following = increment(following, count);
+        }
+        items[at] = null;
+        tail = at;
+    }
+
+    public boolean remove(Object element) {
+        return removeFirstOccurrence(element);
+    }
+
+    public boolean removeFirstOccurrence(Object element) {
+        if (element != null) {
+            for (int at = head; at != tail; at = increment(at, items.length)) {
+                if (element.equals(items[at])) {
+                    deleteAt(at);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean contains(Object element) {
+        if (element != null) {
+            for (int at = head; at != tail; at = increment(at, items.length)) {
+                if (element.equals(items[at])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public Object[] toArray() {
+        Object[] made = new Object[size()];
+        int place = 0;
+        for (int at = head; at != tail; at = increment(at, items.length)) {
+            made[place++] = items[at];
+        }
+        return made;
+    }
+
+    public Object clone() {
+        return new ArrayDeque<E>(this);
+    }
+
+    public Iterator<E> iterator() {
+        return new Iterator<E>() {
+            int cursor = head;
+            int returned = -1;
+
+            public boolean hasNext() {
+                return cursor != tail;
+            }
+
+            @SuppressWarnings("unchecked")
+            public E next() {
+                if (cursor == tail) {
+                    throw new NoSuchElementException();
+                }
+                E element = (E) items[cursor];
+                returned = cursor;
+                cursor = increment(cursor, items.length);
+                return element;
+            }
+
+            public void remove() {
+                if (returned < 0) {
+                    throw new IllegalStateException();
+                }
+                deleteAt(returned);
+                cursor = returned;
+                returned = -1;
+            }
+        };
+    }
+
+    public Iterator<E> descendingIterator() {
+        return new Iterator<E>() {
+            int cursor = tail;
+            int returned = -1;
+
+            public boolean hasNext() {
+                return cursor != head;
+            }
+
+            @SuppressWarnings("unchecked")
+            public E next() {
+                if (cursor == head) {
+                    throw new NoSuchElementException();
+                }
+                cursor = decrement(cursor, items.length);
+                returned = cursor;
+                return (E) items[cursor];
+            }
+
+            public void remove() {
+                if (returned < 0) {
+                    throw new IllegalStateException();
+                }
+                deleteAt(returned);
+                returned = -1;
+            }
+        };
+    }
+}
+"####,
+            ),
+            (
+                "java/util/ArrayList.java",
+                r####"package java.util;
+
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
+
+public class ArrayList<E> extends AbstractList<E> implements List<E>, RandomAccess, Cloneable, java.io.Serializable {
+    private static final Object[] NOTHING = new Object[0];
+
+    private Object[] items;
+    private int size;
+
+    public ArrayList() {
+        items = NOTHING;
+    }
+
+    public ArrayList(int capacity) {
+        if (capacity < 0) {
+            throw new IllegalArgumentException("Illegal Capacity: " + capacity);
+        }
+        items = capacity == 0 ? NOTHING : new Object[capacity];
+    }
+
+    public ArrayList(Collection<? extends E> other) {
+        Object[] copied = other.toArray();
+        size = copied.length;
+        items = size == 0 ? NOTHING : Arrays.copyOf(copied, size, Object[].class);
+    }
+
+    public void trimToSize() {
+        modCount++;
+        if (size < items.length) {
+            items = size == 0 ? NOTHING : Arrays.copyOf(items, size);
+        }
+    }
+
+    public void ensureCapacity(int capacity) {
+        if (capacity > items.length) {
+            modCount++;
+            grow(capacity);
+        }
+    }
+
+    private void grow(int needed) {
+        int current = items.length;
+        int wanted = current + (current >> 1);
+        if (wanted < needed) {
+            wanted = needed;
+        }
+        if (wanted < 10) {
+            wanted = 10;
+        }
+        if (wanted < 0) {
+            throw new OutOfMemoryError("Required array length too large");
+        }
+        items = Arrays.copyOf(items, wanted);
+    }
+
+    public int size() {
+        return size;
+    }
+
+    public boolean isEmpty() {
+        return size == 0;
+    }
+
+    public boolean contains(Object element) {
+        return indexOf(element) >= 0;
+    }
+
+    public int indexOf(Object element) {
+        for (int at = 0; at < size; at++) {
+            if (Objects.equals(element, items[at])) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public int lastIndexOf(Object element) {
+        for (int at = size - 1; at >= 0; at--) {
+            if (Objects.equals(element, items[at])) {
+                return at;
+            }
+        }
+        return -1;
+    }
+
+    public Object clone() {
+        ArrayList<E> copy = new ArrayList<E>(size);
+        System.arraycopy(items, 0, copy.items, 0, size);
+        copy.size = size;
+        return copy;
+    }
+
+    public Object[] toArray() {
+        return Arrays.copyOf(items, size);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T[] toArray(T[] array) {
+        if (array.length < size) {
+            return (T[]) Arrays.copyOf(items, size, array.getClass());
+        }
+        System.arraycopy(items, 0, array, 0, size);
+        if (array.length > size) {
+            array[size] = null;
+        }
+        return array;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E get(int index) {
+        Objects.checkIndex(index, size);
+        return (E) items[index];
+    }
+
+    @SuppressWarnings("unchecked")
+    public E set(int index, E element) {
+        Objects.checkIndex(index, size);
+        E previous = (E) items[index];
+        items[index] = element;
+        return previous;
+    }
+
+    public boolean add(E element) {
+        modCount++;
+        if (size == items.length) {
+            grow(size + 1);
+        }
+        items[size++] = element;
+        return true;
+    }
+
+    public void add(int index, E element) {
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+        modCount++;
+        if (size == items.length) {
+            grow(size + 1);
+        }
+        System.arraycopy(items, index, items, index + 1, size - index);
+        items[index] = element;
+        size++;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E remove(int index) {
+        Objects.checkIndex(index, size);
+        E previous = (E) items[index];
+        drop(index);
+        return previous;
+    }
+
+    public boolean remove(Object element) {
+        int index = indexOf(element);
+        if (index < 0) {
+            return false;
+        }
+        drop(index);
+        return true;
+    }
+
+    private void drop(int index) {
+        modCount++;
+        int moved = size - index - 1;
+        if (moved > 0) {
+            System.arraycopy(items, index + 1, items, index, moved);
+        }
+        items[--size] = null;
+    }
+
+    public void clear() {
+        modCount++;
+        for (int at = 0; at < size; at++) {
+            items[at] = null;
+        }
+        size = 0;
+    }
+
+    public boolean addAll(Collection<? extends E> other) {
+        Object[] added = other.toArray();
+        modCount++;
+        int count = added.length;
+        if (count == 0) {
+            return false;
+        }
+        if (count > items.length - size) {
+            grow(size + count);
+        }
+        System.arraycopy(added, 0, items, size, count);
+        size += count;
+        return true;
+    }
+
+    public boolean addAll(int index, Collection<? extends E> other) {
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+        Object[] added = other.toArray();
+        modCount++;
+        int count = added.length;
+        if (count == 0) {
+            return false;
+        }
+        if (count > items.length - size) {
+            grow(size + count);
+        }
+        int moved = size - index;
+        if (moved > 0) {
+            System.arraycopy(items, index, items, index + count, moved);
+        }
+        System.arraycopy(added, 0, items, index, count);
+        size += count;
+        return true;
+    }
+
+    protected void removeRange(int from, int to) {
+        if (from > to) {
+            throw new IndexOutOfBoundsException("From Index: " + from + " > To Index: " + to);
+        }
+        modCount++;
+        System.arraycopy(items, to, items, from, size - to);
+        int fresh = size - (to - from);
+        for (int at = fresh; at < size; at++) {
+            items[at] = null;
+        }
+        size = fresh;
+    }
+
+    public boolean removeAll(Collection<?> other) {
+        return keep(other, false);
+    }
+
+    public boolean retainAll(Collection<?> other) {
+        return keep(other, true);
+    }
+
+    private boolean keep(Collection<?> other, boolean wanted) {
+        int kept = 0;
+        for (int at = 0; at < size; at++) {
+            if (other.contains(items[at]) == wanted) {
+                items[kept++] = items[at];
+            }
+        }
+        if (kept == size) {
+            return false;
+        }
+        modCount++;
+        for (int at = kept; at < size; at++) {
+            items[at] = null;
+        }
+        size = kept;
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    public boolean removeIf(Predicate<? super E> filter) {
+        int expected = modCount;
+        int kept = 0;
+        for (int at = 0; at < size; at++) {
+            E element = (E) items[at];
+            if (!filter.test(element)) {
+                items[kept++] = element;
+            }
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+        }
+        if (kept == size) {
+            return false;
+        }
+        modCount++;
+        for (int at = kept; at < size; at++) {
+            items[at] = null;
+        }
+        size = kept;
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    public void forEach(Consumer<? super E> action) {
+        int expected = modCount;
+        for (int at = 0; at < size && modCount == expected; at++) {
+            action.accept((E) items[at]);
+        }
+        if (modCount != expected) {
+            throw new ConcurrentModificationException();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public void replaceAll(UnaryOperator<E> operator) {
+        int expected = modCount;
+        for (int at = 0; at < size && modCount == expected; at++) {
+            items[at] = operator.apply((E) items[at]);
+        }
+        if (modCount != expected) {
+            throw new ConcurrentModificationException();
+        }
+        modCount++;
+    }
+
+    @SuppressWarnings("unchecked")
+    public void sort(Comparator<? super E> order) {
+        int expected = modCount;
+        Arrays.sort((E[]) items, 0, size, order);
+        if (modCount != expected) {
+            throw new ConcurrentModificationException();
+        }
+        modCount++;
+    }
+
+    public boolean equals(Object other) {
+        if (other == this) {
+            return true;
+        }
+        if (!(other instanceof List)) {
+            return false;
+        }
+        if (other instanceof ArrayList) {
+            ArrayList<?> that = (ArrayList<?>) other;
+            if (that.size != size) {
+                return false;
+            }
+            for (int at = 0; at < size; at++) {
+                if (!Objects.equals(items[at], that.items[at])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return super.equals(other);
+    }
+
+    public int hashCode() {
+        int hash = 1;
+        for (int at = 0; at < size; at++) {
+            Object element = items[at];
+            hash = 31 * hash + (element == null ? 0 : element.hashCode());
+        }
+        return hash;
+    }
+
+    public Iterator<E> iterator() {
+        return new Cursor(0);
+    }
+
+    public ListIterator<E> listIterator() {
+        return new Cursor(0);
+    }
+
+    public ListIterator<E> listIterator(int index) {
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index);
+        }
+        return new Cursor(index);
+    }
+
+    private class Cursor implements ListIterator<E> {
+        int cursor;
+        int last = -1;
+        int expected = modCount;
+
+        Cursor(int index) {
+            cursor = index;
+        }
+
+        private void check() {
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+        }
+
+        public boolean hasNext() {
+            return cursor != size;
+        }
+
+        @SuppressWarnings("unchecked")
+        public E next() {
+            check();
+            int at = cursor;
+            if (at >= size) {
+                throw new NoSuchElementException();
+            }
+            cursor = at + 1;
+            last = at;
+            return (E) items[at];
+        }
+
+        public boolean hasPrevious() {
+            return cursor != 0;
+        }
+
+        @SuppressWarnings("unchecked")
+        public E previous() {
+            check();
+            int at = cursor - 1;
+            if (at < 0) {
+                throw new NoSuchElementException();
+            }
+            cursor = at;
+            last = at;
+            return (E) items[at];
+        }
+
+        public int nextIndex() {
+            return cursor;
+        }
+
+        public int previousIndex() {
+            return cursor - 1;
+        }
+
+        public void remove() {
+            if (last < 0) {
+                throw new IllegalStateException();
+            }
+            check();
+            ArrayList.this.remove(last);
+            cursor = last;
+            last = -1;
+            expected = modCount;
+        }
+
+        public void set(E element) {
+            if (last < 0) {
+                throw new IllegalStateException();
+            }
+            check();
+            ArrayList.this.set(last, element);
+        }
+
+        public void add(E element) {
+            check();
+            ArrayList.this.add(cursor, element);
+            cursor++;
+            last = -1;
+            expected = modCount;
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Arrays.java",
+                r####"package java.util;
+
+import java.util.function.IntFunction;
+import java.util.function.IntUnaryOperator;
+
+public final class Arrays {
+    private Arrays() {
+    }
+
+    @SafeVarargs
+    public static <T> List<T> asList(T... items) {
+        return new Fixed<T>(items);
+    }
+
+    private static final class Fixed<E> extends AbstractList<E> implements RandomAccess, java.io.Serializable {
+        private final E[] items;
+
+        Fixed(E[] items) {
+            this.items = Objects.requireNonNull(items);
+        }
+
+        public int size() {
+            return items.length;
+        }
+
+        public Object[] toArray() {
+            return Arrays.copyOf(items, items.length, Object[].class);
+        }
+
+        @SuppressWarnings("unchecked")
+        public <T> T[] toArray(T[] array) {
+            int size = size();
+            if (array.length < size) {
+                return Arrays.copyOf(this.items, size, (Class<? extends T[]>) array.getClass());
+            }
+            System.arraycopy(this.items, 0, array, 0, size);
+            if (array.length > size) {
+                array[size] = null;
+            }
+            return array;
+        }
+
+        public E get(int index) {
+            return items[index];
+        }
+
+        public E set(int index, E element) {
+            E previous = items[index];
+            items[index] = element;
+            return previous;
+        }
+
+        public int indexOf(Object element) {
+            for (int at = 0; at < items.length; at++) {
+                if (Objects.equals(element, items[at])) {
+                    return at;
+                }
+            }
+            return -1;
+        }
+
+        public boolean contains(Object element) {
+            return indexOf(element) >= 0;
+        }
+
+        public void sort(Comparator<? super E> order) {
+            Arrays.sort(items, order);
+        }
+    }
+
+    private static void checkRange(int length, int from, int to) {
+        if (from > to) {
+            throw new IllegalArgumentException("fromIndex(" + from + ") > toIndex(" + to + ")");
+        }
+        if (from < 0) {
+            throw new ArrayIndexOutOfBoundsException(from);
+        }
+        if (to > length) {
+            throw new ArrayIndexOutOfBoundsException(to);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T[] copyOf(T[] original, int length) {
+        return (T[]) copyOf(original, length, original.getClass());
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T, U> T[] copyOf(U[] original, int length, Class<? extends T[]> type) {
+        if (length < 0) {
+            throw new NegativeArraySizeException(String.valueOf(length));
+        }
+        T[] made = (T[]) omni.runtime.Arrays.newInstance(type.getComponentType().getName(), length);
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T[] copyOfRange(T[] original, int from, int to) {
+        return copyOfRange(original, from, to, (Class<? extends T[]>) original.getClass());
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T, U> T[] copyOfRange(U[] original, int from, int to, Class<? extends T[]> type) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        T[] made = (T[]) omni.runtime.Arrays.newInstance(type.getComponentType().getName(), length);
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static boolean[] copyOf(boolean[] original, int length) {
+        boolean[] made = new boolean[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static boolean[] copyOfRange(boolean[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        boolean[] made = new boolean[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(boolean[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(boolean[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (boolean item : items) {
+            hash = 31 * hash + Boolean.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(boolean[] left, boolean[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (left[at] != right[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(boolean[] items, boolean value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(boolean[] items, int from, int to, boolean value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static byte[] copyOf(byte[] original, int length) {
+        byte[] made = new byte[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static byte[] copyOfRange(byte[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        byte[] made = new byte[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(byte[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(byte[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (byte item : items) {
+            hash = 31 * hash + Byte.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(byte[] left, byte[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (left[at] != right[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(byte[] items, byte value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(byte[] items, int from, int to, byte value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(byte[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(byte[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(byte[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        byte[] spare = new byte[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(byte[] items, byte[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                byte held = items[at];
+                int place = at - 1;
+                while (place >= from && Byte.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Byte.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Byte.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(byte[] items, byte key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(byte[] items, int from, int to, byte key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Byte.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static char[] copyOf(char[] original, int length) {
+        char[] made = new char[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static char[] copyOfRange(char[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        char[] made = new char[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(char[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(char[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (char item : items) {
+            hash = 31 * hash + Character.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(char[] left, char[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (left[at] != right[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(char[] items, char value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(char[] items, int from, int to, char value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(char[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(char[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(char[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        char[] spare = new char[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(char[] items, char[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                char held = items[at];
+                int place = at - 1;
+                while (place >= from && Character.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Character.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Character.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(char[] items, char key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(char[] items, int from, int to, char key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Character.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static short[] copyOf(short[] original, int length) {
+        short[] made = new short[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static short[] copyOfRange(short[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        short[] made = new short[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(short[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(short[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (short item : items) {
+            hash = 31 * hash + Short.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(short[] left, short[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (left[at] != right[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(short[] items, short value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(short[] items, int from, int to, short value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(short[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(short[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(short[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        short[] spare = new short[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(short[] items, short[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                short held = items[at];
+                int place = at - 1;
+                while (place >= from && Short.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Short.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Short.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(short[] items, short key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(short[] items, int from, int to, short key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Short.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static int[] copyOf(int[] original, int length) {
+        int[] made = new int[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static int[] copyOfRange(int[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        int[] made = new int[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(int[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(int[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (int item : items) {
+            hash = 31 * hash + Integer.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(int[] left, int[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (left[at] != right[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(int[] items, int value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(int[] items, int from, int to, int value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(int[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(int[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(int[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        int[] spare = new int[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(int[] items, int[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                int held = items[at];
+                int place = at - 1;
+                while (place >= from && Integer.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Integer.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Integer.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(int[] items, int key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(int[] items, int from, int to, int key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Integer.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static long[] copyOf(long[] original, int length) {
+        long[] made = new long[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static long[] copyOfRange(long[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        long[] made = new long[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(long[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(long[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (long item : items) {
+            hash = 31 * hash + Long.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(long[] left, long[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (left[at] != right[at]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(long[] items, long value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(long[] items, int from, int to, long value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(long[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(long[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(long[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        long[] spare = new long[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(long[] items, long[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                long held = items[at];
+                int place = at - 1;
+                while (place >= from && Long.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Long.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Long.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(long[] items, long key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(long[] items, int from, int to, long key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Long.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static float[] copyOf(float[] original, int length) {
+        float[] made = new float[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static float[] copyOfRange(float[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        float[] made = new float[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(float[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(float[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (float item : items) {
+            hash = 31 * hash + Float.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(float[] left, float[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (Float.floatToIntBits(left[at]) != Float.floatToIntBits(right[at])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(float[] items, float value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(float[] items, int from, int to, float value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(float[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(float[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(float[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        float[] spare = new float[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(float[] items, float[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                float held = items[at];
+                int place = at - 1;
+                while (place >= from && Float.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Float.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Float.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(float[] items, float key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(float[] items, int from, int to, float key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Float.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static double[] copyOf(double[] original, int length) {
+        double[] made = new double[length];
+        System.arraycopy(original, 0, made, 0, Math.min(original.length, length));
+        return made;
+    }
+
+    public static double[] copyOfRange(double[] original, int from, int to) {
+        int length = to - from;
+        if (length < 0) {
+            throw new IllegalArgumentException(from + " > " + to);
+        }
+        if (from < 0 || from > original.length) {
+            throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from);
+        }
+        double[] made = new double[length];
+        System.arraycopy(original, from, made, 0, Math.min(original.length - from, length));
+        return made;
+    }
+
+    public static String toString(double[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(items[at]);
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static int hashCode(double[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (double item : items) {
+            hash = 31 * hash + Double.hashCode(item);
+        }
+        return hash;
+    }
+
+    public static boolean equals(double[] left, double[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (Double.doubleToLongBits(left[at]) != Double.doubleToLongBits(right[at])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void fill(double[] items, double value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(double[] items, int from, int to, double value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void sort(double[] items) {
+        sortRange(items, 0, items.length);
+    }
+
+    public static void sort(double[] items, int from, int to) {
+        checkRange(items.length, from, to);
+        sortRange(items, from, to);
+    }
+
+    private static void sortRange(double[] items, int from, int to) {
+        if (to - from < 2) {
+            return;
+        }
+        double[] spare = new double[to - from];
+        mergeSort(items, spare, from, to);
+    }
+
+    private static void mergeSort(double[] items, double[] spare, int from, int to) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                double held = items[at];
+                int place = at - 1;
+                while (place >= from && Double.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle);
+        mergeSort(items, spare, middle, to);
+        if (Double.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (Double.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(double[] items, double key) {
+        return binarySearch(items, 0, items.length, key);
+    }
+
+    public static int binarySearch(double[] items, int from, int to, double key) {
+        checkRange(items.length, from, to);
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int order = Double.compare(items[middle], key);
+            if (order < 0) {
+                low = middle + 1;
+            } else if (order > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static String toString(Object[] items) {
+        if (items == null) {
+            return "null";
+        }
+        if (items.length == 0) {
+            return "[]";
+        }
+        StringBuilder made = new StringBuilder();
+        made.append('[');
+        for (int at = 0; ; at++) {
+            made.append(String.valueOf(items[at]));
+            if (at == items.length - 1) {
+                return made.append(']').toString();
+            }
+            made.append(", ");
+        }
+    }
+
+    public static String deepToString(Object[] items) {
+        if (items == null) {
+            return "null";
+        }
+        StringBuilder made = new StringBuilder();
+        deepToString(items, made, new ArrayList<Object[]>());
+        return made.toString();
+    }
+
+    private static void deepToString(Object[] items, StringBuilder made, List<Object[]> seen) {
+        if (items.length == 0) {
+            made.append("[]");
+            return;
+        }
+        seen.add(items);
+        made.append('[');
+        for (int at = 0; ; at++) {
+            Object item = items[at];
+            if (item == null) {
+                made.append("null");
+            } else if (item instanceof Object[]) {
+                boolean cycle = false;
+                for (Object[] earlier : seen) {
+                    if (earlier == item) {
+                        cycle = true;
+                    }
+                }
+                if (cycle) {
+                    made.append("[...]");
+                } else {
+                    deepToString((Object[]) item, made, seen);
+                }
+            } else {
+                made.append(primitiveText(item));
+            }
+            if (at == items.length - 1) {
+                break;
+            }
+            made.append(", ");
+        }
+        made.append(']');
+        seen.remove(seen.size() - 1);
+    }
+
+    private static String primitiveText(Object item) {
+        if (item instanceof int[]) {
+            return toString((int[]) item);
+        }
+        if (item instanceof long[]) {
+            return toString((long[]) item);
+        }
+        if (item instanceof char[]) {
+            return toString((char[]) item);
+        }
+        if (item instanceof byte[]) {
+            return toString((byte[]) item);
+        }
+        if (item instanceof short[]) {
+            return toString((short[]) item);
+        }
+        if (item instanceof boolean[]) {
+            return toString((boolean[]) item);
+        }
+        if (item instanceof float[]) {
+            return toString((float[]) item);
+        }
+        if (item instanceof double[]) {
+            return toString((double[]) item);
+        }
+        return item.toString();
+    }
+
+    public static int hashCode(Object[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (Object item : items) {
+            hash = 31 * hash + (item == null ? 0 : item.hashCode());
+        }
+        return hash;
+    }
+
+    public static int deepHashCode(Object[] items) {
+        if (items == null) {
+            return 0;
+        }
+        int hash = 1;
+        for (Object item : items) {
+            int code;
+            if (item == null) {
+                code = 0;
+            } else if (item instanceof Object[]) {
+                code = deepHashCode((Object[]) item);
+            } else if (item instanceof int[]) {
+                code = hashCode((int[]) item);
+            } else if (item instanceof long[]) {
+                code = hashCode((long[]) item);
+            } else if (item instanceof char[]) {
+                code = hashCode((char[]) item);
+            } else if (item instanceof byte[]) {
+                code = hashCode((byte[]) item);
+            } else if (item instanceof short[]) {
+                code = hashCode((short[]) item);
+            } else if (item instanceof boolean[]) {
+                code = hashCode((boolean[]) item);
+            } else if (item instanceof float[]) {
+                code = hashCode((float[]) item);
+            } else if (item instanceof double[]) {
+                code = hashCode((double[]) item);
+            } else {
+                code = item.hashCode();
+            }
+            hash = 31 * hash + code;
+        }
+        return hash;
+    }
+
+    public static boolean equals(Object[] left, Object[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (!Objects.equals(left[at], right[at])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static boolean deepEquals(Object[] left, Object[] right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length != right.length) {
+            return false;
+        }
+        for (int at = 0; at < left.length; at++) {
+            if (!deepEqual(left[at], right[at])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean deepEqual(Object left, Object right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        if (left instanceof Object[] && right instanceof Object[]) {
+            return deepEquals((Object[]) left, (Object[]) right);
+        }
+        if (left instanceof int[] && right instanceof int[]) {
+            return equals((int[]) left, (int[]) right);
+        }
+        if (left instanceof long[] && right instanceof long[]) {
+            return equals((long[]) left, (long[]) right);
+        }
+        if (left instanceof char[] && right instanceof char[]) {
+            return equals((char[]) left, (char[]) right);
+        }
+        if (left instanceof byte[] && right instanceof byte[]) {
+            return equals((byte[]) left, (byte[]) right);
+        }
+        if (left instanceof short[] && right instanceof short[]) {
+            return equals((short[]) left, (short[]) right);
+        }
+        if (left instanceof boolean[] && right instanceof boolean[]) {
+            return equals((boolean[]) left, (boolean[]) right);
+        }
+        if (left instanceof float[] && right instanceof float[]) {
+            return equals((float[]) left, (float[]) right);
+        }
+        if (left instanceof double[] && right instanceof double[]) {
+            return equals((double[]) left, (double[]) right);
+        }
+        return left.equals(right);
+    }
+
+    public static void fill(Object[] items, Object value) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static void fill(Object[] items, int from, int to, Object value) {
+        checkRange(items.length, from, to);
+        for (int at = from; at < to; at++) {
+            items[at] = value;
+        }
+    }
+
+    public static <T> void setAll(T[] items, IntFunction<? extends T> maker) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = maker.apply(at);
+        }
+    }
+
+    public static void setAll(int[] items, IntUnaryOperator maker) {
+        for (int at = 0; at < items.length; at++) {
+            items[at] = maker.applyAsInt(at);
+        }
+    }
+
+    public static void sort(Object[] items) {
+        sort(items, 0, items.length, null);
+    }
+
+    public static void sort(Object[] items, int from, int to) {
+        sort(items, from, to, null);
+    }
+
+    public static <T> void sort(T[] items, Comparator<? super T> order) {
+        sort(items, 0, items.length, order);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> void sort(T[] items, int from, int to, Comparator<? super T> order) {
+        checkRange(items.length, from, to);
+        if (to - from < 2) {
+            return;
+        }
+        Comparator<Object> using = order == null ? (Comparator<Object>) (Comparator<?>) Collections.NaturalOrder.INSTANCE : (Comparator<Object>) order;
+        Object[] spare = new Object[to - from];
+        mergeSort(items, spare, from, to, using);
+    }
+
+    private static void mergeSort(Object[] items, Object[] spare, int from, int to, Comparator<Object> order) {
+        if (to - from <= 16) {
+            for (int at = from + 1; at < to; at++) {
+                Object held = items[at];
+                int place = at - 1;
+                while (place >= from && order.compare(items[place], held) > 0) {
+                    items[place + 1] = items[place];
+                    place--;
+                }
+                items[place + 1] = held;
+            }
+            return;
+        }
+        int middle = (from + to) >>> 1;
+        mergeSort(items, spare, from, middle, order);
+        mergeSort(items, spare, middle, to, order);
+        if (order.compare(items[middle - 1], items[middle]) <= 0) {
+            return;
+        }
+        int count = middle - from;
+        System.arraycopy(items, from, spare, 0, count);
+        int left = 0;
+        int right = middle;
+        int place = from;
+        while (left < count && right < to) {
+            if (order.compare(items[right], spare[left]) < 0) {
+                items[place++] = items[right++];
+            } else {
+                items[place++] = spare[left++];
+            }
+        }
+        while (left < count) {
+            items[place++] = spare[left++];
+        }
+    }
+
+    public static int binarySearch(Object[] items, Object key) {
+        return binarySearch(items, 0, items.length, key, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> int binarySearch(T[] items, T key, Comparator<? super T> order) {
+        return binarySearch(items, 0, items.length, key, order);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> int binarySearch(T[] items, int from, int to, T key, Comparator<? super T> order) {
+        checkRange(items.length, from, to);
+        Comparator<Object> using = order == null ? (Comparator<Object>) (Comparator<?>) Collections.NaturalOrder.INSTANCE : (Comparator<Object>) order;
+        int low = from;
+        int high = to - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            int found = using.compare(items[middle], key);
+            if (found < 0) {
+                low = middle + 1;
+            } else if (found > 0) {
+                high = middle - 1;
+            } else {
+                return middle;
+            }
+        }
+        return -(low + 1);
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Collection.java",
+                r####"package java.util;
+
+import java.util.function.Predicate;
+
+public interface Collection<E> extends Iterable<E> {
+    int size();
+
+    boolean isEmpty();
+
+    boolean contains(Object element);
+
+    Iterator<E> iterator();
+
+    Object[] toArray();
+
+    <T> T[] toArray(T[] array);
+
+    boolean add(E element);
+
+    boolean remove(Object element);
+
+    boolean containsAll(Collection<?> other);
+
+    boolean addAll(Collection<? extends E> other);
+
+    boolean removeAll(Collection<?> other);
+
+    boolean retainAll(Collection<?> other);
+
+    void clear();
+
+    boolean equals(Object other);
+
+    int hashCode();
+
+    default boolean removeIf(Predicate<? super E> filter) {
+        boolean removed = false;
+        Iterator<E> walk = iterator();
+        while (walk.hasNext()) {
+            if (filter.test(walk.next())) {
+                walk.remove();
+                removed = true;
+            }
+        }
+        return removed;
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Collections.java",
+                r####"package java.util;
+
+public final class Collections {
+    private Collections() {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static final List EMPTY_LIST = new EmptyList<Object>();
+
+    @SuppressWarnings("rawtypes")
+    public static final Set EMPTY_SET = new EmptySet<Object>();
+
+    @SuppressWarnings("rawtypes")
+    public static final Map EMPTY_MAP = new EmptyMap<Object, Object>();
+
+    static final class NaturalOrder implements Comparator<Comparable<Object>>, java.io.Serializable {
+        static final NaturalOrder INSTANCE = new NaturalOrder();
+
+        public int compare(Comparable<Object> left, Comparable<Object> right) {
+            return left.compareTo(right);
+        }
+
+        public Comparator<Comparable<Object>> reversed() {
+            return Collections.reverseOrder();
+        }
+    }
+
+    static final class ReverseOrder implements Comparator<Comparable<Object>>, java.io.Serializable {
+        static final ReverseOrder INSTANCE = new ReverseOrder();
+
+        public int compare(Comparable<Object> left, Comparable<Object> right) {
+            return right.compareTo(left);
+        }
+
+        @SuppressWarnings("unchecked")
+        public Comparator<Comparable<Object>> reversed() {
+            return (Comparator<Comparable<Object>>) (Comparator<?>) NaturalOrder.INSTANCE;
+        }
+    }
+
+    static final class Reversed<T> implements Comparator<T>, java.io.Serializable {
+        final Comparator<T> order;
+
+        Reversed(Comparator<T> order) {
+            this.order = order;
+        }
+
+        public int compare(T left, T right) {
+            return order.compare(right, left);
+        }
+
+        public Comparator<T> reversed() {
+            return order;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Comparator<T> reverseOrder() {
+        return (Comparator<T>) (Comparator<?>) ReverseOrder.INSTANCE;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Comparator<T> reverseOrder(Comparator<T> order) {
+        if (order == null) {
+            return reverseOrder();
+        }
+        if (order == (Comparator<?>) ReverseOrder.INSTANCE) {
+            return (Comparator<T>) (Comparator<?>) NaturalOrder.INSTANCE;
+        }
+        if (order instanceof Reversed) {
+            return ((Reversed<T>) order).order;
+        }
+        return new Reversed<T>(order);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T extends Comparable<? super T>> void sort(List<T> list) {
+        list.sort(null);
+    }
+
+    public static <T> void sort(List<T> list, Comparator<? super T> order) {
+        list.sort(order);
+    }
+
+    public static void reverse(List<?> list) {
+        reverseList(list);
+    }
+
+    private static <T> void reverseList(List<T> list) {
+        int size = list.size();
+        for (int left = 0, right = size - 1; left < right; left++, right--) {
+            T held = list.get(left);
+            list.set(left, list.get(right));
+            list.set(right, held);
+        }
+    }
+
+    public static void swap(List<?> list, int left, int right) {
+        swapList(list, left, right);
+    }
+
+    private static <T> void swapList(List<T> list, int left, int right) {
+        list.set(left, list.set(right, list.get(left)));
+    }
+
+    public static <T> void fill(List<? super T> list, T value) {
+        ListIterator<? super T> walk = list.listIterator();
+        while (walk.hasNext()) {
+            walk.next();
+            walk.set(value);
+        }
+    }
+
+    public static <T extends Comparable<? super T>> T max(Collection<? extends T> items) {
+        Iterator<? extends T> walk = items.iterator();
+        T best = walk.next();
+        while (walk.hasNext()) {
+            T next = walk.next();
+            if (next.compareTo(best) > 0) {
+                best = next;
+            }
+        }
+        return best;
+    }
+
+    public static <T extends Comparable<? super T>> T min(Collection<? extends T> items) {
+        Iterator<? extends T> walk = items.iterator();
+        T best = walk.next();
+        while (walk.hasNext()) {
+            T next = walk.next();
+            if (next.compareTo(best) < 0) {
+                best = next;
+            }
+        }
+        return best;
+    }
+
+    public static int frequency(Collection<?> items, Object value) {
+        int count = 0;
+        for (Object item : items) {
+            if (Objects.equals(value, item)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @SafeVarargs
+    public static <T> boolean addAll(Collection<? super T> target, T... items) {
+        boolean changed = false;
+        for (T item : items) {
+            changed |= target.add(item);
+        }
+        return changed;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> List<T> emptyList() {
+        return (List<T>) EMPTY_LIST;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Set<T> emptySet() {
+        return (Set<T>) EMPTY_SET;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <K, V> Map<K, V> emptyMap() {
+        return (Map<K, V>) EMPTY_MAP;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Iterator<T> emptyIterator() {
+        return (Iterator<T>) EmptyWalker.INSTANCE;
+    }
+
+    public static <T> List<T> singletonList(T item) {
+        return new SingleList<T>(item);
+    }
+
+    public static <T> Set<T> singleton(T item) {
+        return new SingleSet<T>(item);
+    }
+
+    public static <K, V> Map<K, V> singletonMap(K key, V value) {
+        return new SingleMap<K, V>(key, value);
+    }
+
+    public static <T> List<T> nCopies(int count, T item) {
+        if (count < 0) {
+            throw new IllegalArgumentException("List length = " + count);
+        }
+        ArrayList<T> made = new ArrayList<T>(count);
+        for (int at = 0; at < count; at++) {
+            made.add(item);
+        }
+        return unmodifiableList(made);
+    }
+
+    public static <T> List<T> unmodifiableList(List<? extends T> list) {
+        return new ReadOnlyList<T>(list);
+    }
+
+    public static <T> Set<T> unmodifiableSet(Set<? extends T> set) {
+        return new ReadOnlySet<T>(set);
+    }
+
+    public static <T> Collection<T> unmodifiableCollection(Collection<? extends T> items) {
+        return new ReadOnlyCollection<T>(items);
+    }
+
+    public static <K, V> Map<K, V> unmodifiableMap(Map<? extends K, ? extends V> map) {
+        return new ReadOnlyMap<K, V>(map);
+    }
+
+    public static <T> List<T> synchronizedList(List<T> list) {
+        return list;
+    }
+
+    public static <K, V> Map<K, V> synchronizedMap(Map<K, V> map) {
+        return map;
+    }
+
+    static final class EmptyWalker implements ListIterator<Object> {
+        static final EmptyWalker INSTANCE = new EmptyWalker();
+
+        public boolean hasNext() {
+            return false;
+        }
+
+        public Object next() {
+            throw new NoSuchElementException();
+        }
+
+        public boolean hasPrevious() {
+            return false;
+        }
+
+        public Object previous() {
+            throw new NoSuchElementException();
+        }
+
+        public int nextIndex() {
+            return 0;
+        }
+
+        public int previousIndex() {
+            return -1;
+        }
+
+        public void remove() {
+            throw new IllegalStateException();
+        }
+
+        public void set(Object element) {
+            throw new IllegalStateException();
+        }
+
+        public void add(Object element) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    static final class EmptyList<E> extends AbstractList<E> implements RandomAccess, java.io.Serializable {
+        public int size() {
+            return 0;
+        }
+
+        public E get(int index) {
+            throw new IndexOutOfBoundsException("Index: " + index);
+        }
+
+        @SuppressWarnings("unchecked")
+        public Iterator<E> iterator() {
+            return (Iterator<E>) EmptyWalker.INSTANCE;
+        }
+
+        public boolean contains(Object element) {
+            return false;
+        }
+
+        public boolean equals(Object other) {
+            return other instanceof List && ((List<?>) other).isEmpty();
+        }
+
+        public int hashCode() {
+            return 1;
+        }
+    }
+
+    static final class EmptySet<E> extends AbstractSet<E> implements java.io.Serializable {
+        public int size() {
+            return 0;
+        }
+
+        @SuppressWarnings("unchecked")
+        public Iterator<E> iterator() {
+            return (Iterator<E>) EmptyWalker.INSTANCE;
+        }
+
+        public boolean contains(Object element) {
+            return false;
+        }
+    }
+
+    static final class EmptyMap<K, V> extends AbstractMap<K, V> implements java.io.Serializable {
+        public int size() {
+            return 0;
+        }
+
+        public boolean isEmpty() {
+            return true;
+        }
+
+        public boolean containsKey(Object key) {
+            return false;
+        }
+
+        public V get(Object key) {
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        public Set<Map.Entry<K, V>> entrySet() {
+            return (Set<Map.Entry<K, V>>) EMPTY_SET;
+        }
+
+        public int hashCode() {
+            return 0;
+        }
+    }
+
+    static final class SingleWalker<E> implements Iterator<E> {
+        private final E item;
+        private boolean done;
+
+        SingleWalker(E item) {
+            this.item = item;
+        }
+
+        public boolean hasNext() {
+            return !done;
+        }
+
+        public E next() {
+            if (done) {
+                throw new NoSuchElementException();
+            }
+            done = true;
+            return item;
+        }
+    }
+
+    static final class SingleList<E> extends AbstractList<E> implements RandomAccess, java.io.Serializable {
+        private final E item;
+
+        SingleList(E item) {
+            this.item = item;
+        }
+
+        public int size() {
+            return 1;
+        }
+
+        public E get(int index) {
+            if (index != 0) {
+                throw new IndexOutOfBoundsException("Index: " + index + ", Size: 1");
+            }
+            return item;
+        }
+
+        public Iterator<E> iterator() {
+            return new SingleWalker<E>(item);
+        }
+
+        public boolean contains(Object element) {
+            return Objects.equals(element, item);
+        }
+
+        public int hashCode() {
+            return 31 + Objects.hashCode(item);
+        }
+    }
+
+    static final class SingleSet<E> extends AbstractSet<E> implements java.io.Serializable {
+        private final E item;
+
+        SingleSet(E item) {
+            this.item = item;
+        }
+
+        public int size() {
+            return 1;
+        }
+
+        public Iterator<E> iterator() {
+            return new SingleWalker<E>(item);
+        }
+
+        public boolean contains(Object element) {
+            return Objects.equals(element, item);
+        }
+
+        public int hashCode() {
+            return Objects.hashCode(item);
+        }
+    }
+
+    static final class SingleMap<K, V> extends AbstractMap<K, V> implements java.io.Serializable {
+        private final K key;
+        private final V value;
+
+        SingleMap(K key, V value) {
+            this.key = key;
+            this.value = value;
+        }
+
+        public int size() {
+            return 1;
+        }
+
+        public boolean isEmpty() {
+            return false;
+        }
+
+        public boolean containsKey(Object other) {
+            return Objects.equals(other, key);
+        }
+
+        public boolean containsValue(Object other) {
+            return Objects.equals(other, value);
+        }
+
+        public V get(Object other) {
+            return Objects.equals(other, key) ? value : null;
+        }
+
+        public Set<Map.Entry<K, V>> entrySet() {
+            return singleton((Map.Entry<K, V>) new AbstractMap.SimpleImmutableEntry<K, V>(key, value));
+        }
+
+        public Set<K> keySet() {
+            return singleton(key);
+        }
+
+        public Collection<V> values() {
+            return singletonList(value);
+        }
+
+        public int hashCode() {
+            return Objects.hashCode(key) ^ Objects.hashCode(value);
+        }
+    }
+
+    static class ReadOnlyCollection<E> implements Collection<E>, java.io.Serializable {
+        final Collection<? extends E> items;
+
+        ReadOnlyCollection(Collection<? extends E> items) {
+            if (items == null) {
+                throw new NullPointerException();
+            }
+            this.items = items;
+        }
+
+        public int size() {
+            return items.size();
+        }
+
+        public boolean isEmpty() {
+            return items.isEmpty();
+        }
+
+        public boolean contains(Object element) {
+            return items.contains(element);
+        }
+
+        public Object[] toArray() {
+            return items.toArray();
+        }
+
+        public <T> T[] toArray(T[] array) {
+            return items.toArray(array);
+        }
+
+        public String toString() {
+            return items.toString();
+        }
+
+        public Iterator<E> iterator() {
+            Iterator<? extends E> walk = items.iterator();
+            return new Iterator<E>() {
+                public boolean hasNext() {
+                    return walk.hasNext();
+                }
+
+                public E next() {
+                    return walk.next();
+                }
+
+                public void remove() {
+                    throw new UnsupportedOperationException();
+                }
+            };
+        }
+
+        public boolean add(E element) {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean remove(Object element) {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean containsAll(Collection<?> other) {
+            return items.containsAll(other);
+        }
+
+        public boolean addAll(Collection<? extends E> other) {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean removeAll(Collection<?> other) {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean retainAll(Collection<?> other) {
+            throw new UnsupportedOperationException();
+        }
+
+        public void clear() {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    static class ReadOnlySet<E> extends ReadOnlyCollection<E> implements Set<E> {
+        ReadOnlySet(Set<? extends E> set) {
+            super(set);
+        }
+
+        public boolean equals(Object other) {
+            return other == this || items.equals(other);
+        }
+
+        public int hashCode() {
+            return items.hashCode();
+        }
+    }
+
+    static class ReadOnlyList<E> extends ReadOnlyCollection<E> implements List<E>, RandomAccess {
+        final List<? extends E> list;
+
+        ReadOnlyList(List<? extends E> list) {
+            super(list);
+            this.list = list;
+        }
+
+        public boolean equals(Object other) {
+            return other == this || list.equals(other);
+        }
+
+        public int hashCode() {
+            return list.hashCode();
+        }
+
+        public E get(int index) {
+            return list.get(index);
+        }
+
+        public E set(int index, E element) {
+            throw new UnsupportedOperationException();
+        }
+
+        public void add(int index, E element) {
+            throw new UnsupportedOperationException();
+        }
+
+        public E remove(int index) {
+            throw new UnsupportedOperationException();
+        }
+
+        public int indexOf(Object element) {
+            return list.indexOf(element);
+        }
+
+        public int lastIndexOf(Object element) {
+            return list.lastIndexOf(element);
+        }
+
+        public boolean addAll(int index, Collection<? extends E> other) {
+            throw new UnsupportedOperationException();
+        }
+
+        public void sort(Comparator<? super E> order) {
+            throw new UnsupportedOperationException();
+        }
+
+        public ListIterator<E> listIterator() {
+            return listIterator(0);
+        }
+
+        public ListIterator<E> listIterator(int index) {
+            ListIterator<? extends E> walk = list.listIterator(index);
+            return new ListIterator<E>() {
+                public boolean hasNext() {
+                    return walk.hasNext();
+                }
+
+                public E next() {
+                    return walk.next();
+                }
+
+                public boolean hasPrevious() {
+                    return walk.hasPrevious();
+                }
+
+                public E previous() {
+                    return walk.previous();
+                }
+
+                public int nextIndex() {
+                    return walk.nextIndex();
+                }
+
+                public int previousIndex() {
+                    return walk.previousIndex();
+                }
+
+                public void remove() {
+                    throw new UnsupportedOperationException();
+                }
+
+                public void set(E element) {
+                    throw new UnsupportedOperationException();
+                }
+
+                public void add(E element) {
+                    throw new UnsupportedOperationException();
+                }
+            };
+        }
+
+        public List<E> subList(int from, int to) {
+            return new ReadOnlyList<E>(list.subList(from, to));
+        }
+    }
+
+    static class ReadOnlyMap<K, V> implements Map<K, V>, java.io.Serializable {
+        private final Map<? extends K, ? extends V> map;
+
+        ReadOnlyMap(Map<? extends K, ? extends V> map) {
+            if (map == null) {
+                throw new NullPointerException();
+            }
+            this.map = map;
+        }
+
+        public int size() {
+            return map.size();
+        }
+
+        public boolean isEmpty() {
+            return map.isEmpty();
+        }
+
+        public boolean containsKey(Object key) {
+            return map.containsKey(key);
+        }
+
+        public boolean containsValue(Object value) {
+            return map.containsValue(value);
+        }
+
+        public V get(Object key) {
+            return map.get(key);
+        }
+
+        public V put(K key, V value) {
+            throw new UnsupportedOperationException();
+        }
+
+        public V remove(Object key) {
+            throw new UnsupportedOperationException();
+        }
+
+        public void putAll(Map<? extends K, ? extends V> other) {
+            throw new UnsupportedOperationException();
+        }
+
+        public void clear() {
+            throw new UnsupportedOperationException();
+        }
+
+        public Set<K> keySet() {
+            return unmodifiableSet(map.keySet());
+        }
+
+        @SuppressWarnings("unchecked")
+        public Set<Map.Entry<K, V>> entrySet() {
+            return unmodifiableSet((Set<Map.Entry<K, V>>) (Set<?>) map.entrySet());
+        }
+
+        public Collection<V> values() {
+            return unmodifiableCollection(map.values());
+        }
+
+        public boolean equals(Object other) {
+            return other == this || map.equals(other);
+        }
+
+        public int hashCode() {
+            return map.hashCode();
+        }
+
+        public String toString() {
+            return map.toString();
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Comparator.java",
+                r####"package java.util;
+
+import java.util.function.Function;
+
+public interface Comparator<T> {
+    int compare(T left, T right);
+
+    default Comparator<T> reversed() {
+        Comparator<T> self = this;
+        return new Comparator<T>() {
+            public int compare(T left, T right) {
+                return self.compare(right, left);
+            }
+        };
+    }
+
+    default Comparator<T> thenComparing(Comparator<? super T> other) {
+        Comparator<T> self = this;
+        return new Comparator<T>() {
+            public int compare(T left, T right) {
+                int first = self.compare(left, right);
+                return first != 0 ? first : other.compare(left, right);
+            }
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    static <T extends Comparable<? super T>> Comparator<T> naturalOrder() {
+        return (Comparator<T>) Collections.NaturalOrder.INSTANCE;
+    }
+
+    static <T extends Comparable<? super T>> Comparator<T> reverseOrder() {
+        return Collections.reverseOrder();
+    }
+
+    static <T, U extends Comparable<? super U>> Comparator<T> comparing(Function<? super T, ? extends U> key) {
+        return new Comparator<T>() {
+            public int compare(T left, T right) {
+                return key.apply(left).compareTo(key.apply(right));
+            }
+        };
+    }
+}
+"####,
+            ),
+            (
+                "java/util/ConcurrentModificationException.java",
+                r####"package java.util;
+
+public class ConcurrentModificationException extends RuntimeException {
+    public ConcurrentModificationException() {
+        super();
+    }
+
+    public ConcurrentModificationException(String message) {
+        super(message);
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Deque.java",
+                r####"package java.util;
+
+public interface Deque<E> extends Queue<E> {
+    void addFirst(E element);
+
+    void addLast(E element);
+
+    boolean offerFirst(E element);
+
+    boolean offerLast(E element);
+
+    E removeFirst();
+
+    E removeLast();
+
+    E pollFirst();
+
+    E pollLast();
+
+    E getFirst();
+
+    E getLast();
+
+    E peekFirst();
+
+    E peekLast();
+
+    void push(E element);
+
+    E pop();
+
+    Iterator<E> descendingIterator();
+}
+"####,
+            ),
+            (
+                "java/util/HashMap.java",
+                r####"package java.util;
+
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+
+public class HashMap<K, V> extends AbstractMap<K, V> implements Map<K, V>, Cloneable, java.io.Serializable {
+    static final int LARGEST = 1 << 30;
+    static final int CHAIN_LIMIT = 8;
+    static final int TREE_TABLE = 64;
+
+    transient Node<K, V>[] table;
+    transient int size;
+    transient int modCount;
+    int threshold;
+    final float loadFactor;
+
+    static class Node<K, V> implements Map.Entry<K, V> {
+        final int hash;
+        final K key;
+        V value;
+        Node<K, V> next;
+
+        Node(int hash, K key, V value, Node<K, V> next) {
+            this.hash = hash;
+            this.key = key;
+            this.value = value;
+            this.next = next;
+        }
+
+        public final K getKey() {
+            return key;
+        }
+
+        public final V getValue() {
+            return value;
+        }
+
+        public final String toString() {
+            return key + "=" + value;
+        }
+
+        public final int hashCode() {
+            return Objects.hashCode(key) ^ Objects.hashCode(value);
+        }
+
+        public final V setValue(V fresh) {
+            V previous = value;
+            value = fresh;
+            return previous;
+        }
+
+        public final boolean equals(Object other) {
+            if (other == this) {
+                return true;
+            }
+            if (!(other instanceof Map.Entry)) {
+                return false;
+            }
+            Map.Entry<?, ?> that = (Map.Entry<?, ?>) other;
+            return Objects.equals(key, that.getKey()) && Objects.equals(value, that.getValue());
+        }
+    }
+
+    static final int hash(Object key) {
+        if (key == null) {
+            return 0;
+        }
+        int code = key.hashCode();
+        return code ^ (code >>> 16);
+    }
+
+    static final int tableSizeFor(int capacity) {
+        int bits = -1 >>> Integer.numberOfLeadingZeros(capacity - 1);
+        return bits < 0 ? 1 : bits >= LARGEST ? LARGEST : bits + 1;
+    }
+
+    public HashMap(int capacity, float loadFactor) {
+        if (capacity < 0) {
+            throw new IllegalArgumentException("Illegal initial capacity: " + capacity);
+        }
+        if (capacity > LARGEST) {
+            capacity = LARGEST;
+        }
+        if (loadFactor <= 0 || Float.isNaN(loadFactor)) {
+            throw new IllegalArgumentException("Illegal load factor: " + loadFactor);
+        }
+        this.loadFactor = loadFactor;
+        this.threshold = tableSizeFor(capacity);
+    }
+
+    public HashMap(int capacity) {
+        this(capacity, 0.75f);
+    }
+
+    public HashMap() {
+        this.loadFactor = 0.75f;
+    }
+
+    public HashMap(Map<? extends K, ? extends V> other) {
+        this.loadFactor = 0.75f;
+        putEvery(other, false);
+    }
+
+    final void putEvery(Map<? extends K, ? extends V> other, boolean evict) {
+        int count = other.size();
+        if (count > 0) {
+            if (table == null) {
+                double wanted = Math.ceil(count / (double) loadFactor);
+                int needed = wanted < (double) LARGEST ? (int) wanted : LARGEST;
+                if (needed > threshold) {
+                    threshold = tableSizeFor(needed);
+                }
+            } else {
+                while (count > threshold && table.length < LARGEST) {
+                    resize();
+                }
+            }
+            for (Map.Entry<? extends K, ? extends V> entry : other.entrySet()) {
+                K key = entry.getKey();
+                putValue(hash(key), key, entry.getValue(), false, evict);
+            }
+        }
+    }
+
+    public int size() {
+        return size;
+    }
+
+    public boolean isEmpty() {
+        return size == 0;
+    }
+
+    public V get(Object key) {
+        Node<K, V> found = find(key);
+        return found == null ? null : found.value;
+    }
+
+    final Node<K, V> find(Object key) {
+        Node<K, V>[] bins = table;
+        if (bins == null) {
+            return null;
+        }
+        int code = hash(key);
+        Node<K, V> node = bins[(bins.length - 1) & code];
+        while (node != null) {
+            if (node.hash == code && (node.key == key || (key != null && key.equals(node.key)))) {
+                return node;
+            }
+            node = node.next;
+        }
+        return null;
+    }
+
+    public boolean containsKey(Object key) {
+        return find(key) != null;
+    }
+
+    public V put(K key, V value) {
+        return putValue(hash(key), key, value, false, true);
+    }
+
+    final V putValue(int code, K key, V value, boolean onlyIfAbsent, boolean evict) {
+        Node<K, V>[] bins = table;
+        if (bins == null || bins.length == 0) {
+            bins = resize();
+        }
+        int index = (bins.length - 1) & code;
+        Node<K, V> node = bins[index];
+        if (node == null) {
+            bins[index] = newNode(code, key, value, null);
+        } else {
+            int chain = 0;
+            while (true) {
+                if (node.hash == code && (node.key == key || (key != null && key.equals(node.key)))) {
+                    V previous = node.value;
+                    if (!onlyIfAbsent || previous == null) {
+                        node.value = value;
+                    }
+                    afterNodeAccess(node);
+                    return previous;
+                }
+                if (node.next == null) {
+                    node.next = newNode(code, key, value, null);
+                    if (chain >= CHAIN_LIMIT - 1 && bins.length < TREE_TABLE) {
+                        resize();
+                    }
+                    break;
+                }
+                node = node.next;
+                chain++;
+            }
+        }
+        modCount++;
+        if (++size > threshold) {
+            resize();
+        }
+        afterNodeInsertion(evict);
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    final Node<K, V>[] resize() {
+        Node<K, V>[] old = table;
+        int oldCapacity = old == null ? 0 : old.length;
+        int oldThreshold = threshold;
+        int capacity;
+        int limit = 0;
+        if (oldCapacity > 0) {
+            if (oldCapacity >= LARGEST) {
+                threshold = Integer.MAX_VALUE;
+                return old;
+            }
+            capacity = oldCapacity << 1;
+            if (capacity < LARGEST && oldCapacity >= 16) {
+                limit = oldThreshold << 1;
+            }
+        } else if (oldThreshold > 0) {
+            capacity = oldThreshold;
+        } else {
+            capacity = 16;
+            limit = 12;
+        }
+        if (limit == 0) {
+            float wanted = (float) capacity * loadFactor;
+            limit = capacity < LARGEST && wanted < (float) LARGEST ? (int) wanted : Integer.MAX_VALUE;
+        }
+        threshold = limit;
+        Node<K, V>[] bins = (Node<K, V>[]) new Node[capacity];
+        table = bins;
+        if (old != null) {
+            for (int at = 0; at < oldCapacity; at++) {
+                Node<K, V> node = old[at];
+                if (node == null) {
+                    continue;
+                }
+                old[at] = null;
+                if (node.next == null) {
+                    bins[node.hash & (capacity - 1)] = node;
+                    continue;
+                }
+                Node<K, V> lowHead = null;
+                Node<K, V> lowTail = null;
+                Node<K, V> highHead = null;
+                Node<K, V> highTail = null;
+                while (node != null) {
+                    Node<K, V> following = node.next;
+                    if ((node.hash & oldCapacity) == 0) {
+                        if (lowTail == null) {
+                            lowHead = node;
+                        } else {
+                            lowTail.next = node;
+                        }
+                        lowTail = node;
+                    } else {
+                        if (highTail == null) {
+                            highHead = node;
+                        } else {
+                            highTail.next = node;
+                        }
+                        highTail = node;
+                    }
+                    node = following;
+                }
+                if (lowTail != null) {
+                    lowTail.next = null;
+                    bins[at] = lowHead;
+                }
+                if (highTail != null) {
+                    highTail.next = null;
+                    bins[at + oldCapacity] = highHead;
+                }
+            }
+        }
+        return bins;
+    }
+
+    public void putAll(Map<? extends K, ? extends V> other) {
+        putEvery(other, true);
+    }
+
+    public V remove(Object key) {
+        Node<K, V> removed = removeNode(hash(key), key, null, false);
+        return removed == null ? null : removed.value;
+    }
+
+    final Node<K, V> removeNode(int code, Object key, Object value, boolean matchValue) {
+        Node<K, V>[] bins = table;
+        if (bins == null || bins.length == 0) {
+            return null;
+        }
+        int index = (bins.length - 1) & code;
+        Node<K, V> previous = null;
+        Node<K, V> node = bins[index];
+        while (node != null) {
+            if (node.hash == code && (node.key == key || (key != null && key.equals(node.key)))) {
+                if (matchValue && !Objects.equals(value, node.value)) {
+                    return null;
+                }
+                if (previous == null) {
+                    bins[index] = node.next;
+                } else {
+                    previous.next = node.next;
+                }
+                modCount++;
+                size--;
+                afterNodeRemoval(node);
+                return node;
+            }
+            previous = node;
+            node = node.next;
+        }
+        return null;
+    }
+
+    public void clear() {
+        modCount++;
+        Node<K, V>[] bins = table;
+        if (bins != null && size > 0) {
+            size = 0;
+            for (int at = 0; at < bins.length; at++) {
+                bins[at] = null;
+            }
+        }
+        afterClear();
+    }
+
+    public boolean containsValue(Object value) {
+        for (Node<K, V> node = first(); node != null; node = after(node)) {
+            if (Objects.equals(value, node.value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public V getOrDefault(Object key, V fallback) {
+        Node<K, V> found = find(key);
+        return found == null ? fallback : found.value;
+    }
+
+    public V putIfAbsent(K key, V value) {
+        return putValue(hash(key), key, value, true, true);
+    }
+
+    public boolean remove(Object key, Object value) {
+        return removeNode(hash(key), key, value, true) != null;
+    }
+
+    public boolean replace(K key, V expected, V value) {
+        Node<K, V> found = find(key);
+        if (found != null && Objects.equals(found.value, expected)) {
+            found.value = value;
+            afterNodeAccess(found);
+            return true;
+        }
+        return false;
+    }
+
+    public V replace(K key, V value) {
+        Node<K, V> found = find(key);
+        if (found != null) {
+            V previous = found.value;
+            found.value = value;
+            afterNodeAccess(found);
+            return previous;
+        }
+        return null;
+    }
+
+    final Node<K, V>[] prepared() {
+        Node<K, V>[] bins = table;
+        if (size > threshold || bins == null || bins.length == 0) {
+            bins = resize();
+        }
+        return bins;
+    }
+
+    final int chainLength(Node<K, V> node) {
+        int count = 0;
+        while (node != null) {
+            count++;
+            node = node.next;
+        }
+        return count;
+    }
+
+    final void insertFirst(Node<K, V>[] bins, int code, K key, V value, int expected) {
+        int index = (bins.length - 1) & code;
+        Node<K, V> head = bins[index];
+        int chain = chainLength(head);
+        bins[index] = newNode(code, key, value, head);
+        if (chain >= CHAIN_LIMIT - 1 && bins.length < TREE_TABLE) {
+            resize();
+        }
+        modCount = expected + 1;
+        size++;
+        afterNodeInsertion(true);
+    }
+
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> mapping) {
+        if (mapping == null) {
+            throw new NullPointerException();
+        }
+        int code = hash(key);
+        Node<K, V>[] bins = prepared();
+        Node<K, V> found = find(key);
+        if (found != null && found.value != null) {
+            afterNodeAccess(found);
+            return found.value;
+        }
+        int expected = modCount;
+        V made = mapping.apply(key);
+        if (modCount != expected) {
+            throw new ConcurrentModificationException();
+        }
+        if (made == null) {
+            return null;
+        }
+        if (found != null) {
+            found.value = made;
+            afterNodeAccess(found);
+            return made;
+        }
+        insertFirst(bins, code, key, made, expected);
+        return made;
+    }
+
+    public V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> mapping) {
+        if (mapping == null) {
+            throw new NullPointerException();
+        }
+        Node<K, V> found = find(key);
+        if (found == null || found.value == null) {
+            return null;
+        }
+        int expected = modCount;
+        V made = mapping.apply(key, found.value);
+        if (modCount != expected) {
+            throw new ConcurrentModificationException();
+        }
+        if (made == null) {
+            removeNode(hash(key), key, null, false);
+            return null;
+        }
+        found.value = made;
+        afterNodeAccess(found);
+        return made;
+    }
+
+    public V compute(K key, BiFunction<? super K, ? super V, ? extends V> mapping) {
+        if (mapping == null) {
+            throw new NullPointerException();
+        }
+        int code = hash(key);
+        Node<K, V>[] bins = prepared();
+        Node<K, V> found = find(key);
+        V held = found == null ? null : found.value;
+        int expected = modCount;
+        V made = mapping.apply(key, held);
+        if (modCount != expected) {
+            throw new ConcurrentModificationException();
+        }
+        if (found != null) {
+            if (made == null) {
+                removeNode(code, key, null, false);
+            } else {
+                found.value = made;
+                afterNodeAccess(found);
+            }
+        } else if (made != null) {
+            insertFirst(bins, code, key, made, expected);
+        }
+        return made;
+    }
+
+    public V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> mapping) {
+        if (value == null || mapping == null) {
+            throw new NullPointerException();
+        }
+        int code = hash(key);
+        Node<K, V>[] bins = prepared();
+        Node<K, V> found = find(key);
+        if (found == null) {
+            insertFirst(bins, code, key, value, modCount);
+            return value;
+        }
+        V made;
+        if (found.value == null) {
+            made = value;
+        } else {
+            int expected = modCount;
+            made = mapping.apply(found.value, value);
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+        }
+        if (made == null) {
+            removeNode(code, key, null, false);
+        } else {
+            found.value = made;
+            afterNodeAccess(found);
+        }
+        return made;
+    }
+
+    public void forEach(BiConsumer<? super K, ? super V> action) {
+        int expected = modCount;
+        for (Node<K, V> node = first(); node != null; node = after(node)) {
+            action.accept(node.key, node.value);
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+        }
+    }
+
+    public void replaceAll(BiFunction<? super K, ? super V, ? extends V> mapping) {
+        int expected = modCount;
+        for (Node<K, V> node = first(); node != null; node = after(node)) {
+            node.value = mapping.apply(node.key, node.value);
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public Object clone() {
+        HashMap<K, V> copy = new HashMap<K, V>((int) Math.min(Math.ceil(size / (double) loadFactor), (double) LARGEST), loadFactor);
+        copy.putEvery(this, false);
+        return copy;
+    }
+
+    Node<K, V> newNode(int code, K key, V value, Node<K, V> next) {
+        return new Node<K, V>(code, key, value, next);
+    }
+
+    void afterNodeAccess(Node<K, V> node) {
+    }
+
+    void afterNodeInsertion(boolean evict) {
+    }
+
+    void afterNodeRemoval(Node<K, V> node) {
+    }
+
+    void afterClear() {
+    }
+
+    Node<K, V> first() {
+        Node<K, V>[] bins = table;
+        if (bins == null || size == 0) {
+            return null;
+        }
+        for (int at = 0; at < bins.length; at++) {
+            if (bins[at] != null) {
+                return bins[at];
+            }
+        }
+        return null;
+    }
+
+    Node<K, V> after(Node<K, V> node) {
+        if (node.next != null) {
+            return node.next;
+        }
+        Node<K, V>[] bins = table;
+        for (int at = ((bins.length - 1) & node.hash) + 1; at < bins.length; at++) {
+            if (bins[at] != null) {
+                return bins[at];
+            }
+        }
+        return null;
+    }
+
+    public Set<K> keySet() {
+        return new Keys();
+    }
+
+    public Collection<V> values() {
+        return new Values();
+    }
+
+    public Set<Map.Entry<K, V>> entrySet() {
+        return new Entries();
+    }
+
+    abstract class Walker {
+        Node<K, V> coming;
+        Node<K, V> current;
+        int expected;
+
+        Walker() {
+            expected = modCount;
+            coming = first();
+        }
+
+        public final boolean hasNext() {
+            return coming != null;
+        }
+
+        final Node<K, V> nextNode() {
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+            Node<K, V> node = coming;
+            if (node == null) {
+                throw new NoSuchElementException();
+            }
+            current = node;
+            coming = after(node);
+            return node;
+        }
+
+        public final void remove() {
+            Node<K, V> node = current;
+            if (node == null) {
+                throw new IllegalStateException();
+            }
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+            current = null;
+            removeNode(node.hash, node.key, null, false);
+            expected = modCount;
+        }
+    }
+
+    final class KeyWalker extends Walker implements Iterator<K> {
+        public K next() {
+            return nextNode().key;
+        }
+    }
+
+    final class ValueWalker extends Walker implements Iterator<V> {
+        public V next() {
+            return nextNode().value;
+        }
+    }
+
+    final class EntryWalker extends Walker implements Iterator<Map.Entry<K, V>> {
+        public Map.Entry<K, V> next() {
+            return nextNode();
+        }
+    }
+
+    final class Keys extends AbstractSet<K> {
+        public int size() {
+            return size;
+        }
+
+        public void clear() {
+            HashMap.this.clear();
+        }
+
+        public Iterator<K> iterator() {
+            return new KeyWalker();
+        }
+
+        public boolean contains(Object key) {
+            return containsKey(key);
+        }
+
+        public boolean remove(Object key) {
+            return removeNode(hash(key), key, null, false) != null;
+        }
+    }
+
+    final class Values extends AbstractCollection<V> {
+        public int size() {
+            return size;
+        }
+
+        public void clear() {
+            HashMap.this.clear();
+        }
+
+        public Iterator<V> iterator() {
+            return new ValueWalker();
+        }
+
+        public boolean contains(Object value) {
+            return containsValue(value);
+        }
+    }
+
+    final class Entries extends AbstractSet<Map.Entry<K, V>> {
+        public int size() {
+            return size;
+        }
+
+        public void clear() {
+            HashMap.this.clear();
+        }
+
+        public Iterator<Map.Entry<K, V>> iterator() {
+            return new EntryWalker();
+        }
+
+        public boolean contains(Object other) {
+            if (!(other instanceof Map.Entry)) {
+                return false;
+            }
+            Map.Entry<?, ?> entry = (Map.Entry<?, ?>) other;
+            Node<K, V> found = find(entry.getKey());
+            return found != null && found.equals(entry);
+        }
+
+        public boolean remove(Object other) {
+            if (!(other instanceof Map.Entry)) {
+                return false;
+            }
+            Map.Entry<?, ?> entry = (Map.Entry<?, ?>) other;
+            Object key = entry.getKey();
+            return removeNode(hash(key), key, entry.getValue(), true) != null;
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/HashSet.java",
+                r####"package java.util;
+
+public class HashSet<E> extends AbstractSet<E> implements Set<E>, Cloneable, java.io.Serializable {
+    static final Object PRESENT = new Object();
+
+    transient HashMap<E, Object> map;
+
+    public HashSet() {
+        map = new HashMap<E, Object>();
+    }
+
+    public HashSet(Collection<? extends E> other) {
+        map = new HashMap<E, Object>(Math.max((int) (other.size() / 0.75f) + 1, 16));
+        addAll(other);
+    }
+
+    public HashSet(int capacity, float loadFactor) {
+        map = new HashMap<E, Object>(capacity, loadFactor);
+    }
+
+    public HashSet(int capacity) {
+        map = new HashMap<E, Object>(capacity);
+    }
+
+    HashSet(int capacity, float loadFactor, boolean linked) {
+        map = new LinkedHashMap<E, Object>(capacity, loadFactor);
+    }
+
+    public Iterator<E> iterator() {
+        return map.keySet().iterator();
+    }
+
+    public int size() {
+        return map.size();
+    }
+
+    public boolean isEmpty() {
+        return map.isEmpty();
+    }
+
+    public boolean contains(Object element) {
+        return map.containsKey(element);
+    }
+
+    public boolean add(E element) {
+        return map.put(element, PRESENT) == null;
+    }
+
+    public boolean remove(Object element) {
+        return map.remove(element) == PRESENT;
+    }
+
+    public void clear() {
+        map.clear();
+    }
+
+    @SuppressWarnings("unchecked")
+    public Object clone() {
+        HashSet<E> copy = new HashSet<E>(Math.max((int) (map.size() / 0.75f) + 1, 16));
+        copy.addAll(this);
+        return copy;
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Iterator.java",
+                r####"package java.util;
+
+import java.util.function.Consumer;
+
+public interface Iterator<E> {
+    boolean hasNext();
+
+    E next();
+
+    default void remove() {
+        throw new UnsupportedOperationException("remove");
+    }
+
+    default void forEachRemaining(Consumer<? super E> action) {
+        while (hasNext()) {
+            action.accept(next());
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/LinkedHashMap.java",
+                r####"package java.util;
+
+public class LinkedHashMap<K, V> extends HashMap<K, V> implements Map<K, V> {
+    static class Entry<K, V> extends HashMap.Node<K, V> {
+        Entry<K, V> before;
+        Entry<K, V> after;
+
+        Entry(int hash, K key, V value, HashMap.Node<K, V> next) {
+            super(hash, key, value, next);
+        }
+    }
+
+    transient Entry<K, V> head;
+    transient Entry<K, V> tail;
+    final boolean accessOrder;
+
+    public LinkedHashMap(int capacity, float loadFactor) {
+        super(capacity, loadFactor);
+        accessOrder = false;
+    }
+
+    public LinkedHashMap(int capacity) {
+        super(capacity);
+        accessOrder = false;
+    }
+
+    public LinkedHashMap() {
+        super();
+        accessOrder = false;
+    }
+
+    public LinkedHashMap(Map<? extends K, ? extends V> other) {
+        super();
+        accessOrder = false;
+        putEvery(other, false);
+    }
+
+    public LinkedHashMap(int capacity, float loadFactor, boolean accessOrder) {
+        super(capacity, loadFactor);
+        this.accessOrder = accessOrder;
+    }
+
+    private void linkLast(Entry<K, V> entry) {
+        Entry<K, V> last = tail;
+        tail = entry;
+        if (last == null) {
+            head = entry;
+        } else {
+            entry.before = last;
+            last.after = entry;
+        }
+    }
+
+    HashMap.Node<K, V> newNode(int code, K key, V value, HashMap.Node<K, V> next) {
+        Entry<K, V> entry = new Entry<K, V>(code, key, value, next);
+        linkLast(entry);
+        return entry;
+    }
+
+    void afterNodeRemoval(HashMap.Node<K, V> node) {
+        Entry<K, V> entry = (Entry<K, V>) node;
+        Entry<K, V> previous = entry.before;
+        Entry<K, V> following = entry.after;
+        entry.before = null;
+        entry.after = null;
+        if (previous == null) {
+            head = following;
+        } else {
+            previous.after = following;
+        }
+        if (following == null) {
+            tail = previous;
+        } else {
+            following.before = previous;
+        }
+    }
+
+    void afterNodeInsertion(boolean evict) {
+        Entry<K, V> eldest = head;
+        if (evict && eldest != null && removeEldestEntry(eldest)) {
+            K key = eldest.key;
+            removeNode(hash(key), key, null, false);
+        }
+    }
+
+    void afterNodeAccess(HashMap.Node<K, V> node) {
+        Entry<K, V> last = tail;
+        if (accessOrder && last != node) {
+            Entry<K, V> entry = (Entry<K, V>) node;
+            Entry<K, V> previous = entry.before;
+            Entry<K, V> following = entry.after;
+            entry.after = null;
+            if (previous == null) {
+                head = following;
+            } else {
+                previous.after = following;
+            }
+            if (following != null) {
+                following.before = previous;
+            } else {
+                last = previous;
+            }
+            if (last == null) {
+                head = entry;
+            } else {
+                entry.before = last;
+                last.after = entry;
+            }
+            tail = entry;
+            modCount++;
+        }
+    }
+
+    void afterClear() {
+        head = null;
+        tail = null;
+    }
+
+    HashMap.Node<K, V> first() {
+        return head;
+    }
+
+    HashMap.Node<K, V> after(HashMap.Node<K, V> node) {
+        return ((Entry<K, V>) node).after;
+    }
+
+    public boolean containsValue(Object value) {
+        for (Entry<K, V> entry = head; entry != null; entry = entry.after) {
+            if (Objects.equals(value, entry.value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public V get(Object key) {
+        HashMap.Node<K, V> found = find(key);
+        if (found == null) {
+            return null;
+        }
+        if (accessOrder) {
+            afterNodeAccess(found);
+        }
+        return found.value;
+    }
+
+    public V getOrDefault(Object key, V fallback) {
+        HashMap.Node<K, V> found = find(key);
+        if (found == null) {
+            return fallback;
+        }
+        if (accessOrder) {
+            afterNodeAccess(found);
+        }
+        return found.value;
+    }
+
+    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return false;
+    }
+}
+"####,
+            ),
+            (
+                "java/util/LinkedHashSet.java",
+                r####"package java.util;
+
+public class LinkedHashSet<E> extends HashSet<E> implements Set<E>, Cloneable, java.io.Serializable {
+    public LinkedHashSet(int capacity, float loadFactor) {
+        super(capacity, loadFactor, true);
+    }
+
+    public LinkedHashSet(int capacity) {
+        super(capacity, 0.75f, true);
+    }
+
+    public LinkedHashSet() {
+        super(16, 0.75f, true);
+    }
+
+    public LinkedHashSet(Collection<? extends E> other) {
+        super(Math.max(2 * other.size(), 11), 0.75f, true);
+        addAll(other);
+    }
+}
+"####,
+            ),
+            (
+                "java/util/LinkedList.java",
+                r####"package java.util;
+
+public class LinkedList<E> extends AbstractList<E> implements List<E>, Deque<E>, Cloneable, java.io.Serializable {
+    private static final class Link<E> {
+        E item;
+        Link<E> next;
+        Link<E> previous;
+
+        Link(Link<E> previous, E item, Link<E> next) {
+            this.item = item;
+            this.next = next;
+            this.previous = previous;
+        }
+    }
+
+    transient int size;
+    transient Link<E> first;
+    transient Link<E> last;
+
+    public LinkedList() {
+    }
+
+    public LinkedList(Collection<? extends E> other) {
+        this();
+        addAll(other);
+    }
+
+    private void linkFirst(E element) {
+        Link<E> head = first;
+        Link<E> made = new Link<E>(null, element, head);
+        first = made;
+        if (head == null) {
+            last = made;
+        } else {
+            head.previous = made;
+        }
+        size++;
+        modCount++;
+    }
+
+    void linkLast(E element) {
+        Link<E> tail = last;
+        Link<E> made = new Link<E>(tail, element, null);
+        last = made;
+        if (tail == null) {
+            first = made;
+        } else {
+            tail.next = made;
+        }
+        size++;
+        modCount++;
+    }
+
+    void linkBefore(E element, Link<E> successor) {
+        Link<E> predecessor = successor.previous;
+        Link<E> made = new Link<E>(predecessor, element, successor);
+        successor.previous = made;
+        if (predecessor == null) {
+            first = made;
+        } else {
+            predecessor.next = made;
+        }
+        size++;
+        modCount++;
+    }
+
+    E unlink(Link<E> link) {
+        E element = link.item;
+        Link<E> following = link.next;
+        Link<E> preceding = link.previous;
+        if (preceding == null) {
+            first = following;
+        } else {
+            preceding.next = following;
+            link.previous = null;
+        }
+        if (following == null) {
+            last = preceding;
+        } else {
+            following.previous = preceding;
+            link.next = null;
+        }
+        link.item = null;
+        size--;
+        modCount++;
+        return element;
+    }
+
+    public E getFirst() {
+        if (first == null) {
+            throw new NoSuchElementException();
+        }
+        return first.item;
+    }
+
+    public E getLast() {
+        if (last == null) {
+            throw new NoSuchElementException();
+        }
+        return last.item;
+    }
+
+    public E removeFirst() {
+        if (first == null) {
+            throw new NoSuchElementException();
+        }
+        return unlink(first);
+    }
+
+    public E removeLast() {
+        if (last == null) {
+            throw new NoSuchElementException();
+        }
+        return unlink(last);
+    }
+
+    public void addFirst(E element) {
+        linkFirst(element);
+    }
+
+    public void addLast(E element) {
+        linkLast(element);
+    }
+
+    public boolean contains(Object element) {
+        return indexOf(element) >= 0;
+    }
+
+    public int size() {
+        return size;
+    }
+
+    public boolean add(E element) {
+        linkLast(element);
+        return true;
+    }
+
+    public boolean remove(Object element) {
+        for (Link<E> link = first; link != null; link = link.next) {
+            if (Objects.equals(element, link.item)) {
+                unlink(link);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean addAll(Collection<? extends E> other) {
+        return addAll(size, other);
+    }
+
+    @SuppressWarnings("unchecked")
+    public boolean addAll(int index, Collection<? extends E> other) {
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+        Object[] added = other.toArray();
+        if (added.length == 0) {
+            return false;
+        }
+        if (index == size) {
+            for (Object item : added) {
+                linkLast((E) item);
+            }
+        } else {
+            Link<E> successor = link(index);
+            for (Object item : added) {
+                linkBefore((E) item, successor);
+            }
+        }
+        return true;
+    }
+
+    public void clear() {
+        Link<E> link = first;
+        while (link != null) {
+            Link<E> following = link.next;
+            link.item = null;
+            link.next = null;
+            link.previous = null;
+            link = following;
+        }
+        first = null;
+        last = null;
+        size = 0;
+        modCount++;
+    }
+
+    public E get(int index) {
+        Objects.checkIndex(index, size);
+        return link(index).item;
+    }
+
+    public E set(int index, E element) {
+        Objects.checkIndex(index, size);
+        Link<E> found = link(index);
+        E previous = found.item;
+        found.item = element;
+        return previous;
+    }
+
+    public void add(int index, E element) {
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+        if (index == size) {
+            linkLast(element);
+        } else {
+            linkBefore(element, link(index));
+        }
+    }
+
+    public E remove(int index) {
+        Objects.checkIndex(index, size);
+        return unlink(link(index));
+    }
+
+    Link<E> link(int index) {
+        if (index < (size >> 1)) {
+            Link<E> found = first;
+            for (int at = 0; at < index; at++) {
+                found = found.next;
+            }
+            return found;
+        }
+        Link<E> found = last;
+        for (int at = size - 1; at > index; at--) {
+            found = found.previous;
+        }
+        return found;
+    }
+
+    public int indexOf(Object element) {
+        int index = 0;
+        for (Link<E> link = first; link != null; link = link.next) {
+            if (Objects.equals(element, link.item)) {
+                return index;
+            }
+            index++;
+        }
+        return -1;
+    }
+
+    public int lastIndexOf(Object element) {
+        int index = size;
+        for (Link<E> link = last; link != null; link = link.previous) {
+            index--;
+            if (Objects.equals(element, link.item)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    public E peek() {
+        return first == null ? null : first.item;
+    }
+
+    public E element() {
+        return getFirst();
+    }
+
+    public E poll() {
+        return first == null ? null : unlink(first);
+    }
+
+    public E remove() {
+        return removeFirst();
+    }
+
+    public boolean offer(E element) {
+        return add(element);
+    }
+
+    public boolean offerFirst(E element) {
+        addFirst(element);
+        return true;
+    }
+
+    public boolean offerLast(E element) {
+        addLast(element);
+        return true;
+    }
+
+    public E peekFirst() {
+        return first == null ? null : first.item;
+    }
+
+    public E peekLast() {
+        return last == null ? null : last.item;
+    }
+
+    public E pollFirst() {
+        return first == null ? null : unlink(first);
+    }
+
+    public E pollLast() {
+        return last == null ? null : unlink(last);
+    }
+
+    public void push(E element) {
+        addFirst(element);
+    }
+
+    public E pop() {
+        return removeFirst();
+    }
+
+    public Object[] toArray() {
+        Object[] made = new Object[size];
+        int at = 0;
+        for (Link<E> link = first; link != null; link = link.next) {
+            made[at++] = link.item;
+        }
+        return made;
+    }
+
+    public Object clone() {
+        return new LinkedList<E>(this);
+    }
+
+    public Iterator<E> iterator() {
+        return new Walker(0);
+    }
+
+    public ListIterator<E> listIterator() {
+        return new Walker(0);
+    }
+
+    public ListIterator<E> listIterator(int index) {
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+        return new Walker(index);
+    }
+
+    public Iterator<E> descendingIterator() {
+        Walker walk = new Walker(size);
+        return new Iterator<E>() {
+            public boolean hasNext() {
+                return walk.hasPrevious();
+            }
+
+            public E next() {
+                return walk.previous();
+            }
+
+            public void remove() {
+                walk.remove();
+            }
+        };
+    }
+
+    private class Walker implements ListIterator<E> {
+        private Link<E> returned;
+        private Link<E> coming;
+        private int index;
+        private int expected = modCount;
+
+        Walker(int index) {
+            coming = index == size ? null : link(index);
+            this.index = index;
+        }
+
+        private void check() {
+            if (modCount != expected) {
+                throw new ConcurrentModificationException();
+            }
+        }
+
+        public boolean hasNext() {
+            return index < size;
+        }
+
+        public E next() {
+            check();
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            returned = coming;
+            coming = coming.next;
+            index++;
+            return returned.item;
+        }
+
+        public boolean hasPrevious() {
+            return index > 0;
+        }
+
+        public E previous() {
+            check();
+            if (!hasPrevious()) {
+                throw new NoSuchElementException();
+            }
+            coming = coming == null ? last : coming.previous;
+            returned = coming;
+            index--;
+            return returned.item;
+        }
+
+        public int nextIndex() {
+            return index;
+        }
+
+        public int previousIndex() {
+            return index - 1;
+        }
+
+        public void remove() {
+            check();
+            if (returned == null) {
+                throw new IllegalStateException();
+            }
+            Link<E> following = returned.next;
+            unlink(returned);
+            if (coming == returned) {
+                coming = following;
+            } else {
+                index--;
+            }
+            returned = null;
+            expected++;
+        }
+
+        public void set(E element) {
+            if (returned == null) {
+                throw new IllegalStateException();
+            }
+            check();
+            returned.item = element;
+        }
+
+        public void add(E element) {
+            check();
+            returned = null;
+            if (coming == null) {
+                linkLast(element);
+            } else {
+                linkBefore(element, coming);
+            }
+            index++;
+            expected++;
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/List.java",
+                r####"package java.util;
+
+import java.util.function.UnaryOperator;
+
+public interface List<E> extends Collection<E> {
+    int size();
+
+    boolean isEmpty();
+
+    boolean contains(Object element);
+
+    Iterator<E> iterator();
+
+    Object[] toArray();
+
+    <T> T[] toArray(T[] array);
+
+    boolean add(E element);
+
+    boolean remove(Object element);
+
+    boolean containsAll(Collection<?> other);
+
+    boolean addAll(Collection<? extends E> other);
+
+    boolean addAll(int index, Collection<? extends E> other);
+
+    boolean removeAll(Collection<?> other);
+
+    boolean retainAll(Collection<?> other);
+
+    void clear();
+
+    E get(int index);
+
+    E set(int index, E element);
+
+    void add(int index, E element);
+
+    E remove(int index);
+
+    int indexOf(Object element);
+
+    int lastIndexOf(Object element);
+
+    ListIterator<E> listIterator();
+
+    ListIterator<E> listIterator(int index);
+
+    List<E> subList(int from, int to);
+
+    default void replaceAll(UnaryOperator<E> operator) {
+        ListIterator<E> walk = listIterator();
+        while (walk.hasNext()) {
+            walk.set(operator.apply(walk.next()));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    default void sort(Comparator<? super E> order) {
+        Object[] items = toArray();
+        Arrays.sort(items, (Comparator) order);
+        ListIterator<E> walk = listIterator();
+        for (Object item : items) {
+            walk.next();
+            walk.set((E) item);
+        }
+    }
+
+    default E getFirst() {
+        if (isEmpty()) {
+            throw new NoSuchElementException();
+        }
+        return get(0);
+    }
+
+    default E getLast() {
+        if (isEmpty()) {
+            throw new NoSuchElementException();
+        }
+        return get(size() - 1);
+    }
+
+    default E removeFirst() {
+        if (isEmpty()) {
+            throw new NoSuchElementException();
+        }
+        return remove(0);
+    }
+
+    default E removeLast() {
+        if (isEmpty()) {
+            throw new NoSuchElementException();
+        }
+        return remove(size() - 1);
+    }
+
+    @SafeVarargs
+    static <E> List<E> of(E... elements) {
+        return Collections.unmodifiableList(new ArrayList<E>(Arrays.asList(elements)));
+    }
+}
+"####,
+            ),
+            (
+                "java/util/ListIterator.java",
+                r####"package java.util;
+
+public interface ListIterator<E> extends Iterator<E> {
+    boolean hasNext();
+
+    E next();
+
+    boolean hasPrevious();
+
+    E previous();
+
+    int nextIndex();
+
+    int previousIndex();
+
+    void remove();
+
+    void set(E element);
+
+    void add(E element);
+}
+"####,
+            ),
+            (
+                "java/util/Locale.java",
+                r####"package java.util;
+
+public final class Locale {
+    public static final Locale ROOT = new Locale("");
+    public static final Locale ENGLISH = new Locale("en");
+    public static final Locale US = new Locale("en");
+
+    private final String language;
+
+    public Locale(String language) {
+        this.language = language;
+    }
+
+    public static Locale getDefault() {
+        return ROOT;
+    }
+
+    public String getLanguage() {
+        return language;
+    }
+
+    public String toString() {
+        return language;
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Map.java",
+                r####"package java.util;
+
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+
+public interface Map<K, V> {
+    int size();
+
+    boolean isEmpty();
+
+    boolean containsKey(Object key);
+
+    boolean containsValue(Object value);
+
+    V get(Object key);
+
+    V put(K key, V value);
+
+    V remove(Object key);
+
+    void putAll(Map<? extends K, ? extends V> other);
+
+    void clear();
+
+    Set<K> keySet();
+
+    Collection<V> values();
+
+    Set<Map.Entry<K, V>> entrySet();
+
+    boolean equals(Object other);
+
+    int hashCode();
+
+    default V getOrDefault(Object key, V fallback) {
+        V held = get(key);
+        return held != null || containsKey(key) ? held : fallback;
+    }
+
+    default void forEach(BiConsumer<? super K, ? super V> action) {
+        for (Map.Entry<K, V> entry : entrySet()) {
+            action.accept(entry.getKey(), entry.getValue());
+        }
+    }
+
+    default V putIfAbsent(K key, V value) {
+        V held = get(key);
+        if (held == null) {
+            held = put(key, value);
+        }
+        return held;
+    }
+
+    default boolean remove(Object key, Object value) {
+        Object held = get(key);
+        if (!Objects.equals(held, value) || (held == null && !containsKey(key))) {
+            return false;
+        }
+        remove(key);
+        return true;
+    }
+
+    default V replace(K key, V value) {
+        if (containsKey(key)) {
+            return put(key, value);
+        }
+        return null;
+    }
+
+    default V computeIfAbsent(K key, Function<? super K, ? extends V> mapping) {
+        V held = get(key);
+        if (held == null) {
+            V made = mapping.apply(key);
+            if (made != null) {
+                put(key, made);
+            }
+            return made;
+        }
+        return held;
+    }
+
+    default V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> mapping) {
+        V held = get(key);
+        if (held != null) {
+            V made = mapping.apply(key, held);
+            if (made != null) {
+                put(key, made);
+            } else {
+                remove(key);
+            }
+            return made;
+        }
+        return null;
+    }
+
+    default V compute(K key, BiFunction<? super K, ? super V, ? extends V> mapping) {
+        V held = get(key);
+        V made = mapping.apply(key, held);
+        if (made == null) {
+            if (held != null || containsKey(key)) {
+                remove(key);
+            }
+            return null;
+        }
+        put(key, made);
+        return made;
+    }
+
+    default V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> mapping) {
+        V held = get(key);
+        V made = held == null ? value : mapping.apply(held, value);
+        if (made == null) {
+            remove(key);
+        } else {
+            put(key, made);
+        }
+        return made;
+    }
+
+    default void replaceAll(BiFunction<? super K, ? super V, ? extends V> mapping) {
+        for (Map.Entry<K, V> entry : entrySet()) {
+            entry.setValue(mapping.apply(entry.getKey(), entry.getValue()));
+        }
+    }
+
+    interface Entry<K, V> {
+        K getKey();
+
+        V getValue();
+
+        V setValue(V value);
+
+        boolean equals(Object other);
+
+        int hashCode();
+    }
+}
+"####,
+            ),
+            (
+                "java/util/NoSuchElementException.java",
+                r####"package java.util;
+
+public class NoSuchElementException extends RuntimeException {
+    public NoSuchElementException() {
+        super();
+    }
+
+    public NoSuchElementException(String message) {
+        super(message);
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Objects.java",
+                r####"package java.util;
+
+public final class Objects {
+    private Objects() {
+    }
+
+    public static boolean equals(Object left, Object right) {
+        return left == right || (left != null && left.equals(right));
+    }
+
+    public static boolean deepEquals(Object left, Object right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        if (left instanceof Object[] && right instanceof Object[]) {
+            return Arrays.deepEquals((Object[]) left, (Object[]) right);
+        }
+        return left.equals(right);
+    }
+
+    public static int hashCode(Object value) {
+        return value != null ? value.hashCode() : 0;
+    }
+
+    public static int hash(Object... values) {
+        return Arrays.hashCode(values);
+    }
+
+    public static String toString(Object value) {
+        return String.valueOf(value);
+    }
+
+    public static String toString(Object value, String fallback) {
+        return value != null ? value.toString() : fallback;
+    }
+
+    public static <T> int compare(T left, T right, Comparator<? super T> order) {
+        return left == right ? 0 : order.compare(left, right);
+    }
+
+    public static <T> T requireNonNull(T value) {
+        if (value == null) {
+            throw new NullPointerException();
+        }
+        return value;
+    }
+
+    public static <T> T requireNonNull(T value, String message) {
+        if (value == null) {
+            throw new NullPointerException(message);
+        }
+        return value;
+    }
+
+    public static <T> T requireNonNullElse(T value, T fallback) {
+        return value != null ? value : requireNonNull(fallback, "defaultObj");
+    }
+
+    public static boolean isNull(Object value) {
+        return value == null;
+    }
+
+    public static boolean nonNull(Object value) {
+        return value != null;
+    }
+
+    public static int checkIndex(int index, int length) {
+        if (index < 0 || index >= length) {
+            throw new IndexOutOfBoundsException("Index " + index + " out of bounds for length " + length);
+        }
+        return index;
+    }
+}
+"####,
+            ),
+            (
+                "java/util/Queue.java",
+                r####"package java.util;
+
+public interface Queue<E> extends Collection<E> {
+    boolean offer(E element);
+
+    E remove();
+
+    E poll();
+
+    E element();
+
+    E peek();
+}
+"####,
+            ),
+            (
+                "java/util/RandomAccess.java",
+                r####"package java.util;
+
+public interface RandomAccess {
+}
+"####,
+            ),
+            (
+                "java/util/Set.java",
+                r####"package java.util;
+
+public interface Set<E> extends Collection<E> {
+    int size();
+
+    boolean isEmpty();
+
+    boolean contains(Object element);
+
+    Iterator<E> iterator();
+
+    Object[] toArray();
+
+    <T> T[] toArray(T[] array);
+
+    boolean add(E element);
+
+    boolean remove(Object element);
+
+    boolean containsAll(Collection<?> other);
+
+    boolean addAll(Collection<? extends E> other);
+
+    boolean retainAll(Collection<?> other);
+
+    boolean removeAll(Collection<?> other);
+
+    void clear();
+
+    @SafeVarargs
+    static <E> Set<E> of(E... elements) {
+        return Collections.unmodifiableSet(new LinkedHashSet<E>(Arrays.asList(elements)));
+    }
+}
+"####,
+            ),
+            (
+                "java/util/function/BiConsumer.java",
+                r####"package java.util.function;
+
+public interface BiConsumer<T, U> {
+    void accept(T left, U right);
+}
+"####,
+            ),
+            (
+                "java/util/function/BiFunction.java",
+                r####"package java.util.function;
+
+public interface BiFunction<T, U, R> {
+    R apply(T left, U right);
+}
+"####,
+            ),
+            (
+                "java/util/function/BiPredicate.java",
+                r####"package java.util.function;
+
+public interface BiPredicate<T, U> {
+    boolean test(T left, U right);
+}
+"####,
+            ),
+            (
+                "java/util/function/BinaryOperator.java",
+                r####"package java.util.function;
+
+public interface BinaryOperator<T> extends BiFunction<T, T, T> {
+}
+"####,
+            ),
+            (
+                "java/util/function/Consumer.java",
+                r####"package java.util.function;
+
+public interface Consumer<T> {
+    void accept(T value);
+}
+"####,
+            ),
+            (
+                "java/util/function/Function.java",
+                r####"package java.util.function;
+
+public interface Function<T, R> {
+    R apply(T value);
+}
+"####,
+            ),
+            (
+                "java/util/function/IntBinaryOperator.java",
+                r####"package java.util.function;
+
+public interface IntBinaryOperator {
+    int applyAsInt(int left, int right);
+}
+"####,
+            ),
+            (
+                "java/util/function/IntConsumer.java",
+                r####"package java.util.function;
+
+public interface IntConsumer {
+    void accept(int value);
+}
+"####,
+            ),
+            (
+                "java/util/function/IntFunction.java",
+                r####"package java.util.function;
+
+public interface IntFunction<R> {
+    R apply(int value);
+}
+"####,
+            ),
+            (
+                "java/util/function/IntPredicate.java",
+                r####"package java.util.function;
+
+public interface IntPredicate {
+    boolean test(int value);
+}
+"####,
+            ),
+            (
+                "java/util/function/IntUnaryOperator.java",
+                r####"package java.util.function;
+
+public interface IntUnaryOperator {
+    int applyAsInt(int value);
+}
+"####,
+            ),
+            (
+                "java/util/function/Predicate.java",
+                r####"package java.util.function;
+
+public interface Predicate<T> {
+    boolean test(T value);
+}
+"####,
+            ),
+            (
+                "java/util/function/Supplier.java",
+                r####"package java.util.function;
+
+public interface Supplier<T> {
+    T get();
+}
+"####,
+            ),
+            (
+                "java/util/function/ToIntFunction.java",
+                r####"package java.util.function;
+
+public interface ToIntFunction<T> {
+    int applyAsInt(T value);
+}
+"####,
+            ),
+            (
+                "java/util/function/UnaryOperator.java",
+                r####"package java.util.function;
+
+public interface UnaryOperator<T> extends Function<T, T> {
+}
+"####,
+            ),
+            (
+                "java/util/regex/MatchResult.java",
+                r####"package java.util.regex;
+
+public interface MatchResult {
+    int start();
+
+    int start(int group);
+
+    int end();
+
+    int end(int group);
+
+    String group();
+
+    String group(int group);
+
+    int groupCount();
+}
+"####,
+            ),
+            (
+                "java/util/regex/Matcher.java",
+                r####"package java.util.regex;
+
+import java.util.Map;
+import java.util.function.Function;
+
+public final class Matcher implements MatchResult {
+    private Pattern pattern;
+    private CharSequence text;
+    int from;
+    int to;
+    int[] groups;
+    int[] opens;
+    int[] counts;
+    int[] marks;
+    int[] scopes;
+    int first = -1;
+    int last = 0;
+    int oldLast = -1;
+    int lastAppend = 0;
+    int matchEnd;
+    boolean hitEnd;
+    boolean requireEnd;
+    boolean wholeInput;
+    boolean transparentBounds = false;
+    boolean anchoringBounds = true;
+
+    Matcher(Pattern pattern, CharSequence text) {
+        this.pattern = pattern;
+        this.text = text;
+        prepare();
+        reset();
+    }
+
+    private void prepare() {
+        int count = Math.max(pattern.captures + 1, 10);
+        groups = new int[count * 2];
+        opens = new int[count];
+        counts = new int[pattern.loops];
+        marks = new int[pattern.loops];
+        scopes = new int[pattern.scopes];
+    }
+
+    int textLength() {
+        return text.length();
+    }
+
+    private void clearGroups() {
+        for (int at = 0; at < groups.length; at++) {
+            groups[at] = -1;
+        }
+    }
+
+    public Pattern pattern() {
+        return pattern;
+    }
+
+    public Matcher usePattern(Pattern fresh) {
+        if (fresh == null) {
+            throw new IllegalArgumentException("Pattern cannot be null");
+        }
+        pattern = fresh;
+        prepare();
+        clearGroups();
+        return this;
+    }
+
+    public MatchResult toMatchResult() {
+        String held = first < 0 ? null : text.toString();
+        return new Snapshot(held, groups.clone(), pattern.captures, first, last);
+    }
+
+    public Matcher reset() {
+        first = -1;
+        last = 0;
+        oldLast = -1;
+        clearGroups();
+        lastAppend = 0;
+        from = 0;
+        to = textLength();
+        return this;
+    }
+
+    public Matcher reset(CharSequence input) {
+        text = input;
+        return reset();
+    }
+
+    public Matcher region(int start, int end) {
+        if (start < 0 || start > textLength()) {
+            throw new IndexOutOfBoundsException("start");
+        }
+        if (end < 0 || end > textLength()) {
+            throw new IndexOutOfBoundsException("end");
+        }
+        if (start > end) {
+            throw new IndexOutOfBoundsException("start > end");
+        }
+        reset();
+        from = start;
+        to = end;
+        return this;
+    }
+
+    public int regionStart() {
+        return from;
+    }
+
+    public int regionEnd() {
+        return to;
+    }
+
+    public boolean hasTransparentBounds() {
+        return transparentBounds;
+    }
+
+    public Matcher useTransparentBounds(boolean value) {
+        transparentBounds = value;
+        return this;
+    }
+
+    public boolean hasAnchoringBounds() {
+        return anchoringBounds;
+    }
+
+    public Matcher useAnchoringBounds(boolean value) {
+        anchoringBounds = value;
+        return this;
+    }
+
+    public boolean hitEnd() {
+        return hitEnd;
+    }
+
+    public boolean requireEnd() {
+        return requireEnd;
+    }
+
+    private boolean search(int start) {
+        hitEnd = false;
+        requireEnd = false;
+        start = start < 0 ? 0 : start;
+        first = start;
+        oldLast = oldLast < 0 ? start : oldLast;
+        clearGroups();
+        wholeInput = false;
+        for (int at = start; at <= to; at++) {
+            if (at > start && at < to && Character.isLowSurrogate(text.charAt(at))
+                && Character.isHighSurrogate(text.charAt(at - 1))) {
+                continue;
+            }
+            if (pattern.root.match(this, at, text)) {
+                first = at;
+                groups[0] = at;
+                groups[1] = matchEnd;
+                last = matchEnd;
+                oldLast = last;
+                return true;
+            }
+        }
+        hitEnd = true;
+        first = -1;
+        return false;
+    }
+
+    private boolean anchored(int start, boolean whole) {
+        hitEnd = false;
+        requireEnd = false;
+        start = start < 0 ? 0 : start;
+        first = start;
+        oldLast = oldLast < 0 ? start : oldLast;
+        clearGroups();
+        wholeInput = whole;
+        boolean found = pattern.root.match(this, start, text);
+        wholeInput = false;
+        if (!found) {
+            first = -1;
+            return false;
+        }
+        groups[0] = start;
+        groups[1] = matchEnd;
+        last = matchEnd;
+        oldLast = last;
+        return true;
+    }
+
+    public boolean matches() {
+        return anchored(from, true);
+    }
+
+    public boolean lookingAt() {
+        return anchored(from, false);
+    }
+
+    public boolean find() {
+        int next = last;
+        if (next == first) {
+            next++;
+        }
+        if (next < from) {
+            next = from;
+        }
+        if (next > to) {
+            clearGroups();
+            first = -1;
+            return false;
+        }
+        return search(next);
+    }
+
+    public boolean find(int start) {
+        int limit = textLength();
+        if (start < 0 || start > limit) {
+            throw new IndexOutOfBoundsException("Illegal start index");
+        }
+        reset();
+        return search(start);
+    }
+
+    private void checkMatch() {
+        if (first < 0) {
+            throw new IllegalStateException("No match found");
+        }
+    }
+
+    private void checkGroup(int group) {
+        if (group < 0 || group > groupCount()) {
+            throw new IndexOutOfBoundsException("No group " + group);
+        }
+    }
+
+    public int start() {
+        if (first < 0) {
+            throw new IllegalStateException("No match available");
+        }
+        return first;
+    }
+
+    public int start(int group) {
+        if (first < 0) {
+            throw new IllegalStateException("No match available");
+        }
+        checkGroup(group);
+        return groups[group * 2];
+    }
+
+    public int start(String name) {
+        return start(groupIndex(name));
+    }
+
+    public int end() {
+        if (first < 0) {
+            throw new IllegalStateException("No match available");
+        }
+        return last;
+    }
+
+    public int end(int group) {
+        if (first < 0) {
+            throw new IllegalStateException("No match available");
+        }
+        checkGroup(group);
+        return groups[group * 2 + 1];
+    }
+
+    public int end(String name) {
+        return end(groupIndex(name));
+    }
+
+    public String group() {
+        return group(0);
+    }
+
+    public String group(int group) {
+        checkMatch();
+        checkGroup(group);
+        if (groups[group * 2] == -1 || groups[group * 2 + 1] == -1) {
+            return null;
+        }
+        return text.subSequence(groups[group * 2], groups[group * 2 + 1]).toString();
+    }
+
+    public String group(String name) {
+        return group(groupIndex(name));
+    }
+
+    public int groupCount() {
+        return pattern.captures;
+    }
+
+    public Map<String, Integer> namedGroups() {
+        return pattern.namedGroups();
+    }
+
+    private int groupIndex(String name) {
+        if (name == null) {
+            throw new NullPointerException("Group name");
+        }
+        Integer found = pattern.names.get(name);
+        if (found == null) {
+            throw new IllegalArgumentException("No group with name <" + name + ">");
+        }
+        return found.intValue();
+    }
+
+    public static String quoteReplacement(String text) {
+        if (text.indexOf('\\') == -1 && text.indexOf('$') == -1) {
+            return text;
+        }
+        StringBuilder made = new StringBuilder();
+        for (int at = 0; at < text.length(); at++) {
+            char one = text.charAt(at);
+            if (one == '\\' || one == '$') {
+                made.append('\\');
+            }
+            made.append(one);
+        }
+        return made.toString();
+    }
+
+    private void expand(String replacement, StringBuilder result) {
+        int cursor = 0;
+        while (cursor < replacement.length()) {
+            char one = replacement.charAt(cursor);
+            if (one == '\\') {
+                cursor++;
+                if (cursor == replacement.length()) {
+                    throw new IllegalArgumentException("character to be escaped is missing");
+                }
+                result.append(replacement.charAt(cursor));
+                cursor++;
+            } else if (one == '$') {
+                cursor++;
+                if (cursor == replacement.length()) {
+                    throw new IllegalArgumentException("Illegal group reference: group index is missing");
+                }
+                one = replacement.charAt(cursor);
+                int reference;
+                if (one == '{') {
+                    cursor++;
+                    StringBuilder name = new StringBuilder();
+                    while (cursor < replacement.length()) {
+                        one = replacement.charAt(cursor);
+                        if (Pattern.isAsciiLetter(one) || Pattern.isAsciiDigit(one)) {
+                            name.append(one);
+                            cursor++;
+                        } else {
+                            break;
+                        }
+                    }
+                    if (name.length() == 0) {
+                        throw new IllegalArgumentException("named capturing group has 0 length name");
+                    }
+                    if (one != '}') {
+                        throw new IllegalArgumentException("named capturing group is missing trailing '}'");
+                    }
+                    String label = name.toString();
+                    if (Pattern.isAsciiDigit(label.charAt(0))) {
+                        throw new IllegalArgumentException("capturing group name {" + label + "} starts with digit character");
+                    }
+                    Integer found = pattern.names.get(label);
+                    if (found == null) {
+                        throw new IllegalArgumentException("No group with name {" + label + "}");
+                    }
+                    reference = found.intValue();
+                    cursor++;
+                } else {
+                    reference = one - '0';
+                    if (reference < 0 || reference > 9) {
+                        throw new IllegalArgumentException("Illegal group reference");
+                    }
+                    cursor++;
+                    while (cursor < replacement.length()) {
+                        int digit = replacement.charAt(cursor) - '0';
+                        if (digit < 0 || digit > 9) {
+                            break;
+                        }
+                        int wider = reference * 10 + digit;
+                        if (groupCount() < wider) {
+                            break;
+                        }
+                        reference = wider;
+                        cursor++;
+                    }
+                }
+                if (start(reference) != -1 && end(reference) != -1) {
+                    result.append(text, start(reference), end(reference));
+                }
+            } else {
+                result.append(one);
+                cursor++;
+            }
+        }
+    }
+
+    public Matcher appendReplacement(StringBuilder target, String replacement) {
+        if (first < 0) {
+            throw new IllegalStateException("No match available");
+        }
+        StringBuilder result = new StringBuilder();
+        expand(replacement, result);
+        target.append(text, lastAppend, first);
+        target.append(result);
+        lastAppend = last;
+        return this;
+    }
+
+    public Matcher appendReplacement(StringBuffer target, String replacement) {
+        if (first < 0) {
+            throw new IllegalStateException("No match available");
+        }
+        StringBuilder result = new StringBuilder();
+        expand(replacement, result);
+        target.append(text, lastAppend, first);
+        target.append(result);
+        lastAppend = last;
+        return this;
+    }
+
+    public StringBuilder appendTail(StringBuilder target) {
+        target.append(text, lastAppend, textLength());
+        return target;
+    }
+
+    public StringBuffer appendTail(StringBuffer target) {
+        target.append(text, lastAppend, textLength());
+        return target;
+    }
+
+    public String replaceAll(String replacement) {
+        reset();
+        boolean found = find();
+        if (!found) {
+            return text.toString();
+        }
+        StringBuilder made = new StringBuilder();
+        do {
+            appendReplacement(made, replacement);
+            found = find();
+        } while (found);
+        appendTail(made);
+        return made.toString();
+    }
+
+    public String replaceAll(Function<MatchResult, String> replacer) {
+        reset();
+        boolean found = find();
+        if (!found) {
+            return text.toString();
+        }
+        StringBuilder made = new StringBuilder();
+        do {
+            String replacement = replacer.apply(this);
+            appendReplacement(made, replacement);
+            found = find();
+        } while (found);
+        appendTail(made);
+        return made.toString();
+    }
+
+    public String replaceFirst(String replacement) {
+        if (replacement == null) {
+            throw new NullPointerException("replacement");
+        }
+        reset();
+        if (!find()) {
+            return text.toString();
+        }
+        StringBuilder made = new StringBuilder();
+        appendReplacement(made, replacement);
+        appendTail(made);
+        return made.toString();
+    }
+
+    public String replaceFirst(Function<MatchResult, String> replacer) {
+        reset();
+        if (!find()) {
+            return text.toString();
+        }
+        StringBuilder made = new StringBuilder();
+        appendReplacement(made, replacer.apply(this));
+        appendTail(made);
+        return made.toString();
+    }
+
+    public String toString() {
+        return "java.util.regex.Matcher[pattern=" + pattern + " region=" + regionStart() + "," + regionEnd()
+            + " lastmatch=" + (first >= 0 && group() != null ? group() : "") + "]";
+    }
+
+    private static final class Snapshot implements MatchResult {
+        private final String text;
+        private final int[] groups;
+        private final int count;
+        private final int first;
+        private final int last;
+
+        Snapshot(String text, int[] groups, int count, int first, int last) {
+            this.text = text;
+            this.groups = groups;
+            this.count = count;
+            this.first = first;
+            this.last = last;
+        }
+
+        private void check() {
+            if (text == null) {
+                throw new IllegalStateException("No match found");
+            }
+        }
+
+        private void checkGroup(int group) {
+            if (group < 0 || group > count) {
+                throw new IndexOutOfBoundsException("No group " + group);
+            }
+        }
+
+        public int start() {
+            check();
+            return first;
+        }
+
+        public int start(int group) {
+            check();
+            checkGroup(group);
+            return groups[group * 2];
+        }
+
+        public int end() {
+            check();
+            return last;
+        }
+
+        public int end(int group) {
+            check();
+            checkGroup(group);
+            return groups[group * 2 + 1];
+        }
+
+        public String group() {
+            return group(0);
+        }
+
+        public String group(int group) {
+            check();
+            checkGroup(group);
+            if (groups[group * 2] == -1 || groups[group * 2 + 1] == -1) {
+                return null;
+            }
+            return text.substring(groups[group * 2], groups[group * 2 + 1]);
+        }
+
+        public int groupCount() {
+            return count;
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/regex/Pattern.java",
+                r####"package java.util.regex;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
+
+public final class Pattern implements java.io.Serializable {
+    public static final int UNIX_LINES = 0x01;
+    public static final int CASE_INSENSITIVE = 0x02;
+    public static final int COMMENTS = 0x04;
+    public static final int MULTILINE = 0x08;
+    public static final int LITERAL = 0x10;
+    public static final int DOTALL = 0x20;
+    public static final int UNICODE_CASE = 0x40;
+    public static final int CANON_EQ = 0x80;
+    public static final int UNICODE_CHARACTER_CLASS = 0x100;
+
+    static final int ALL_FLAGS = 0x1ff;
+    static final int UNBOUNDED = Integer.MAX_VALUE;
+
+    private final String source;
+    private final int flags;
+    final Node root;
+    final int captures;
+    final int loops;
+    final int scopes;
+    final Map<String, Integer> names;
+
+    private Pattern(String source, int flags) {
+        this.source = source;
+        this.flags = flags;
+        Parser parser = new Parser(source, flags);
+        Term term = parser.parse();
+        this.captures = parser.captures;
+        this.names = parser.names;
+        Compiler compiler = new Compiler();
+        this.root = term.compile(compiler, new Accept());
+        this.loops = compiler.loops;
+        this.scopes = compiler.scopes;
+    }
+
+    public static Pattern compile(String regex) {
+        return new Pattern(regex, 0);
+    }
+
+    public static Pattern compile(String regex, int flags) {
+        if ((flags & ~ALL_FLAGS) != 0) {
+            throw new IllegalArgumentException("Unknown flag 0x" + Integer.toHexString(flags));
+        }
+        return new Pattern(regex, flags);
+    }
+
+    public String pattern() {
+        return source;
+    }
+
+    public String toString() {
+        return source;
+    }
+
+    public int flags() {
+        return flags;
+    }
+
+    public Matcher matcher(CharSequence input) {
+        return new Matcher(this, input);
+    }
+
+    public static boolean matches(String regex, CharSequence input) {
+        return compile(regex).matcher(input).matches();
+    }
+
+    public Map<String, Integer> namedGroups() {
+        return Collections.unmodifiableMap(names);
+    }
+
+    public Predicate<String> asPredicate() {
+        Pattern self = this;
+        return new Predicate<String>() {
+            public boolean test(String text) {
+                return self.matcher(text).find();
+            }
+        };
+    }
+
+    public Predicate<String> asMatchPredicate() {
+        Pattern self = this;
+        return new Predicate<String>() {
+            public boolean test(String text) {
+                return self.matcher(text).matches();
+            }
+        };
+    }
+
+    public String[] split(CharSequence input) {
+        return split(input, 0);
+    }
+
+    public String[] split(CharSequence input, int limit) {
+        int index = 0;
+        boolean limited = limit > 0;
+        ArrayList<String> pieces = new ArrayList<String>();
+        Matcher found = matcher(input);
+        while (found.find()) {
+            if (!limited || pieces.size() < limit - 1) {
+                if (index == 0 && index == found.start() && found.start() == found.end()) {
+                    continue;
+                }
+                pieces.add(input.subSequence(index, found.start()).toString());
+                index = found.end();
+            } else if (pieces.size() == limit - 1) {
+                pieces.add(input.subSequence(index, input.length()).toString());
+                index = found.end();
+            }
+        }
+        if (index == 0) {
+            return new String[] {input.toString()};
+        }
+        if (!limited || pieces.size() < limit) {
+            pieces.add(input.subSequence(index, input.length()).toString());
+        }
+        int size = pieces.size();
+        if (limit == 0) {
+            while (size > 0 && pieces.get(size - 1).isEmpty()) {
+                size--;
+            }
+        }
+        String[] made = new String[size];
+        for (int at = 0; at < size; at++) {
+            made[at] = pieces.get(at);
+        }
+        return made;
+    }
+
+    public static String quote(String text) {
+        int marker = text.indexOf("\\E");
+        if (marker == -1) {
+            return "\\Q" + text + "\\E";
+        }
+        StringBuilder made = new StringBuilder(text.length() * 2);
+        made.append("\\Q");
+        int current = 0;
+        while ((marker = text.indexOf("\\E", current)) != -1) {
+            made.append(text, current, marker);
+            current = marker + 2;
+            made.append("\\E\\\\E\\Q");
+        }
+        made.append(text, current, text.length());
+        made.append("\\E");
+        return made.toString();
+    }
+
+    static boolean isLineTerminator(int one) {
+        return one == '\n' || one == '\r' || one == '\u0085' || one == ' ' || one == ' ';
+    }
+
+    static boolean isAsciiLetter(int one) {
+        return (one >= 'a' && one <= 'z') || (one >= 'A' && one <= 'Z');
+    }
+
+    static boolean isAsciiDigit(int one) {
+        return one >= '0' && one <= '9';
+    }
+
+    static int asciiLower(int one) {
+        return one >= 'A' && one <= 'Z' ? one + 32 : one;
+    }
+
+    static int asciiUpper(int one) {
+        return one >= 'a' && one <= 'z' ? one - 32 : one;
+    }
+
+    static boolean isWord(int one) {
+        return one == '_' || isAsciiLetter(one) || isAsciiDigit(one);
+    }
+
+    static final class Compiler {
+        int loops;
+        int scopes;
+    }
+
+    abstract static class Property {
+        abstract boolean has(int one);
+
+        boolean single() {
+            return false;
+        }
+    }
+
+    static final class Exact extends Property {
+        final int point;
+
+        Exact(int point) {
+            this.point = point;
+        }
+
+        boolean has(int one) {
+            return one == point;
+        }
+
+        boolean single() {
+            return point < 0x10000;
+        }
+    }
+
+    static final class FoldedAscii extends Property {
+        final int lower;
+        final int upper;
+
+        FoldedAscii(int one) {
+            this.lower = asciiLower(one);
+            this.upper = asciiUpper(one);
+        }
+
+        boolean has(int one) {
+            return one == lower || one == upper;
+        }
+
+        boolean single() {
+            return true;
+        }
+    }
+
+    static final class FoldedUnicode extends Property {
+        final int lower;
+
+        FoldedUnicode(int one) {
+            this.lower = Character.toLowerCase(Character.toUpperCase(one));
+        }
+
+        boolean has(int one) {
+            return one == lower || lower == Character.toLowerCase(Character.toUpperCase(one));
+        }
+    }
+
+    static final class Span extends Property {
+        final int low;
+        final int high;
+        final int folding;
+
+        Span(int low, int high, int folding) {
+            this.low = low;
+            this.high = high;
+            this.folding = folding;
+        }
+
+        private boolean inside(int one) {
+            return one >= low && one <= high;
+        }
+
+        boolean has(int one) {
+            if (inside(one)) {
+                return true;
+            }
+            if (folding == 1) {
+                return one < 128 && (inside(asciiUpper(one)) || inside(asciiLower(one)));
+            }
+            if (folding == 2) {
+                return inside(Character.toUpperCase(one)) || inside(Character.toLowerCase(one));
+            }
+            return false;
+        }
+    }
+
+    static final class Union extends Property {
+        final Property left;
+        final Property right;
+
+        Union(Property left, Property right) {
+            this.left = left;
+            this.right = right;
+        }
+
+        boolean has(int one) {
+            return left.has(one) || right.has(one);
+        }
+    }
+
+    static final class Both extends Property {
+        final Property left;
+        final Property right;
+
+        Both(Property left, Property right) {
+            this.left = left;
+            this.right = right;
+        }
+
+        boolean has(int one) {
+            return left.has(one) && right.has(one);
+        }
+    }
+
+    static final class Not extends Property {
+        final Property inner;
+
+        Not(Property inner) {
+            this.inner = inner;
+        }
+
+        boolean has(int one) {
+            return !inner.has(one);
+        }
+    }
+
+    static final class Kind extends Property {
+        static final int ANY = 0;
+        static final int DOT = 1;
+        static final int UNIX_DOT = 2;
+        static final int DIGIT = 3;
+        static final int SPACE = 4;
+        static final int WORD = 5;
+        static final int HORIZONTAL = 6;
+        static final int VERTICAL = 7;
+        static final int UNICODE_DIGIT = 8;
+        static final int UNICODE_SPACE = 9;
+        static final int UNICODE_WORD = 10;
+        static final int LOWER = 11;
+        static final int UPPER = 12;
+        static final int ASCII = 13;
+        static final int ALPHA = 14;
+        static final int ALNUM = 15;
+        static final int PUNCT = 16;
+        static final int GRAPH = 17;
+        static final int PRINT = 18;
+        static final int BLANK = 19;
+        static final int CONTROL = 20;
+        static final int HEX = 21;
+        static final int LETTER = 22;
+        static final int UNICODE_LOWER = 23;
+        static final int UNICODE_UPPER = 24;
+        static final int LETTER_OR_DIGIT = 25;
+        static final int WHITESPACE = 26;
+        static final int UNICODE_CONTROL = 27;
+        static final int UNICODE_PUNCTUATION = 28;
+        static final int SEPARATOR = 29;
+        static final int TITLE = 30;
+        static final int ALPHABETIC = 31;
+        static final int CASED = 32;
+
+        final int kind;
+
+        Kind(int kind) {
+            this.kind = kind;
+        }
+
+        boolean has(int one) {
+            switch (kind) {
+                case ANY:
+                    return true;
+                case DOT:
+                    return !isLineTerminator(one);
+                case UNIX_DOT:
+                    return one != '\n';
+                case DIGIT:
+                    return one >= '0' && one <= '9';
+                case SPACE:
+                    return one == ' ' || one == '\t' || one == '\n' || one == 0x0B || one == '\f' || one == '\r';
+                case WORD:
+                    return isAsciiLetter(one) || isAsciiDigit(one) || one == '_';
+                case HORIZONTAL:
+                    return one == ' ' || one == '\t' || one == 0xA0 || one == 0x1680 || one == 0x180e
+                        || (one >= 0x2000 && one <= 0x200a) || one == 0x202f || one == 0x205f || one == 0x3000;
+                case VERTICAL:
+                    return one == '\n' || one == 0x0B || one == '\f' || one == '\r' || one == 0x85 || one == 0x2028 || one == 0x2029;
+                case UNICODE_DIGIT:
+                    return Character.isDigit(one);
+                case UNICODE_SPACE:
+                    return Character.isWhitespace(one) || one == 0x85 || one == 0xA0 || one == 0x2007 || one == 0x202f;
+                case UNICODE_WORD:
+                    return Character.isLetterOrDigit(one) || one == '_' || one == 0x200c || one == 0x200d;
+                case LOWER:
+                    return one >= 'a' && one <= 'z';
+                case UPPER:
+                    return one >= 'A' && one <= 'Z';
+                case ASCII:
+                    return one >= 0 && one < 128;
+                case ALPHA:
+                    return isAsciiLetter(one);
+                case ALNUM:
+                    return isAsciiLetter(one) || isAsciiDigit(one);
+                case PUNCT:
+                    return (one >= 0x21 && one <= 0x2f) || (one >= 0x3a && one <= 0x40) || (one >= 0x5b && one <= 0x60) || (one >= 0x7b && one <= 0x7e);
+                case GRAPH:
+                    return one >= 0x21 && one <= 0x7e;
+                case PRINT:
+                    return one >= 0x20 && one <= 0x7e;
+                case BLANK:
+                    return one == ' ' || one == '\t';
+                case CONTROL:
+                    return (one >= 0 && one < 0x20) || one == 0x7f;
+                case HEX:
+                    return isAsciiDigit(one) || (one >= 'a' && one <= 'f') || (one >= 'A' && one <= 'F');
+                case LETTER:
+                    return Character.isLetter(one);
+                case UNICODE_LOWER:
+                    return Character.isLowerCase(one);
+                case UNICODE_UPPER:
+                    return Character.isUpperCase(one);
+                case LETTER_OR_DIGIT:
+                    return Character.isLetterOrDigit(one);
+                case WHITESPACE:
+                    return Character.isWhitespace(one);
+                case UNICODE_CONTROL:
+                    return (one >= 0 && one < 0x20) || (one >= 0x7f && one < 0xa0);
+                case UNICODE_PUNCTUATION:
+                    return !Character.isLetterOrDigit(one) && !Character.isWhitespace(one) && one > 0x20 && one != 0x7f
+                        && !(one >= 0x80 && one < 0xa0) && isPunctuationMark(one);
+                case SEPARATOR:
+                    return one == ' ' || one == 0xA0 || one == 0x1680 || (one >= 0x2000 && one <= 0x200a) || one == 0x2028
+                        || one == 0x2029 || one == 0x202f || one == 0x205f || one == 0x3000;
+                case TITLE:
+                    return one == 0x01c5 || one == 0x01c8 || one == 0x01cb || one == 0x01f2;
+                case ALPHABETIC:
+                    return Character.isAlphabetic(one);
+                case CASED:
+                    return Character.isLowerCase(one) || Character.isUpperCase(one) || Character.isTitleCase(one);
+                default:
+                    return false;
+            }
+        }
+
+        boolean single() {
+            return kind == DOT || kind == UNIX_DOT || kind == DIGIT || kind == SPACE || kind == WORD || kind == LOWER
+                || kind == UPPER || kind == ALPHA || kind == ALNUM || kind == PUNCT || kind == HEX;
+        }
+
+        private static boolean isPunctuationMark(int one) {
+            if (one < 128) {
+                return (one >= 0x21 && one <= 0x23) || (one >= 0x25 && one <= 0x2a) || (one >= 0x2c && one <= 0x2f)
+                    || one == 0x3a || one == 0x3b || one == 0x3f || one == 0x40 || (one >= 0x5b && one <= 0x5d)
+                    || one == 0x5f || one == 0x7b || one == 0x7d;
+            }
+            return one == 0xa1 || one == 0xa7 || one == 0xab || one == 0xb6 || one == 0xb7 || one == 0xbb || one == 0xbf
+                || (one >= 0x2010 && one <= 0x2027) || (one >= 0x2030 && one <= 0x205e) || (one >= 0x3001 && one <= 0x3003)
+                || (one >= 0x3008 && one <= 0x3011);
+        }
+    }
+
+    abstract static class Term {
+        abstract Node compile(Compiler compiler, Node next);
+
+        abstract int shortest();
+
+        abstract int longest();
+
+        boolean fixed() {
+            return true;
+        }
+    }
+
+    static final class Single extends Term {
+        final Property property;
+
+        Single(Property property) {
+            this.property = property;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            return new CharNode(property, next);
+        }
+
+        int shortest() {
+            return 1;
+        }
+
+        int longest() {
+            return property instanceof Exact && ((Exact) property).point >= 0x10000 ? 2 : 1;
+        }
+    }
+
+    static final class Nothing extends Term {
+        Node compile(Compiler compiler, Node next) {
+            return next;
+        }
+
+        int shortest() {
+            return 0;
+        }
+
+        int longest() {
+            return 0;
+        }
+    }
+
+    static final class Sequence extends Term {
+        final List<Term> parts;
+
+        Sequence(List<Term> parts) {
+            this.parts = parts;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            Node made = next;
+            for (int at = parts.size() - 1; at >= 0; at--) {
+                made = parts.get(at).compile(compiler, made);
+            }
+            return made;
+        }
+
+        int shortest() {
+            int total = 0;
+            for (Term part : parts) {
+                total += part.shortest();
+            }
+            return total;
+        }
+
+        int longest() {
+            long total = 0;
+            for (Term part : parts) {
+                int one = part.longest();
+                if (one < 0) {
+                    return -1;
+                }
+                total += one;
+            }
+            return total > UNBOUNDED ? UNBOUNDED : (int) total;
+        }
+
+        boolean fixed() {
+            for (Term part : parts) {
+                if (!part.fixed()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    static final class Choice extends Term {
+        final List<Term> options;
+
+        Choice(List<Term> options) {
+            this.options = options;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            Node[] made = new Node[options.size()];
+            for (int at = 0; at < made.length; at++) {
+                made[at] = options.get(at).compile(compiler, next);
+            }
+            return new Branch(made);
+        }
+
+        int shortest() {
+            int best = UNBOUNDED;
+            for (Term option : options) {
+                best = Math.min(best, option.shortest());
+            }
+            return best;
+        }
+
+        int longest() {
+            int best = 0;
+            for (Term option : options) {
+                int one = option.longest();
+                if (one < 0) {
+                    return -1;
+                }
+                best = Math.max(best, one);
+            }
+            return best;
+        }
+
+        boolean fixed() {
+            return false;
+        }
+    }
+
+    static final class Group extends Term {
+        final int index;
+        final Term inner;
+
+        Group(int index, Term inner) {
+            this.index = index;
+            this.inner = inner;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            if (index < 0) {
+                return inner.compile(compiler, next);
+            }
+            return new GroupHead(index, inner.compile(compiler, new GroupTail(index, next)));
+        }
+
+        int shortest() {
+            return inner.shortest();
+        }
+
+        int longest() {
+            return inner.longest();
+        }
+
+        boolean fixed() {
+            return inner.fixed();
+        }
+    }
+
+    static final class Look extends Term {
+        final boolean ahead;
+        final boolean negative;
+        final Term inner;
+
+        Look(boolean ahead, boolean negative, Term inner) {
+            this.ahead = ahead;
+            this.negative = negative;
+            this.inner = inner;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            if (ahead) {
+                return new LookAhead(inner.compile(compiler, new Succeed()), negative, next);
+            }
+            int scope = compiler.scopes++;
+            Node body = inner.compile(compiler, new BehindEnd(scope));
+            return new LookBehind(scope, body, inner.shortest(), inner.longest(), negative, next);
+        }
+
+        int shortest() {
+            return 0;
+        }
+
+        int longest() {
+            return 0;
+        }
+    }
+
+    static final class Atomic extends Term {
+        final Term inner;
+
+        Atomic(Term inner) {
+            this.inner = inner;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            int scope = compiler.scopes++;
+            return new AtomicNode(scope, inner.compile(compiler, new AtomicEnd(scope)), next);
+        }
+
+        int shortest() {
+            return inner.shortest();
+        }
+
+        int longest() {
+            return inner.longest();
+        }
+
+        boolean fixed() {
+            return inner.fixed();
+        }
+    }
+
+    static final class Repeat extends Term {
+        static final int GREEDY = 0;
+        static final int LAZY = 1;
+        static final int POSSESSIVE = 2;
+
+        final Term inner;
+        final int minimum;
+        final int maximum;
+        final int mode;
+
+        Repeat(Term inner, int minimum, int maximum, int mode) {
+            this.inner = inner;
+            this.minimum = minimum;
+            this.maximum = maximum;
+            this.mode = mode;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            if (maximum == 0) {
+                return next;
+            }
+            if (inner instanceof Single) {
+                return new SingleLoop(((Single) inner).property, minimum, maximum, mode, next);
+            }
+            if (mode == POSSESSIVE) {
+                return new Atomic(new Repeat(inner, minimum, maximum, GREEDY)).compile(compiler, next);
+            }
+            int counter = compiler.loops++;
+            RepeatHead head = new RepeatHead(counter, minimum, maximum, mode == LAZY);
+            head.body = inner.compile(compiler, new RepeatTail(head));
+            head.next = next;
+            return head;
+        }
+
+        int shortest() {
+            long total = (long) minimum * inner.shortest();
+            return total > UNBOUNDED ? UNBOUNDED : (int) total;
+        }
+
+        int longest() {
+            int one = inner.longest();
+            if (one < 0) {
+                return -1;
+            }
+            if (inner instanceof Single) {
+                long total = (long) maximum * one;
+                return total > UNBOUNDED ? UNBOUNDED : (int) total;
+            }
+            if (mode != POSSESSIVE && !inner.fixed()) {
+                return -1;
+            }
+            long total = (long) maximum * one;
+            return total > UNBOUNDED ? -1 : (int) total;
+        }
+
+        boolean fixed() {
+            return minimum == maximum && inner.fixed();
+        }
+    }
+
+    static final class Anchor extends Term {
+        static final int BEGIN = 0;
+        static final int CARET = 1;
+        static final int UNIX_CARET = 2;
+        static final int DOLLAR = 3;
+        static final int UNIX_DOLLAR = 4;
+        static final int END = 5;
+        static final int LAST_MATCH = 6;
+        static final int BOUND = 7;
+        static final int NOT_BOUND = 8;
+
+        final int kind;
+        final boolean multiline;
+        final boolean unicode;
+
+        Anchor(int kind, boolean multiline, boolean unicode) {
+            this.kind = kind;
+            this.multiline = multiline;
+            this.unicode = unicode;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            return new AnchorNode(kind, multiline, unicode, next);
+        }
+
+        int shortest() {
+            return 0;
+        }
+
+        int longest() {
+            return 0;
+        }
+    }
+
+    static final class Reference extends Term {
+        final int group;
+        final int folding;
+
+        Reference(int group, int folding) {
+            this.group = group;
+            this.folding = folding;
+        }
+
+        Node compile(Compiler compiler, Node next) {
+            return new BackReference(group, folding, next);
+        }
+
+        int shortest() {
+            return 0;
+        }
+
+        int longest() {
+            return -1;
+        }
+
+        boolean fixed() {
+            return false;
+        }
+    }
+
+    abstract static class Node {
+        Node next;
+
+        abstract boolean match(Matcher state, int at, CharSequence text);
+    }
+
+    static final class Accept extends Node {
+        boolean match(Matcher state, int at, CharSequence text) {
+            if (state.wholeInput && at != state.to) {
+                return false;
+            }
+            state.matchEnd = at;
+            return true;
+        }
+    }
+
+    static final class Succeed extends Node {
+        boolean match(Matcher state, int at, CharSequence text) {
+            return true;
+        }
+    }
+
+    static final class CharNode extends Node {
+        final Property property;
+
+        CharNode(Property property, Node next) {
+            this.property = property;
+            this.next = next;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            if (at < state.to) {
+                int one = Character.codePointAt(text, at);
+                int after = at + Character.charCount(one);
+                if (after <= state.to) {
+                    return property.has(one) && next.match(state, after, text);
+                }
+            }
+            state.hitEnd = true;
+            return false;
+        }
+    }
+
+    static final class SingleLoop extends Node {
+        final Property property;
+        final int minimum;
+        final int maximum;
+        final int mode;
+
+        SingleLoop(Property property, int minimum, int maximum, int mode, Node next) {
+            this.property = property;
+            this.minimum = minimum;
+            this.maximum = maximum;
+            this.mode = mode;
+            this.next = next;
+        }
+
+        private int step(Matcher state, int at, CharSequence text) {
+            if (at >= state.to) {
+                state.hitEnd = true;
+                return -1;
+            }
+            int one = Character.codePointAt(text, at);
+            int after = at + Character.charCount(one);
+            if (after > state.to) {
+                state.hitEnd = true;
+                return -1;
+            }
+            return property.has(one) ? after : -1;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int count = 0;
+            int position = at;
+            while (count < minimum) {
+                int after = step(state, position, text);
+                if (after < 0) {
+                    return false;
+                }
+                position = after;
+                count++;
+            }
+            if (mode == Repeat.LAZY) {
+                while (true) {
+                    if (next.match(state, position, text)) {
+                        return true;
+                    }
+                    if (count >= maximum) {
+                        return false;
+                    }
+                    int after = step(state, position, text);
+                    if (after < 0) {
+                        return false;
+                    }
+                    position = after;
+                    count++;
+                }
+            }
+            int floor = position;
+            int floorCount = count;
+            while (count < maximum) {
+                int after = step(state, position, text);
+                if (after < 0) {
+                    break;
+                }
+                position = after;
+                count++;
+            }
+            if (mode == Repeat.POSSESSIVE) {
+                return next.match(state, position, text);
+            }
+            while (true) {
+                if (next.match(state, position, text)) {
+                    return true;
+                }
+                if (count == floorCount || position <= floor) {
+                    return false;
+                }
+                position -= Character.charCount(Character.codePointBefore(text, position));
+                count--;
+            }
+        }
+    }
+
+    static final class Branch extends Node {
+        final Node[] options;
+
+        Branch(Node[] options) {
+            this.options = options;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            for (Node option : options) {
+                if (option.match(state, at, text)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    static final class GroupHead extends Node {
+        final int index;
+
+        GroupHead(int index, Node next) {
+            this.index = index;
+            this.next = next;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int saved = state.opens[index];
+            state.opens[index] = at;
+            boolean found = next.match(state, at, text);
+            state.opens[index] = saved;
+            return found;
+        }
+    }
+
+    static final class GroupTail extends Node {
+        final int index;
+
+        GroupTail(int index, Node next) {
+            this.index = index;
+            this.next = next;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int savedStart = state.groups[index * 2];
+            int savedEnd = state.groups[index * 2 + 1];
+            state.groups[index * 2] = state.opens[index];
+            state.groups[index * 2 + 1] = at;
+            if (next.match(state, at, text)) {
+                return true;
+            }
+            state.groups[index * 2] = savedStart;
+            state.groups[index * 2 + 1] = savedEnd;
+            return false;
+        }
+    }
+
+    static final class RepeatHead extends Node {
+        final int counter;
+        final int minimum;
+        final int maximum;
+        final boolean lazy;
+        Node body;
+
+        RepeatHead(int counter, int minimum, int maximum, boolean lazy) {
+            this.counter = counter;
+            this.minimum = minimum;
+            this.maximum = maximum;
+            this.lazy = lazy;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int savedCount = state.counts[counter];
+            int savedMark = state.marks[counter];
+            state.counts[counter] = 0;
+            state.marks[counter] = at;
+            boolean found;
+            if (lazy) {
+                found = (minimum == 0 && next.match(state, at, text)) || body.match(state, at, text);
+            } else {
+                found = body.match(state, at, text) || (minimum == 0 && next.match(state, at, text));
+            }
+            state.counts[counter] = savedCount;
+            state.marks[counter] = savedMark;
+            return found;
+        }
+    }
+
+    static final class RepeatTail extends Node {
+        final RepeatHead head;
+
+        RepeatTail(RepeatHead head) {
+            this.head = head;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int counter = head.counter;
+            int count = state.counts[counter] + 1;
+            int mark = state.marks[counter];
+            if (at == mark) {
+                return head.next.match(state, at, text);
+            }
+            int savedCount = state.counts[counter];
+            state.counts[counter] = count;
+            state.marks[counter] = at;
+            boolean found;
+            if (count < head.minimum) {
+                found = head.body.match(state, at, text);
+            } else if (head.lazy) {
+                found = head.next.match(state, at, text) || (count < head.maximum && head.body.match(state, at, text));
+            } else {
+                found = (count < head.maximum && head.body.match(state, at, text)) || head.next.match(state, at, text);
+            }
+            state.counts[counter] = savedCount;
+            state.marks[counter] = mark;
+            return found;
+        }
+    }
+
+    static final class LookAhead extends Node {
+        final Node body;
+        final boolean negative;
+
+        LookAhead(Node body, boolean negative, Node next) {
+            this.body = body;
+            this.negative = negative;
+            this.next = next;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int savedTo = state.to;
+            if (state.transparentBounds) {
+                state.to = state.textLength();
+            }
+            if (negative && at >= state.to) {
+                state.requireEnd = true;
+            }
+            boolean seen = body.match(state, at, text);
+            state.to = savedTo;
+            return seen != negative && next.match(state, at, text);
+        }
+    }
+
+    static final class BehindEnd extends Node {
+        final int scope;
+
+        BehindEnd(int scope) {
+            this.scope = scope;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            return at == state.scopes[scope];
+        }
+    }
+
+    static final class LookBehind extends Node {
+        final int scope;
+        final Node body;
+        final int shortest;
+        final int longest;
+        final boolean negative;
+
+        LookBehind(int scope, Node body, int shortest, int longest, boolean negative, Node next) {
+            this.scope = scope;
+            this.body = body;
+            this.shortest = shortest;
+            this.longest = longest;
+            this.negative = negative;
+            this.next = next;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int savedFrom = state.from;
+            int savedTo = state.to;
+            int savedEnd = state.scopes[scope];
+            int lowest = state.transparentBounds ? 0 : state.from;
+            if (state.transparentBounds) {
+                state.from = 0;
+            }
+            state.scopes[scope] = at;
+            boolean seen = false;
+            int floor = longest < 0 ? lowest : Math.max(at - longest, lowest);
+            for (int start = at - shortest; start >= floor; start--) {
+                if (body.match(state, start, text)) {
+                    seen = true;
+                    break;
+                }
+            }
+            state.from = savedFrom;
+            state.to = savedTo;
+            state.scopes[scope] = savedEnd;
+            return seen != negative && next.match(state, at, text);
+        }
+    }
+
+    static final class AtomicEnd extends Node {
+        final int scope;
+
+        AtomicEnd(int scope) {
+            this.scope = scope;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            state.scopes[scope] = at;
+            return true;
+        }
+    }
+
+    static final class AtomicNode extends Node {
+        final int scope;
+        final Node body;
+
+        AtomicNode(int scope, Node body, Node next) {
+            this.scope = scope;
+            this.body = body;
+            this.next = next;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int saved = state.scopes[scope];
+            boolean seen = body.match(state, at, text);
+            int end = state.scopes[scope];
+            state.scopes[scope] = saved;
+            return seen && next.match(state, end, text);
+        }
+    }
+
+    static final class BackReference extends Node {
+        final int group;
+        final int folding;
+
+        BackReference(int group, int folding, Node next) {
+            this.group = group;
+            this.folding = folding;
+            this.next = next;
+        }
+
+        private boolean same(int left, int right) {
+            if (left == right) {
+                return true;
+            }
+            if (folding == 1) {
+                return left < 128 && right < 128 && asciiLower(left) == asciiLower(right);
+            }
+            if (folding == 2) {
+                int upperLeft = Character.toUpperCase(left);
+                int upperRight = Character.toUpperCase(right);
+                return upperLeft == upperRight || Character.toLowerCase(upperLeft) == Character.toLowerCase(upperRight);
+            }
+            return false;
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            if (group * 2 + 1 >= state.groups.length) {
+                return false;
+            }
+            int start = state.groups[group * 2];
+            int end = state.groups[group * 2 + 1];
+            if (start < 0) {
+                return false;
+            }
+            int length = end - start;
+            if (at + length > state.to) {
+                state.hitEnd = true;
+                return false;
+            }
+            for (int offset = 0; offset < length; offset++) {
+                if (!same(text.charAt(start + offset), text.charAt(at + offset))) {
+                    return false;
+                }
+            }
+            return next.match(state, at + length, text);
+        }
+    }
+
+    static final class AnchorNode extends Node {
+        final int kind;
+        final boolean multiline;
+        final boolean unicode;
+
+        AnchorNode(int kind, boolean multiline, boolean unicode, Node next) {
+            this.kind = kind;
+            this.multiline = multiline;
+            this.unicode = unicode;
+            this.next = next;
+        }
+
+        static final Kind UNICODE_WORDS = new Kind(Kind.UNICODE_WORD);
+
+        private boolean word(int one) {
+            return unicode ? UNICODE_WORDS.has(one) : isWord(one);
+        }
+
+        boolean match(Matcher state, int at, CharSequence text) {
+            int start = state.anchoringBounds ? state.from : 0;
+            int end = state.anchoringBounds ? state.to : state.textLength();
+            switch (kind) {
+                case Anchor.BEGIN:
+                    return at == start && next.match(state, at, text);
+                case Anchor.END:
+                    if (at != end) {
+                        return false;
+                    }
+                    state.hitEnd = true;
+                    state.requireEnd = true;
+                    return next.match(state, at, text);
+                case Anchor.LAST_MATCH:
+                    return at == state.oldLast && next.match(state, at, text);
+                case Anchor.CARET: {
+                    if (at == end) {
+                        state.hitEnd = true;
+                        return false;
+                    }
+                    if (at > start) {
+                        char before = text.charAt(at - 1);
+                        if (!isLineTerminator(before)) {
+                            return false;
+                        }
+                        if (before == '\r' && text.charAt(at) == '\n') {
+                            return false;
+                        }
+                    }
+                    return next.match(state, at, text);
+                }
+                case Anchor.UNIX_CARET: {
+                    if (at == end) {
+                        state.hitEnd = true;
+                        return false;
+                    }
+                    if (at > start && text.charAt(at - 1) != '\n') {
+                        return false;
+                    }
+                    return next.match(state, at, text);
+                }
+                case Anchor.DOLLAR: {
+                    if (!multiline) {
+                        if (at < end - 2) {
+                            return false;
+                        }
+                        if (at == end - 2) {
+                            if (text.charAt(at) != '\r' || text.charAt(at + 1) != '\n') {
+                                return false;
+                            }
+                        }
+                    }
+                    if (at < end) {
+                        char here = text.charAt(at);
+                        if (here == '\n') {
+                            if (at > 0 && text.charAt(at - 1) == '\r') {
+                                return false;
+                            }
+                            if (multiline) {
+                                return next.match(state, at, text);
+                            }
+                        } else if (here == '\r' || here == '\u0085' || here == ' ' || here == ' ') {
+                            if (multiline) {
+                                return next.match(state, at, text);
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                    state.hitEnd = true;
+                    state.requireEnd = true;
+                    return next.match(state, at, text);
+                }
+                case Anchor.UNIX_DOLLAR: {
+                    if (at < end) {
+                        char here = text.charAt(at);
+                        if (here == '\n') {
+                            if (!multiline && at != end - 1) {
+                                return false;
+                            }
+                            if (multiline) {
+                                return next.match(state, at, text);
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                    state.hitEnd = true;
+                    state.requireEnd = true;
+                    return next.match(state, at, text);
+                }
+                default: {
+                    int low = state.transparentBounds ? 0 : state.from;
+                    int high = state.transparentBounds ? state.textLength() : state.to;
+                    boolean left = at > low && word(Character.codePointBefore(text, at));
+                    boolean right = false;
+                    if (at < high) {
+                        right = word(Character.codePointAt(text, at));
+                    } else {
+                        state.hitEnd = true;
+                        state.requireEnd = true;
+                    }
+                    boolean bound = left != right;
+                    if (kind == Anchor.NOT_BOUND) {
+                        bound = !bound;
+                    }
+                    return bound && next.match(state, at, text);
+                }
+            }
+        }
+    }
+
+    static final class Parser {
+        static final int END = -1;
+
+        final String source;
+        final int[] points;
+        int at;
+        int flags;
+        int captures;
+        final Map<String, Integer> names = new LinkedHashMap<String, Integer>();
+        int escapedPoint;
+        Property escapedProperty;
+        Term escapedTerm;
+
+        Parser(String source, int flags) {
+            this.source = source;
+            this.flags = flags;
+            int count = source.codePointCount(0, source.length());
+            points = new int[count];
+            int index = 0;
+            for (int offset = 0; offset < source.length(); ) {
+                int one = source.codePointAt(offset);
+                points[index++] = one;
+                offset += Character.charCount(one);
+            }
+        }
+
+        PatternSyntaxException error(String description, int index) {
+            return new PatternSyntaxException(description, source, index);
+        }
+
+        boolean has(int flag) {
+            return (flags & flag) != 0;
+        }
+
+        int peekRaw() {
+            return at < points.length ? points[at] : END;
+        }
+
+        void skipComments() {
+            if (!has(COMMENTS)) {
+                return;
+            }
+            while (at < points.length) {
+                int one = points[at];
+                if (one == ' ' || one == '\t' || one == '\n' || one == 0x0B || one == '\f' || one == '\r') {
+                    at++;
+                } else if (one == '#') {
+                    while (at < points.length && !isLineTerminator(points[at])) {
+                        at++;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        int peek() {
+            skipComments();
+            return peekRaw();
+        }
+
+        int next() {
+            skipComments();
+            if (at >= points.length) {
+                at++;
+                return END;
+            }
+            return points[at++];
+        }
+
+        Term parse() {
+            if (has(LITERAL)) {
+                ArrayList<Term> parts = new ArrayList<Term>();
+                for (int one : points) {
+                    parts.add(new Single(literal(one)));
+                }
+                return parts.size() == 1 ? parts.get(0) : new Sequence(parts);
+            }
+            Term made = expression();
+            if (at < points.length) {
+                if (points[at] == ')') {
+                    throw error("Unmatched closing ')'", at - 1 < 0 ? 0 : at - 1);
+                }
+                throw error("Unexpected internal error", at);
+            }
+            return made;
+        }
+
+        Term expression() {
+            ArrayList<Term> options = new ArrayList<Term>();
+            options.add(sequence());
+            while (peek() == '|') {
+                at++;
+                options.add(sequence());
+            }
+            return options.size() == 1 ? options.get(0) : new Choice(options);
+        }
+
+        Term sequence() {
+            ArrayList<Term> parts = new ArrayList<Term>();
+            while (true) {
+                int one = peek();
+                if (one == END || one == '|' || one == ')') {
+                    break;
+                }
+                Term atom = atom();
+                if (atom == null) {
+                    continue;
+                }
+                parts.add(quantified(atom));
+            }
+            if (parts.isEmpty()) {
+                return new Nothing();
+            }
+            return parts.size() == 1 ? parts.get(0) : new Sequence(parts);
+        }
+
+        Property literal(int one) {
+            if (has(CASE_INSENSITIVE)) {
+                if (has(UNICODE_CASE)) {
+                    int upper = Character.toUpperCase(one);
+                    int lower = Character.toLowerCase(upper);
+                    if (upper != lower) {
+                        return new FoldedUnicode(one);
+                    }
+                } else if (one < 128 && isAsciiLetter(one)) {
+                    return new FoldedAscii(one);
+                }
+            }
+            return new Exact(one);
+        }
+
+        Property range(int low, int high) {
+            int folding = 0;
+            if (has(CASE_INSENSITIVE)) {
+                folding = has(UNICODE_CASE) ? 2 : 1;
+            }
+            return new Span(low, high, folding);
+        }
+
+        Property dot() {
+            if (has(DOTALL)) {
+                return new Kind(Kind.ANY);
+            }
+            if (has(UNIX_LINES)) {
+                return new Kind(Kind.UNIX_DOT);
+            }
+            return new Kind(Kind.DOT);
+        }
+
+        Term atom() {
+            int start = at;
+            int one = next();
+            switch (one) {
+                case '(':
+                    return group(start);
+                case '[':
+                    return new Single(characterClass());
+                case '.':
+                    return new Single(dot());
+                case '^':
+                    if (has(MULTILINE)) {
+                        return new Anchor(has(UNIX_LINES) ? Anchor.UNIX_CARET : Anchor.CARET, true, false);
+                    }
+                    return new Anchor(Anchor.BEGIN, false, false);
+                case '$':
+                    return new Anchor(has(UNIX_LINES) ? Anchor.UNIX_DOLLAR : Anchor.DOLLAR, has(MULTILINE), false);
+                case '\\':
+                    return escapeTerm();
+                case '*':
+                case '+':
+                case '?':
+                    throw error("Dangling meta character '" + (char) one + "'", start);
+                case '{':
+                    throw error("Illegal repetition", start);
+                default:
+                    return new Single(literal(one));
+            }
+        }
+
+        Term quantified(Term atom) {
+            int start = at;
+            int one = peek();
+            int minimum;
+            int maximum;
+            if (one == '*') {
+                at++;
+                minimum = 0;
+                maximum = UNBOUNDED;
+            } else if (one == '+') {
+                at++;
+                minimum = 1;
+                maximum = UNBOUNDED;
+            } else if (one == '?') {
+                at++;
+                minimum = 0;
+                maximum = 1;
+            } else if (one == '{') {
+                at++;
+                int digit = peekRaw();
+                if (!isAsciiDigit(digit)) {
+                    throw error("Illegal repetition", start);
+                }
+                minimum = number();
+                if (peekRaw() == ',') {
+                    at++;
+                    if (peekRaw() == '}') {
+                        maximum = UNBOUNDED;
+                    } else if (isAsciiDigit(peekRaw())) {
+                        maximum = number();
+                    } else {
+                        maximum = minimum;
+                        if (peekRaw() != '}') {
+                            throw error("Unclosed counted closure", at);
+                        }
+                    }
+                } else {
+                    maximum = minimum;
+                }
+                if (peekRaw() != '}') {
+                    throw error("Unclosed counted closure", at);
+                }
+                at++;
+                if (maximum < minimum) {
+                    throw error("Illegal repetition range", at - 1);
+                }
+            } else {
+                return atom;
+            }
+            int mode = Repeat.GREEDY;
+            if (peekRaw() == '?') {
+                at++;
+                mode = Repeat.LAZY;
+            } else if (peekRaw() == '+') {
+                at++;
+                mode = Repeat.POSSESSIVE;
+            }
+            return new Repeat(atom, minimum, maximum, mode);
+        }
+
+        int number() {
+            long value = 0;
+            while (isAsciiDigit(peekRaw())) {
+                value = value * 10 + (points[at] - '0');
+                if (value > UNBOUNDED) {
+                    throw error("Illegal repetition range", at);
+                }
+                at++;
+            }
+            return (int) value;
+        }
+
+        Term group(int start) {
+            int saved = flags;
+            Term made;
+            if (peekRaw() == '?') {
+                at++;
+                int kind = next();
+                switch (kind) {
+                    case ':':
+                        made = new Group(-1, expression());
+                        break;
+                    case '=':
+                    case '!':
+                        made = new Look(true, kind == '!', expression());
+                        break;
+                    case '>':
+                        made = new Atomic(expression());
+                        break;
+                    case '<': {
+                        int after = peekRaw();
+                        if (after == '=' || after == '!') {
+                            at++;
+                            Term inner = expression();
+                            if (inner.longest() < 0) {
+                                throw error("Look-behind group does not have an obvious maximum length", at - 1);
+                            }
+                            made = new Look(false, after == '!', inner);
+                        } else {
+                            String name = groupName();
+                            if (names.containsKey(name)) {
+                                throw error("Named capturing group <" + name + "> is already defined", at - 1);
+                            }
+                            int index = ++captures;
+                            names.put(name, index);
+                            made = new Group(index, expression());
+                        }
+                        break;
+                    }
+                    default:
+                        at--;
+                        inlineFlags();
+                        int closing = next();
+                        if (closing == ')') {
+                            return null;
+                        }
+                        if (closing != ':') {
+                            throw error("Unknown inline modifier", at - 1);
+                        }
+                        made = new Group(-1, expression());
+                        break;
+                }
+            } else {
+                int index = ++captures;
+                made = new Group(index, expression());
+            }
+            if (next() != ')') {
+                throw error("Unclosed group", points.length);
+            }
+            flags = saved;
+            return made;
+        }
+
+        String groupName() {
+            StringBuilder name = new StringBuilder();
+            int one = peekRaw();
+            if (!isAsciiLetter(one)) {
+                throw error("capturing group name does not start with a Latin letter", at);
+            }
+            while (isAsciiLetter(peekRaw()) || isAsciiDigit(peekRaw())) {
+                name.appendCodePoint(points[at++]);
+            }
+            if (peekRaw() != '>') {
+                throw error("named capturing group is missing trailing '>'", at);
+            }
+            at++;
+            return name.toString();
+        }
+
+        void inlineFlags() {
+            boolean on = true;
+            while (true) {
+                int one = peekRaw();
+                int flag;
+                switch (one) {
+                    case 'i':
+                        flag = CASE_INSENSITIVE;
+                        break;
+                    case 'm':
+                        flag = MULTILINE;
+                        break;
+                    case 's':
+                        flag = DOTALL;
+                        break;
+                    case 'd':
+                        flag = UNIX_LINES;
+                        break;
+                    case 'u':
+                        flag = UNICODE_CASE;
+                        break;
+                    case 'c':
+                        flag = CANON_EQ;
+                        break;
+                    case 'x':
+                        flag = COMMENTS;
+                        break;
+                    case 'U':
+                        flag = UNICODE_CHARACTER_CLASS | UNICODE_CASE;
+                        break;
+                    case '-':
+                        on = false;
+                        at++;
+                        continue;
+                    default:
+                        return;
+                }
+                at++;
+                if (on) {
+                    flags |= flag;
+                } else {
+                    flags &= ~flag;
+                }
+            }
+        }
+
+        static final int POINT = 0;
+        static final int PROPERTY = 1;
+        static final int TERM = 2;
+        static final int QUOTE = 3;
+
+        Term escapeTerm() {
+            int start = at - 1;
+            int kind = escape(false, start);
+            if (kind == POINT) {
+                return new Single(literal(escapedPoint));
+            }
+            if (kind == PROPERTY) {
+                return new Single(escapedProperty);
+            }
+            if (kind == QUOTE) {
+                ArrayList<Term> parts = new ArrayList<Term>();
+                while (at < points.length) {
+                    if (points[at] == '\\' && at + 1 < points.length && points[at + 1] == 'E') {
+                        at += 2;
+                        break;
+                    }
+                    parts.add(new Single(literal(points[at++])));
+                }
+                if (parts.isEmpty()) {
+                    return null;
+                }
+                return parts.size() == 1 ? parts.get(0) : new Sequence(parts);
+            }
+            return escapedTerm;
+        }
+
+        int hexDigit(int one) {
+            if (one >= '0' && one <= '9') {
+                return one - '0';
+            }
+            if (one >= 'a' && one <= 'f') {
+                return one - 'a' + 10;
+            }
+            if (one >= 'A' && one <= 'F') {
+                return one - 'A' + 10;
+            }
+            return -1;
+        }
+
+        int hex(int count, String problem) {
+            int value = 0;
+            for (int index = 0; index < count; index++) {
+                int digit = hexDigit(peekRaw());
+                if (digit < 0) {
+                    throw error(problem, at);
+                }
+                value = value * 16 + digit;
+                at++;
+            }
+            return value;
+        }
+
+        int predefined(int one) {
+            boolean unicode = has(UNICODE_CHARACTER_CLASS);
+            switch (one) {
+                case 'd':
+                case 'D':
+                    return unicode ? Kind.UNICODE_DIGIT : Kind.DIGIT;
+                case 's':
+                case 'S':
+                    return unicode ? Kind.UNICODE_SPACE : Kind.SPACE;
+                case 'w':
+                case 'W':
+                    return unicode ? Kind.UNICODE_WORD : Kind.WORD;
+                case 'h':
+                case 'H':
+                    return Kind.HORIZONTAL;
+                default:
+                    return Kind.VERTICAL;
+            }
+        }
+
+        int escape(boolean inClass, int start) {
+            int one = next();
+            switch (one) {
+                case END:
+                    throw error("Unexpected internal error", start + 1);
+                case '0': {
+                    int first = peekRaw();
+                    if (first < '0' || first > '7') {
+                        throw error("Illegal octal escape sequence", at);
+                    }
+                    int value = first - '0';
+                    at++;
+                    int second = peekRaw();
+                    if (second >= '0' && second <= '7') {
+                        value = value * 8 + (second - '0');
+                        at++;
+                        int third = peekRaw();
+                        if (third >= '0' && third <= '7' && first <= '3') {
+                            value = value * 8 + (third - '0');
+                            at++;
+                        }
+                    }
+                    escapedPoint = value;
+                    return POINT;
+                }
+                case '1':
+                case '2':
+                case '3':
+                case '4':
+                case '5':
+                case '6':
+                case '7':
+                case '8':
+                case '9': {
+                    if (inClass) {
+                        throw error("Illegal/unsupported escape sequence", at - 1);
+                    }
+                    int group = one - '0';
+                    while (isAsciiDigit(peekRaw())) {
+                        int wider = group * 10 + (points[at] - '0');
+                        if (captures < wider) {
+                            break;
+                        }
+                        group = wider;
+                        at++;
+                    }
+                    escapedTerm = new Reference(group, folding());
+                    return TERM;
+                }
+                case 'A':
+                case 'B':
+                case 'G':
+                case 'Z':
+                case 'b':
+                case 'z': {
+                    if (inClass) {
+                        throw error("Illegal/unsupported escape sequence", at - 1);
+                    }
+                    boolean unicode = has(UNICODE_CHARACTER_CLASS);
+                    switch (one) {
+                        case 'A':
+                            escapedTerm = new Anchor(Anchor.BEGIN, false, unicode);
+                            break;
+                        case 'B':
+                            escapedTerm = new Anchor(Anchor.NOT_BOUND, false, unicode);
+                            break;
+                        case 'G':
+                            escapedTerm = new Anchor(Anchor.LAST_MATCH, false, unicode);
+                            break;
+                        case 'Z':
+                            escapedTerm = new Anchor(has(UNIX_LINES) ? Anchor.UNIX_DOLLAR : Anchor.DOLLAR, false, unicode);
+                            break;
+                        case 'b':
+                            escapedTerm = new Anchor(Anchor.BOUND, false, unicode);
+                            break;
+                        default:
+                            escapedTerm = new Anchor(Anchor.END, false, unicode);
+                            break;
+                    }
+                    return TERM;
+                }
+                case 'a':
+                    escapedPoint = 7;
+                    return POINT;
+                case 'e':
+                    escapedPoint = 27;
+                    return POINT;
+                case 'f':
+                    escapedPoint = '\f';
+                    return POINT;
+                case 'n':
+                    escapedPoint = '\n';
+                    return POINT;
+                case 'r':
+                    escapedPoint = '\r';
+                    return POINT;
+                case 't':
+                    escapedPoint = '\t';
+                    return POINT;
+                case 'c': {
+                    int control = next();
+                    if (control == END) {
+                        throw error("Illegal control escape sequence", at - 1);
+                    }
+                    escapedPoint = control ^ 64;
+                    return POINT;
+                }
+                case 'd':
+                case 'D':
+                case 's':
+                case 'S':
+                case 'w':
+                case 'W':
+                case 'h':
+                case 'H':
+                case 'v':
+                case 'V': {
+                    Property made = new Kind(predefined(one));
+                    escapedProperty = Character.isUpperCase((char) one) ? new Not(made) : made;
+                    return PROPERTY;
+                }
+                case 'R': {
+                    if (inClass) {
+                        throw error("Illegal/unsupported escape sequence", at - 1);
+                    }
+                    ArrayList<Term> options = new ArrayList<Term>();
+                    ArrayList<Term> pair = new ArrayList<Term>();
+                    pair.add(new Single(new Exact('\r')));
+                    pair.add(new Single(new Exact('\n')));
+                    options.add(new Sequence(pair));
+                    options.add(new Single(new Kind(Kind.VERTICAL)));
+                    escapedTerm = new Atomic(new Choice(options));
+                    return TERM;
+                }
+                case 'X':
+                    if (inClass) {
+                        throw error("Illegal/unsupported escape sequence", at - 1);
+                    }
+                    escapedProperty = new Kind(Kind.ANY);
+                    return PROPERTY;
+                case 'p':
+                case 'P': {
+                    String name;
+                    if (peekRaw() == '{') {
+                        at++;
+                        StringBuilder text = new StringBuilder();
+                        while (peekRaw() != '}' && peekRaw() != END) {
+                            text.appendCodePoint(points[at++]);
+                        }
+                        if (peekRaw() != '}') {
+                            throw error("Unclosed character family", at);
+                        }
+                        at++;
+                        name = text.toString();
+                    } else {
+                        int letter = next();
+                        if (letter == END) {
+                            throw error("Illegal character family", at);
+                        }
+                        name = String.valueOf((char) letter);
+                    }
+                    Property made = family(name, at - 1);
+                    escapedProperty = one == 'P' ? new Not(made) : made;
+                    return PROPERTY;
+                }
+                case 'Q':
+                    return QUOTE;
+                case 'k': {
+                    if (inClass) {
+                        throw error("Illegal/unsupported escape sequence", at - 1);
+                    }
+                    if (next() != '<') {
+                        throw error("\\k is not followed by '<' for named capturing group", at - 1);
+                    }
+                    String name = groupName();
+                    Integer group = names.get(name);
+                    if (group == null) {
+                        throw error("named capturing group <" + name + "> does not exist", at - 1);
+                    }
+                    escapedTerm = new Reference(group.intValue(), folding());
+                    return TERM;
+                }
+                case 'u': {
+                    int value = hex(4, "Illegal Unicode escape sequence");
+                    if (Character.isHighSurrogate((char) value) && at + 5 < points.length && peekRaw() == '\\'
+                        && points[at + 1] == 'u') {
+                        int keep = at;
+                        at += 2;
+                        int low = hex(4, "Illegal Unicode escape sequence");
+                        if (Character.isLowSurrogate((char) low)) {
+                            value = Character.toCodePoint((char) value, (char) low);
+                        } else {
+                            at = keep;
+                        }
+                    }
+                    escapedPoint = value;
+                    return POINT;
+                }
+                case 'x': {
+                    if (peekRaw() == '{') {
+                        at++;
+                        long value = 0;
+                        int digits = 0;
+                        while (hexDigit(peekRaw()) >= 0) {
+                            value = value * 16 + hexDigit(points[at++]);
+                            digits++;
+                            if (value > Character.MAX_CODE_POINT) {
+                                throw error("Hexadecimal codepoint is too big", at);
+                            }
+                        }
+                        if (digits == 0 || peekRaw() != '}') {
+                            throw error("Unclosed hexadecimal escape sequence", at);
+                        }
+                        at++;
+                        escapedPoint = (int) value;
+                        return POINT;
+                    }
+                    escapedPoint = hex(2, "Illegal hexadecimal escape sequence");
+                    return POINT;
+                }
+                default:
+                    if (isAsciiLetter(one)) {
+                        throw error("Illegal/unsupported escape sequence", at - 1);
+                    }
+                    escapedPoint = one;
+                    return POINT;
+            }
+        }
+
+        int folding() {
+            if (!has(CASE_INSENSITIVE)) {
+                return 0;
+            }
+            return has(UNICODE_CASE) ? 2 : 1;
+        }
+
+        Property family(String name, int index) {
+            Property made = plainFamily(name, index);
+            if (has(CASE_INSENSITIVE) && made instanceof Kind) {
+                int kind = ((Kind) made).kind;
+                if (kind == Kind.LOWER || kind == Kind.UPPER) {
+                    return new Kind(Kind.ALPHA);
+                }
+                if (kind == Kind.UNICODE_LOWER || kind == Kind.UNICODE_UPPER || kind == Kind.TITLE) {
+                    return new Kind(Kind.CASED);
+                }
+            }
+            return made;
+        }
+
+        Property plainFamily(String name, int index) {
+            String key = name;
+            if (key.startsWith("Is")) {
+                key = key.substring(2);
+            } else if (key.startsWith("general_category=")) {
+                key = key.substring(17);
+            } else if (key.startsWith("gc=")) {
+                key = key.substring(3);
+            }
+            switch (key) {
+                case "Lower":
+                    return new Kind(has(UNICODE_CHARACTER_CLASS) ? Kind.UNICODE_LOWER : Kind.LOWER);
+                case "Upper":
+                    return new Kind(has(UNICODE_CHARACTER_CLASS) ? Kind.UNICODE_UPPER : Kind.UPPER);
+                case "ASCII":
+                    return new Kind(Kind.ASCII);
+                case "Alpha":
+                    return new Kind(has(UNICODE_CHARACTER_CLASS) ? Kind.ALPHABETIC : Kind.ALPHA);
+                case "Digit":
+                    return new Kind(has(UNICODE_CHARACTER_CLASS) ? Kind.UNICODE_DIGIT : Kind.DIGIT);
+                case "Alnum":
+                    return new Kind(has(UNICODE_CHARACTER_CLASS) ? Kind.LETTER_OR_DIGIT : Kind.ALNUM);
+                case "Punct":
+                    return new Kind(Kind.PUNCT);
+                case "Graph":
+                    return new Kind(Kind.GRAPH);
+                case "Print":
+                    return new Kind(Kind.PRINT);
+                case "Blank":
+                    return new Kind(Kind.BLANK);
+                case "Cntrl":
+                    return new Kind(Kind.CONTROL);
+                case "XDigit":
+                case "Hex_Digit":
+                case "HexDigit":
+                    return new Kind(Kind.HEX);
+                case "Space":
+                case "White_Space":
+                case "WhiteSpace":
+                    return new Kind(has(UNICODE_CHARACTER_CLASS) || name.startsWith("Is") ? Kind.UNICODE_SPACE : Kind.SPACE);
+                case "javaLowerCase":
+                case "Lowercase":
+                case "Ll":
+                    return new Kind(Kind.UNICODE_LOWER);
+                case "javaUpperCase":
+                case "Uppercase":
+                case "Lu":
+                    return new Kind(Kind.UNICODE_UPPER);
+                case "Lt":
+                case "javaTitleCase":
+                case "Titlecase":
+                    return new Kind(Kind.TITLE);
+                case "javaWhitespace":
+                    return new Kind(Kind.WHITESPACE);
+                case "javaLetter":
+                case "Letter":
+                case "L":
+                    return new Kind(Kind.LETTER);
+                case "javaDigit":
+                case "Nd":
+                case "N":
+                    return new Kind(Kind.UNICODE_DIGIT);
+                case "javaLetterOrDigit":
+                    return new Kind(Kind.LETTER_OR_DIGIT);
+                case "javaAlphabetic":
+                case "Alphabetic":
+                    return new Kind(Kind.ALPHABETIC);
+                case "Punctuation":
+                case "P":
+                    return new Kind(Kind.UNICODE_PUNCTUATION);
+                case "Control":
+                case "Cc":
+                    return new Kind(Kind.UNICODE_CONTROL);
+                case "Z":
+                case "Zs":
+                case "Separator":
+                    return new Kind(Kind.SEPARATOR);
+                case "Latin":
+                case "InBasicLatin":
+                    return new Kind(Kind.ASCII);
+                default:
+                    throw error("Unknown character property name {" + name + "}", index);
+            }
+        }
+
+        Property characterClass() {
+            boolean negate = false;
+            if (peek() == '^') {
+                at++;
+                negate = true;
+            }
+            Property left = null;
+            Property current = null;
+            boolean first = true;
+            while (true) {
+                int one = peek();
+                if (one == END) {
+                    throw error("Unclosed character class", points.length - 1);
+                }
+                if (one == ']' && !first) {
+                    at++;
+                    break;
+                }
+                first = false;
+                if (one == '[') {
+                    at++;
+                    current = join(current, characterClass());
+                    continue;
+                }
+                if (one == '&' && at + 1 < points.length && points[at + 1] == '&') {
+                    at += 2;
+                    if (current != null) {
+                        left = left == null ? current : new Both(left, current);
+                    }
+                    current = null;
+                    continue;
+                }
+                int startPoint;
+                at++;
+                if (one == '\\') {
+                    int kind = escape(true, at - 1);
+                    if (kind == PROPERTY) {
+                        current = join(current, escapedProperty);
+                        continue;
+                    }
+                    if (kind == QUOTE) {
+                        while (at < points.length) {
+                            if (points[at] == '\\' && at + 1 < points.length && points[at + 1] == 'E') {
+                                at += 2;
+                                break;
+                            }
+                            current = join(current, literal(points[at++]));
+                        }
+                        continue;
+                    }
+                    startPoint = escapedPoint;
+                } else {
+                    startPoint = one;
+                }
+                if (peek() == '-') {
+                    int after = at + 1 < points.length ? points[at + 1] : END;
+                    if (after != ']' && after != '[' && after != END) {
+                        at++;
+                        int endPoint;
+                        if (after == '\\') {
+                            at++;
+                            int kind = escape(true, at - 1);
+                            if (kind != POINT) {
+                                throw error("Illegal character range", at - 1);
+                            }
+                            endPoint = escapedPoint;
+                        } else {
+                            at++;
+                            endPoint = after;
+                        }
+                        if (endPoint < startPoint) {
+                            throw error("Illegal character range", at - 1);
+                        }
+                        current = join(current, range(startPoint, endPoint));
+                        continue;
+                    }
+                }
+                current = join(current, literal(startPoint));
+            }
+            Property made;
+            if (left == null) {
+                made = current;
+            } else if (current == null) {
+                made = left;
+            } else {
+                made = new Both(left, current);
+            }
+            if (made == null) {
+                throw error("Bad class syntax", at - 1);
+            }
+            return negate ? new Not(made) : made;
+        }
+
+        static Property join(Property left, Property right) {
+            if (left == null) {
+                return right;
+            }
+            return new Union(left, right);
+        }
+    }
+}
+"####,
+            ),
+            (
+                "java/util/regex/PatternSyntaxException.java",
+                r####"package java.util.regex;
+
+public class PatternSyntaxException extends IllegalArgumentException {
+    private final String description;
+    private final String pattern;
+    private final int index;
+
+    public PatternSyntaxException(String description, String pattern, int index) {
+        this.description = description;
+        this.pattern = pattern;
+        this.index = index;
+    }
+
+    public int getIndex() {
+        return index;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public String getPattern() {
+        return pattern;
+    }
+
+    public String getMessage() {
+        StringBuilder made = new StringBuilder();
+        made.append(description);
+        if (index >= 0) {
+            made.append(" near index ");
+            made.append(index);
+        }
+        made.append(System.lineSeparator());
+        made.append(pattern);
+        if (index >= 0 && pattern != null && index < pattern.length()) {
+            made.append(System.lineSeparator());
+            for (int at = 0; at < index; at++) {
+                made.append(' ');
+            }
+            made.append('^');
+        }
+        return made.toString();
+    }
+}
+"####,
+            ),
+            (
+                "omni/runtime/Arrays.java",
+                r####"package omni.runtime;
+
+public final class Arrays {
+    private Arrays() {
+    }
+
+    public static native Object newInstance(String component, int length);
+
+    public static int length(Object array) {
+        if (array instanceof Object[]) {
+            return ((Object[]) array).length;
+        }
+        if (array instanceof int[]) {
+            return ((int[]) array).length;
+        }
+        if (array instanceof long[]) {
+            return ((long[]) array).length;
+        }
+        if (array instanceof char[]) {
+            return ((char[]) array).length;
+        }
+        if (array instanceof byte[]) {
+            return ((byte[]) array).length;
+        }
+        if (array instanceof short[]) {
+            return ((short[]) array).length;
+        }
+        if (array instanceof boolean[]) {
+            return ((boolean[]) array).length;
+        }
+        if (array instanceof float[]) {
+            return ((float[]) array).length;
+        }
+        if (array instanceof double[]) {
+            return ((double[]) array).length;
+        }
+        throw new IllegalArgumentException("Argument is not an array");
+    }
+}
+"####,
+            ),
+            (
+                "omni/runtime/Classes.java",
+                r####"package omni.runtime;
+
+import java.util.HashMap;
+
+public final class Classes {
+    private static HashMap<String, Class<?>> known;
+
+    private Classes() {
+    }
+
+    public static Class<?> named(String name) {
+        switch (name) {
+            case "int":
+                return Integer.TYPE;
+            case "long":
+                return Long.TYPE;
+            case "short":
+                return Short.TYPE;
+            case "byte":
+                return Byte.TYPE;
+            case "char":
+                return Character.TYPE;
+            case "boolean":
+                return Boolean.TYPE;
+            case "float":
+                return Float.TYPE;
+            case "double":
+                return Double.TYPE;
+            case "void":
+                return Void.TYPE;
+            default:
+                break;
+        }
+        if (known == null) {
+            known = new HashMap<String, Class<?>>();
+        }
+        Class<?> found = known.get(name);
+        if (found == null) {
+            found = Class.ofName(name);
+            known.put(name, found);
+        }
+        return found;
+    }
+
+    public static Class<?> of(Object value) {
+        return value.getClass();
+    }
+}
+"####,
+            ),
+            (
+                "omni/runtime/Console.java",
+                r####"package omni.runtime;
+
+public final class Console {
+    private Console() {
+    }
+
+    public static native void write(int descriptor, char[] chars, int offset, int count);
+
+    public static native void exit(int status);
+}
+"####,
+            ),
+            (
+                "omni/runtime/Faults.java",
+                r####"package omni.runtime;
+
+public final class Faults {
+    private Faults() {
+    }
+
+    public static NullPointerException nullPointer() {
+        return new NullPointerException();
+    }
+
+    public static ArithmeticException divisionByZero() {
+        return new ArithmeticException("/ by zero");
+    }
+
+    public static ArrayIndexOutOfBoundsException indexOutOfBounds(int index, int length) {
+        return new ArrayIndexOutOfBoundsException("Index " + index + " out of bounds for length " + length);
+    }
+
+    public static ClassCastException castFailure(Object value, String target) {
+        return new ClassCastException("class " + value.getClass().getName() + " cannot be cast to class " + target);
+    }
+
+    public static NegativeArraySizeException negativeSize(int length) {
+        return new NegativeArraySizeException(String.valueOf(length));
+    }
+}
+"####,
+            ),
+            (
+                "omni/runtime/Numbers.java",
+                r####"package omni.runtime;
+
+public final class Numbers {
+    private static long seed = 0x2545F4914F6CDD1DL;
+
+    private Numbers() {
+    }
+
+    public static native int formatDouble(double value, char[] buffer);
+
+    public static native int formatFloat(float value, char[] buffer);
+
+    static native double parseDecimal(char[] text, int length);
+
+    public static native long clock();
+
+    public static double random() {
+        seed ^= seed << 13;
+        seed ^= seed >>> 7;
+        seed ^= seed << 17;
+        return (seed >>> 11) * 1.1102230246251565E-16;
+    }
+
+    public static double parse(String text) {
+        if (text == null) {
+            throw new NullPointerException();
+        }
+        String held = text.trim();
+        int length = held.length();
+        if (length == 0) {
+            throw new NumberFormatException("empty String");
+        }
+        int at = 0;
+        boolean negative = false;
+        if (held.charAt(0) == '+' || held.charAt(0) == '-') {
+            negative = held.charAt(0) == '-';
+            at = 1;
+        }
+        String rest = held.substring(at);
+        if (rest.equals("NaN")) {
+            return Double.NaN;
+        }
+        if (rest.equals("Infinity")) {
+            return negative ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
+        }
+        int end = length;
+        char last = held.charAt(length - 1);
+        if (last == 'd' || last == 'D' || last == 'f' || last == 'F') {
+            end = length - 1;
+        }
+        boolean digits = false;
+        boolean point = false;
+        boolean exponent = false;
+        int scan = at;
+        while (scan < end) {
+            char one = held.charAt(scan);
+            if (one >= '0' && one <= '9') {
+                digits = true;
+            } else if (one == '.' && !point && !exponent) {
+                point = true;
+            } else if ((one == 'e' || one == 'E') && digits && !exponent) {
+                exponent = true;
+                digits = false;
+                if (scan + 1 < end && (held.charAt(scan + 1) == '+' || held.charAt(scan + 1) == '-')) {
+                    scan++;
+                }
+            } else {
+                throw new NumberFormatException("For input string: \"" + text + "\"");
+            }
+            scan++;
+        }
+        if (!digits) {
+            throw new NumberFormatException("For input string: \"" + text + "\"");
+        }
+        char[] chars = held.substring(0, end).toCharArray();
+        return parseDecimal(chars, chars.length);
+    }
+}
+"####,
+            ),
+        ];
+
+        pub fn lower(
+            files: &mut ClassFiles,
+            roots: &[Root],
+            layout: Layout,
+            module_name: &str,
+        ) -> Result<(Module, Vec<FunctionId>, BTreeSet<String>), Diagnostic> {
+            let mut lowering = Lowering::new(files, layout);
+            let mut entries = Vec::new();
+            for (owner, name, descriptor, is_static) in roots {
+                entries.push(lowering.root(owner, name, descriptor, *is_static)?);
+            }
+            for name in lowering.files.own_names() {
+                lowering.declare(&name)?;
+            }
+            entries.extend(lowering.export_named()?);
+            let (module, missing) = lowering.finish(module_name)?;
+            Ok((module, entries, missing))
+        }
+
+        const MATHEMATICS: [&str; 18] = [
+            "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "log10", "pow",
+            "sinh", "cosh", "tanh", "cbrt", "hypot", "expm1", "log1p",
+        ];
+
+        #[derive(Clone, Copy)]
+        enum NativeShape {
+            Bitcast,
+            Unary(UnaryOp),
+            Identity(FunctionId),
+        }
+
+        fn host_forward(owner: &str, name: &str, descriptor: &str) -> Option<String> {
+            let host = match (owner, name, descriptor) {
+                ("omni/runtime/Numbers", "formatDouble", "(D[C)I") => "omni.format_double",
+                ("omni/runtime/Numbers", "formatFloat", "(F[C)I") => "omni.format_float",
+                ("omni/runtime/Numbers", "parseDecimal", "([CI)D") => "omni.parse_double",
+                ("omni/runtime/Numbers", "clock", "()J") => "omni.clock",
+                ("omni/runtime/Console", "write", "(I[CII)V") => "omni.write_chars",
+                ("omni/runtime/Console", "exit", "(I)V") => "exit",
+                ("java/lang/Math" | "java/lang/StrictMath", _, "(D)D" | "(DD)D")
+                    if MATHEMATICS.contains(&name) =>
+                {
+                    return Some(format!("omni.math.{name}"));
+                }
+                _ => return None,
+            };
+            Some(host.to_string())
+        }
+
+        fn deferred_native(owner: &str, name: &str, descriptor: &str) -> bool {
+            matches!(
+                (owner, name, descriptor),
+                (ROOT, "getClass", "()Ljava/lang/Class;")
+                    | (
+                        "omni/runtime/Arrays",
+                        "newInstance",
+                        "(Ljava/lang/String;I)Ljava/lang/Object;"
+                    )
+            )
+        }
+
+        #[derive(Clone, Debug, Default)]
+        struct ClassInfo {
+            name: String,
+            parent: Option<usize>,
+            interfaces: Vec<usize>,
+            interface: bool,
+            abstract_class: bool,
+            final_class: bool,
+            element: Option<String>,
+            fields: Vec<(String, String)>,
+            statics: Vec<(String, String, Option<jvm::Element>)>,
+            vtable: Vec<(String, String, Option<usize>)>,
+            slots: Vec<(String, String)>,
+            initializer: Option<usize>,
+            instantiated: bool,
+            external: bool,
+        }
+
+        impl ClassInfo {
+            fn slot_of(&self, name: &str, descriptor: &str) -> Option<usize> {
+                self.vtable
+                    .iter()
+                    .position(|(held, described, _)| held == name && described == descriptor)
+            }
+
+            fn interface_slot(&self, name: &str, descriptor: &str) -> Option<usize> {
+                self.slots
+                    .iter()
+                    .position(|(held, described)| held == name && described == descriptor)
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        struct MethodInfo {
+            owner: usize,
+            name: String,
+            descriptor: String,
+            is_static: bool,
+            abstract_method: bool,
+            native: bool,
+            private: bool,
+            final_method: bool,
+            external: bool,
+            export: Option<String>,
+            function: Option<FunctionId>,
+            generated: Option<Function>,
+        }
+
+        pub struct Lowering<'a> {
+            files: &'a mut ClassFiles,
+            layout: Layout,
+            classes: Vec<ClassInfo>,
+            class_index: BTreeMap<String, usize>,
+            methods: Vec<MethodInfo>,
+            method_index: BTreeMap<(String, String, String), usize>,
+            functions: Vec<Function>,
+            globals: Vec<Global>,
+            global_index: BTreeMap<String, GlobalId>,
+            imports: BTreeMap<String, FunctionId>,
+            helpers: BTreeMap<String, FunctionId>,
+            pending: VecDeque<usize>,
+            pub missing: BTreeSet<String>,
+            lambdas: u32,
+            roots: Vec<FunctionId>,
+            deferred: Vec<usize>,
+        }
+
+        impl<'a> Lowering<'a> {
+            pub fn new(files: &'a mut ClassFiles, layout: Layout) -> Lowering<'a> {
+                Lowering {
+                    files,
+                    layout,
+                    classes: Vec::new(),
+                    class_index: BTreeMap::new(),
+                    methods: Vec::new(),
+                    method_index: BTreeMap::new(),
+                    functions: Vec::new(),
+                    globals: Vec::new(),
+                    global_index: BTreeMap::new(),
+                    imports: BTreeMap::new(),
+                    helpers: BTreeMap::new(),
+                    pending: VecDeque::new(),
+                    missing: BTreeSet::new(),
+                    lambdas: 0,
+                    roots: Vec::new(),
+                    deferred: Vec::new(),
+                }
+            }
+
+            pub fn declare(&mut self, name: &str) -> Result<usize, Diagnostic> {
+                if let Some(found) = self.class_index.get(name) {
+                    return Ok(*found);
+                }
+                if name.starts_with('[') {
+                    return self.array_class(name);
+                }
+                let Some(jvm_class) = self.files.get(name) else {
+                    return Ok(self.declare_missing(name));
+                };
+                let parent = match &jvm_class.superclass {
+                    Some(held) => Some(self.declare(&internal(held))?),
+                    None if name != ROOT => Some(self.declare(ROOT)?),
+                    None => None,
+                };
+                let mut interfaces = Vec::new();
+                for one in &jvm_class.interfaces {
+                    interfaces.push(self.declare(&internal(one))?);
+                }
+                if let Some(found) = self.class_index.get(name) {
+                    return Ok(*found);
+                }
+                let flags = jvm_class.access_flags;
+                let mut class = ClassInfo {
+                    name: name.to_string(),
+                    parent,
+                    interfaces: interfaces.clone(),
+                    interface: flags & 0x0200 != 0,
+                    abstract_class: flags & 0x0400 != 0,
+                    final_class: flags & 0x0010 != 0,
+                    ..ClassInfo::default()
+                };
+                if let Some(held) = parent {
+                    class.vtable = self.classes[held].vtable.clone();
+                }
+                if class.interface {
+                    for one in &interfaces {
+                        for slot in self.classes[*one].slots.clone() {
+                            if !class.slots.contains(&slot) {
+                                class.slots.push(slot);
+                            }
+                        }
+                    }
+                }
+                for field in &jvm_class.fields {
+                    let entry = (field.name.clone(), field.descriptor.clone());
+                    if field.access_flags & 0x0008 != 0 || class.interface {
+                        class
+                            .statics
+                            .push((entry.0, entry.1, field.constant.clone()));
+                    } else {
+                        class.fields.push(entry);
+                    }
+                }
+                let reference = self.classes.len();
+                self.classes.push(class);
+                self.class_index.insert(name.to_string(), reference);
+                for method in &jvm_class.methods {
+                    let access = method.access_flags;
+                    let export = method.annotations.iter().find_map(|one| {
+                        let named = one.descriptor == "Lkotlin/native/CName;"
+                            || one.descriptor == "Lkotlin/native/SymbolName;";
+                        if !named {
+                            return None;
+                        }
+                        one.values.iter().find_map(|(key, value)| match value {
+                            jvm::Element::Text(text)
+                                if !text.is_empty() && (key == "externName" || key == "name") =>
+                            {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    let index = self.methods.len();
+                    self.methods.push(MethodInfo {
+                        owner: reference,
+                        name: method.name.clone(),
+                        descriptor: method.descriptor.clone(),
+                        is_static: access & 0x0008 != 0,
+                        abstract_method: access & 0x0400 != 0,
+                        native: access & 0x0100 != 0,
+                        private: access & 0x0002 != 0,
+                        final_method: access & 0x0010 != 0,
+                        external: false,
+                        export,
+                        function: None,
+                        generated: None,
+                    });
+                    self.method_index.insert(
+                        (
+                            name.to_string(),
+                            method.name.clone(),
+                            method.descriptor.clone(),
+                        ),
+                        index,
+                    );
+                    if method.name == "<clinit>" {
+                        self.classes[reference].initializer = Some(index);
+                        continue;
+                    }
+                    if access & 0x0008 != 0 || method.name == "<init>" || access & 0x0002 != 0 {
+                        continue;
+                    }
+                    let held = &mut self.classes[reference];
+                    if held.interface {
+                        let slot = (method.name.clone(), method.descriptor.clone());
+                        if !held.slots.contains(&slot) {
+                            held.slots.push(slot);
+                        }
+                        continue;
+                    }
+                    let entry = if access & 0x0400 != 0 {
+                        None
+                    } else {
+                        Some(index)
+                    };
+                    match held.slot_of(&method.name, &method.descriptor) {
+                        Some(at) => held.vtable[at].2 = entry,
+                        None => held.vtable.push((
+                            method.name.clone(),
+                            method.descriptor.clone(),
+                            entry,
+                        )),
+                    }
+                }
+                if !self.classes[reference].interface {
+                    self.complete_vtable(reference);
+                }
+                Ok(reference)
+            }
+
+            fn declare_missing(&mut self, name: &str) -> usize {
+                if let Some(found) = self.class_index.get(name) {
+                    return *found;
+                }
+                self.missing.insert(name.to_string());
+                let parent = if name == ROOT {
+                    None
+                } else {
+                    Some(self.declare(ROOT).unwrap_or(0))
+                };
+                let vtable = parent
+                    .map(|held| self.classes[held].vtable.clone())
+                    .unwrap_or_default();
+                let reference = self.classes.len();
+                self.classes.push(ClassInfo {
+                    name: name.to_string(),
+                    parent,
+                    vtable,
+                    external: true,
+                    ..ClassInfo::default()
+                });
+                self.class_index.insert(name.to_string(), reference);
+                reference
+            }
+
+            fn array_class(&mut self, descriptor: &str) -> Result<usize, Diagnostic> {
+                let component = &descriptor[1..];
+                let root = self.declare(ROOT)?;
+                let parent = match class_of_descriptor(component) {
+                    Some(name) if name != ROOT => {
+                        let element = self.declare(&name)?;
+                        let held = &self.classes[element];
+                        match (held.interface, held.parent) {
+                            (false, Some(above)) => {
+                                let above = self.classes[above].name.clone();
+                                self.declare(&format!("[L{above};"))?
+                            }
+                            _ => self.declare("[Ljava/lang/Object;")?,
+                        }
+                    }
+                    Some(_) => root,
+                    None if component.starts_with('[') => {
+                        let inner = self.declare(component)?;
+                        match self.classes[inner].parent {
+                            Some(above) if above != root => {
+                                let above = self.classes[above].name.clone();
+                                self.declare(&format!("[{above}"))?
+                            }
+                            _ => self.declare("[Ljava/lang/Object;")?,
+                        }
+                    }
+                    None => root,
+                };
+                if let Some(found) = self.class_index.get(descriptor) {
+                    return Ok(*found);
+                }
+                let mut interfaces = Vec::new();
+                for name in ["java/lang/Cloneable", "java/io/Serializable"] {
+                    if self.files.get(name).is_some() {
+                        interfaces.push(self.declare(name)?);
+                    }
+                }
+                let reference = self.classes.len();
+                let vtable = self.classes[parent].vtable.clone();
+                self.classes.push(ClassInfo {
+                    name: descriptor.to_string(),
+                    parent: Some(parent),
+                    interfaces,
+                    final_class: true,
+                    element: Some(component.to_string()),
+                    vtable,
+                    ..ClassInfo::default()
+                });
+                self.class_index.insert(descriptor.to_string(), reference);
+                self.complete_vtable(reference);
+                Ok(reference)
+            }
+
+            fn interface_closure(&self, class: usize) -> Vec<usize> {
+                let mut out: Vec<usize> = Vec::new();
+                let mut waiting: Vec<usize> = Vec::new();
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    waiting.extend(self.classes[held].interfaces.iter().rev().copied());
+                    current = self.classes[held].parent;
+                }
+                waiting.reverse();
+                let mut index = 0;
+                while index < waiting.len() {
+                    let one = waiting[index];
+                    index += 1;
+                    if out.contains(&one) {
+                        continue;
+                    }
+                    out.push(one);
+                    for above in &self.classes[one].interfaces {
+                        waiting.push(*above);
+                    }
+                }
+                out
+            }
+
+            fn default_method(
+                &self,
+                interfaces: &[usize],
+                name: &str,
+                descriptor: &str,
+            ) -> Option<usize> {
+                for interface in interfaces {
+                    let key = (
+                        self.classes[*interface].name.clone(),
+                        name.to_string(),
+                        descriptor.to_string(),
+                    );
+                    if let Some(found) = self.method_index.get(&key) {
+                        let method = &self.methods[*found];
+                        if !method.abstract_method && !method.is_static {
+                            return Some(*found);
+                        }
+                    }
+                }
+                None
+            }
+
+            fn class_declares(&self, class: usize, name: &str, descriptor: &str) -> Option<usize> {
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if !self.classes[held].interface {
+                        let key = (
+                            self.classes[held].name.clone(),
+                            name.to_string(),
+                            descriptor.to_string(),
+                        );
+                        if let Some(found) = self.method_index.get(&key) {
+                            let method = &self.methods[*found];
+                            if !method.is_static && !method.private {
+                                return Some(*found);
+                            }
+                        }
+                    }
+                    current = self.classes[held].parent;
+                }
+                None
+            }
+
+            fn most_specific_default(
+                &self,
+                interfaces: &[usize],
+                name: &str,
+                descriptor: &str,
+            ) -> Option<usize> {
+                let declaring: Vec<(usize, usize)> = interfaces
+                    .iter()
+                    .filter_map(|interface| {
+                        let key = (
+                            self.classes[*interface].name.clone(),
+                            name.to_string(),
+                            descriptor.to_string(),
+                        );
+                        let found = *self.method_index.get(&key)?;
+                        let method = &self.methods[found];
+                        (!method.is_static && !method.private).then_some((*interface, found))
+                    })
+                    .collect();
+                let concrete: Vec<usize> = declaring
+                    .iter()
+                    .filter(|(interface, _)| {
+                        !declaring.iter().any(|(other, _)| {
+                            other != interface && self.interface_closure(*other).contains(interface)
+                        })
+                    })
+                    .filter(|(_, method)| !self.methods[*method].abstract_method)
+                    .map(|(_, method)| *method)
+                    .collect();
+                match concrete.as_slice() {
+                    [only] => Some(*only),
+                    _ => None,
+                }
+            }
+
+            fn complete_vtable(&mut self, class: usize) {
+                let interfaces = self.interface_closure(class);
+                for interface in &interfaces {
+                    for (name, descriptor) in self.classes[*interface].slots.clone() {
+                        if self.classes[class].slot_of(&name, &descriptor).is_none() {
+                            self.classes[class].vtable.push((name, descriptor, None));
+                        }
+                    }
+                }
+                for at in 0..self.classes[class].vtable.len() {
+                    let (name, descriptor, _) = self.classes[class].vtable[at].clone();
+                    if self.class_declares(class, &name, &descriptor).is_some() {
+                        continue;
+                    }
+                    let found = self.most_specific_default(&interfaces, &name, &descriptor);
+                    self.classes[class].vtable[at].2 = found;
+                }
+            }
+
+            fn find_method(&mut self, class: usize, name: &str, descriptor: &str) -> Option<usize> {
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    let key = (
+                        self.classes[held].name.clone(),
+                        name.to_string(),
+                        descriptor.to_string(),
+                    );
+                    if let Some(found) = self.method_index.get(&key) {
+                        return Some(*found);
+                    }
+                    current = self.classes[held].parent;
+                }
+                for interface in self.interface_closure(class) {
+                    let key = (
+                        self.classes[interface].name.clone(),
+                        name.to_string(),
+                        descriptor.to_string(),
+                    );
+                    if let Some(found) = self.method_index.get(&key) {
+                        return Some(*found);
+                    }
+                }
+                None
+            }
+
+            fn external_method(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+            ) -> usize {
+                let key = (owner.to_string(), name.to_string(), descriptor.to_string());
+                if let Some(found) = self.method_index.get(&key) {
+                    return *found;
+                }
+                let class = self.declare_missing(owner);
+                self.missing.insert(format!("{owner}.{name}{descriptor}"));
+                let index = self.methods.len();
+                self.methods.push(MethodInfo {
+                    owner: class,
+                    name: name.to_string(),
+                    descriptor: descriptor.to_string(),
+                    is_static,
+                    abstract_method: false,
+                    native: false,
+                    private: false,
+                    final_method: true,
+                    external: true,
+                    export: None,
+                    function: None,
+                    generated: None,
+                });
+                self.method_index.insert(key, index);
+                index
+            }
+
+            pub fn resolve(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+            ) -> Result<usize, Diagnostic> {
+                let class = self.declare(owner)?;
+                match self.find_method(class, name, descriptor) {
+                    Some(found) => Ok(found),
+                    None => Ok(self.external_method(owner, name, descriptor, is_static)),
+                }
+            }
+
+            fn method_name(&self, method: usize) -> String {
+                let held = &self.methods[method];
+                format!(
+                    "{}.{}{}",
+                    self.classes[held.owner].name, held.name, held.descriptor
+                )
+            }
+
+            pub fn function_of(&mut self, method: usize) -> FunctionId {
+                if let Some(found) = self.methods[method].function {
+                    return found;
+                }
+                let held = self.methods[method].clone();
+                let name = self.method_name(method);
+                let signature = signature_of(&held.descriptor, held.is_static);
+                let has_code = !held.external && !held.abstract_method;
+                let linkage = if has_code {
+                    Linkage::Internal
+                } else {
+                    Linkage::Import
+                };
+                let id = FunctionId(self.functions.len() as u32);
+                self.functions
+                    .push(Function::new(&name, signature, linkage));
+                self.methods[method].function = Some(id);
+                if has_code {
+                    self.pending.push_back(method);
+                }
+                if held.is_static || held.name == "<init>" {
+                    if let Some(initializer) = self.classes[held.owner].initializer {
+                        self.function_of(initializer);
+                    }
+                }
+                id
+            }
+
+            pub fn import(&mut self, name: &str, signature: Signature) -> FunctionId {
+                if let Some(found) = self.imports.get(name) {
+                    return *found;
+                }
+                let id = FunctionId(self.functions.len() as u32);
+                self.functions
+                    .push(Function::new(name, signature, Linkage::Import));
+                self.imports.insert(name.to_string(), id);
+                id
+            }
+
+            pub fn instantiate(&mut self, class: usize) {
+                if self.classes[class].instantiated {
+                    return;
+                }
+                self.classes[class].instantiated = true;
+                let entries: Vec<usize> = self.classes[class]
+                    .vtable
+                    .iter()
+                    .filter_map(|(_, _, method)| *method)
+                    .collect();
+                for method in entries {
+                    self.function_of(method);
+                }
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if let Some(initializer) = self.classes[held].initializer {
+                        self.function_of(initializer);
+                    }
+                    current = self.classes[held].parent;
+                }
+            }
+
+            pub fn root(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+            ) -> Result<FunctionId, Diagnostic> {
+                let method = self.resolve(owner, name, descriptor, is_static)?;
+                let inner = self.function_of(method);
+                let class = self.methods[method].owner;
+                let ensure = if is_static { self.ensure(class)? } else { None };
+                let id = match ensure {
+                    None => inner,
+                    Some(ensure) => {
+                        let label = format!("entry:{}", self.method_name(method));
+                        let signature = signature_of(descriptor, is_static);
+                        let result = signature.result;
+                        self.generated(&label, signature, move |body, values| {
+                            body.builder.call(ensure, None, Vec::new());
+                            let made = body.builder.call(inner, result, values);
+                            body.builder.ret(made);
+                            Ok(())
+                        })?
+                    }
+                };
+                if !self.roots.contains(&id) {
+                    self.roots.push(id);
+                }
+                Ok(id)
+            }
+
+            pub fn export_named(&mut self) -> Result<Vec<FunctionId>, Diagnostic> {
+                let mut made = Vec::new();
+                for method in 0..self.methods.len() {
+                    let held = self.methods[method].clone();
+                    if held.export.is_none() || held.external || held.abstract_method {
+                        continue;
+                    }
+                    let owner = self.classes[held.owner].name.clone();
+                    made.push(self.root(&owner, &held.name, &held.descriptor, held.is_static)?);
+                }
+                Ok(made)
+            }
+
+            fn instance_field(
+                &mut self,
+                owner: &str,
+                name: &str,
+            ) -> Result<Option<(usize, u32, String)>, Diagnostic> {
+                let class = self.declare(owner)?;
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if let Some(position) = self.classes[held]
+                        .fields
+                        .iter()
+                        .position(|(field, _)| field == name)
+                    {
+                        let mut base = 0usize;
+                        let mut above = self.classes[held].parent;
+                        while let Some(one) = above {
+                            base += self.classes[one].fields.len();
+                            above = self.classes[one].parent;
+                        }
+                        let descriptor = self.classes[held].fields[position].1.clone();
+                        return Ok(Some((held, (base + position) as u32, descriptor)));
+                    }
+                    current = self.classes[held].parent;
+                }
+                Ok(None)
+            }
+
+            fn static_owner(
+                &mut self,
+                owner: &str,
+                name: &str,
+            ) -> Result<Option<usize>, Diagnostic> {
+                let class = self.declare(owner)?;
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if self.classes[held]
+                        .statics
+                        .iter()
+                        .any(|(field, _, _)| field == name)
+                    {
+                        return Ok(Some(held));
+                    }
+                    current = self.classes[held].parent;
+                }
+                for interface in self.interface_closure(class) {
+                    if self.classes[interface]
+                        .statics
+                        .iter()
+                        .any(|(field, _, _)| field == name)
+                    {
+                        return Ok(Some(interface));
+                    }
+                }
+                Ok(None)
+            }
+
+            fn global(
+                &mut self,
+                name: &str,
+                size: u32,
+                align: u32,
+                mutable: bool,
+                content: GlobalContent,
+            ) -> GlobalId {
+                if let Some(found) = self.global_index.get(name) {
+                    return *found;
+                }
+                let id = GlobalId(self.globals.len() as u32);
+                self.globals.push(Global {
+                    name: name.to_string(),
+                    size,
+                    align,
+                    mutable,
+                    thread_local: false,
+                    linkage: Linkage::Internal,
+                    content,
+                    relocations: Vec::new(),
+                });
+                self.global_index.insert(name.to_string(), id);
+                id
+            }
+
+            fn static_global(&mut self, class: usize, name: &str, descriptor: &str) -> GlobalId {
+                let ty = storage(descriptor);
+                let data = self.layout.data();
+                let size = data.size_of(ty);
+                let align = data.align_of(ty);
+                let label = format!("{}.{name}", self.classes[class].name);
+                self.global(&label, size, align, true, GlobalContent::Zero)
+            }
+
+            fn initializes_itself(&self, class: usize) -> bool {
+                let info = &self.classes[class];
+                info.initializer.is_some()
+                    || info
+                        .statics
+                        .iter()
+                        .any(|(_, _, constant)| constant.is_some())
+            }
+
+            fn declares_default(&self, interface: usize) -> bool {
+                self.methods.iter().any(|method| {
+                    method.owner == interface
+                        && !method.is_static
+                        && !method.abstract_method
+                        && !method.name.starts_with('<')
+                })
+            }
+
+            fn default_interfaces(&self, class: usize) -> Vec<usize> {
+                fn visit(lowering: &Lowering<'_>, interface: usize, out: &mut Vec<usize>) {
+                    for above in &lowering.classes[interface].interfaces {
+                        visit(lowering, *above, out);
+                    }
+                    if lowering.classes[interface].interface
+                        && !out.contains(&interface)
+                        && lowering.declares_default(interface)
+                    {
+                        out.push(interface);
+                    }
+                }
+                let mut out = Vec::new();
+                if !self.classes[class].interface {
+                    for direct in &self.classes[class].interfaces {
+                        visit(self, *direct, &mut out);
+                    }
+                }
+                out
+            }
+
+            fn needs_initialization(&self, class: usize) -> bool {
+                let mut current = Some(class);
+                while let Some(held) = current {
+                    if self.initializes_itself(held)
+                        || self
+                            .default_interfaces(held)
+                            .into_iter()
+                            .any(|interface| self.initializes_itself(interface))
+                    {
+                        return true;
+                    }
+                    current = self.classes[held].parent;
+                }
+                false
+            }
+
+            pub fn run(&mut self) -> Result<(), Diagnostic> {
+                while let Some(method) = self.pending.pop_front() {
+                    self.lower_method(method)?;
+                }
+                Ok(())
+            }
+
+            fn lower_method(&mut self, method: usize) -> Result<(), Diagnostic> {
+                let info = self.methods[method].clone();
+                let Some(id) = info.function else {
+                    return Ok(());
+                };
+                if let Some(generated) = info.generated {
+                    self.functions[id.index()] = generated;
+                    return Ok(());
+                }
+                let owner = self.classes[info.owner].name.clone();
+                if info.native {
+                    if deferred_native(&owner, &info.name, &info.descriptor) {
+                        if !self.deferred.contains(&method) {
+                            self.deferred.push(method);
+                        }
+                        return Ok(());
+                    }
+                    match self.native_body(&owner, &info.name, &info.descriptor, info.is_static)? {
+                        Some(made) => self.functions[id.index()] = made,
+                        None => {
+                            self.missing
+                                .insert(format!("{owner}.{}{}", info.name, info.descriptor));
+                            self.functions[id.index()].linkage = Linkage::Import;
+                        }
+                    }
+                    return Ok(());
+                }
+                let Some(class) = self.files.get(&owner) else {
+                    self.functions[id.index()].linkage = Linkage::Import;
+                    return Ok(());
+                };
+                let Some(member) = class
+                    .methods
+                    .iter()
+                    .find(|one| one.name == info.name && one.descriptor == info.descriptor)
+                else {
+                    self.functions[id.index()].linkage = Linkage::Import;
+                    return Ok(());
+                };
+                let Some(code) = &member.code else {
+                    self.functions[id.index()].linkage = Linkage::Import;
+                    return Ok(());
+                };
+                let name = self.functions[id.index()].name.clone();
+                let signature = self.functions[id.index()].signature.clone();
+                let mut function = Function::new(&name, signature, Linkage::Internal);
+                {
+                    let builder = FunctionBuilder::new(&mut function);
+                    let body = Body::new(self, builder);
+                    MethodLowering::lower(body, &class, method, code)?;
+                }
+                self.functions[id.index()] = function;
+                Ok(())
+            }
+
+            fn generated(
+                &mut self,
+                name: &str,
+                signature: Signature,
+                build: impl FnOnce(&mut Body<'_, 'a, '_>, Vec<Value>) -> Result<(), Diagnostic>,
+            ) -> Result<FunctionId, Diagnostic> {
+                if let Some(found) = self.helpers.get(name) {
+                    return Ok(*found);
+                }
+                let id = FunctionId(self.functions.len() as u32);
+                self.functions
+                    .push(Function::new(name, signature.clone(), Linkage::Internal));
+                self.helpers.insert(name.to_string(), id);
+                let mut function = Function::new(name, signature, Linkage::Internal);
+                {
+                    let builder = FunctionBuilder::new(&mut function);
+                    let mut body = Body::new(self, builder);
+                    let entry = body.builder.create_block();
+                    let parameters = body.builder.entry_parameters(entry);
+                    body.builder.switch_to(entry);
+                    build(&mut body, parameters)?;
+                    body.finish(name)?;
+                }
+                self.functions[id.index()] = function;
+                Ok(id)
+            }
+
+            fn native_body(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                is_static: bool,
+            ) -> Result<Option<Function>, Diagnostic> {
+                let label = format!("{owner}.{name}{descriptor}");
+                let signature = signature_of(descriptor, is_static);
+                let identity = Signature::new(vec![Type::REFERENCE], Some(Type::I64));
+                if let Some(host) = host_forward(owner, name, descriptor) {
+                    let target = self.import(&host, signature.clone());
+                    let result = signature.result;
+                    return self
+                        .build_function(&label, signature, move |body, values| {
+                            let made = body.builder.call(target, result, values);
+                            body.builder.ret(made);
+                            Ok(())
+                        })
+                        .map(Some);
+                }
+                let shape = match (owner, name, descriptor) {
+                    ("java/lang/Float", "floatToRawIntBits", "(F)I")
+                    | ("java/lang/Float", "intBitsToFloat", "(I)F")
+                    | ("java/lang/Double", "doubleToRawLongBits", "(D)J")
+                    | ("java/lang/Double", "longBitsToDouble", "(J)D") => NativeShape::Bitcast,
+                    (
+                        "java/lang/Math" | "java/lang/StrictMath",
+                        "sqrt" | "floor" | "ceil" | "rint",
+                        "(D)D",
+                    ) => NativeShape::Unary(match name {
+                        "sqrt" => UnaryOp::SquareRoot,
+                        "floor" => UnaryOp::Floor,
+                        "ceil" => UnaryOp::Ceiling,
+                        _ => UnaryOp::RoundNearestEven,
+                    }),
+                    ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I")
+                    | (ROOT, "hashCode", "()I") => {
+                        NativeShape::Identity(self.import("omni.identity", identity))
+                    }
+                    _ => return Ok(None),
+                };
+                let result = signature.result.unwrap_or(Type::I32);
+                let function = self.build_function(&label, signature, move |body, values| {
+                    let value = match shape {
+                        NativeShape::Bitcast => {
+                            body.builder.convert(Conversion::Bitcast, values[0], result)
+                        }
+                        NativeShape::Unary(op) => body.builder.unary(op, values[0]),
+                        NativeShape::Identity(host) => {
+                            let wide = body.builder.call(host, Some(Type::I64), vec![values[0]]);
+                            let wide = wide.unwrap_or(values[0]);
+                            body.builder.convert(Conversion::Truncate, wide, Type::I32)
+                        }
+                    };
+                    body.builder.ret(Some(value));
+                    Ok(())
+                })?;
+                Ok(Some(function))
+            }
+
+            fn build_function(
+                &mut self,
+                label: &str,
+                signature: Signature,
+                build: impl FnOnce(&mut Body<'_, 'a, '_>, Vec<Value>) -> Result<(), Diagnostic>,
+            ) -> Result<Function, Diagnostic> {
+                let mut function = Function::new(label, signature, Linkage::Internal);
+                {
+                    let mut builder = FunctionBuilder::new(&mut function);
+                    let entry = builder.create_block();
+                    let parameters = builder.entry_parameters(entry);
+                    builder.switch_to(entry);
+                    let mut body = Body::new(self, builder);
+                    build(&mut body, parameters)?;
+                    body.finish(label)?;
+                }
+                Ok(function)
+            }
+
+            fn depth(&self, class: usize) -> usize {
+                let mut count = 0;
+                let mut current = self.classes[class].parent;
+                while let Some(held) = current {
+                    count += 1;
+                    current = self.classes[held].parent;
+                }
+                count
+            }
+
+            fn shown_name(&self, class: usize) -> String {
+                self.classes[class].name.replace('/', ".")
+            }
+
+            fn component_name(element: &str) -> String {
+                match element {
+                    "Z" => "boolean".to_string(),
+                    "B" => "byte".to_string(),
+                    "C" => "char".to_string(),
+                    "S" => "short".to_string(),
+                    "I" => "int".to_string(),
+                    "J" => "long".to_string(),
+                    "F" => "float".to_string(),
+                    "D" => "double".to_string(),
+                    other => match other
+                        .strip_prefix('L')
+                        .and_then(|rest| rest.strip_suffix(';'))
+                    {
+                        Some(named) => named.replace('/', "."),
+                        None => other.replace('/', "."),
+                    },
+                }
+            }
+
+            fn class_of_body(&mut self, label: &str) -> Result<Function, Diagnostic> {
+                let mut candidates: Vec<(usize, usize, String)> = (0..self.classes.len())
+                    .filter(|at| {
+                        let held = &self.classes[*at];
+                        held.instantiated
+                            && !held.interface
+                            && !held.abstract_class
+                            && !held.external
+                    })
+                    .map(|at| (self.depth(at), at, self.shown_name(at)))
+                    .collect();
+                candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.2.cmp(&right.2)));
+                let signature = Signature::new(vec![Type::REFERENCE], Some(Type::REFERENCE));
+                self.build_function(label, signature, move |body, values| {
+                    let this = values[0];
+                    for (_, class, shown) in candidates {
+                        let holds = body
+                            .builder
+                            .push(
+                                Operation::InstanceOf(ClassId(class as u32)),
+                                vec![this],
+                                Some(Type::BOOL),
+                            )
+                            .unwrap_or(this);
+                        let found = body.builder.create_block();
+                        let next = body.builder.create_block();
+                        body.builder.branch(holds, found, next);
+                        body.builder.switch_to(found);
+                        let text = body.string(&shown)?;
+                        let made = body.static_call(
+                            CLASSES,
+                            "named",
+                            "(Ljava/lang/String;)Ljava/lang/Class;",
+                            vec![text],
+                            None,
+                        )?;
+                        body.builder.ret(made);
+                        body.builder.switch_to(next);
+                    }
+                    let text = body.string("java.lang.Object")?;
+                    let made = body.static_call(
+                        CLASSES,
+                        "named",
+                        "(Ljava/lang/String;)Ljava/lang/Class;",
+                        vec![text],
+                        None,
+                    )?;
+                    body.builder.ret(made);
+                    Ok(())
+                })
+            }
+
+            fn new_array_body(&mut self, label: &str) -> Result<Function, Diagnostic> {
+                let fallback = self.declare("[Ljava/lang/Object;")?;
+                self.instantiate(fallback);
+                let mut arrays: Vec<(String, usize)> = (0..self.classes.len())
+                    .filter_map(|at| {
+                        let element = self.classes[at].element.as_deref()?;
+                        Some((Self::component_name(element), at))
+                    })
+                    .collect();
+                arrays.sort();
+                for (_, class) in &arrays {
+                    self.instantiate(*class);
+                }
+                let equals = self.resolve(STRING, "equals", "(Ljava/lang/Object;)Z", false)?;
+                let equals = self.function_of(equals);
+                let signature =
+                    Signature::new(vec![Type::REFERENCE, Type::I32], Some(Type::REFERENCE));
+                self.build_function(label, signature, move |body, values| {
+                    let (name, length) = (values[0], values[1]);
+                    let zero = body.builder.integer(Type::I32, 0);
+                    let negative = body.builder.compare(Comparison::LessSigned, length, zero);
+                    body.guard(negative, |body| {
+                        body.fault(
+                            "negativeSize",
+                            "(I)Ljava/lang/NegativeArraySizeException;",
+                            vec![length],
+                        )
+                    })?;
+                    for (component, class) in arrays {
+                        let text = body.string(&component)?;
+                        let same = body
+                            .builder
+                            .call(equals, Some(Type::I32), vec![text, name])
+                            .unwrap_or(zero);
+                        let same = body.builder.compare(Comparison::NotEqual, same, zero);
+                        let found = body.builder.create_block();
+                        let next = body.builder.create_block();
+                        body.builder.branch(same, found, next);
+                        body.builder.switch_to(found);
+                        let made = body.builder.push(
+                            Operation::AllocateArray(ClassId(class as u32)),
+                            vec![length],
+                            Some(Type::REFERENCE),
+                        );
+                        body.builder.ret(made);
+                        body.builder.switch_to(next);
+                    }
+                    let made = body.builder.push(
+                        Operation::AllocateArray(ClassId(fallback as u32)),
+                        vec![length],
+                        Some(Type::REFERENCE),
+                    );
+                    body.builder.ret(made);
+                    Ok(())
+                })
+            }
+
+            fn settle(&mut self) -> Result<(), Diagnostic> {
+                let mut seen = None;
+                loop {
+                    self.run()?;
+                    let arrays: Vec<usize> = (0..self.classes.len())
+                        .filter(|at| {
+                            self.classes[*at].element.is_some() && !self.classes[*at].instantiated
+                        })
+                        .collect();
+                    for class in arrays {
+                        self.instantiate(class);
+                    }
+                    self.run()?;
+                    let mark = (
+                        self.classes.iter().filter(|held| held.instantiated).count(),
+                        self.classes.len(),
+                    );
+                    if seen == Some(mark) {
+                        return Ok(());
+                    }
+                    seen = Some(mark);
+                    for method in self.deferred.clone() {
+                        let Some(id) = self.methods[method].function else {
+                            continue;
+                        };
+                        let label = self.functions[id.index()].name.clone();
+                        let made = if self.methods[method].name == "getClass" {
+                            self.class_of_body(&label)?
+                        } else {
+                            self.new_array_body(&label)?
+                        };
+                        self.functions[id.index()] = made;
+                    }
+                }
+            }
+
+            pub fn literal(&mut self, text: &str) -> Result<FunctionId, Diagnostic> {
+                let key = format!("literal\u{0}{text}");
+                if let Some(found) = self.helpers.get(&key) {
+                    return Ok(*found);
+                }
+                let index = self
+                    .helpers
+                    .keys()
+                    .filter(|held| held.starts_with("literal\u{0}"))
+                    .count();
+                let maker = self.string_maker()?;
+                let units: Vec<u16> = text.encode_utf16().collect();
+                let mut bytes = Vec::with_capacity(units.len() * 2);
+                for unit in &units {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+                let pointer = self.layout.data().pointer_bytes;
+                let slot = self.global(
+                    &format!("literal:{index}:slot"),
+                    pointer,
+                    pointer,
+                    true,
+                    GlobalContent::Zero,
+                );
+                let data = self.global(
+                    &format!("literal:{index}:data"),
+                    bytes.len() as u32,
+                    2,
+                    false,
+                    GlobalContent::Bytes(bytes),
+                );
+                let length = units.len() as i128;
+                let name = format!("literal:{index}");
+                let id = self.generated(
+                    &name,
+                    Signature::new(Vec::new(), Some(Type::REFERENCE)),
+                    move |body, _| {
+                        let address = body.builder.push(
+                            Operation::GlobalAddress(slot),
+                            Vec::new(),
+                            Some(Type::POINTER),
+                        );
+                        let address = address.unwrap_or(Value(0));
+                        let held = body.builder.load(Type::REFERENCE, address, pointer);
+                        let null = body.builder.null(Type::REFERENCE);
+                        let absent = body.builder.compare(Comparison::Equal, held, null);
+                        let make = body.builder.create_block();
+                        let done = body.builder.create_block();
+                        let result = body.builder.block_parameter(done, Type::REFERENCE);
+                        body.builder.terminate(Terminator::Branch {
+                            condition: absent,
+                            taken: BlockCall::to(make),
+                            otherwise: BlockCall::with(done, vec![held]),
+                        });
+                        body.builder.switch_to(make);
+                        let source = body
+                            .builder
+                            .push(
+                                Operation::GlobalAddress(data),
+                                Vec::new(),
+                                Some(Type::POINTER),
+                            )
+                            .unwrap_or(Value(0));
+                        let count = body.builder.integer(Type::I32, length);
+                        let made = body
+                            .builder
+                            .call(maker, Some(Type::REFERENCE), vec![source, count])
+                            .unwrap_or(held);
+                        body.builder.store(made, address, pointer);
+                        body.builder.jump(done, vec![made]);
+                        body.builder.switch_to(done);
+                        body.builder.ret(Some(result));
+                        Ok(())
+                    },
+                )?;
+                self.helpers.insert(key, id);
+                Ok(id)
+            }
+
+            fn string_maker(&mut self) -> Result<FunctionId, Diagnostic> {
+                if let Some(found) = self.helpers.get("omni.string") {
+                    return Ok(*found);
+                }
+                let signature =
+                    Signature::new(vec![Type::POINTER, Type::I32], Some(Type::REFERENCE));
+                let string = self.declare(STRING)?;
+                let field = self.instance_field(STRING, "value")?;
+                let Some((holder, index, descriptor)) = field.filter(|(_, _, held)| held == "[C")
+                else {
+                    let id = self.import("omni.string", signature);
+                    self.helpers.insert("omni.string".to_string(), id);
+                    return Ok(id);
+                };
+                self.instantiate(string);
+                let chars = self.declare(&descriptor)?;
+                self.generated("omni.string", signature, move |body, values| {
+                    let (data, length) = (values[0], values[1]);
+                    let array = body
+                        .builder
+                        .push(
+                            Operation::AllocateArray(ClassId(chars as u32)),
+                            vec![length],
+                            Some(Type::REFERENCE),
+                        )
+                        .unwrap_or(data);
+                    body.count_up(length, |body, index| {
+                        let at = body
+                            .builder
+                            .push(
+                                Operation::ElementAddress(Type::I16),
+                                vec![data, index],
+                                Some(Type::POINTER),
+                            )
+                            .unwrap_or(data);
+                        let unit = body.builder.load(Type::I16, at, 2);
+                        body.builder.push(
+                            Operation::StoreElement(Type::I16),
+                            vec![array, index, unit],
+                            None,
+                        );
+                    });
+                    let made = body
+                        .builder
+                        .push(
+                            Operation::Allocate(ClassId(string as u32)),
+                            Vec::new(),
+                            Some(Type::REFERENCE),
+                        )
+                        .unwrap_or(data);
+                    body.builder.push(
+                        Operation::StoreField(ClassId(holder as u32), index),
+                        vec![made, array],
+                        None,
+                    );
+                    body.builder.ret(Some(made));
+                    Ok(())
+                })
+            }
+
+            pub fn ensure(&mut self, class: usize) -> Result<Option<FunctionId>, Diagnostic> {
+                if !self.needs_initialization(class) {
+                    return Ok(None);
+                }
+                let name = format!("{}.<ensure>", self.classes[class].name);
+                if let Some(found) = self.helpers.get(&name) {
+                    return Ok(Some(*found));
+                }
+                let parent = match self.classes[class].parent {
+                    Some(held) if !self.classes[class].interface => self.ensure(held)?,
+                    _ => None,
+                };
+                let mut interfaces = Vec::new();
+                for interface in self.default_interfaces(class) {
+                    if let Some(made) = self.ensure(interface)? {
+                        interfaces.push(made);
+                    }
+                }
+                let flag = self.global(
+                    &format!("{}.<state>", self.classes[class].name),
+                    1,
+                    1,
+                    true,
+                    GlobalContent::Zero,
+                );
+                let initializer = self.classes[class]
+                    .initializer
+                    .map(|method| self.function_of(method));
+                let mut constants = Vec::new();
+                for (field, descriptor, constant) in self.classes[class].statics.clone() {
+                    let Some(constant) = constant else {
+                        continue;
+                    };
+                    let global = self.static_global(class, &field, &descriptor);
+                    let literal = match &constant {
+                        jvm::Element::Text(text) => Some(self.literal(text)?),
+                        _ => None,
+                    };
+                    constants.push((global, descriptor, constant, literal));
+                }
+                let pointer = self.layout.data();
+                let id =
+                    self.generated(&name, Signature::new(Vec::new(), None), move |body, _| {
+                        let address = body
+                            .builder
+                            .push(
+                                Operation::GlobalAddress(flag),
+                                Vec::new(),
+                                Some(Type::POINTER),
+                            )
+                            .unwrap_or(Value(0));
+                        let state = body.builder.load(Type::I8, address, 1);
+                        let zero = body.builder.integer(Type::I8, 0);
+                        let fresh = body.builder.compare(Comparison::Equal, state, zero);
+                        let start = body.builder.create_block();
+                        let done = body.builder.create_block();
+                        body.builder.branch(fresh, start, done);
+                        body.builder.switch_to(start);
+                        let one = body.builder.integer(Type::I8, 1);
+                        body.builder.store(one, address, 1);
+                        if let Some(parent) = parent {
+                            body.builder.call(parent, None, Vec::new());
+                        }
+                        for interface in interfaces {
+                            body.builder.call(interface, None, Vec::new());
+                        }
+                        for (global, descriptor, constant, literal) in constants {
+                            let ty = storage(&descriptor);
+                            let value = match (&constant, literal) {
+                                (_, Some(made)) => body
+                                    .builder
+                                    .call(made, Some(Type::REFERENCE), Vec::new())
+                                    .unwrap_or(address),
+                                (jvm::Element::Long(held), _) => {
+                                    body.builder.integer(Type::I64, i128::from(*held))
+                                }
+                                (jvm::Element::Float(held), _) => body
+                                    .builder
+                                    .push(
+                                        Operation::FloatConstant(u64::from(*held)),
+                                        Vec::new(),
+                                        Some(Type::F32),
+                                    )
+                                    .unwrap_or(address),
+                                (jvm::Element::Double(held), _) => body
+                                    .builder
+                                    .push(
+                                        Operation::FloatConstant(*held),
+                                        Vec::new(),
+                                        Some(Type::F64),
+                                    )
+                                    .unwrap_or(address),
+                                (other, _) => {
+                                    let number = match other {
+                                        jvm::Element::Int(held) => i128::from(*held),
+                                        jvm::Element::Byte(held) => i128::from(*held),
+                                        jvm::Element::Short(held) => i128::from(*held),
+                                        jvm::Element::Char(held) => i128::from(*held),
+                                        jvm::Element::Boolean(held) => i128::from(*held),
+                                        _ => 0,
+                                    };
+                                    let wide = body.builder.integer(Type::I32, number);
+                                    body.narrow(wide, &descriptor)
+                                }
+                            };
+                            let target = body
+                                .builder
+                                .push(
+                                    Operation::GlobalAddress(global),
+                                    Vec::new(),
+                                    Some(Type::POINTER),
+                                )
+                                .unwrap_or(address);
+                            body.builder.store(value, target, pointer.align_of(ty));
+                        }
+                        if let Some(initializer) = initializer {
+                            body.builder.call(initializer, None, Vec::new());
+                        }
+                        body.builder.ret(None);
+                        body.builder.switch_to(done);
+                        body.builder.ret(None);
+                        Ok(())
+                    })?;
+                Ok(Some(id))
+            }
+
+            fn array_clone(&mut self, class: usize) -> Result<FunctionId, Diagnostic> {
+                let element = storage(self.classes[class].element.as_deref().unwrap_or("I"));
+                let name = format!("{}.clone()", self.classes[class].name);
+                self.instantiate(class);
+                self.generated(
+                    &name,
+                    Signature::new(vec![Type::REFERENCE], Some(Type::REFERENCE)),
+                    move |body, values| {
+                        let source = values[0];
+                        let length = body
+                            .builder
+                            .push(Operation::ArrayLength, vec![source], Some(Type::I32))
+                            .unwrap_or(source);
+                        let copy = body
+                            .builder
+                            .push(
+                                Operation::AllocateArray(ClassId(class as u32)),
+                                vec![length],
+                                Some(Type::REFERENCE),
+                            )
+                            .unwrap_or(source);
+                        body.count_up(length, |body, index| {
+                            let item = body
+                                .builder
+                                .push(
+                                    Operation::LoadElement(element),
+                                    vec![source, index],
+                                    Some(element),
+                                )
+                                .unwrap_or(index);
+                            body.builder.push(
+                                Operation::StoreElement(element),
+                                vec![copy, index, item],
+                                None,
+                            );
+                        });
+                        body.builder.ret(Some(copy));
+                        Ok(())
+                    },
+                )
+            }
+
+            fn multi_array(
+                &mut self,
+                descriptor: &str,
+                dimensions: u8,
+            ) -> Result<FunctionId, Diagnostic> {
+                let name = format!("{descriptor}.<new>{dimensions}");
+                if let Some(found) = self.helpers.get(&name) {
+                    return Ok(*found);
+                }
+                let class = self.declare(descriptor)?;
+                self.instantiate(class);
+                let inner = if dimensions > 1 {
+                    Some(self.multi_array(&descriptor[1..], dimensions - 1)?)
+                } else {
+                    None
+                };
+                let parameters = vec![Type::I32; usize::from(dimensions)];
+                self.generated(
+                    &name,
+                    Signature::new(parameters, Some(Type::REFERENCE)),
+                    move |body, values| {
+                        let length = values[0];
+                        let zero = body.builder.integer(Type::I32, 0);
+                        let negative = body.builder.compare(Comparison::LessSigned, length, zero);
+                        body.guard(negative, |body| {
+                            body.fault(
+                                "negativeSize",
+                                "(I)Ljava/lang/NegativeArraySizeException;",
+                                vec![length],
+                            )
+                        })?;
+                        let array = body
+                            .builder
+                            .push(
+                                Operation::AllocateArray(ClassId(class as u32)),
+                                vec![length],
+                                Some(Type::REFERENCE),
+                            )
+                            .unwrap_or(length);
+                        if let Some(inner) = inner {
+                            let rest = values[1..].to_vec();
+                            body.count_up(length, |body, index| {
+                                let made = body
+                                    .builder
+                                    .call(inner, Some(Type::REFERENCE), rest.clone())
+                                    .unwrap_or(index);
+                                body.builder.push(
+                                    Operation::StoreElement(Type::REFERENCE),
+                                    vec![array, index, made],
+                                    None,
+                                );
+                            });
+                        }
+                        body.builder.ret(Some(array));
+                        Ok(())
+                    },
+                )
+            }
+
+            fn stub(&mut self, class: usize, name: &str, descriptor: &str) -> FunctionId {
+                let label = format!("abstract:{}.{name}{descriptor}", self.classes[class].name);
+                self.missing.insert(label.clone());
+                self.import(&label, signature_of(descriptor, false))
+            }
+
+            pub fn finish(
+                mut self,
+                module_name: &str,
+            ) -> Result<(Module, BTreeSet<String>), Diagnostic> {
+                self.settle()?;
+                let mut classes = Vec::with_capacity(self.classes.len());
+                for index in 0..self.classes.len() {
+                    let info = self.classes[index].clone();
+                    let concrete = !info.interface && !info.abstract_class && info.instantiated;
+                    let methods: Vec<Option<FunctionId>> = if info.interface {
+                        let mut reach = vec![index];
+                        reach.extend(self.interface_closure(index));
+                        info.slots
+                            .iter()
+                            .map(|(name, descriptor)| {
+                                self.default_method(&reach, name, descriptor)
+                                    .and_then(|method| self.methods[method].function)
+                            })
+                            .collect()
+                    } else {
+                        let mut slots = Vec::with_capacity(info.vtable.len());
+                        for (name, descriptor, method) in &info.vtable {
+                            let found = method.and_then(|held| self.methods[held].function);
+                            slots.push(match found {
+                                None if concrete => Some(self.stub(index, name, descriptor)),
+                                other => other,
+                            });
+                        }
+                        slots
+                    };
+                    let mut implementations = Vec::new();
+                    if !info.interface {
+                        for interface in self.interface_closure(index) {
+                            if !self.classes[interface].interface {
+                                continue;
+                            }
+                            let mut reach = vec![interface];
+                            reach.extend(self.interface_closure(interface));
+                            let mut slots = Vec::new();
+                            for (name, descriptor) in self.classes[interface].slots.clone() {
+                                let found = info
+                                    .slot_of(&name, &descriptor)
+                                    .and_then(|at| info.vtable[at].2)
+                                    .and_then(|method| self.methods[method].function);
+                                let fallback = self
+                                    .default_method(&reach, &name, &descriptor)
+                                    .and_then(|method| self.methods[method].function);
+                                slots.push(match (found, fallback) {
+                                    (None, None) if concrete => {
+                                        Some(self.stub(index, &name, &descriptor))
+                                    }
+                                    (found, _) => found,
+                                });
+                            }
+                            implementations.push((ClassId(interface as u32), slots));
+                        }
+                    }
+                    classes.push(ClassType {
+                        name: info.name.clone(),
+                        parent: if info.interface {
+                            None
+                        } else {
+                            info.parent.map(|held| ClassId(held as u32))
+                        },
+                        interface: info.interface,
+                        abstract_class: !info.interface && !concrete,
+                        element: info.element.as_deref().map(storage),
+                        fields: if info.element.is_some() {
+                            Vec::new()
+                        } else {
+                            info.fields.iter().map(|(_, held)| storage(held)).collect()
+                        },
+                        methods,
+                        implementations,
+                    });
+                }
+                for root in &self.roots {
+                    if self.functions[root.index()].linkage == Linkage::Internal {
+                        self.functions[root.index()].linkage = Linkage::Export;
+                    }
+                }
+                for method in &self.methods {
+                    let (Some(symbol), Some(id)) = (&method.export, method.function) else {
+                        continue;
+                    };
+                    if self.functions[id.index()].linkage != Linkage::Import {
+                        self.functions[id.index()].name = symbol.clone();
+                    }
+                }
+                let mut module = Module::new(module_name);
+                module.layout = self.layout;
+                module.classes = classes;
+                module.globals = self.globals;
+                module.functions = self.functions;
+                if let Some(violation) = module.violations().first() {
+                    return Err(fail(
+                        "EK411",
+                        "The native program broke a rule of the intermediate form it was lowered to.",
+                    )
+                    .with_context(format!("Rule: {}", violation.rule.name()))
+                    .with_context(format!("Name: {}", violation.subject)));
+                }
+                Ok((module, self.missing))
+            }
+        }
+
+        pub struct Body<'l, 'a, 'f> {
+            lowering: &'l mut Lowering<'a>,
+            builder: FunctionBuilder<'f>,
+            landing: Option<(Block, Block)>,
+            non_null: BTreeSet<Value>,
+        }
+
+        impl<'l, 'a, 'f> Body<'l, 'a, 'f> {
+            fn new(
+                lowering: &'l mut Lowering<'a>,
+                builder: FunctionBuilder<'f>,
+            ) -> Body<'l, 'a, 'f> {
+                Body {
+                    lowering,
+                    builder,
+                    landing: None,
+                    non_null: BTreeSet::new(),
+                }
+            }
+
+            fn finish(self, name: &str) -> Result<(), Diagnostic> {
+                self.builder.finish().map_err(|_| {
+                    fail(
+                        "EK411",
+                        "The native program broke a rule of the intermediate form it was lowered to.",
+                    )
+                    .with_context(format!("Name: {name}"))
+                })
+            }
+
+            fn count_up(&mut self, limit: Value, mut each: impl FnMut(&mut Self, Value)) {
+                let header = self.builder.create_block();
+                let inside = self.builder.create_block();
+                let after = self.builder.create_block();
+                let zero = self.builder.integer(Type::I32, 0);
+                let counter = self.builder.block_parameter(header, Type::I32);
+                self.builder.jump(header, vec![zero]);
+                self.builder.switch_to(header);
+                let more = self.builder.compare(Comparison::LessSigned, counter, limit);
+                self.builder.branch(more, inside, after);
+                self.builder.switch_to(inside);
+                each(self, counter);
+                let one = self.builder.integer(Type::I32, 1);
+                let next = self.builder.binary(BinaryOp::Add, counter, one);
+                self.builder.jump(header, vec![next]);
+                self.builder.switch_to(after);
+            }
+
+            fn call_operation(
+                &mut self,
+                operation: Operation,
+                arguments: Vec<Value>,
+                result: Option<Type>,
+            ) -> Option<Value> {
+                let Some((landing, _)) = self.landing else {
+                    return self.builder.push(operation, arguments, result);
+                };
+                let next = self.builder.create_block();
+                let received = result.map(|ty| self.builder.block_parameter(next, ty));
+                let produced = result.map(|ty| self.builder.function.new_value(ty));
+                let call = Instruction {
+                    operation,
+                    arguments,
+                    result: produced,
+                    spot: None,
+                };
+                self.builder.terminate(Terminator::Invoke {
+                    call,
+                    normal: BlockCall::with(next, produced.into_iter().collect()),
+                    unwind: BlockCall::to(landing),
+                });
+                self.builder.switch_to(next);
+                received
+            }
+
+            fn call(&mut self, function: FunctionId, arguments: Vec<Value>) -> Option<Value> {
+                let result = self.lowering.functions[function.index()].signature.result;
+                self.call_operation(Operation::Call(function), arguments, result)
+            }
+
+            fn raise(&mut self, exception: Value) {
+                match self.landing {
+                    None => self.builder.terminate(Terminator::Throw(exception)),
+                    Some((_, dispatch)) => self.builder.jump(dispatch, vec![exception]),
+                }
+            }
+
+            fn fault(
+                &mut self,
+                name: &str,
+                descriptor: &str,
+                arguments: Vec<Value>,
+            ) -> Result<(), Diagnostic> {
+                let method = self.lowering.resolve(FAULTS, name, descriptor, true)?;
+                let function = self.lowering.function_of(method);
+                if let Some(ensure) = self.lowering.ensure(self.lowering.methods[method].owner)? {
+                    self.builder.call(ensure, None, Vec::new());
+                }
+                let made = self
+                    .builder
+                    .call(function, Some(Type::REFERENCE), arguments);
+                let made = match made {
+                    Some(held) => held,
+                    None => self.builder.null(Type::REFERENCE),
+                };
+                self.raise(made);
+                Ok(())
+            }
+
+            fn guard(
+                &mut self,
+                failing: Value,
+                fault: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+            ) -> Result<(), Diagnostic> {
+                let bad = self.builder.create_block();
+                let good = self.builder.create_block();
+                self.builder.branch(failing, bad, good);
+                self.builder.switch_to(bad);
+                fault(self)?;
+                self.builder.switch_to(good);
+                Ok(())
+            }
+
+            fn null_check(&mut self, value: Value) -> Result<(), Diagnostic> {
+                if self.non_null.contains(&value) {
+                    return Ok(());
+                }
+                let null = self.builder.null(Type::REFERENCE);
+                let absent = self.builder.compare(Comparison::Equal, value, null);
+                self.guard(absent, |body| {
+                    body.fault(
+                        "nullPointer",
+                        "()Ljava/lang/NullPointerException;",
+                        Vec::new(),
+                    )
+                })?;
+                self.non_null.insert(value);
+                Ok(())
+            }
+
+            fn widen(&mut self, value: Value, descriptor: &str) -> Value {
+                match descriptor.as_bytes().first() {
+                    Some(b'Z' | b'C') => {
+                        self.builder
+                            .convert(Conversion::ZeroExtend, value, Type::I32)
+                    }
+                    Some(b'B' | b'S') => {
+                        self.builder
+                            .convert(Conversion::SignExtend, value, Type::I32)
+                    }
+                    _ => value,
+                }
+            }
+
+            fn narrow(&mut self, value: Value, descriptor: &str) -> Value {
+                match descriptor.as_bytes().first() {
+                    Some(b'Z') => self
+                        .builder
+                        .convert(Conversion::Truncate, value, Type::BOOL),
+                    Some(b'B') => self.builder.convert(Conversion::Truncate, value, Type::I8),
+                    Some(b'C' | b'S') => {
+                        self.builder.convert(Conversion::Truncate, value, Type::I16)
+                    }
+                    _ => value,
+                }
+            }
+
+            fn renarrow(&mut self, value: Value, descriptor: &str) -> Value {
+                if matches!(
+                    descriptor.as_bytes().first(),
+                    Some(b'Z' | b'B' | b'C' | b'S')
+                ) {
+                    let narrow = self.narrow(value, descriptor);
+                    self.widen(narrow, descriptor)
+                } else {
+                    value
+                }
+            }
+
+            fn initialize(
+                &mut self,
+                class: usize,
+                current: Option<usize>,
+            ) -> Result<(), Diagnostic> {
+                let mut above = current;
+                while let Some(held) = above {
+                    if held == class {
+                        return Ok(());
+                    }
+                    above = self.lowering.classes[held].parent;
+                }
+                if let Some(ensure) = self.lowering.ensure(class)? {
+                    self.call(ensure, Vec::new());
+                }
+                Ok(())
+            }
+
+            fn string(&mut self, text: &str) -> Result<Value, Diagnostic> {
+                let getter = self.lowering.literal(text)?;
+                let made = self.builder.call(getter, Some(Type::REFERENCE), Vec::new());
+                let made = made.unwrap_or(Value(0));
+                self.non_null.insert(made);
+                Ok(made)
+            }
+
+            fn invoke_method(&mut self, method: usize, arguments: Vec<Value>) -> Option<Value> {
+                let function = self.lowering.function_of(method);
+                self.call(function, arguments)
+            }
+
+            fn virtual_call(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                arguments: Vec<Value>,
+                through_interface: bool,
+            ) -> Result<Option<Value>, Diagnostic> {
+                let class = self.lowering.declare(owner)?;
+                let resolved = self.lowering.find_method(class, name, descriptor);
+                if let Some(found) = resolved {
+                    let held = &self.lowering.methods[found];
+                    let direct = held.private
+                        || held.is_static
+                        || held.external
+                        || held.final_method
+                        || self.lowering.classes[held.owner].final_class;
+                    if direct && !self.lowering.classes[class].interface {
+                        return Ok(self.invoke_method(found, arguments));
+                    }
+                }
+                let signature = signature_of(descriptor, false);
+                let selector = if self.lowering.classes[class].interface || through_interface {
+                    match self.lowering.classes[class].interface_slot(name, descriptor) {
+                        Some(slot) if self.lowering.classes[class].interface => Some(
+                            Operation::InterfaceMethod(ClassId(class as u32), slot as u32),
+                        ),
+                        _ => {
+                            let root = self.lowering.declare(ROOT)?;
+                            self.lowering.classes[root]
+                                .slot_of(name, descriptor)
+                                .map(|slot| {
+                                    Operation::VirtualMethod(ClassId(root as u32), slot as u32)
+                                })
+                        }
+                    }
+                } else {
+                    self.lowering.classes[class]
+                        .slot_of(name, descriptor)
+                        .map(|slot| Operation::VirtualMethod(ClassId(class as u32), slot as u32))
+                };
+                let Some(selector) = selector else {
+                    let method = match resolved {
+                        Some(found) => found,
+                        None => self
+                            .lowering
+                            .external_method(owner, name, descriptor, false),
+                    };
+                    return Ok(self.invoke_method(method, arguments));
+                };
+                let target = self
+                    .builder
+                    .push(selector, vec![arguments[0]], Some(Type::POINTER))
+                    .unwrap_or(arguments[0]);
+                let mut all = vec![target];
+                all.extend(arguments);
+                let result = signature.result;
+                Ok(self.call_operation(Operation::CallIndirect(signature), all, result))
+            }
+        }
+
+        impl<'l, 'a, 'f> Body<'l, 'a, 'f> {
+            fn cast_class(&mut self, target: &str) -> Result<Option<usize>, Diagnostic> {
+                if let Some(component) = target
+                    .strip_prefix("[L")
+                    .and_then(|rest| rest.strip_suffix(';'))
+                {
+                    let element = self.lowering.declare(component)?;
+                    let info = &self.lowering.classes[element];
+                    if info.external {
+                        return Ok(None);
+                    }
+                    if info.interface {
+                        return Ok(Some(self.lowering.declare("[Ljava/lang/Object;")?));
+                    }
+                }
+                let class = self.lowering.declare(target)?;
+                if self.lowering.classes[class].external {
+                    return Ok(None);
+                }
+                Ok(Some(class))
+            }
+
+            fn check_cast(&mut self, value: Value, target: &str) -> Result<(), Diagnostic> {
+                if target == ROOT {
+                    return Ok(());
+                }
+                let Some(class) = self.cast_class(target)? else {
+                    return Ok(());
+                };
+                let null = self.builder.null(Type::REFERENCE);
+                let absent = self.builder.compare(Comparison::Equal, value, null);
+                let test = self.builder.create_block();
+                let good = self.builder.create_block();
+                self.builder.branch(absent, good, test);
+                self.builder.switch_to(test);
+                let holds = self
+                    .builder
+                    .push(
+                        Operation::InstanceOf(ClassId(class as u32)),
+                        vec![value],
+                        Some(Type::BOOL),
+                    )
+                    .unwrap_or(value);
+                let bad = self.builder.create_block();
+                self.builder.branch(holds, good, bad);
+                self.builder.switch_to(bad);
+                let shown = target
+                    .trim_start_matches('L')
+                    .trim_end_matches(';')
+                    .replace('/', ".");
+                let named = self.string(&shown)?;
+                self.fault(
+                    "castFailure",
+                    "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/ClassCastException;",
+                    vec![value, named],
+                )?;
+                self.builder.switch_to(good);
+                Ok(())
+            }
+
+            fn instance_test(&mut self, value: Value, target: &str) -> Result<Value, Diagnostic> {
+                let Some(class) = self.cast_class(target)? else {
+                    return Ok(self.builder.integer(Type::BOOL, 0));
+                };
+                Ok(self
+                    .builder
+                    .push(
+                        Operation::InstanceOf(ClassId(class as u32)),
+                        vec![value],
+                        Some(Type::BOOL),
+                    )
+                    .unwrap_or(value))
+            }
+
+            fn new_object(
+                &mut self,
+                name: &str,
+                current: Option<usize>,
+            ) -> Result<Value, Diagnostic> {
+                let class = self.lowering.declare(name)?;
+                self.lowering.instantiate(class);
+                self.initialize(class, current)?;
+                let made = self
+                    .builder
+                    .push(
+                        Operation::Allocate(ClassId(class as u32)),
+                        Vec::new(),
+                        Some(Type::REFERENCE),
+                    )
+                    .unwrap_or(Value(0));
+                self.non_null.insert(made);
+                Ok(made)
+            }
+
+            fn static_call(
+                &mut self,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                arguments: Vec<Value>,
+                current: Option<usize>,
+            ) -> Result<Option<Value>, Diagnostic> {
+                let method = self.lowering.resolve(owner, name, descriptor, true)?;
+                let class = self.lowering.methods[method].owner;
+                self.initialize(class, current)?;
+                Ok(self.invoke_method(method, arguments))
+            }
+
+            fn unit(&mut self) -> Result<Value, Diagnostic> {
+                let Some(class) = self.lowering.static_owner("kotlin/Unit", "INSTANCE")? else {
+                    return Ok(self.builder.null(Type::REFERENCE));
+                };
+                self.initialize(class, None)?;
+                let global = self
+                    .lowering
+                    .static_global(class, "INSTANCE", "Lkotlin/Unit;");
+                let address = self
+                    .builder
+                    .push(
+                        Operation::GlobalAddress(global),
+                        Vec::new(),
+                        Some(Type::POINTER),
+                    )
+                    .unwrap_or(Value(0));
+                let pointer = self.lowering.layout.data().pointer_bytes;
+                Ok(self.builder.load(Type::REFERENCE, address, pointer))
+            }
+
+            fn boxed(primitive: u8) -> (&'static str, &'static str, &'static str) {
+                match primitive {
+                    b'Z' => ("java/lang/Boolean", "booleanValue", "Z"),
+                    b'B' => ("java/lang/Byte", "byteValue", "B"),
+                    b'C' => ("java/lang/Character", "charValue", "C"),
+                    b'S' => ("java/lang/Short", "shortValue", "S"),
+                    b'J' => ("java/lang/Long", "longValue", "J"),
+                    b'F' => ("java/lang/Float", "floatValue", "F"),
+                    b'D' => ("java/lang/Double", "doubleValue", "D"),
+                    _ => ("java/lang/Integer", "intValue", "I"),
+                }
+            }
+
+            fn adapt(&mut self, value: Value, have: &str, want: &str) -> Result<Value, Diagnostic> {
+                let have_kind = Kind::of(have).unwrap_or(Kind::Reference);
+                let want_kind = Kind::of(want).unwrap_or(Kind::Reference);
+                if have_kind == Kind::Reference && want_kind == Kind::Reference {
+                    if have != want {
+                        if let Some(target) = class_of_descriptor(want) {
+                            self.check_cast(value, &target)?;
+                        } else if want.starts_with('[') {
+                            self.check_cast(value, want)?;
+                        }
+                    }
+                    return Ok(value);
+                }
+                if have_kind == Kind::Reference {
+                    let primitive = want.as_bytes()[0];
+                    let (class, getter, letter) = Self::boxed(primitive);
+                    self.check_cast(value, class)?;
+                    self.null_check(value)?;
+                    let made = self.virtual_call(
+                        class,
+                        getter,
+                        &format!("(){letter}"),
+                        vec![value],
+                        false,
+                    )?;
+                    return Ok(made.unwrap_or(value));
+                }
+                if want_kind == Kind::Reference {
+                    let primitive = have.as_bytes()[0];
+                    let (class, _, letter) = Self::boxed(primitive);
+                    let made = self.static_call(
+                        class,
+                        "valueOf",
+                        &format!("({letter})L{class};"),
+                        vec![value],
+                        None,
+                    )?;
+                    return Ok(made.unwrap_or(value));
+                }
+                Ok(self.convert_kind(value, have_kind, want_kind))
+            }
+
+            fn convert_kind(&mut self, value: Value, from: Kind, to: Kind) -> Value {
+                let target = to.ty();
+                let conversion = match (from, to) {
+                    (left, right) if left == right => return value,
+                    (Kind::Int, Kind::Long) => Conversion::SignExtend,
+                    (Kind::Long, Kind::Int) => Conversion::Truncate,
+                    (Kind::Int | Kind::Long, Kind::Float | Kind::Double) => {
+                        Conversion::SignedToFloat
+                    }
+                    (Kind::Float, Kind::Double) => Conversion::FloatExtend,
+                    (Kind::Double, Kind::Float) => Conversion::FloatTruncate,
+                    (Kind::Float | Kind::Double, Kind::Int | Kind::Long) => {
+                        Conversion::FloatToSignedSaturating
+                    }
+                    _ => return value,
+                };
+                self.builder.convert(conversion, value, target)
+            }
+        }
+
+        struct Dispatch {
+            entries: Vec<usize>,
+            landing: Block,
+            dispatch: Block,
+            caught: Value,
+            thrown: Value,
+        }
+
+        struct MethodLowering<'m, 'l, 'a, 'f> {
+            body: Body<'l, 'a, 'f>,
+            class: &'m jvm::Class,
+            owner: usize,
+            returns: String,
+            locals: BTreeMap<(u16, Kind), Variable>,
+            spilled: BTreeMap<(usize, Kind), Variable>,
+            stack: Vec<(Value, Kind)>,
+            blocks: BTreeMap<u32, Block>,
+            handlers: Vec<(u32, u32, u32, Option<String>)>,
+            dispatches: Vec<Dispatch>,
+            exits: Vec<(u32, Vec<Kind>)>,
+        }
+
+        fn unknown_instruction(
+            class: &jvm::Class,
+            name: &str,
+            descriptor: &str,
+            pc: u32,
+            opcode: u8,
+        ) -> Diagnostic {
+            fail(
+                "EK410",
+                "An instruction this compiler does not know was found in compiled code.",
+            )
+            .with_context(format!("Opcode: 0x{opcode:02x}"))
+            .with_context(format!("Offset: {pc}"))
+            .with_context(format!(
+                "Method: {}.{name}{descriptor}",
+                internal(&class.name)
+            ))
+        }
+
+        impl<'m, 'l, 'a, 'f> MethodLowering<'m, 'l, 'a, 'f> {
+            fn lower(
+                mut body: Body<'l, 'a, 'f>,
+                class: &'m jvm::Class,
+                method: usize,
+                code: &'m jvm::Code,
+            ) -> Result<(), Diagnostic> {
+                let info = body.lowering.methods[method].clone();
+                let decoded = decode(&code.bytes).map_err(|(pc, opcode)| {
+                    unknown_instruction(class, &info.name, &info.descriptor, pc, opcode)
+                })?;
+                let end_pc = code.bytes.len() as u32;
+                let mut leaders: BTreeSet<u32> = BTreeSet::new();
+                leaders.insert(0);
+                for one in &decoded {
+                    match &one.operand {
+                        Operand::Branch(to) => {
+                            leaders.insert(*to);
+                            leaders.insert(one.next);
+                        }
+                        Operand::Table(default, _, targets) => {
+                            leaders.insert(*default);
+                            leaders.extend(targets.iter().copied());
+                            leaders.insert(one.next);
+                        }
+                        Operand::Lookup(default, pairs) => {
+                            leaders.insert(*default);
+                            leaders.extend(pairs.iter().map(|(_, to)| *to));
+                            leaders.insert(one.next);
+                        }
+                        _ => {}
+                    }
+                    if matches!(one.opcode, 0xac..=0xb1 | 0xbf) {
+                        leaders.insert(one.next);
+                    }
+                }
+                let mut handlers = Vec::new();
+                for (start, end, handler, catch_type) in &code.handlers {
+                    leaders.insert(u32::from(*start));
+                    leaders.insert(u32::from(*end));
+                    leaders.insert(u32::from(*handler));
+                    let caught = if *catch_type == 0 {
+                        None
+                    } else {
+                        class_name(class, *catch_type)
+                    };
+                    handlers.push((
+                        u32::from(*start),
+                        u32::from(*end),
+                        u32::from(*handler),
+                        caught,
+                    ));
+                }
+                leaders.retain(|at| *at < end_pc);
+                let entry = body.builder.create_block();
+                let parameters = body.builder.entry_parameters(entry);
+                let mut blocks = BTreeMap::new();
+                for leader in &leaders {
+                    blocks.insert(*leader, body.builder.create_block());
+                }
+                body.builder.switch_to(entry);
+                let (_, returns) = split_descriptor(&info.descriptor);
+                let mut lowering = MethodLowering {
+                    body,
+                    class,
+                    owner: info.owner,
+                    returns,
+                    locals: BTreeMap::new(),
+                    spilled: BTreeMap::new(),
+                    stack: Vec::new(),
+                    blocks,
+                    handlers,
+                    dispatches: Vec::new(),
+                    exits: Vec::new(),
+                };
+                let (descriptors, _) = split_descriptor(&info.descriptor);
+                let mut kinds = Vec::new();
+                if !info.is_static {
+                    kinds.push(Kind::Reference);
+                }
+                kinds.extend(
+                    descriptors
+                        .iter()
+                        .map(|one| Kind::of(one).unwrap_or(Kind::Int)),
+                );
+                let mut slot = 0u16;
+                for (kind, value) in kinds.iter().zip(&parameters) {
+                    let variable = lowering.local(slot, *kind);
+                    lowering.body.builder.define(variable, *value);
+                    slot += if kind.wide() { 2 } else { 1 };
+                }
+                if !info.is_static {
+                    if let Some(this) = parameters.first() {
+                        lowering.body.non_null.insert(*this);
+                    }
+                }
+                let first = lowering.blocks[&0];
+                lowering.body.builder.jump(first, Vec::new());
+                let mut entry_kinds: BTreeMap<u32, Vec<Kind>> = BTreeMap::new();
+                entry_kinds.insert(0, Vec::new());
+                let mut work: VecDeque<u32> = VecDeque::new();
+                work.push_back(0);
+                for (_, _, handler, _) in lowering.handlers.clone() {
+                    entry_kinds.insert(handler, vec![Kind::Reference]);
+                    work.push_back(handler);
+                }
+                let mut done: BTreeSet<u32> = BTreeSet::new();
+                while let Some(start) = work.pop_front() {
+                    if !lowering.blocks.contains_key(&start) || !done.insert(start) {
+                        continue;
+                    }
+                    let kinds = entry_kinds.get(&start).cloned().unwrap_or_default();
+                    let end = leaders.range(start + 1..).next().copied().unwrap_or(end_pc);
+                    lowering.begin(start, &kinds);
+                    let mut ended = false;
+                    for one in decoded.iter().filter(|one| one.pc >= start && one.pc < end) {
+                        if lowering.instruction(one, &info)? {
+                            ended = true;
+                            break;
+                        }
+                    }
+                    if !ended {
+                        if end < end_pc {
+                            let kinds = lowering.leave();
+                            let next = lowering.blocks[&end];
+                            lowering.body.builder.jump(next, Vec::new());
+                            lowering.exits.push((end, kinds));
+                        } else {
+                            lowering.body.builder.terminate(Terminator::Unreachable);
+                        }
+                    }
+                    for (next, kinds) in std::mem::take(&mut lowering.exits) {
+                        entry_kinds.entry(next).or_insert(kinds);
+                        work.push_back(next);
+                    }
+                }
+                for (pc, block) in lowering.blocks.clone() {
+                    if !done.contains(&pc) {
+                        lowering.body.builder.switch_to(block);
+                        lowering.body.builder.terminate(Terminator::Unreachable);
+                    }
+                }
+                lowering.build_dispatches()?;
+                let name = lowering.body.lowering.method_name(method);
+                lowering.body.finish(&name)
+            }
+
+            fn local(&mut self, slot: u16, kind: Kind) -> Variable {
+                if let Some(found) = self.locals.get(&(slot, kind)) {
+                    return *found;
+                }
+                let made = self.body.builder.declare_variable(kind.ty());
+                self.locals.insert((slot, kind), made);
+                made
+            }
+
+            fn spill_variable(&mut self, depth: usize, kind: Kind) -> Variable {
+                if let Some(found) = self.spilled.get(&(depth, kind)) {
+                    return *found;
+                }
+                let made = self.body.builder.declare_variable(kind.ty());
+                self.spilled.insert((depth, kind), made);
+                made
+            }
+
+            fn begin(&mut self, start: u32, kinds: &[Kind]) {
+                let block = self.blocks[&start];
+                self.body.builder.switch_to(block);
+                self.stack.clear();
+                for (depth, kind) in kinds.iter().enumerate() {
+                    let variable = self.spill_variable(depth, *kind);
+                    let value = self.body.builder.read(variable);
+                    self.stack.push((value, *kind));
+                }
+                let active: Vec<usize> = self
+                    .handlers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (from, to, _, _))| *from <= start && start < *to)
+                    .map(|(index, _)| index)
+                    .collect();
+                self.body.landing = if active.is_empty() {
+                    None
+                } else {
+                    Some(self.dispatch_for(active))
+                };
+            }
+
+            fn dispatch_for(&mut self, entries: Vec<usize>) -> (Block, Block) {
+                if let Some(found) = self.dispatches.iter().find(|one| one.entries == entries) {
+                    return (found.landing, found.dispatch);
+                }
+                let landing = self.body.builder.create_block();
+                let caught = self.body.builder.block_parameter(landing, Type::REFERENCE);
+                let dispatch = self.body.builder.create_block();
+                let thrown = self.body.builder.block_parameter(dispatch, Type::REFERENCE);
+                self.dispatches.push(Dispatch {
+                    entries,
+                    landing,
+                    dispatch,
+                    caught,
+                    thrown,
+                });
+                (landing, dispatch)
+            }
+
+            fn build_dispatches(&mut self) -> Result<(), Diagnostic> {
+                let dispatches = std::mem::take(&mut self.dispatches);
+                for one in dispatches {
+                    self.body.landing = None;
+                    self.body.builder.switch_to(one.landing);
+                    self.body.builder.jump(one.dispatch, vec![one.caught]);
+                    self.body.builder.switch_to(one.dispatch);
+                    let variable = self.spill_variable(0, Kind::Reference);
+                    self.body.builder.define(variable, one.thrown);
+                    let mut ended = false;
+                    for entry in &one.entries {
+                        let (_, _, target, caught) = self.handlers[*entry].clone();
+                        let Some(block) = self.blocks.get(&target).copied() else {
+                            continue;
+                        };
+                        let class = match caught.as_deref() {
+                            None | Some("java/lang/Throwable") => None,
+                            Some(name) => {
+                                let class = self.body.lowering.declare(name)?;
+                                if self.body.lowering.classes[class].external {
+                                    None
+                                } else {
+                                    Some(class)
+                                }
+                            }
+                        };
+                        match class {
+                            None => {
+                                self.body.builder.jump(block, Vec::new());
+                                ended = true;
+                                break;
+                            }
+                            Some(class) => {
+                                let holds = self
+                                    .body
+                                    .builder
+                                    .push(
+                                        Operation::InstanceOf(ClassId(class as u32)),
+                                        vec![one.thrown],
+                                        Some(Type::BOOL),
+                                    )
+                                    .unwrap_or(one.thrown);
+                                let next = self.body.builder.create_block();
+                                self.body.builder.branch(holds, block, next);
+                                self.body.builder.switch_to(next);
+                            }
+                        }
+                    }
+                    if !ended {
+                        self.body.builder.terminate(Terminator::Throw(one.thrown));
+                    }
+                }
+                Ok(())
+            }
+
+            fn leave(&mut self) -> Vec<Kind> {
+                let held = self.stack.clone();
+                for (depth, (value, kind)) in held.iter().enumerate() {
+                    let variable = self.spill_variable(depth, *kind);
+                    self.body.builder.define(variable, *value);
+                }
+                held.iter().map(|(_, kind)| *kind).collect()
+            }
+
+            fn exit_to(&mut self, targets: &[u32]) -> Vec<Block> {
+                let kinds = self.leave();
+                let mut blocks = Vec::with_capacity(targets.len());
+                for target in targets {
+                    self.exits.push((*target, kinds.clone()));
+                    blocks.push(self.blocks.get(target).copied().unwrap_or(self.blocks[&0]));
+                }
+                blocks
+            }
+
+            fn push(&mut self, value: Value, kind: Kind) {
+                self.stack.push((value, kind));
+            }
+
+            fn pop(&mut self) -> (Value, Kind) {
+                self.stack.pop().unwrap_or((Value(u32::MAX), Kind::Int))
+            }
+
+            fn pop_value(&mut self) -> Value {
+                self.pop().0
+            }
+
+            fn int(&mut self, value: i64) -> Value {
+                self.body.builder.integer(Type::I32, i128::from(value))
+            }
+
+            fn current(&self) -> Option<usize> {
+                Some(self.owner)
+            }
+
+            fn arguments(&mut self, descriptor: &str, receiver: bool) -> Vec<Value> {
+                let (parameters, _) = split_descriptor(descriptor);
+                let mut values = Vec::with_capacity(parameters.len() + 1);
+                for _ in &parameters {
+                    values.push(self.pop_value());
+                }
+                if receiver {
+                    values.push(self.pop_value());
+                }
+                values.reverse();
+                values
+            }
+
+            fn returned(&mut self, value: Option<Value>, descriptor: &str) {
+                let (_, returns) = split_descriptor(descriptor);
+                if let (Some(value), Some(kind)) = (value, Kind::of(&returns)) {
+                    let value = self.body.renarrow(value, &returns);
+                    self.push(value, kind);
+                }
+            }
+
+            fn binary(&mut self, op: BinaryOp, kind: Kind) {
+                let right = self.pop_value();
+                let left = self.pop_value();
+                let made = self.body.builder.binary(op, left, right);
+                self.push(made, kind);
+            }
+
+            fn shift(&mut self, op: BinaryOp, kind: Kind) {
+                let amount = self.pop_value();
+                let value = self.pop_value();
+                let amount = if kind == Kind::Long {
+                    self.body
+                        .builder
+                        .convert(Conversion::ZeroExtend, amount, Type::I64)
+                } else {
+                    amount
+                };
+                let made = self.body.builder.binary(op, value, amount);
+                self.push(made, kind);
+            }
+
+            fn divide(&mut self, op: BinaryOp, kind: Kind) -> Result<(), Diagnostic> {
+                let right = self.pop_value();
+                let left = self.pop_value();
+                let zero = self.body.builder.integer(kind.ty(), 0);
+                let empty = self.body.builder.compare(Comparison::Equal, right, zero);
+                self.body.guard(empty, |body| {
+                    body.fault(
+                        "divisionByZero",
+                        "()Ljava/lang/ArithmeticException;",
+                        Vec::new(),
+                    )
+                })?;
+                let made = self.body.builder.binary(op, left, right);
+                self.push(made, kind);
+                Ok(())
+            }
+
+            fn convert(
+                &mut self,
+                conversion: Conversion,
+                to: Kind,
+                narrow: Option<(Type, Conversion)>,
+            ) {
+                let value = self.pop_value();
+                let made = match narrow {
+                    Some((ty, extend)) => {
+                        let cut = self.body.builder.convert(Conversion::Truncate, value, ty);
+                        self.body.builder.convert(extend, cut, Type::I32)
+                    }
+                    None => self.body.builder.convert(conversion, value, to.ty()),
+                };
+                self.push(made, to);
+            }
+
+            fn three_way(&mut self, kind: Kind, unordered: i64) {
+                let right = self.pop_value();
+                let left = self.pop_value();
+                let (greater, less) = if kind == Kind::Long {
+                    (
+                        self.body
+                            .builder
+                            .compare(Comparison::GreaterSigned, left, right),
+                        self.body
+                            .builder
+                            .compare(Comparison::LessSigned, left, right),
+                    )
+                } else {
+                    (
+                        self.body.builder.float_compare(
+                            FloatComparison::OrderedGreater,
+                            left,
+                            right,
+                        ),
+                        self.body
+                            .builder
+                            .float_compare(FloatComparison::OrderedLess, left, right),
+                    )
+                };
+                let greater = self
+                    .body
+                    .builder
+                    .convert(Conversion::ZeroExtend, greater, Type::I32);
+                let less = self
+                    .body
+                    .builder
+                    .convert(Conversion::ZeroExtend, less, Type::I32);
+                let mut made = self.body.builder.binary(BinaryOp::Subtract, greater, less);
+                if kind != Kind::Long {
+                    let neither =
+                        self.body
+                            .builder
+                            .float_compare(FloatComparison::Unordered, left, right);
+                    let fallback = self.int(unordered);
+                    made = self.body.builder.select(neither, fallback, made);
+                }
+                self.push(made, Kind::Int);
+            }
+
+            fn array_access(&mut self, array: Value, index: Value) -> Result<(), Diagnostic> {
+                self.body.null_check(array)?;
+                let length = self
+                    .body
+                    .builder
+                    .push(Operation::ArrayLength, vec![array], Some(Type::I32))
+                    .unwrap_or(array);
+                let outside =
+                    self.body
+                        .builder
+                        .compare(Comparison::GreaterEqualUnsigned, index, length);
+                self.body.guard(outside, |body| {
+                    body.fault(
+                        "indexOutOfBounds",
+                        "(II)Ljava/lang/ArrayIndexOutOfBoundsException;",
+                        vec![index, length],
+                    )
+                })
+            }
+
+            fn element_load(&mut self, descriptor: &str) -> Result<(), Diagnostic> {
+                let index = self.pop_value();
+                let array = self.pop_value();
+                self.array_access(array, index)?;
+                let value = if descriptor == "B" {
+                    self.byte_or_boolean(array, index, None)?
+                } else {
+                    let ty = storage(descriptor);
+                    let loaded = self
+                        .body
+                        .builder
+                        .push(Operation::LoadElement(ty), vec![array, index], Some(ty))
+                        .unwrap_or(index);
+                    self.body.widen(loaded, descriptor)
+                };
+                self.push(value, Kind::of(descriptor).unwrap_or(Kind::Int));
+                Ok(())
+            }
+
+            fn byte_or_boolean(
+                &mut self,
+                array: Value,
+                index: Value,
+                stored: Option<Value>,
+            ) -> Result<Value, Diagnostic> {
+                let booleans = self.body.lowering.declare("[Z")?;
+                let holds = self
+                    .body
+                    .builder
+                    .push(
+                        Operation::InstanceOf(ClassId(booleans as u32)),
+                        vec![array],
+                        Some(Type::BOOL),
+                    )
+                    .unwrap_or(array);
+                let as_boolean = self.body.builder.create_block();
+                let as_byte = self.body.builder.create_block();
+                let joined = self.body.builder.create_block();
+                let result = self.body.builder.block_parameter(joined, Type::I32);
+                self.body.builder.branch(holds, as_boolean, as_byte);
+                for (block, descriptor) in [(as_boolean, "Z"), (as_byte, "B")] {
+                    self.body.builder.switch_to(block);
+                    let ty = storage(descriptor);
+                    let value = match stored {
+                        Some(value) => {
+                            let narrowed = self.body.narrow(value, descriptor);
+                            self.body.builder.push(
+                                Operation::StoreElement(ty),
+                                vec![array, index, narrowed],
+                                None,
+                            );
+                            value
+                        }
+                        None => {
+                            let loaded = self
+                                .body
+                                .builder
+                                .push(Operation::LoadElement(ty), vec![array, index], Some(ty))
+                                .unwrap_or(index);
+                            self.body.widen(loaded, descriptor)
+                        }
+                    };
+                    self.body.builder.jump(joined, vec![value]);
+                }
+                self.body.builder.switch_to(joined);
+                Ok(result)
+            }
+
+            fn element_store(&mut self, descriptor: &str) -> Result<(), Diagnostic> {
+                let value = self.pop_value();
+                let index = self.pop_value();
+                let array = self.pop_value();
+                self.array_access(array, index)?;
+                if descriptor == "B" {
+                    self.byte_or_boolean(array, index, Some(value))?;
+                    return Ok(());
+                }
+                let ty = storage(descriptor);
+                let narrowed = self.body.narrow(value, descriptor);
+                self.body.builder.push(
+                    Operation::StoreElement(ty),
+                    vec![array, index, narrowed],
+                    None,
+                );
+                Ok(())
+            }
+
+            fn new_array(&mut self, descriptor: &str) -> Result<(), Diagnostic> {
+                let length = self.pop_value();
+                let zero = self.int(0);
+                let negative = self
+                    .body
+                    .builder
+                    .compare(Comparison::LessSigned, length, zero);
+                self.body.guard(negative, |body| {
+                    body.fault(
+                        "negativeSize",
+                        "(I)Ljava/lang/NegativeArraySizeException;",
+                        vec![length],
+                    )
+                })?;
+                let class = self.body.lowering.declare(descriptor)?;
+                self.body.lowering.instantiate(class);
+                let made = self
+                    .body
+                    .builder
+                    .push(
+                        Operation::AllocateArray(ClassId(class as u32)),
+                        vec![length],
+                        Some(Type::REFERENCE),
+                    )
+                    .unwrap_or(length);
+                self.body.non_null.insert(made);
+                self.push(made, Kind::Reference);
+                Ok(())
+            }
+
+            fn condition(&mut self, opcode: u8) -> Value {
+                let comparison = match opcode {
+                    0x99 | 0x9f | 0xa5 | 0xc6 => Comparison::Equal,
+                    0x9a | 0xa0 | 0xa6 | 0xc7 => Comparison::NotEqual,
+                    0x9b | 0xa1 => Comparison::LessSigned,
+                    0x9c | 0xa2 => Comparison::GreaterEqualSigned,
+                    0x9d | 0xa3 => Comparison::GreaterSigned,
+                    _ => Comparison::LessEqualSigned,
+                };
+                let (left, right) = match opcode {
+                    0x99..=0x9e => {
+                        let left = self.pop_value();
+                        (left, self.int(0))
+                    }
+                    0xc6 | 0xc7 => {
+                        let left = self.pop_value();
+                        (left, self.body.builder.null(Type::REFERENCE))
+                    }
+                    _ => {
+                        let right = self.pop_value();
+                        let left = self.pop_value();
+                        (left, right)
+                    }
+                };
+                self.body.builder.compare(comparison, left, right)
+            }
+
+            fn instruction(
+                &mut self,
+                one: &Decoded,
+                info: &MethodInfo,
+            ) -> Result<bool, Diagnostic> {
+                let opcode = one.opcode;
+                let slot_of = |fallback: u8, base: u8| -> u16 {
+                    match one.operand {
+                        Operand::Local(slot) => slot,
+                        _ => u16::from(fallback - base),
+                    }
+                };
+                match opcode {
+                    0x00 => {}
+                    0x01 => {
+                        let made = self.body.builder.null(Type::REFERENCE);
+                        self.push(made, Kind::Reference);
+                    }
+                    0x02..=0x08 => {
+                        let made = self.int(i64::from(opcode) - 3);
+                        self.push(made, Kind::Int);
+                    }
+                    0x09 | 0x0a => {
+                        let made = self.body.builder.integer(Type::I64, i128::from(opcode) - 9);
+                        self.push(made, Kind::Long);
+                    }
+                    0x0b..=0x0d => {
+                        let made = self.body.builder.float(Type::F32, f64::from(opcode - 0x0b));
+                        self.push(made, Kind::Float);
+                    }
+                    0x0e | 0x0f => {
+                        let made = self.body.builder.float(Type::F64, f64::from(opcode - 0x0e));
+                        self.push(made, Kind::Double);
+                    }
+                    0x10 | 0x11 => {
+                        if let Operand::Int(held) = one.operand {
+                            let made = self.int(i64::from(held));
+                            self.push(made, Kind::Int);
+                        }
+                    }
+                    0x12..=0x14 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        self.load_constant(index)?;
+                    }
+                    0x15..=0x2d => {
+                        let (kind, slot) = match opcode {
+                            0x15 => (Kind::Int, slot_of(0, 0)),
+                            0x16 => (Kind::Long, slot_of(0, 0)),
+                            0x17 => (Kind::Float, slot_of(0, 0)),
+                            0x18 => (Kind::Double, slot_of(0, 0)),
+                            0x19 => (Kind::Reference, slot_of(0, 0)),
+                            0x1a..=0x1d => (Kind::Int, u16::from(opcode - 0x1a)),
+                            0x1e..=0x21 => (Kind::Long, u16::from(opcode - 0x1e)),
+                            0x22..=0x25 => (Kind::Float, u16::from(opcode - 0x22)),
+                            0x26..=0x29 => (Kind::Double, u16::from(opcode - 0x26)),
+                            _ => (Kind::Reference, u16::from(opcode - 0x2a)),
+                        };
+                        let variable = self.local(slot, kind);
+                        let value = self.body.builder.read(variable);
+                        self.push(value, kind);
+                    }
+                    0x2e..=0x35 => {
+                        let descriptor = ["I", "J", "F", "D", "Ljava/lang/Object;", "B", "C", "S"]
+                            [usize::from(opcode - 0x2e)];
+                        self.element_load(descriptor)?;
+                    }
+                    0x36..=0x4e => {
+                        let (kind, slot) = match opcode {
+                            0x36 => (Kind::Int, slot_of(0, 0)),
+                            0x37 => (Kind::Long, slot_of(0, 0)),
+                            0x38 => (Kind::Float, slot_of(0, 0)),
+                            0x39 => (Kind::Double, slot_of(0, 0)),
+                            0x3a => (Kind::Reference, slot_of(0, 0)),
+                            0x3b..=0x3e => (Kind::Int, u16::from(opcode - 0x3b)),
+                            0x3f..=0x42 => (Kind::Long, u16::from(opcode - 0x3f)),
+                            0x43..=0x46 => (Kind::Float, u16::from(opcode - 0x43)),
+                            0x47..=0x4a => (Kind::Double, u16::from(opcode - 0x47)),
+                            _ => (Kind::Reference, u16::from(opcode - 0x4b)),
+                        };
+                        let value = self.pop_value();
+                        let variable = self.local(slot, kind);
+                        self.body.builder.define(variable, value);
+                    }
+                    0x4f..=0x56 => {
+                        let descriptor = ["I", "J", "F", "D", "Ljava/lang/Object;", "B", "C", "S"]
+                            [usize::from(opcode - 0x4f)];
+                        self.element_store(descriptor)?;
+                    }
+                    0x57 => {
+                        self.pop();
+                    }
+                    0x58 => {
+                        let (_, kind) = self.pop();
+                        if !kind.wide() {
+                            self.pop();
+                        }
+                    }
+                    0x59 => {
+                        let top = self.pop();
+                        self.stack.push(top);
+                        self.stack.push(top);
+                    }
+                    0x5a => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        self.stack.extend([first, second, first]);
+                    }
+                    0x5b => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        if second.1.wide() {
+                            self.stack.extend([first, second, first]);
+                        } else {
+                            let third = self.pop();
+                            self.stack.extend([first, third, second, first]);
+                        }
+                    }
+                    0x5c => {
+                        let first = self.pop();
+                        if first.1.wide() {
+                            self.stack.extend([first, first]);
+                        } else {
+                            let second = self.pop();
+                            self.stack.extend([second, first, second, first]);
+                        }
+                    }
+                    0x5d => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        if first.1.wide() {
+                            self.stack.extend([first, second, first]);
+                        } else {
+                            let third = self.pop();
+                            self.stack.extend([second, first, third, second, first]);
+                        }
+                    }
+                    0x5e => {
+                        let first = self.pop();
+                        if first.1.wide() {
+                            let second = self.pop();
+                            if second.1.wide() {
+                                self.stack.extend([first, second, first]);
+                            } else {
+                                let third = self.pop();
+                                self.stack.extend([first, third, second, first]);
+                            }
+                        } else {
+                            let second = self.pop();
+                            let third = self.pop();
+                            if third.1.wide() {
+                                self.stack.extend([second, first, third, second, first]);
+                            } else {
+                                let fourth = self.pop();
+                                self.stack
+                                    .extend([second, first, fourth, third, second, first]);
+                            }
+                        }
+                    }
+                    0x5f => {
+                        let first = self.pop();
+                        let second = self.pop();
+                        self.stack.extend([first, second]);
+                    }
+                    0x60..=0x77 => {
+                        let kind = [Kind::Int, Kind::Long, Kind::Float, Kind::Double]
+                            [usize::from((opcode - 0x60) % 4)];
+                        let family = (opcode - 0x60) / 4;
+                        let float = matches!(kind, Kind::Float | Kind::Double);
+                        match family {
+                            0 => self.binary(
+                                if float {
+                                    BinaryOp::FloatAdd
+                                } else {
+                                    BinaryOp::Add
+                                },
+                                kind,
+                            ),
+                            1 => self.binary(
+                                if float {
+                                    BinaryOp::FloatSubtract
+                                } else {
+                                    BinaryOp::Subtract
+                                },
+                                kind,
+                            ),
+                            2 => self.binary(
+                                if float {
+                                    BinaryOp::FloatMultiply
+                                } else {
+                                    BinaryOp::Multiply
+                                },
+                                kind,
+                            ),
+                            3 if float => self.binary(BinaryOp::FloatDivide, kind),
+                            3 => self.divide(BinaryOp::DivideSigned, kind)?,
+                            4 if float => self.binary(BinaryOp::FloatRemainder, kind),
+                            4 => self.divide(BinaryOp::RemainderSigned, kind)?,
+                            _ => {
+                                let value = self.pop_value();
+                                let op = if float {
+                                    UnaryOp::FloatNegate
+                                } else {
+                                    UnaryOp::Negate
+                                };
+                                let made = self.body.builder.unary(op, value);
+                                self.push(made, kind);
+                            }
+                        }
+                    }
+                    0x78..=0x83 => {
+                        let kind = if opcode.is_multiple_of(2) {
+                            Kind::Int
+                        } else {
+                            Kind::Long
+                        };
+                        match opcode {
+                            0x78 | 0x79 => self.shift(BinaryOp::ShiftLeft, kind),
+                            0x7a | 0x7b => self.shift(BinaryOp::ShiftRightArithmetic, kind),
+                            0x7c | 0x7d => self.shift(BinaryOp::ShiftRightLogical, kind),
+                            0x7e | 0x7f => self.binary(BinaryOp::And, kind),
+                            0x80 | 0x81 => self.binary(BinaryOp::Or, kind),
+                            _ => self.binary(BinaryOp::Xor, kind),
+                        }
+                    }
+                    0x84 => {
+                        if let Operand::Iinc(slot, delta) = one.operand {
+                            let variable = self.local(slot, Kind::Int);
+                            let value = self.body.builder.read(variable);
+                            let amount = self.int(i64::from(delta));
+                            let sum = self.body.builder.binary(BinaryOp::Add, value, amount);
+                            self.body.builder.define(variable, sum);
+                        }
+                    }
+                    0x85 => self.convert(Conversion::SignExtend, Kind::Long, None),
+                    0x86 | 0x89 => self.convert(Conversion::SignedToFloat, Kind::Float, None),
+                    0x87 | 0x8a => self.convert(Conversion::SignedToFloat, Kind::Double, None),
+                    0x88 => self.convert(Conversion::Truncate, Kind::Int, None),
+                    0x8b | 0x8e => {
+                        self.convert(Conversion::FloatToSignedSaturating, Kind::Int, None)
+                    }
+                    0x8c | 0x8f => {
+                        self.convert(Conversion::FloatToSignedSaturating, Kind::Long, None)
+                    }
+                    0x8d => self.convert(Conversion::FloatExtend, Kind::Double, None),
+                    0x90 => self.convert(Conversion::FloatTruncate, Kind::Float, None),
+                    0x91 => self.convert(
+                        Conversion::Truncate,
+                        Kind::Int,
+                        Some((Type::I8, Conversion::SignExtend)),
+                    ),
+                    0x92 => self.convert(
+                        Conversion::Truncate,
+                        Kind::Int,
+                        Some((Type::I16, Conversion::ZeroExtend)),
+                    ),
+                    0x93 => self.convert(
+                        Conversion::Truncate,
+                        Kind::Int,
+                        Some((Type::I16, Conversion::SignExtend)),
+                    ),
+                    0x94 => self.three_way(Kind::Long, 0),
+                    0x95 => self.three_way(Kind::Float, -1),
+                    0x96 => self.three_way(Kind::Float, 1),
+                    0x97 => self.three_way(Kind::Double, -1),
+                    0x98 => self.three_way(Kind::Double, 1),
+                    0x99..=0xa6 | 0xc6 | 0xc7 => {
+                        let Operand::Branch(to) = one.operand else {
+                            return Ok(false);
+                        };
+                        let condition = self.condition(opcode);
+                        let targets = self.exit_to(&[to, one.next]);
+                        self.body.builder.branch(condition, targets[0], targets[1]);
+                        return Ok(true);
+                    }
+                    0xa7 | 0xc8 => {
+                        if let Operand::Branch(to) = one.operand {
+                            let targets = self.exit_to(&[to]);
+                            self.body.builder.jump(targets[0], Vec::new());
+                            return Ok(true);
+                        }
+                    }
+                    0xaa | 0xab => {
+                        let value = self.pop_value();
+                        let (default, pairs): (u32, Vec<(i32, u32)>) = match &one.operand {
+                            Operand::Table(default, low, targets) => (
+                                *default,
+                                targets
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(at, to)| (low.wrapping_add(at as i32), *to))
+                                    .collect(),
+                            ),
+                            Operand::Lookup(default, pairs) => (*default, pairs.clone()),
+                            _ => return Ok(false),
+                        };
+                        let mut pcs: Vec<u32> = pairs.iter().map(|(_, to)| *to).collect();
+                        pcs.push(default);
+                        let blocks = self.exit_to(&pcs);
+                        let mut seen = BTreeSet::new();
+                        let cases: Vec<(i128, BlockCall)> = pairs
+                            .iter()
+                            .zip(&blocks)
+                            .filter(|((key, _), _)| seen.insert(*key))
+                            .map(|((key, _), block)| (i128::from(*key), BlockCall::to(*block)))
+                            .collect();
+                        let fallback = blocks[blocks.len() - 1];
+                        self.body.builder.terminate(Terminator::Switch {
+                            value,
+                            cases,
+                            default: BlockCall::to(fallback),
+                        });
+                        return Ok(true);
+                    }
+                    0xa8 | 0xa9 | 0xc9 => {
+                        return Err(unknown_instruction(
+                            self.class,
+                            &info.name,
+                            &info.descriptor,
+                            one.pc,
+                            opcode,
+                        ));
+                    }
+                    0xac..=0xb0 => {
+                        let value = self.pop_value();
+                        let returns = self.returns.clone();
+                        let value = self.body.renarrow(value, &returns);
+                        self.body.builder.ret(Some(value));
+                        return Ok(true);
+                    }
+                    0xb1 => {
+                        self.body.builder.ret(None);
+                        return Ok(true);
+                    }
+                    0xb2..=0xb5 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        let Some((owner, name, descriptor, _)) = member(self.class, index) else {
+                            return Ok(false);
+                        };
+                        self.field_access(opcode, &owner, &name, &descriptor)?;
+                    }
+                    0xb6..=0xb9 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        let Some((owner, name, descriptor, interface)) = member(self.class, index)
+                        else {
+                            return Ok(false);
+                        };
+                        self.invoke(opcode, &owner, &name, &descriptor, interface)?;
+                    }
+                    0xba => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        self.dynamic(index)?;
+                    }
+                    0xbb => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        let name = class_name(self.class, index).unwrap_or_default();
+                        let current = self.current();
+                        let made = self.body.new_object(&name, current)?;
+                        self.push(made, Kind::Reference);
+                    }
+                    0xbc => {
+                        if let Operand::NewArray(code) = one.operand {
+                            let descriptor = match code {
+                                4 => "[Z",
+                                5 => "[C",
+                                6 => "[F",
+                                7 => "[D",
+                                8 => "[B",
+                                9 => "[S",
+                                11 => "[J",
+                                _ => "[I",
+                            };
+                            self.new_array(descriptor)?;
+                        }
+                    }
+                    0xbd => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        let name = class_name(self.class, index).unwrap_or_default();
+                        let descriptor = if name.starts_with('[') {
+                            format!("[{name}")
+                        } else {
+                            format!("[L{name};")
+                        };
+                        self.new_array(&descriptor)?;
+                    }
+                    0xbe => {
+                        let array = self.pop_value();
+                        self.body.null_check(array)?;
+                        let made = self
+                            .body
+                            .builder
+                            .push(Operation::ArrayLength, vec![array], Some(Type::I32))
+                            .unwrap_or(array);
+                        self.push(made, Kind::Int);
+                    }
+                    0xbf => {
+                        let value = self.pop_value();
+                        self.body.null_check(value)?;
+                        self.body.raise(value);
+                        return Ok(true);
+                    }
+                    0xc0 | 0xc1 => {
+                        let Operand::Pool(index) = one.operand else {
+                            return Ok(false);
+                        };
+                        let name = class_name(self.class, index).unwrap_or_default();
+                        let value = self.pop_value();
+                        if opcode == 0xc0 {
+                            self.body.check_cast(value, &name)?;
+                            self.push(value, Kind::Reference);
+                        } else {
+                            let holds = self.body.instance_test(value, &name)?;
+                            let made =
+                                self.body
+                                    .builder
+                                    .convert(Conversion::ZeroExtend, holds, Type::I32);
+                            self.push(made, Kind::Int);
+                        }
+                    }
+                    0xc2 | 0xc3 => {
+                        let value = self.pop_value();
+                        self.body.null_check(value)?;
+                    }
+                    0xc5 => {
+                        if let Operand::MultiArray(index, dimensions) = one.operand {
+                            let name = class_name(self.class, index).unwrap_or_default();
+                            let mut lengths = Vec::new();
+                            for _ in 0..dimensions {
+                                lengths.push(self.pop_value());
+                            }
+                            lengths.reverse();
+                            let maker = self.body.lowering.multi_array(&name, dimensions)?;
+                            let made = self.body.call(maker, lengths).unwrap_or(Value(0));
+                            self.body.non_null.insert(made);
+                            self.push(made, Kind::Reference);
+                        }
+                    }
+                    other => {
+                        return Err(unknown_instruction(
+                            self.class,
+                            &info.name,
+                            &info.descriptor,
+                            one.pc,
+                            other,
+                        ));
+                    }
+                }
+                Ok(false)
+            }
+
+            fn load_constant(&mut self, index: u16) -> Result<(), Diagnostic> {
+                match self.class.constants.get(index as usize) {
+                    Some(jvm::Constant::Integer(held)) => {
+                        let made = self.int(i64::from(*held));
+                        self.push(made, Kind::Int);
+                    }
+                    Some(jvm::Constant::Long(held)) => {
+                        let made = self.body.builder.integer(Type::I64, i128::from(*held));
+                        self.push(made, Kind::Long);
+                    }
+                    Some(jvm::Constant::Float(held)) => {
+                        let made = self
+                            .body
+                            .builder
+                            .push(
+                                Operation::FloatConstant(u64::from(*held)),
+                                Vec::new(),
+                                Some(Type::F32),
+                            )
+                            .unwrap_or(Value(0));
+                        self.push(made, Kind::Float);
+                    }
+                    Some(jvm::Constant::Double(held)) => {
+                        let made = self
+                            .body
+                            .builder
+                            .push(Operation::FloatConstant(*held), Vec::new(), Some(Type::F64))
+                            .unwrap_or(Value(0));
+                        self.push(made, Kind::Double);
+                    }
+                    Some(jvm::Constant::String(text)) => {
+                        let text = utf8(self.class, *text).unwrap_or_default();
+                        let made = self.body.string(&text)?;
+                        self.push(made, Kind::Reference);
+                    }
+                    Some(jvm::Constant::Class(name)) => {
+                        let name = utf8(self.class, *name).unwrap_or_default();
+                        let shown = name.replace('/', ".");
+                        let text = self.body.string(&shown)?;
+                        let made = self.body.static_call(
+                            CLASSES,
+                            "named",
+                            "(Ljava/lang/String;)Ljava/lang/Class;",
+                            vec![text],
+                            None,
+                        )?;
+                        let made = made.unwrap_or(text);
+                        self.push(made, Kind::Reference);
+                    }
+                    _ => {
+                        return Err(fail(
+                            "EK415",
+                            "This compiled code asks for a bootstrap the native compiler does not provide.",
+                        )
+                        .with_context(format!("Bootstrap: {}.constant", internal(&self.class.name))));
+                    }
+                }
+                Ok(())
+            }
+
+            fn field_access(
+                &mut self,
+                opcode: u8,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+            ) -> Result<(), Diagnostic> {
+                let kind = Kind::of(descriptor).unwrap_or(Kind::Int);
+                let ty = storage(descriptor);
+                let current = self.current();
+                if matches!(opcode, 0xb2 | 0xb3) {
+                    let holder = match self.body.lowering.static_owner(owner, name)? {
+                        Some(found) => found,
+                        None => {
+                            self.body
+                                .lowering
+                                .missing
+                                .insert(format!("{owner}.{name}:{descriptor}"));
+                            self.body.lowering.declare(owner)?
+                        }
+                    };
+                    self.body.initialize(holder, current)?;
+                    let global = self.body.lowering.static_global(holder, name, descriptor);
+                    let address = self
+                        .body
+                        .builder
+                        .push(
+                            Operation::GlobalAddress(global),
+                            Vec::new(),
+                            Some(Type::POINTER),
+                        )
+                        .unwrap_or(Value(0));
+                    let align = self.body.lowering.layout.data().align_of(ty);
+                    if opcode == 0xb2 {
+                        let loaded = self.body.builder.load(ty, address, align);
+                        let value = self.body.widen(loaded, descriptor);
+                        self.push(value, kind);
+                    } else {
+                        let value = self.pop_value();
+                        let value = self.body.narrow(value, descriptor);
+                        self.body.builder.store(value, address, align);
+                    }
+                    return Ok(());
+                }
+                let field = self.body.lowering.instance_field(owner, name)?;
+                let Some((holder, index, _)) = field else {
+                    self.body
+                        .lowering
+                        .missing
+                        .insert(format!("{owner}.{name}:{descriptor}"));
+                    let host = format!("field:{owner}.{name}:{descriptor}");
+                    if opcode == 0xb4 {
+                        let object = self.pop_value();
+                        let function = self.body.lowering.import(
+                            &host,
+                            Signature::new(vec![Type::REFERENCE], Some(kind.ty())),
+                        );
+                        let made = self.body.call(function, vec![object]).unwrap_or(object);
+                        self.push(made, kind);
+                    } else {
+                        let value = self.pop_value();
+                        let object = self.pop_value();
+                        let function = self.body.lowering.import(
+                            &format!("{host}=set"),
+                            Signature::new(vec![Type::REFERENCE, kind.ty()], None),
+                        );
+                        self.body.call(function, vec![object, value]);
+                    }
+                    return Ok(());
+                };
+                if opcode == 0xb4 {
+                    let object = self.pop_value();
+                    self.body.null_check(object)?;
+                    let loaded = self
+                        .body
+                        .builder
+                        .push(
+                            Operation::LoadField(ClassId(holder as u32), index),
+                            vec![object],
+                            Some(ty),
+                        )
+                        .unwrap_or(object);
+                    let value = self.body.widen(loaded, descriptor);
+                    self.push(value, kind);
+                } else {
+                    let value = self.pop_value();
+                    let object = self.pop_value();
+                    self.body.null_check(object)?;
+                    let value = self.body.narrow(value, descriptor);
+                    self.body.builder.push(
+                        Operation::StoreField(ClassId(holder as u32), index),
+                        vec![object, value],
+                        None,
+                    );
+                }
+                Ok(())
+            }
+
+            fn invoke(
+                &mut self,
+                opcode: u8,
+                owner: &str,
+                name: &str,
+                descriptor: &str,
+                interface: bool,
+            ) -> Result<(), Diagnostic> {
+                let current = self.current();
+                if owner.starts_with('[') {
+                    let arguments = self.arguments(descriptor, true);
+                    self.body.null_check(arguments[0])?;
+                    if name == "clone" {
+                        let class = self.body.lowering.declare(owner)?;
+                        let cloner = self.body.lowering.array_clone(class)?;
+                        let made = self.body.call(cloner, arguments).unwrap_or(Value(0));
+                        self.push(made, Kind::Reference);
+                        return Ok(());
+                    }
+                    let value = self
+                        .body
+                        .virtual_call(ROOT, name, descriptor, arguments, false)?;
+                    self.returned(value, descriptor);
+                    return Ok(());
+                }
+                if opcode == 0xb7 && name == "<init>" && owner == ROOT {
+                    self.arguments(descriptor, true);
+                    return Ok(());
+                }
+                if owner == "kotlin/jvm/internal/Intrinsics"
+                    && name.starts_with("check")
+                    && descriptor.ends_with(")V")
+                {
+                    let known = matches!(
+                        (name, descriptor),
+                        ("checkNotNull", "(Ljava/lang/Object;)V")
+                            | ("checkNotNull", "(Ljava/lang/Object;Ljava/lang/String;)V")
+                            | (
+                                "checkNotNullParameter",
+                                "(Ljava/lang/Object;Ljava/lang/String;)V"
+                            )
+                            | (
+                                "checkParameterIsNotNull",
+                                "(Ljava/lang/Object;Ljava/lang/String;)V"
+                            )
+                            | (
+                                "checkNotNullExpressionValue",
+                                "(Ljava/lang/Object;Ljava/lang/String;)V"
+                            )
+                            | (
+                                "checkExpressionValueIsNotNull",
+                                "(Ljava/lang/Object;Ljava/lang/String;)V"
+                            )
+                    );
+                    if known {
+                        let arguments = self.arguments(descriptor, false);
+                        self.body.null_check(arguments[0])?;
+                        return Ok(());
+                    }
+                }
+                match opcode {
+                    0xb8 => {
+                        let arguments = self.arguments(descriptor, false);
+                        let value = self
+                            .body
+                            .static_call(owner, name, descriptor, arguments, current)?;
+                        self.returned(value, descriptor);
+                    }
+                    0xb7 => {
+                        let arguments = self.arguments(descriptor, true);
+                        if name != "<init>" {
+                            self.body.null_check(arguments[0])?;
+                        }
+                        let method = self.body.lowering.resolve(owner, name, descriptor, false)?;
+                        let value = self.body.invoke_method(method, arguments);
+                        self.returned(value, descriptor);
+                    }
+                    _ => {
+                        let arguments = self.arguments(descriptor, true);
+                        self.body.null_check(arguments[0])?;
+                        let value = self.body.virtual_call(
+                            owner,
+                            name,
+                            descriptor,
+                            arguments,
+                            opcode == 0xb9 || interface,
+                        )?;
+                        self.returned(value, descriptor);
+                    }
+                }
+                Ok(())
+            }
+
+            fn dynamic(&mut self, index: u16) -> Result<(), Diagnostic> {
+                let refused = |owner: &str, name: &str| {
+                    fail(
+                        "EK415",
+                        "This compiled code asks for a bootstrap the native compiler does not provide.",
+                    )
+                    .with_context(format!("Bootstrap: {owner}.{name}"))
+                };
+                let Some(jvm::Constant::InvokeDynamic(bootstrap, typed)) =
+                    self.class.constants.get(index as usize).cloned()
+                else {
+                    return Err(refused(&internal(&self.class.name), "invokedynamic"));
+                };
+                let Some((name, descriptor)) = name_and_type(self.class, typed) else {
+                    return Err(refused(&internal(&self.class.name), "invokedynamic"));
+                };
+                let Some(entry) = self.class.bootstrap.get(bootstrap as usize).cloned() else {
+                    return Err(refused(&internal(&self.class.name), &name));
+                };
+                let Some((_, bootstrap_owner, bootstrap_name, _, _)) =
+                    method_handle(self.class, entry.handle)
+                else {
+                    return Err(refused(&internal(&self.class.name), &name));
+                };
+                let (captured, returns) = split_descriptor(&descriptor);
+                let integer_at = |at: Option<&u16>| -> Option<i32> {
+                    match self.class.constants.get(usize::from(*at?)) {
+                        Some(jvm::Constant::Integer(held)) => Some(*held),
+                        _ => None,
+                    }
+                };
+                match (bootstrap_owner.as_str(), bootstrap_name.as_str()) {
+                    ("java/lang/invoke/LambdaMetafactory", "metafactory" | "altMetafactory") => {
+                        let sam = entry
+                            .arguments
+                            .first()
+                            .and_then(|at| method_type(self.class, *at))
+                            .unwrap_or_default();
+                        let implementation = entry
+                            .arguments
+                            .get(1)
+                            .and_then(|at| method_handle(self.class, *at))
+                            .ok_or_else(|| refused(&bootstrap_owner, &bootstrap_name))?;
+                        let mut bridges = Vec::new();
+                        if bootstrap_name == "altMetafactory" {
+                            if let Some(flags) = integer_at(entry.arguments.get(3)) {
+                                let mut at = 4;
+                                if flags & 2 != 0 {
+                                    let markers = integer_at(entry.arguments.get(at)).unwrap_or(0);
+                                    at += 1 + markers.max(0) as usize;
+                                }
+                                if flags & 4 != 0 {
+                                    let count = integer_at(entry.arguments.get(at)).unwrap_or(0);
+                                    at += 1;
+                                    for offset in 0..count.max(0) as usize {
+                                        if let Some(bridge) = entry
+                                            .arguments
+                                            .get(at + offset)
+                                            .and_then(|held| method_type(self.class, *held))
+                                        {
+                                            bridges.push(bridge);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let interface =
+                            class_of_descriptor(&returns).unwrap_or_else(|| ROOT.to_string());
+                        let caller = internal(&self.class.name);
+                        let class = self.body.lowering.lambda_class(
+                            &caller,
+                            &interface,
+                            &name,
+                            &sam,
+                            &captured,
+                            implementation,
+                            &bridges,
+                        )?;
+                        let mut values = Vec::new();
+                        for _ in &captured {
+                            values.push(self.pop_value());
+                        }
+                        values.reverse();
+                        let lambda_name = self.body.lowering.classes[class].name.clone();
+                        let object = self.body.new_object(&lambda_name, None)?;
+                        for (position, (value, descriptor)) in
+                            values.into_iter().zip(&captured).enumerate()
+                        {
+                            let narrowed = self.body.narrow(value, descriptor);
+                            self.body.builder.push(
+                                Operation::StoreField(ClassId(class as u32), position as u32),
+                                vec![object, narrowed],
+                                None,
+                            );
+                        }
+                        self.push(object, Kind::Reference);
+                    }
+                    (
+                        "java/lang/invoke/StringConcatFactory",
+                        "makeConcatWithConstants" | "makeConcat",
+                    ) => {
+                        let recipe = if bootstrap_name == "makeConcatWithConstants" {
+                            entry.arguments.first().and_then(|at| {
+                                match self.class.constants.get(*at as usize) {
+                                    Some(jvm::Constant::String(text)) => utf8(self.class, *text),
+                                    _ => None,
+                                }
+                            })
+                        } else {
+                            None
+                        }
+                        .unwrap_or_else(|| "\u{1}".repeat(captured.len()));
+                        let mut constants: Vec<String> = entry
+                            .arguments
+                            .iter()
+                            .skip(1)
+                            .filter_map(|at| match self.class.constants.get(*at as usize) {
+                                Some(jvm::Constant::String(text)) => utf8(self.class, *text),
+                                _ => None,
+                            })
+                            .collect();
+                        constants.reverse();
+                        let mut values = Vec::new();
+                        for _ in &captured {
+                            values.push(self.pop_value());
+                        }
+                        values.reverse();
+                        let joined = self.concatenate(
+                            &recipe,
+                            values.into_iter().zip(captured).collect(),
+                            constants,
+                        )?;
+                        self.push(joined, Kind::Reference);
+                    }
+                    _ => return Err(refused(&bootstrap_owner, &bootstrap_name)),
+                }
+                Ok(())
+            }
+
+            fn concatenate(
+                &mut self,
+                recipe: &str,
+                values: Vec<(Value, String)>,
+                mut constants: Vec<String>,
+            ) -> Result<Value, Diagnostic> {
+                let builder = self.body.new_object(BUILDER, None)?;
+                let constructor = self
+                    .body
+                    .lowering
+                    .resolve(BUILDER, "<init>", "()V", false)?;
+                self.body.invoke_method(constructor, vec![builder]);
+                let mut text = String::new();
+                let mut next = values.into_iter();
+                let mut pieces: Vec<(Value, String)> = Vec::new();
+                for one in recipe.chars() {
+                    match one {
+                        '\u{1}' => {
+                            if !text.is_empty() {
+                                let literal = self.body.string(&text)?;
+                                pieces.push((literal, "Ljava/lang/String;".to_string()));
+                                text.clear();
+                            }
+                            if let Some(piece) = next.next() {
+                                pieces.push(piece);
+                            }
+                        }
+                        '\u{2}' => text.push_str(&constants.pop().unwrap_or_default()),
+                        other => text.push(other),
+                    }
+                }
+                if !text.is_empty() {
+                    let literal = self.body.string(&text)?;
+                    pieces.push((literal, "Ljava/lang/String;".to_string()));
+                }
+                for (value, descriptor) in pieces {
+                    let parameter = match descriptor.as_bytes().first() {
+                        Some(b'Z') => "Z",
+                        Some(b'C') => "C",
+                        Some(b'B' | b'S' | b'I') => "I",
+                        Some(b'J') => "J",
+                        Some(b'F') => "F",
+                        Some(b'D') => "D",
+                        _ if descriptor == "Ljava/lang/String;" => "Ljava/lang/String;",
+                        _ => "Ljava/lang/Object;",
+                    };
+                    let shape = format!("({parameter})Ljava/lang/StringBuilder;");
+                    self.body.virtual_call(
+                        BUILDER,
+                        "append",
+                        &shape,
+                        vec![builder, value],
+                        false,
+                    )?;
+                }
+                let made = self.body.virtual_call(
+                    BUILDER,
+                    "toString",
+                    "()Ljava/lang/String;",
+                    vec![builder],
+                    false,
+                )?;
+                Ok(made.unwrap_or(builder))
+            }
+        }
+
+        impl<'a> Lowering<'a> {
+            #[allow(clippy::too_many_arguments)]
+            fn lambda_class(
+                &mut self,
+                caller: &str,
+                interface: &str,
+                method_name: &str,
+                sam: &str,
+                captured: &[String],
+                implementation: (u8, String, String, String, bool),
+                bridges: &[String],
+            ) -> Result<usize, Diagnostic> {
+                let interface_class = self.declare(interface)?;
+                let root = self.declare(ROOT)?;
+                self.lambdas += 1;
+                let name = format!("{caller}$$Lambda${}", self.lambdas);
+                let reference = self.classes.len();
+                self.classes.push(ClassInfo {
+                    name: name.clone(),
+                    parent: Some(root),
+                    interfaces: vec![interface_class],
+                    final_class: true,
+                    fields: captured
+                        .iter()
+                        .enumerate()
+                        .map(|(index, descriptor)| (format!("cap${index}"), descriptor.clone()))
+                        .collect(),
+                    vtable: self.classes[root].vtable.clone(),
+                    ..ClassInfo::default()
+                });
+                self.class_index.insert(name.clone(), reference);
+                let mut descriptors = vec![sam.to_string()];
+                for bridge in bridges {
+                    if !descriptors.contains(bridge) {
+                        descriptors.push(bridge.clone());
+                    }
+                }
+                for descriptor in descriptors {
+                    let index = self.methods.len();
+                    self.methods.push(MethodInfo {
+                        owner: reference,
+                        name: method_name.to_string(),
+                        descriptor: descriptor.clone(),
+                        is_static: false,
+                        abstract_method: false,
+                        native: false,
+                        private: false,
+                        final_method: true,
+                        external: false,
+                        export: None,
+                        function: None,
+                        generated: None,
+                    });
+                    self.method_index.insert(
+                        (name.clone(), method_name.to_string(), descriptor.clone()),
+                        index,
+                    );
+                    let made = self.lambda_method(reference, index, captured, &implementation)?;
+                    self.methods[index].generated = Some(made);
+                    let held = &mut self.classes[reference];
+                    match held.slot_of(method_name, &descriptor) {
+                        Some(at) => held.vtable[at].2 = Some(index),
+                        None => held.vtable.push((
+                            method_name.to_string(),
+                            descriptor.clone(),
+                            Some(index),
+                        )),
+                    }
+                }
+                self.complete_vtable(reference);
+                Ok(reference)
+            }
+
+            fn lambda_method(
+                &mut self,
+                class: usize,
+                method: usize,
+                captured: &[String],
+                implementation: &(u8, String, String, String, bool),
+            ) -> Result<Function, Diagnostic> {
+                let (kind, owner, target, target_descriptor, interface) = implementation.clone();
+                let descriptor = self.methods[method].descriptor.clone();
+                let label = self.method_name(method);
+                let signature = signature_of(&descriptor, false);
+                let (sam_parameters, sam_returns) = split_descriptor(&descriptor);
+                let (target_parameters, target_returns) = split_descriptor(&target_descriptor);
+                let mut function = Function::new(&label, signature, Linkage::Internal);
+                {
+                    let mut builder = FunctionBuilder::new(&mut function);
+                    let entry = builder.create_block();
+                    let parameters = builder.entry_parameters(entry);
+                    builder.switch_to(entry);
+                    let mut body = Body::new(self, builder);
+                    let this = parameters[0];
+                    let mut arguments: Vec<(Value, String)> = Vec::new();
+                    for (index, held) in captured.iter().enumerate() {
+                        let ty = storage(held);
+                        let loaded = body
+                            .builder
+                            .push(
+                                Operation::LoadField(ClassId(class as u32), index as u32),
+                                vec![this],
+                                Some(ty),
+                            )
+                            .unwrap_or(this);
+                        let value = body.widen(loaded, held);
+                        arguments.push((value, held.clone()));
+                    }
+                    for (index, parameter) in sam_parameters.iter().enumerate() {
+                        arguments.push((parameters[index + 1], parameter.clone()));
+                    }
+                    let mut wanted: Vec<String> = Vec::new();
+                    if matches!(kind, 5 | 7 | 9) {
+                        wanted.push(format!("L{owner};"));
+                    }
+                    wanted.extend(target_parameters.iter().cloned());
+                    let mut values = Vec::new();
+                    for (index, (value, have)) in arguments.iter().enumerate() {
+                        let want = wanted.get(index).cloned().unwrap_or_else(|| have.clone());
+                        values.push(body.adapt(*value, have, &want)?);
+                    }
+                    let result = match kind {
+                        6 => body.static_call(&owner, &target, &target_descriptor, values, None)?,
+                        7 => {
+                            let found = body.lowering.resolve(
+                                &owner,
+                                &target,
+                                &target_descriptor,
+                                false,
+                            )?;
+                            body.invoke_method(found, values)
+                        }
+                        5 | 9 => body.virtual_call(
+                            &owner,
+                            &target,
+                            &target_descriptor,
+                            values,
+                            interface || kind == 9,
+                        )?,
+                        8 => {
+                            let object = body.new_object(&owner, None)?;
+                            let mut all = vec![object];
+                            all.extend(values);
+                            let constructor = body.lowering.resolve(
+                                &owner,
+                                "<init>",
+                                &target_descriptor,
+                                false,
+                            )?;
+                            body.invoke_method(constructor, all);
+                            Some(object)
+                        }
+                        _ => {
+                            return Err(fail(
+                                "EK415",
+                                "This compiled code asks for a bootstrap the native compiler does not provide.",
+                            )
+                            .with_context(format!("Bootstrap: {owner}.{target}")));
+                        }
+                    };
+                    let produced = if kind == 8 {
+                        format!("L{owner};")
+                    } else {
+                        target_returns.clone()
+                    };
+                    if sam_returns == "V" {
+                        body.builder.ret(None);
+                    } else {
+                        let value = match result {
+                            Some(held) => {
+                                let held = body.renarrow(held, &produced);
+                                body.adapt(held, &produced, &sam_returns)?
+                            }
+                            None => body.unit()?,
+                        };
+                        body.builder.ret(Some(value));
+                    }
+                    body.finish(&label)?;
+                }
+                Ok(function)
+            }
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum ArtifactKind {
         Object,
@@ -44052,6 +61595,80 @@ annotation class SharedImmutable
             files.add_jar(library)?;
         }
         lower_classes(&mut files, options)
+    }
+
+    pub fn lower_to_omni(
+        kotlin: &[(String, String)],
+        java: &[(String, String)],
+        options: &Options,
+        libraries: Vec<Vec<u8>>,
+    ) -> Result<
+        (
+            crate::compilers::compiler_infrastructure::Module,
+            Vec<crate::compilers::compiler_infrastructure::FunctionId>,
+            Vec<String>,
+        ),
+        Diagnostic,
+    > {
+        let mut classpath = crate::compilers::java::Classpath::new();
+        for library in &libraries {
+            classpath.learn_jar(library)?;
+        }
+        let mut sources = prelude(options);
+        sources.extend(kotlin.iter().cloned());
+        super::lower::native_packages(true);
+        let classes = super::compile_mixed(&sources, java, &classpath, libraries.clone());
+        super::lower::native_packages(false);
+        let classes = classes?;
+        let mut files = translate::ClassFiles::new();
+        for (_, bytes) in classes {
+            files.add_class(bytes)?;
+        }
+        lowering::add_runtime(&mut files)?;
+        for library in &libraries {
+            files.add_jar(library)?;
+        }
+        let mut roots = Vec::new();
+        if options.produce.needs_entry() && !options.no_main {
+            let Some((owner, name, descriptor)) =
+                translate::find_entry(&mut files, options.entry.as_deref())
+            else {
+                return Err(match &options.entry {
+                    Some(entry) => fail(
+                        "EK406",
+                        "The entry point names no function this program has.",
+                    )
+                    .with_context(format!("Entry: {entry}")),
+                    None => fail("EK407", "A program needs a main function to start from."),
+                });
+            };
+            roots.push((owner, name, descriptor, true));
+        } else {
+            for name in files.own_names() {
+                let Some(class) = files.get(&name) else {
+                    continue;
+                };
+                for method in &class.methods {
+                    if method.access_flags & 0x0001 == 0 || method.access_flags & 0x0400 != 0 {
+                        continue;
+                    }
+                    if method.name.starts_with('<') {
+                        continue;
+                    }
+                    let is_static = method.access_flags & 0x0008 != 0;
+                    roots.push((
+                        name.clone(),
+                        method.name.clone(),
+                        method.descriptor.clone(),
+                        is_static,
+                    ));
+                }
+            }
+        }
+        let layout = options.target.omni_layout();
+        let (module, entries, missing) =
+            lowering::lower(&mut files, &roots, layout, &options.module())?;
+        Ok((module, entries, missing.into_iter().collect()))
     }
 
     pub fn lower_classes(

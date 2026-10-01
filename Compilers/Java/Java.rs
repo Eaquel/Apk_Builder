@@ -13888,9 +13888,19 @@ impl Emitter<'_> {
                 self.pops(3);
                 None
             }
+            (Type::Float, Binary::Less | Binary::LessOrEqual) => {
+                self.op(0x96);
+                self.pops(1);
+                None
+            }
             (Type::Float, _) => {
                 self.op(0x95);
                 self.pops(1);
+                None
+            }
+            (Type::Double, Binary::Less | Binary::LessOrEqual) => {
+                self.op(0x98);
+                self.pops(3);
                 None
             }
             (Type::Double, _) => {
@@ -20033,19 +20043,23 @@ impl Emitter<'_> {
             None => declared.clone(),
         };
         if boxed != object {
-            let Type::Object(named, _) = &boxed else {
-                return Err(at(
-                    "EJ237",
-                    line,
-                    1,
-                    format!(
-                        "`{name}` is a {}, and an iterator hands over objects.",
-                        declared.readable()
-                    ),
-                )
-                .with_suggestion("Write the loop over a reference type, or over an array."));
+            let named = match &boxed {
+                Type::Object(named, _) => named.clone(),
+                Type::Array(_) => boxed.descriptor(),
+                _ => {
+                    return Err(at(
+                        "EJ237",
+                        line,
+                        1,
+                        format!(
+                            "`{name}` is a {}, and an iterator hands over objects.",
+                            declared.readable()
+                        ),
+                    )
+                    .with_suggestion("Write the loop over a reference type, or over an array."));
+                }
             };
-            let index = self.pool.class(named);
+            let index = self.pool.class(&named);
             self.op2(0xc0, index);
             self.pops(1);
             self.pushes(&boxed);
@@ -22270,6 +22284,10 @@ fn everything_abstract_is_implemented(
     let mut required = std::collections::BTreeSet::new();
     let mut provided = std::collections::BTreeSet::new();
 
+    provided.insert(("equals".to_string(), 1));
+    provided.insert(("hashCode".to_string(), 0));
+    provided.insert(("toString".to_string(), 0));
+
     for method in &unit.methods {
         if method.constructor || method.name.starts_with('<') {
             continue;
@@ -22676,6 +22694,10 @@ pub fn compile_unit_in_nest(
                     body = &body[1..];
                     Some(*to_super)
                 }
+                _ if this_class == "java/lang/Object" => {
+                    emitter.early = false;
+                    Some(true)
+                }
                 _ => {
                     emitter.early = false;
                     emitter.load(0, &Type::Object(this_class.clone(), Vec::new()));
@@ -22983,7 +23005,11 @@ pub fn compile_unit_in_nest(
     }
 
     let this_index = pool.class(&this_class);
-    let super_index = pool.class(&superclass);
+    let super_index = if this_class == "java/lang/Object" {
+        0
+    } else {
+        pool.class(&superclass)
+    };
     let interface_indices: Vec<u16> = interfaces.iter().map(|name| pool.class(name)).collect();
 
     let mut out = Vec::with_capacity(1024 + method_bytes.len());
