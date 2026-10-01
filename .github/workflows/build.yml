@@ -99,6 +99,9 @@ jobs:
       - name: Run every check that needs no Android build
         run: ./Test/Builder_Test.py --strict layout format lint dependencies strings core
 
+      - name: Hold every reference suite, oracle comparison and determinism check
+        run: ./Test/Builder_Test.py --strict suites differential determinism
+
   apk:
     name: Builder APK
     runs-on: ubuntu-latest

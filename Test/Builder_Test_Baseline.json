@@ -1,0 +1,22 @@
+{
+  "suites": {
+    "bundles": {
+      "failed": 0,
+      "out_of_scope": 0,
+      "passed": 605473,
+      "total": 605473
+    },
+    "filecheck": {
+      "failed": 0,
+      "out_of_scope": 3,
+      "passed": 87,
+      "total": 90
+    },
+    "regex-oracle": {
+      "failed": 0,
+      "out_of_scope": 2,
+      "passed": 3998,
+      "total": 4000
+    }
+  }
+}

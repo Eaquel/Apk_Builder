@@ -55032,3 +55032,8040 @@ public final class R {
             .any(|(name, _)| name == "com/example/bound/BR.java"));
     }
 }
+
+mod reference {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::io::Read;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    pub(super) fn repository() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct Entry {
+        pub(super) path: String,
+        pub(super) link: Option<String>,
+        pub(super) start: usize,
+        pub(super) length: usize,
+    }
+
+    pub(super) struct Bundle {
+        pub(super) name: String,
+        pub(super) summary: Vec<String>,
+        pub(super) declared: Option<usize>,
+        pub(super) bytes: Vec<u8>,
+        pub(super) entries: Vec<Entry>,
+        positions: HashMap<String, usize>,
+    }
+
+    const HEADER_OPEN: &[u8] = b"@@@@ DOSYA: ";
+    const HEADER_CLOSE: &[u8] = b" @@@@";
+
+    fn line_end(bytes: &[u8], from: usize) -> usize {
+        bytes[from..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|offset| from + offset)
+            .unwrap_or(bytes.len())
+    }
+
+    fn declared_count(summary: &[String]) -> Option<usize> {
+        summary.iter().find_map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words.windows(2).find_map(|pair| {
+                if pair[1].starts_with("kayıt") {
+                    pair[0].parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    fn parse_header(line: &[u8]) -> Result<(String, Option<String>, usize), String> {
+        if !line.starts_with(HEADER_OPEN) || !line.ends_with(HEADER_CLOSE) {
+            return Err(format!(
+                "not a record header: {}",
+                String::from_utf8_lossy(&line[..line.len().min(120)])
+            ));
+        }
+        let inner = std::str::from_utf8(&line[HEADER_OPEN.len()..line.len() - HEADER_CLOSE.len()])
+            .map_err(|_| "a record header is not UTF-8".to_string())?;
+        if let Some(split) = inner.find(" | baglanti -> ") {
+            let path = inner[..split].to_string();
+            let target = inner[split + " | baglanti -> ".len()..].to_string();
+            return Ok((path, Some(target), 0));
+        }
+        let mut parts = inner.rsplitn(3, " | ");
+        let _kind = parts.next().ok_or("a record header has no kind")?;
+        let size = parts.next().ok_or("a record header has no size")?;
+        let path = parts.next().ok_or("a record header has no path")?;
+        let count = size
+            .strip_suffix(" bayt")
+            .ok_or_else(|| format!("a record size is not in bytes: {size}"))?
+            .parse::<usize>()
+            .map_err(|_| format!("a record size is not a number: {size}"))?;
+        Ok((path.to_string(), None, count))
+    }
+
+    impl Bundle {
+        pub(super) fn parse(name: &str, bytes: Vec<u8>) -> Result<Bundle, String> {
+            let mut summary = Vec::new();
+            let mut at = 0;
+            while at < bytes.len() && !bytes[at..].starts_with(HEADER_OPEN) {
+                let end = line_end(&bytes, at);
+                summary.push(String::from_utf8_lossy(&bytes[at..end]).into_owned());
+                at = (end + 1).min(bytes.len());
+            }
+            let mut entries = Vec::new();
+            let mut positions = HashMap::new();
+            while at < bytes.len() {
+                let end = line_end(&bytes, at);
+                let (path, link, length) = parse_header(&bytes[at..end])?;
+                let start = (end + 1).min(bytes.len());
+                if start + length > bytes.len() {
+                    return Err(format!("{name}: {path} runs past the end of the bundle"));
+                }
+                if positions.insert(path.clone(), entries.len()).is_some() {
+                    return Err(format!("{name}: {path} appears twice"));
+                }
+                entries.push(Entry {
+                    path,
+                    link,
+                    start,
+                    length,
+                });
+                at = start + length;
+                while at < bytes.len() && bytes[at] == b'\n' {
+                    at += 1;
+                }
+            }
+            let declared = declared_count(&summary);
+            Ok(Bundle {
+                name: name.to_string(),
+                summary,
+                declared,
+                bytes,
+                entries,
+                positions,
+            })
+        }
+
+        pub(super) fn content(&self, entry: &Entry) -> &[u8] {
+            &self.bytes[entry.start..entry.start + entry.length]
+        }
+
+        pub(super) fn file(&self, path: &str) -> Option<&[u8]> {
+            let at = *self.positions.get(path)?;
+            let entry = &self.entries[at];
+            match &entry.link {
+                Some(target) => {
+                    let base = path
+                        .rsplit_once('/')
+                        .map(|(folder, _)| folder)
+                        .unwrap_or("");
+                    let resolved = normalize_path(&format!("{base}/{target}"));
+                    if resolved == path {
+                        None
+                    } else {
+                        self.file(&resolved)
+                    }
+                }
+                None => Some(self.content(entry)),
+            }
+        }
+
+        pub(super) fn under<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a Entry> + 'a {
+            self.entries
+                .iter()
+                .filter(move |entry| entry.path.starts_with(prefix))
+        }
+    }
+
+    pub(super) fn normalize_path(path: &str) -> String {
+        let absolute = path.starts_with('/');
+        let mut parts: Vec<&str> = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        let joined = parts.join("/");
+        if absolute {
+            format!("/{joined}")
+        } else {
+            joined
+        }
+    }
+
+    pub(super) fn git(arguments: &[&str]) -> Result<Vec<u8>, String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository())
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("git could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {} failed: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    pub(super) fn catalogue() -> Result<Vec<(String, String)>, String> {
+        let listing = git(&["ls-tree", "-r", "HEAD", "--", "New"])?;
+        let text = String::from_utf8_lossy(&listing);
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let Some((meta, path)) = line.split_once('\t') else {
+                continue;
+            };
+            let fields: Vec<&str> = meta.split_whitespace().collect();
+            if fields.len() != 3 || fields[1] != "blob" || !path.ends_with(".txt") {
+                continue;
+            }
+            let name = path
+                .rsplit('/')
+                .next()
+                .unwrap_or(path)
+                .trim_end_matches(".txt")
+                .to_string();
+            found.push((name, fields[2].to_string()));
+        }
+        found.sort();
+        Ok(found)
+    }
+
+    fn read_blob(id: &str) -> Result<Vec<u8>, String> {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repository())
+            .args(["cat-file", "blob", id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("git could not start: {error}"))?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or("git gave no output")?
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("reading {id}: {error}"))?;
+        let status = child.wait().map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!("git cat-file {id} failed"));
+        }
+        Ok(bytes)
+    }
+
+    fn cache() -> &'static Mutex<HashMap<String, Arc<Bundle>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Arc<Bundle>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn bundle(name: &str) -> Result<Arc<Bundle>, String> {
+        if let Some(found) = cache().lock().map_err(|_| "cache poisoned")?.get(name) {
+            return Ok(found.clone());
+        }
+        let listed = catalogue()?;
+        let id = listed
+            .iter()
+            .find(|(listed_name, _)| listed_name == name)
+            .map(|(_, id)| id.clone())
+            .ok_or_else(|| format!("no bundle named {name}"))?;
+        let parsed = Arc::new(Bundle::parse(name, read_blob(&id)?)?);
+        cache()
+            .lock()
+            .map_err(|_| "cache poisoned")?
+            .insert(name.to_string(), parsed.clone());
+        Ok(parsed)
+    }
+
+    pub(super) fn release(name: &str) {
+        if let Ok(mut held) = cache().lock() {
+            held.remove(name);
+        }
+    }
+
+    pub(super) struct Tree {
+        bundles: Vec<Arc<Bundle>>,
+    }
+
+    impl Tree {
+        pub(super) fn of(names: &[&str]) -> Result<Tree, String> {
+            let mut bundles = Vec::new();
+            for name in names {
+                bundles.push(bundle(name)?);
+            }
+            Ok(Tree { bundles })
+        }
+
+        pub(super) fn file(&self, path: &str) -> Option<&[u8]> {
+            self.bundles.iter().find_map(|bundle| bundle.file(path))
+        }
+
+        pub(super) fn paths_under(&self, prefix: &str) -> Vec<String> {
+            let mut found = BTreeSet::new();
+            for bundle in &self.bundles {
+                for entry in bundle.under(prefix) {
+                    found.insert(entry.path.clone());
+                }
+            }
+            found.into_iter().collect()
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) struct ByteSet([u64; 4]);
+
+    impl ByteSet {
+        pub(super) const fn empty() -> ByteSet {
+            ByteSet([0; 4])
+        }
+
+        pub(super) fn insert(&mut self, byte: u8) {
+            self.0[(byte >> 6) as usize] |= 1u64 << (byte & 63);
+        }
+
+        pub(super) fn remove(&mut self, byte: u8) {
+            self.0[(byte >> 6) as usize] &= !(1u64 << (byte & 63));
+        }
+
+        pub(super) fn contains(&self, byte: u8) -> bool {
+            self.0[(byte >> 6) as usize] & (1u64 << (byte & 63)) != 0
+        }
+
+        pub(super) fn invert(&mut self) {
+            for word in &mut self.0 {
+                *word = !*word;
+            }
+        }
+
+        pub(super) fn merge(&mut self, other: &ByteSet) {
+            for (word, more) in self.0.iter_mut().zip(other.0.iter()) {
+                *word |= more;
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Node {
+        Empty,
+        Set(usize),
+        LineStart,
+        LineEnd,
+        WordStart,
+        WordEnd,
+        Group(Box<Node>, usize),
+        Concat(Vec<Node>),
+        Alternate(Vec<Node>),
+        Repeat(Box<Node>, u32, Option<u32>),
+        Backreference(usize),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        Set(u32),
+        LineStart,
+        LineEnd,
+        WordStart,
+        WordEnd,
+        Save(u32),
+        Split(u32, u32),
+        Jump(u32),
+        Backreference(u32),
+        Accept,
+    }
+
+    pub(super) const REGEX_BAD_BRACKETS: &str = "brackets ([ ]) not balanced";
+    pub(super) const REGEX_BAD_PARENTHESES: &str = "parentheses not balanced";
+    pub(super) const REGEX_EMPTY: &str = "empty (sub)expression";
+    pub(super) const REGEX_BAD_REPETITION: &str = "repetition-operator operand invalid";
+    pub(super) const REGEX_TRAILING_BACKSLASH: &str = "trailing backslash (\\)";
+    pub(super) const REGEX_BAD_CLASS: &str = "invalid character class";
+    pub(super) const REGEX_BAD_RANGE: &str = "invalid character range";
+    pub(super) const REGEX_BAD_BRACES: &str = "braces not balanced";
+    pub(super) const REGEX_BAD_COUNT: &str = "invalid repetition count(s)";
+    pub(super) const REGEX_BAD_BACKREFERENCE: &str = "invalid backreference number";
+    pub(super) const REGEX_BAD_COLLATING: &str = "invalid collating element";
+    pub(super) const REGEX_TOO_LARGE: &str = "out of memory";
+
+    const REPEAT_LIMIT: u32 = 255;
+    const STEP_LIMIT: usize = 400_000;
+
+    pub(super) struct Regex {
+        steps: Vec<Step>,
+        sets: Vec<ByteSet>,
+        groups: usize,
+        backreferences: bool,
+        ignore_case: bool,
+        newline: bool,
+        leading: Option<ByteSet>,
+        anchor: Option<LiteralAnchor>,
+    }
+
+    struct LiteralAnchor {
+        literal: Vec<u8>,
+        before_least: usize,
+        before_most: Option<usize>,
+    }
+
+    fn node_width(node: &Node, sets: &[ByteSet]) -> (usize, Option<usize>) {
+        match node {
+            Node::Empty | Node::LineStart | Node::LineEnd | Node::WordStart | Node::WordEnd => {
+                (0, Some(0))
+            }
+            Node::Set(_) => {
+                let _ = sets;
+                (1, Some(1))
+            }
+            Node::Group(inner, _) => node_width(inner, sets),
+            Node::Concat(items) => items.iter().fold((0, Some(0)), |(least, most), item| {
+                let (item_least, item_most) = node_width(item, sets);
+                (
+                    least + item_least,
+                    most.zip(item_most).map(|(first, second)| first + second),
+                )
+            }),
+            Node::Alternate(branches) => {
+                let widths: Vec<(usize, Option<usize>)> = branches
+                    .iter()
+                    .map(|branch| node_width(branch, sets))
+                    .collect();
+                let least = widths.iter().map(|width| width.0).min().unwrap_or(0);
+                let most = widths.iter().try_fold(0usize, |current, width| {
+                    width.1.map(|value| current.max(value))
+                });
+                (least, most)
+            }
+            Node::Repeat(inner, low, high) => {
+                let (least, most) = node_width(inner, sets);
+                (
+                    least.saturating_mul(*low as usize),
+                    high.and_then(|high| most.map(|most| most.saturating_mul(high as usize))),
+                )
+            }
+            Node::Backreference(_) => (0, None),
+        }
+    }
+
+    fn literal_anchor(tree: &Node, sets: &[ByteSet]) -> Option<LiteralAnchor> {
+        let Node::Concat(items) = tree else {
+            return None;
+        };
+        let single = |item: &Node| -> Option<u8> {
+            if let Node::Set(index) = item {
+                let set = &sets[*index];
+                let mut found = None;
+                for byte in 0..=255u8 {
+                    if set.contains(byte) {
+                        if found.is_some() {
+                            return None;
+                        }
+                        found = Some(byte);
+                    }
+                }
+                found
+            } else {
+                None
+            }
+        };
+        let mut best: Option<(usize, usize)> = None;
+        let mut index = 0;
+        while index < items.len() {
+            if single(&items[index]).is_none() {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < items.len() && single(&items[index]).is_some() {
+                index += 1;
+            }
+            if best.is_none_or(|(from, to)| index - start > to - from) {
+                best = Some((start, index));
+            }
+        }
+        let (start, end) = best?;
+        if end - start < 3 {
+            return None;
+        }
+        let literal: Vec<u8> = items[start..end].iter().filter_map(single).collect();
+        let (before_least, before_most) =
+            items[..start]
+                .iter()
+                .fold((0, Some(0)), |(least, most), item| {
+                    let (item_least, item_most) = node_width(item, sets);
+                    (
+                        least + item_least,
+                        most.zip(item_most).map(|(first, second)| first + second),
+                    )
+                });
+        Some(LiteralAnchor {
+            literal,
+            before_least,
+            before_most,
+        })
+    }
+
+    fn other_case(byte: u8) -> u8 {
+        if byte.is_ascii_lowercase() {
+            byte.to_ascii_uppercase()
+        } else if byte.is_ascii_uppercase() {
+            byte.to_ascii_lowercase()
+        } else {
+            byte
+        }
+    }
+
+    fn named_class(name: &[u8]) -> Option<ByteSet> {
+        let test: fn(u8) -> bool = match name {
+            b"alnum" => |byte| byte.is_ascii_alphanumeric(),
+            b"alpha" => |byte| byte.is_ascii_alphabetic(),
+            b"blank" => |byte| byte == b' ' || byte == b'\t',
+            b"cntrl" => |byte| byte < 32 || byte == 127,
+            b"digit" => |byte| byte.is_ascii_digit(),
+            b"graph" => |byte| (33..=126).contains(&byte),
+            b"lower" => |byte| byte.is_ascii_lowercase(),
+            b"print" => |byte| (32..=126).contains(&byte),
+            b"punct" => |byte| (33..=126).contains(&byte) && !byte.is_ascii_alphanumeric(),
+            b"space" => |byte| matches!(byte, b' ' | b'\t' | b'\n' | 11 | 12 | b'\r'),
+            b"upper" => |byte| byte.is_ascii_uppercase(),
+            b"xdigit" => |byte| byte.is_ascii_hexdigit(),
+            _ => return None,
+        };
+        let mut set = ByteSet::empty();
+        for byte in 0..=255u8 {
+            if test(byte) {
+                set.insert(byte);
+            }
+        }
+        Some(set)
+    }
+
+    fn collating_name(name: &[u8]) -> Option<u8> {
+        if name.len() == 1 {
+            return Some(name[0]);
+        }
+        let table: &[(&[u8], u8)] = &[
+            (b"NUL", 0),
+            (b"tab", b'\t'),
+            (b"newline", b'\n'),
+            (b"vertical-tab", 11),
+            (b"form-feed", 12),
+            (b"carriage-return", b'\r'),
+            (b"space", b' '),
+            (b"exclamation-mark", b'!'),
+            (b"quotation-mark", b'"'),
+            (b"number-sign", b'#'),
+            (b"dollar-sign", b'$'),
+            (b"percent-sign", b'%'),
+            (b"ampersand", b'&'),
+            (b"apostrophe", b'\''),
+            (b"left-parenthesis", b'('),
+            (b"right-parenthesis", b')'),
+            (b"asterisk", b'*'),
+            (b"plus-sign", b'+'),
+            (b"comma", b','),
+            (b"hyphen", b'-'),
+            (b"hyphen-minus", b'-'),
+            (b"period", b'.'),
+            (b"full-stop", b'.'),
+            (b"slash", b'/'),
+            (b"solidus", b'/'),
+            (b"colon", b':'),
+            (b"semicolon", b';'),
+            (b"less-than-sign", b'<'),
+            (b"equals-sign", b'='),
+            (b"greater-than-sign", b'>'),
+            (b"question-mark", b'?'),
+            (b"commercial-at", b'@'),
+            (b"left-square-bracket", b'['),
+            (b"backslash", b'\\'),
+            (b"reverse-solidus", b'\\'),
+            (b"right-square-bracket", b']'),
+            (b"circumflex", b'^'),
+            (b"circumflex-accent", b'^'),
+            (b"underscore", b'_'),
+            (b"low-line", b'_'),
+            (b"grave-accent", b'`'),
+            (b"left-brace", b'{'),
+            (b"left-curly-bracket", b'{'),
+            (b"vertical-line", b'|'),
+            (b"right-brace", b'}'),
+            (b"right-curly-bracket", b'}'),
+            (b"tilde", b'~'),
+            (b"DEL", 127),
+        ];
+        table
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, byte)| *byte)
+    }
+
+    struct RegexParser<'a> {
+        text: &'a [u8],
+        at: usize,
+        groups: usize,
+        closed: Vec<bool>,
+        sets: Vec<ByteSet>,
+        ignore_case: bool,
+        newline: bool,
+        backreferences: bool,
+    }
+
+    impl<'a> RegexParser<'a> {
+        fn more(&self) -> bool {
+            self.at < self.text.len()
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.text.get(self.at).copied()
+        }
+
+        fn peek_second(&self) -> Option<u8> {
+            self.text.get(self.at + 1).copied()
+        }
+
+        fn eat(&mut self, byte: u8) -> bool {
+            if self.peek() == Some(byte) {
+                self.at += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn eat_pair(&mut self, first: u8, second: u8) -> bool {
+            if self.peek() == Some(first) && self.peek_second() == Some(second) {
+                self.at += 2;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn add_set(&mut self, set: ByteSet) -> Node {
+            self.sets.push(set);
+            Node::Set(self.sets.len() - 1)
+        }
+
+        fn literal(&mut self, byte: u8) -> Node {
+            let mut set = ByteSet::empty();
+            set.insert(byte);
+            if self.ignore_case {
+                set.insert(other_case(byte));
+            }
+            self.add_set(set)
+        }
+
+        fn exact(&mut self, byte: u8) -> Node {
+            let mut set = ByteSet::empty();
+            set.insert(byte);
+            self.add_set(set)
+        }
+
+        fn alternation(&mut self, stop: Option<u8>) -> Result<Node, &'static str> {
+            let mut branches = Vec::new();
+            loop {
+                let mut items = Vec::new();
+                while let Some(byte) = self.peek() {
+                    if byte == b'|' || Some(byte) == stop {
+                        break;
+                    }
+                    items.push(self.piece()?);
+                }
+                if items.is_empty() {
+                    return Err(REGEX_EMPTY);
+                }
+                branches.push(if items.len() == 1 {
+                    items.pop().unwrap_or(Node::Empty)
+                } else {
+                    Node::Concat(items)
+                });
+                if !self.eat(b'|') {
+                    break;
+                }
+            }
+            Ok(if branches.len() == 1 {
+                branches.pop().unwrap_or(Node::Empty)
+            } else {
+                Node::Alternate(branches)
+            })
+        }
+
+        fn count(&mut self) -> Result<u32, &'static str> {
+            let mut value: u32 = 0;
+            let mut digits = 0;
+            while let Some(byte) = self.peek() {
+                if !byte.is_ascii_digit() || value > REPEAT_LIMIT {
+                    break;
+                }
+                value = value * 10 + u32::from(byte - b'0');
+                digits += 1;
+                self.at += 1;
+            }
+            if digits == 0 || value > REPEAT_LIMIT {
+                return Err(REGEX_BAD_COUNT);
+            }
+            Ok(value)
+        }
+
+        fn piece(&mut self) -> Result<Node, &'static str> {
+            let byte = self.peek().ok_or(REGEX_EMPTY)?;
+            self.at += 1;
+            let mut after_caret = false;
+            let atom = match byte {
+                b'(' => {
+                    if !self.more() {
+                        return Err(REGEX_BAD_PARENTHESES);
+                    }
+                    self.groups += 1;
+                    let index = self.groups;
+                    if self.closed.len() <= index {
+                        self.closed.resize(index + 1, false);
+                    }
+                    let inner = if self.peek() == Some(b')') {
+                        Node::Empty
+                    } else {
+                        self.alternation(Some(b')'))?
+                    };
+                    if !self.eat(b')') {
+                        return Err(REGEX_BAD_PARENTHESES);
+                    }
+                    self.closed[index] = true;
+                    Node::Group(Box::new(inner), index)
+                }
+                b')' => return Err(REGEX_BAD_PARENTHESES),
+                b'^' => {
+                    after_caret = true;
+                    Node::LineStart
+                }
+                b'$' => Node::LineEnd,
+                b'|' => return Err(REGEX_EMPTY),
+                b'*' | b'+' | b'?' => return Err(REGEX_BAD_REPETITION),
+                b'.' => {
+                    let mut set = ByteSet::empty();
+                    set.invert();
+                    if self.newline {
+                        set.remove(b'\n');
+                    }
+                    self.add_set(set)
+                }
+                b'[' => self.bracket()?,
+                b'\\' => {
+                    let escaped = self.peek().ok_or(REGEX_TRAILING_BACKSLASH)?;
+                    self.at += 1;
+                    let number = match escaped {
+                        b'1'..=b'9' => Some(usize::from(escaped - b'0')),
+                        b'g' => {
+                            if !self.eat(b'{') {
+                                return Err(REGEX_BAD_REPETITION);
+                            }
+                            let mut value = 0usize;
+                            while let Some(digit) = self.peek().filter(u8::is_ascii_digit) {
+                                value = value
+                                    .saturating_mul(10)
+                                    .saturating_add(usize::from(digit - b'0'));
+                                self.at += 1;
+                            }
+                            if !self.eat(b'}') {
+                                return Err(REGEX_BAD_REPETITION);
+                            }
+                            Some(value)
+                        }
+                        _ => None,
+                    };
+                    match number {
+                        Some(index) => {
+                            if index >= 21 {
+                                return Err(REGEX_BAD_BACKREFERENCE);
+                            }
+                            if !self.closed.get(index).copied().unwrap_or(false) {
+                                return Err(REGEX_BAD_BACKREFERENCE);
+                            }
+                            self.backreferences = true;
+                            Node::Backreference(index)
+                        }
+                        None => match escaped {
+                            b'n' => self.literal(b'\n'),
+                            b't' => self.literal(b'\t'),
+                            b'x' => {
+                                let high = self.peek().filter(u8::is_ascii_hexdigit);
+                                let low = self.peek_second().filter(u8::is_ascii_hexdigit);
+                                match (high, low) {
+                                    (Some(high), Some(low)) => {
+                                        self.at += 2;
+                                        let value = (hex_value(high) << 4) | hex_value(low);
+                                        self.exact(value)
+                                    }
+                                    _ => self.literal(b'x'),
+                                }
+                            }
+                            other => self.literal(other),
+                        },
+                    }
+                }
+                b'{' => {
+                    if self.peek().is_some_and(|next| next.is_ascii_digit()) {
+                        return Err(REGEX_BAD_REPETITION);
+                    }
+                    self.literal(b'{')
+                }
+                other => self.literal(other),
+            };
+            let Some(next) = self.peek() else {
+                return Ok(atom);
+            };
+            let interval =
+                next == b'{' && self.peek_second().is_some_and(|byte| byte.is_ascii_digit());
+            if !(next == b'*' || next == b'+' || next == b'?' || interval) {
+                return Ok(atom);
+            }
+            self.at += 1;
+            if after_caret {
+                return Err(REGEX_BAD_REPETITION);
+            }
+            let repeated = match next {
+                b'*' => Node::Repeat(Box::new(atom), 0, None),
+                b'+' => Node::Repeat(Box::new(atom), 1, None),
+                b'?' => Node::Repeat(Box::new(atom), 0, Some(1)),
+                _ => {
+                    let low = self.count()?;
+                    let high = if self.eat(b',') {
+                        if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                            let high = self.count()?;
+                            if low > high {
+                                return Err(REGEX_BAD_COUNT);
+                            }
+                            Some(high)
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some(low)
+                    };
+                    if !self.eat(b'}') {
+                        while self.peek().is_some_and(|byte| byte != b'}') {
+                            self.at += 1;
+                        }
+                        if !self.more() {
+                            return Err(REGEX_BAD_BRACES);
+                        }
+                        return Err(REGEX_BAD_COUNT);
+                    }
+                    Node::Repeat(Box::new(atom), low, high)
+                }
+            };
+            if let Some(following) = self.peek() {
+                let interval = following == b'{'
+                    && self.peek_second().is_some_and(|byte| byte.is_ascii_digit());
+                if following == b'*' || following == b'+' || following == b'?' || interval {
+                    return Err(REGEX_BAD_REPETITION);
+                }
+            }
+            Ok(repeated)
+        }
+
+        fn collating_element(&mut self, closer: u8) -> Result<u8, &'static str> {
+            let start = self.at;
+            while self.more() && !(self.peek() == Some(closer) && self.peek_second() == Some(b']'))
+            {
+                self.at += 1;
+            }
+            if !self.more() {
+                return Err(REGEX_BAD_BRACKETS);
+            }
+            collating_name(&self.text[start..self.at]).ok_or(REGEX_BAD_COLLATING)
+        }
+
+        fn bracket_symbol(&mut self) -> Result<u8, &'static str> {
+            if !self.more() {
+                return Err(REGEX_BAD_BRACKETS);
+            }
+            if self.eat_pair(b'[', b'.') {
+                let value = self.collating_element(b'.')?;
+                if !self.eat_pair(b'.', b']') {
+                    return Err(REGEX_BAD_COLLATING);
+                }
+                return Ok(value);
+            }
+            let byte = self.text[self.at];
+            self.at += 1;
+            Ok(byte)
+        }
+
+        fn bracket_term(&mut self, set: &mut ByteSet) -> Result<(), &'static str> {
+            let opener = self.peek();
+            let kind = if opener == Some(b'[') {
+                self.peek_second()
+            } else {
+                None
+            };
+            if opener == Some(b'-') {
+                return Err(REGEX_BAD_RANGE);
+            }
+            match kind {
+                Some(b':') => {
+                    self.at += 2;
+                    let next = self.peek().ok_or(REGEX_BAD_BRACKETS)?;
+                    if next == b'-' || next == b']' {
+                        return Err(REGEX_BAD_CLASS);
+                    }
+                    let start = self.at;
+                    while self.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+                        self.at += 1;
+                    }
+                    let class = named_class(&self.text[start..self.at]).ok_or(REGEX_BAD_CLASS)?;
+                    set.merge(&class);
+                    if !self.more() {
+                        return Err(REGEX_BAD_BRACKETS);
+                    }
+                    if !self.eat_pair(b':', b']') {
+                        return Err(REGEX_BAD_CLASS);
+                    }
+                }
+                Some(b'=') => {
+                    self.at += 2;
+                    let next = self.peek().ok_or(REGEX_BAD_BRACKETS)?;
+                    if next == b'-' || next == b']' {
+                        return Err(REGEX_BAD_COLLATING);
+                    }
+                    let value = self.collating_element(b'=')?;
+                    set.insert(value);
+                    if !self.more() {
+                        return Err(REGEX_BAD_BRACKETS);
+                    }
+                    if !self.eat_pair(b'=', b']') {
+                        return Err(REGEX_BAD_COLLATING);
+                    }
+                }
+                _ => {
+                    let start = self.bracket_symbol()?;
+                    let finish = if self.peek() == Some(b'-')
+                        && self.peek_second().is_some_and(|byte| byte != b']')
+                    {
+                        self.at += 1;
+                        if self.eat(b'-') {
+                            b'-'
+                        } else {
+                            self.bracket_symbol()?
+                        }
+                    } else {
+                        start
+                    };
+                    if start > finish {
+                        return Err(REGEX_BAD_RANGE);
+                    }
+                    for byte in start..=finish {
+                        set.insert(byte);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn bracket(&mut self) -> Result<Node, &'static str> {
+            if self.text[self.at..].starts_with(b"[:<:]]") {
+                self.at += 6;
+                return Ok(Node::WordStart);
+            }
+            if self.text[self.at..].starts_with(b"[:>:]]") {
+                self.at += 6;
+                return Ok(Node::WordEnd);
+            }
+            let mut set = ByteSet::empty();
+            let invert = self.eat(b'^');
+            if self.eat(b']') {
+                set.insert(b']');
+            } else if self.eat(b'-') {
+                set.insert(b'-');
+            }
+            while self.more()
+                && self.peek() != Some(b']')
+                && !(self.peek() == Some(b'-') && self.peek_second() == Some(b']'))
+            {
+                self.bracket_term(&mut set)?;
+            }
+            if self.eat(b'-') {
+                set.insert(b'-');
+            }
+            if !self.eat(b']') {
+                return Err(REGEX_BAD_BRACKETS);
+            }
+            if self.ignore_case {
+                for byte in 0..=255u8 {
+                    if set.contains(byte) && byte.is_ascii_alphabetic() {
+                        set.insert(other_case(byte));
+                    }
+                }
+            }
+            if invert {
+                set.invert();
+                if self.newline {
+                    set.remove(b'\n');
+                }
+            }
+            Ok(self.add_set(set))
+        }
+    }
+
+    fn hex_value(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => byte - b'A' + 10,
+        }
+    }
+
+    struct Emitter {
+        steps: Vec<Step>,
+    }
+
+    impl Emitter {
+        fn here(&self) -> u32 {
+            self.steps.len() as u32
+        }
+
+        fn push(&mut self, step: Step) -> Result<u32, &'static str> {
+            if self.steps.len() >= STEP_LIMIT {
+                return Err(REGEX_TOO_LARGE);
+            }
+            self.steps.push(step);
+            Ok(self.here() - 1)
+        }
+
+        fn patch(&mut self, at: u32, step: Step) {
+            self.steps[at as usize] = step;
+        }
+
+        fn emit(&mut self, node: &Node) -> Result<(), &'static str> {
+            match node {
+                Node::Empty => {}
+                Node::Set(index) => {
+                    self.push(Step::Set(*index as u32))?;
+                }
+                Node::LineStart => {
+                    self.push(Step::LineStart)?;
+                }
+                Node::LineEnd => {
+                    self.push(Step::LineEnd)?;
+                }
+                Node::WordStart => {
+                    self.push(Step::WordStart)?;
+                }
+                Node::WordEnd => {
+                    self.push(Step::WordEnd)?;
+                }
+                Node::Backreference(index) => {
+                    self.push(Step::Backreference(*index as u32))?;
+                }
+                Node::Group(inner, index) => {
+                    self.push(Step::Save(*index as u32 * 2))?;
+                    self.emit(inner)?;
+                    self.push(Step::Save(*index as u32 * 2 + 1))?;
+                }
+                Node::Concat(items) => {
+                    for item in items {
+                        self.emit(item)?;
+                    }
+                }
+                Node::Alternate(branches) => {
+                    let mut exits = Vec::new();
+                    for (position, branch) in branches.iter().enumerate() {
+                        if position + 1 < branches.len() {
+                            let split = self.push(Step::Split(0, 0))?;
+                            self.emit(branch)?;
+                            exits.push(self.push(Step::Jump(0))?);
+                            let next = self.here();
+                            self.patch(split, Step::Split(split + 1, next));
+                        } else {
+                            self.emit(branch)?;
+                        }
+                    }
+                    let end = self.here();
+                    for exit in exits {
+                        self.patch(exit, Step::Jump(end));
+                    }
+                }
+                Node::Repeat(inner, low, high) => {
+                    for _ in 0..*low {
+                        self.emit(inner)?;
+                    }
+                    match high {
+                        None => {
+                            let split = self.push(Step::Split(0, 0))?;
+                            self.emit(inner)?;
+                            self.push(Step::Jump(split))?;
+                            let end = self.here();
+                            self.patch(split, Step::Split(split + 1, end));
+                        }
+                        Some(high) => {
+                            let mut splits = Vec::new();
+                            for _ in *low..*high {
+                                splits.push(self.push(Step::Split(0, 0))?);
+                                self.emit(inner)?;
+                            }
+                            let end = self.here();
+                            for split in splits {
+                                self.patch(split, Step::Split(split + 1, end));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn regex_escape(text: &str) -> String {
+        let mut escaped = String::with_capacity(text.len() + 8);
+        for character in text.chars() {
+            if "()^$|*+?.[]\\{}".contains(character) {
+                escaped.push('\\');
+            }
+            escaped.push(character);
+        }
+        escaped
+    }
+
+    pub(super) type Span = Option<(usize, usize)>;
+
+    impl Regex {
+        pub(super) fn new(
+            pattern: &str,
+            newline: bool,
+            ignore_case: bool,
+        ) -> Result<Regex, &'static str> {
+            let mut parser = RegexParser {
+                text: pattern.as_bytes(),
+                at: 0,
+                groups: 0,
+                closed: vec![true],
+                sets: Vec::new(),
+                ignore_case,
+                newline,
+                backreferences: false,
+            };
+            let tree = parser.alternation(None)?;
+            if parser.more() {
+                return Err(REGEX_BAD_PARENTHESES);
+            }
+            let mut emitter = Emitter { steps: Vec::new() };
+            emitter.emit(&tree)?;
+            emitter.push(Step::Accept)?;
+            let anchor = if ignore_case || parser.backreferences {
+                None
+            } else {
+                literal_anchor(&tree, &parser.sets)
+            };
+            let mut regex = Regex {
+                steps: emitter.steps,
+                sets: parser.sets,
+                groups: parser.groups,
+                backreferences: parser.backreferences,
+                ignore_case,
+                newline,
+                leading: None,
+                anchor,
+            };
+            regex.leading = regex.leading_bytes();
+            Ok(regex)
+        }
+
+        pub(super) fn group_count(&self) -> usize {
+            self.groups
+        }
+
+        fn leading_bytes(&self) -> Option<ByteSet> {
+            let mut set = ByteSet::empty();
+            let mut seen = vec![false; self.steps.len()];
+            let mut stack = vec![0u32];
+            while let Some(pc) = stack.pop() {
+                if std::mem::replace(&mut seen[pc as usize], true) {
+                    continue;
+                }
+                match self.steps[pc as usize] {
+                    Step::Set(index) => set.merge(&self.sets[index as usize]),
+                    Step::Save(_) => stack.push(pc + 1),
+                    Step::Jump(target) => stack.push(target),
+                    Step::Split(first, second) => {
+                        stack.push(second);
+                        stack.push(first);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(set)
+        }
+
+        fn at_line_start(&self, text: &[u8], position: usize) -> bool {
+            position == 0 || (self.newline && text[position - 1] == b'\n')
+        }
+
+        fn at_line_end(&self, text: &[u8], position: usize) -> bool {
+            position == text.len() || (self.newline && text[position] == b'\n')
+        }
+
+        fn word_byte(byte: u8) -> bool {
+            byte.is_ascii_alphanumeric() || byte == b'_'
+        }
+
+        fn at_word_start(text: &[u8], position: usize) -> bool {
+            position < text.len()
+                && Self::word_byte(text[position])
+                && (position == 0 || !Self::word_byte(text[position - 1]))
+        }
+
+        fn at_word_end(text: &[u8], position: usize) -> bool {
+            position > 0
+                && Self::word_byte(text[position - 1])
+                && (position == text.len() || !Self::word_byte(text[position]))
+        }
+
+        fn closure(
+            &self,
+            text: &[u8],
+            list: &mut Vec<(u32, usize)>,
+            marks: &mut [u32],
+            generation: u32,
+            seed: (u32, usize),
+            position: usize,
+        ) {
+            let (start_pc, start) = seed;
+            let mut stack = vec![start_pc];
+            while let Some(pc) = stack.pop() {
+                let slot = &mut marks[pc as usize];
+                if *slot == generation {
+                    continue;
+                }
+                *slot = generation;
+                match self.steps[pc as usize] {
+                    Step::Jump(target) => stack.push(target),
+                    Step::Split(first, second) => {
+                        stack.push(second);
+                        stack.push(first);
+                    }
+                    Step::Save(_) => stack.push(pc + 1),
+                    Step::LineStart => {
+                        if self.at_line_start(text, position) {
+                            stack.push(pc + 1);
+                        }
+                    }
+                    Step::LineEnd => {
+                        if self.at_line_end(text, position) {
+                            stack.push(pc + 1);
+                        }
+                    }
+                    Step::WordStart => {
+                        if Self::at_word_start(text, position) {
+                            stack.push(pc + 1);
+                        }
+                    }
+                    Step::WordEnd => {
+                        if Self::at_word_end(text, position) {
+                            stack.push(pc + 1);
+                        }
+                    }
+                    Step::Set(_) | Step::Accept | Step::Backreference(_) => list.push((pc, start)),
+                }
+            }
+        }
+
+        fn longest(&self, text: &[u8]) -> Option<(usize, usize)> {
+            let Some(anchor) = &self.anchor else {
+                return self.simulate(text, 0, false);
+            };
+            let mut next_start = 0usize;
+            let mut from = 0usize;
+            while let Some(found) = find_bytes(&text[from.min(text.len())..], &anchor.literal)
+                .map(|offset| offset + from)
+            {
+                from = found + 1;
+                if found < anchor.before_least {
+                    continue;
+                }
+                let latest = found - anchor.before_least;
+                let earliest = match anchor.before_most {
+                    Some(most) => found.saturating_sub(most),
+                    None => return self.simulate(text, next_start, false),
+                };
+                let mut start = earliest.max(next_start);
+                while start <= latest {
+                    if let Some(found_match) = self.simulate(text, start, true) {
+                        return Some(found_match);
+                    }
+                    start += 1;
+                }
+                next_start = latest + 1;
+            }
+            None
+        }
+
+        fn simulate(&self, text: &[u8], first: usize, anchored: bool) -> Option<(usize, usize)> {
+            let mut marks = vec![0u32; self.steps.len()];
+            let mut generation = 0u32;
+            let mut current: Vec<(u32, usize)> = Vec::new();
+            let mut next: Vec<(u32, usize)> = Vec::new();
+            let mut best: Option<(usize, usize)> = None;
+            let mut position = first;
+            loop {
+                generation += 1;
+                if best.is_none() && (!anchored || position == first) {
+                    if current.is_empty() && !anchored {
+                        if let Some(leading) = &self.leading {
+                            while position < text.len() && !leading.contains(text[position]) {
+                                position += 1;
+                            }
+                            if position >= text.len() {
+                                return None;
+                            }
+                        }
+                    }
+                    for &(pc, _) in &current {
+                        marks[pc as usize] = generation;
+                    }
+                    self.closure(
+                        text,
+                        &mut current,
+                        &mut marks,
+                        generation,
+                        (0, position),
+                        position,
+                    );
+                }
+                generation += 1;
+                next.clear();
+                for &(pc, start) in &current {
+                    if let Some((best_start, _)) = best {
+                        if start > best_start {
+                            continue;
+                        }
+                    }
+                    match self.steps[pc as usize] {
+                        Step::Accept => {
+                            let better = match best {
+                                None => true,
+                                Some((best_start, best_end)) => {
+                                    start < best_start
+                                        || (start == best_start && position > best_end)
+                                }
+                            };
+                            if better {
+                                best = Some((start, position));
+                            }
+                        }
+                        Step::Set(index)
+                            if position < text.len()
+                                && self.sets[index as usize].contains(text[position]) =>
+                        {
+                            self.closure(
+                                text,
+                                &mut next,
+                                &mut marks,
+                                generation,
+                                (pc + 1, start),
+                                position + 1,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((best_start, _)) = best {
+                    next.retain(|&(_, start)| start <= best_start);
+                }
+                std::mem::swap(&mut current, &mut next);
+                if position >= text.len() {
+                    break;
+                }
+                position += 1;
+                if current.is_empty() && (best.is_some() || anchored) {
+                    break;
+                }
+            }
+            best
+        }
+
+        fn same_bytes(&self, first: &[u8], second: &[u8]) -> bool {
+            if self.ignore_case {
+                first.eq_ignore_ascii_case(second)
+            } else {
+                first == second
+            }
+        }
+
+        fn backtrack(
+            &self,
+            text: &[u8],
+            start: usize,
+            limit: usize,
+            exact_end: Option<usize>,
+            remember: bool,
+        ) -> Option<(usize, Vec<Span>)> {
+            let width = limit.saturating_sub(start) + 1;
+            let total = self.steps.len().saturating_mul(width);
+            let mut visited = if remember {
+                vec![0u64; total.div_ceil(64)]
+            } else {
+                Vec::new()
+            };
+            let mut slots: Vec<Option<usize>> = vec![None; (self.groups + 1) * 2];
+            enum Work {
+                Explore(u32, usize),
+                Restore(usize, Option<usize>),
+            }
+            let mut work = vec![Work::Explore(0, start)];
+            let mut best: Option<(usize, Vec<Span>)> = None;
+            let mut budget: u64 = 50_000_000;
+            while let Some(item) = work.pop() {
+                let (pc, position) = match item {
+                    Work::Restore(slot, value) => {
+                        slots[slot] = value;
+                        continue;
+                    }
+                    Work::Explore(pc, position) => (pc, position),
+                };
+                budget = budget.checked_sub(1)?;
+                if remember {
+                    let bit = pc as usize * width + (position - start);
+                    if visited[bit / 64] & (1u64 << (bit % 64)) != 0 {
+                        continue;
+                    }
+                    visited[bit / 64] |= 1u64 << (bit % 64);
+                }
+                match self.steps[pc as usize] {
+                    Step::Set(index) => {
+                        if position < limit && self.sets[index as usize].contains(text[position]) {
+                            work.push(Work::Explore(pc + 1, position + 1));
+                        }
+                    }
+                    Step::LineStart => {
+                        if self.at_line_start(text, position) {
+                            work.push(Work::Explore(pc + 1, position));
+                        }
+                    }
+                    Step::LineEnd => {
+                        if self.at_line_end(text, position) {
+                            work.push(Work::Explore(pc + 1, position));
+                        }
+                    }
+                    Step::WordStart => {
+                        if Self::at_word_start(text, position) {
+                            work.push(Work::Explore(pc + 1, position));
+                        }
+                    }
+                    Step::WordEnd => {
+                        if Self::at_word_end(text, position) {
+                            work.push(Work::Explore(pc + 1, position));
+                        }
+                    }
+                    Step::Save(slot) => {
+                        work.push(Work::Restore(slot as usize, slots[slot as usize]));
+                        slots[slot as usize] = Some(position);
+                        work.push(Work::Explore(pc + 1, position));
+                    }
+                    Step::Jump(target) => work.push(Work::Explore(target, position)),
+                    Step::Split(first, second) => {
+                        work.push(Work::Explore(second, position));
+                        work.push(Work::Explore(first, position));
+                    }
+                    Step::Backreference(index) => {
+                        let (Some(from), Some(to)) =
+                            (slots[index as usize * 2], slots[index as usize * 2 + 1])
+                        else {
+                            continue;
+                        };
+                        let length = to.saturating_sub(from);
+                        if position + length <= limit
+                            && self.same_bytes(
+                                &text[from..from + length],
+                                &text[position..position + length],
+                            )
+                        {
+                            work.push(Work::Explore(pc + 1, position + length));
+                        }
+                    }
+                    Step::Accept => {
+                        let accepted = match exact_end {
+                            Some(end) => position == end,
+                            None => best.as_ref().is_none_or(|(end, _)| position > *end),
+                        };
+                        if accepted {
+                            let mut spans: Vec<Span> = Vec::with_capacity(self.groups + 1);
+                            spans.push(Some((start, position)));
+                            for group in 1..=self.groups {
+                                spans.push(match (slots[group * 2], slots[group * 2 + 1]) {
+                                    (Some(from), Some(to)) if from <= to => Some((from, to)),
+                                    _ => None,
+                                });
+                            }
+                            best = Some((position, spans));
+                            if exact_end.is_some() {
+                                return best;
+                            }
+                        }
+                    }
+                }
+            }
+            best
+        }
+
+        pub(super) fn find(&self, text: &[u8]) -> Option<Vec<Span>> {
+            if self.backreferences {
+                for start in 0..=text.len() {
+                    if let Some(leading) = &self.leading {
+                        if start < text.len() && !leading.contains(text[start]) {
+                            continue;
+                        }
+                        if start == text.len() {
+                            break;
+                        }
+                    }
+                    if let Some((_, spans)) = self.backtrack(text, start, text.len(), None, false) {
+                        return Some(spans);
+                    }
+                }
+                return None;
+            }
+            let (start, end) = self.longest(text)?;
+            if self.groups == 0 {
+                return Some(vec![Some((start, end))]);
+            }
+            self.backtrack(text, start, end, Some(end), true)
+                .map(|(_, spans)| spans)
+                .or_else(|| {
+                    Some(
+                        vec![Some((start, end))]
+                            .into_iter()
+                            .chain((0..self.groups).map(|_| None))
+                            .collect(),
+                    )
+                })
+        }
+
+        pub(super) fn is_match(&self, text: &[u8]) -> bool {
+            if self.backreferences {
+                return self.find(text).is_some();
+            }
+            self.longest(text).is_some()
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub(super) struct Spot {
+        pub(super) buffer: usize,
+        pub(super) offset: usize,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub(super) struct Extent {
+        pub(super) start: Spot,
+        pub(super) length: usize,
+    }
+
+    impl Extent {
+        fn new(buffer: usize, offset: usize, length: usize) -> Extent {
+            Extent {
+                start: Spot { buffer, offset },
+                length,
+            }
+        }
+
+        fn end(&self) -> usize {
+            self.start.offset + self.length
+        }
+
+        fn front(&self, count: usize) -> Extent {
+            Extent::new(self.start.buffer, self.start.offset, count.min(self.length))
+        }
+
+        fn after(&self, count: usize) -> Extent {
+            let count = count.min(self.length);
+            Extent::new(
+                self.start.buffer,
+                self.start.offset + count,
+                self.length - count,
+            )
+        }
+
+        fn until_end_of(&self, rest: &Extent) -> Extent {
+            Extent::new(
+                self.start.buffer,
+                self.start.offset,
+                rest.start.offset.saturating_sub(self.start.offset),
+            )
+        }
+    }
+
+    pub(super) struct SourceText {
+        pub(super) name: String,
+        pub(super) text: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    pub(super) struct Sources {
+        pub(super) files: Vec<SourceText>,
+    }
+
+    const TAB_STOP: usize = 8;
+
+    impl Sources {
+        pub(super) fn add(&mut self, name: &str, text: Vec<u8>) -> usize {
+            self.files.push(SourceText {
+                name: name.to_string(),
+                text,
+            });
+            self.files.len() - 1
+        }
+
+        pub(super) fn bytes(&self, extent: Extent) -> &[u8] {
+            let text = &self.files[extent.start.buffer].text;
+            let start = extent.start.offset.min(text.len());
+            let end = extent.end().min(text.len());
+            &text[start..end]
+        }
+
+        pub(super) fn string(&self, extent: Extent) -> String {
+            String::from_utf8_lossy(self.bytes(extent)).into_owned()
+        }
+
+        pub(super) fn whole(&self, buffer: usize) -> Extent {
+            Extent::new(buffer, 0, self.files[buffer].text.len())
+        }
+
+        pub(super) fn line_column(&self, spot: Spot) -> (usize, usize) {
+            let text = &self.files[spot.buffer].text;
+            let at = spot.offset.min(text.len());
+            let line = 1 + text[..at].iter().filter(|&&byte| byte == b'\n').count();
+            let line_start = text[..at]
+                .iter()
+                .rposition(|&byte| byte == b'\n')
+                .map(|position| position + 1)
+                .unwrap_or(0);
+            (line, at - line_start + 1)
+        }
+
+        pub(super) fn render(
+            &self,
+            out: &mut Vec<u8>,
+            spot: Spot,
+            kind: &str,
+            message: &str,
+            ranges: &[Extent],
+        ) {
+            let file = &self.files[spot.buffer];
+            let text = &file.text;
+            let at = spot.offset.min(text.len());
+            let line_start = text[..at]
+                .iter()
+                .rposition(|&byte| byte == b'\n' || byte == b'\r')
+                .map(|position| position + 1)
+                .unwrap_or(0);
+            let line_end = text[at..]
+                .iter()
+                .position(|&byte| byte == b'\n' || byte == b'\r')
+                .map(|position| at + position)
+                .unwrap_or(text.len());
+            let line = 1 + text[..at].iter().filter(|&&byte| byte == b'\n').count();
+            let column = at - line_start;
+            out.extend_from_slice(
+                format!(
+                    "{}:{}:{}: {}: {}\n",
+                    file.name,
+                    line,
+                    column + 1,
+                    kind,
+                    message
+                )
+                .as_bytes(),
+            );
+            let contents = &text[line_start..line_end];
+            if contents.len() > 4096 {
+                return;
+            }
+            let mut caret = vec![b' '; contents.len() + 1];
+            for range in ranges {
+                if range.start.buffer != spot.buffer {
+                    continue;
+                }
+                let start = range.start.offset;
+                let end = range.end();
+                if start > line_end || end < line_start {
+                    continue;
+                }
+                let first = start.max(line_start) - line_start;
+                let last = end.min(line_end) - line_start;
+                for slot in caret.iter_mut().take(last).skip(first) {
+                    *slot = b'~';
+                }
+            }
+            if column < caret.len() {
+                caret[column] = b'^';
+            }
+            while caret.last() == Some(&b' ') {
+                caret.pop();
+            }
+            let mut column_out = 0usize;
+            for &byte in contents {
+                if byte == b'\t' {
+                    loop {
+                        out.push(b' ');
+                        column_out += 1;
+                        if column_out.is_multiple_of(TAB_STOP) {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(byte);
+                    column_out += 1;
+                }
+            }
+            out.push(b'\n');
+            let mut column_out = 0usize;
+            for (index, &mark) in caret.iter().enumerate() {
+                if index >= contents.len() || contents[index] != b'\t' {
+                    out.push(mark);
+                    column_out += 1;
+                    continue;
+                }
+                loop {
+                    out.push(mark);
+                    column_out += 1;
+                    if column_out.is_multiple_of(TAB_STOP) {
+                        break;
+                    }
+                }
+            }
+            out.push(b'\n');
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) enum Directive {
+        Missing,
+        Misspelled,
+        Plain,
+        Next,
+        Same,
+        Not,
+        Dag,
+        Label,
+        Empty,
+        Comment,
+        EndOfFile,
+        BadNot,
+        BadCount,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) struct CheckType {
+        pub(super) directive: Directive,
+        pub(super) count: usize,
+        pub(super) literal: bool,
+    }
+
+    impl CheckType {
+        fn of(directive: Directive) -> CheckType {
+            CheckType {
+                directive,
+                count: 1,
+                literal: false,
+            }
+        }
+
+        fn modifiers(&self) -> &'static str {
+            if self.literal {
+                "{LITERAL}"
+            } else {
+                ""
+            }
+        }
+
+        fn description(&self, prefix: &str) -> String {
+            let with = |suffix: &str| format!("{prefix}{suffix}{}", self.modifiers());
+            match self.directive {
+                Directive::Missing => "invalid".to_string(),
+                Directive::Misspelled => "misspelled".to_string(),
+                Directive::Plain => {
+                    if self.count > 1 {
+                        with("-COUNT")
+                    } else {
+                        with("")
+                    }
+                }
+                Directive::Next => with("-NEXT"),
+                Directive::Same => with("-SAME"),
+                Directive::Not => with("-NOT"),
+                Directive::Dag => with("-DAG"),
+                Directive::Label => with("-LABEL"),
+                Directive::Empty => with("-EMPTY"),
+                Directive::Comment => prefix.to_string(),
+                Directive::EndOfFile => "implicit EOF".to_string(),
+                Directive::BadNot => "bad NOT".to_string(),
+                Directive::BadCount => "bad COUNT".to_string(),
+            }
+        }
+
+        fn abbreviation(&self) -> &'static str {
+            match self.directive {
+                Directive::Plain => {
+                    if self.count > 1 {
+                        "count"
+                    } else {
+                        "check"
+                    }
+                }
+                Directive::Next => "next",
+                Directive::Same => "same",
+                Directive::Not => "not",
+                Directive::Dag => "dag",
+                Directive::Label => "label",
+                Directive::Empty => "empty",
+                Directive::Comment => "com",
+                Directive::EndOfFile => "eof",
+                Directive::BadNot => "bad-not",
+                Directive::BadCount => "bad-count",
+                Directive::Misspelled => "misspelled",
+                Directive::Missing => "none",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum NumberKind {
+        Unformatted,
+        Unsigned,
+        Signed,
+        HexUpper,
+        HexLower,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct NumberFormat {
+        kind: NumberKind,
+        precision: usize,
+        alternate: bool,
+    }
+
+    impl NumberFormat {
+        fn of(kind: NumberKind) -> NumberFormat {
+            NumberFormat {
+                kind,
+                precision: 0,
+                alternate: false,
+            }
+        }
+
+        fn is_set(&self) -> bool {
+            self.kind != NumberKind::Unformatted
+        }
+
+        fn same_as(&self, other: &NumberFormat) -> bool {
+            self.kind != NumberKind::Unformatted
+                && self.kind == other.kind
+                && self.precision == other.precision
+                && self.alternate == other.alternate
+        }
+
+        fn name(&self) -> &'static str {
+            match self.kind {
+                NumberKind::Unformatted => "<none>",
+                NumberKind::Unsigned => "%u",
+                NumberKind::Signed => "%d",
+                NumberKind::HexUpper => "%X",
+                NumberKind::HexLower => "%x",
+            }
+        }
+
+        fn wildcard(&self) -> String {
+            let prefix = if self.alternate { "0x" } else { "" };
+            let precise = |body: &str| format!("{prefix}{body}{{{}}}", self.precision);
+            match self.kind {
+                NumberKind::Unsigned => {
+                    if self.precision > 0 {
+                        precise("([1-9][0-9]*)?[0-9]")
+                    } else {
+                        "[0-9]+".to_string()
+                    }
+                }
+                NumberKind::Signed => {
+                    if self.precision > 0 {
+                        precise("-?([1-9][0-9]*)?[0-9]")
+                    } else {
+                        "-?[0-9]+".to_string()
+                    }
+                }
+                NumberKind::HexUpper => {
+                    if self.precision > 0 {
+                        precise("([1-9A-F][0-9A-F]*)?[0-9A-F]")
+                    } else {
+                        format!("{prefix}[0-9A-F]+")
+                    }
+                }
+                NumberKind::HexLower => {
+                    if self.precision > 0 {
+                        precise("([1-9a-f][0-9a-f]*)?[0-9a-f]")
+                    } else {
+                        format!("{prefix}[0-9a-f]+")
+                    }
+                }
+                NumberKind::Unformatted => String::new(),
+            }
+        }
+
+        fn render(&self, value: i128) -> Result<String, Failure> {
+            if self.kind != NumberKind::Signed && value < 0 {
+                return Err(Failure::Overflow);
+            }
+            let magnitude = value.unsigned_abs();
+            let digits = match self.kind {
+                NumberKind::HexUpper => format!("{magnitude:X}"),
+                NumberKind::HexLower => format!("{magnitude:x}"),
+                _ => format!("{magnitude}"),
+            };
+            let sign = if value < 0 { "-" } else { "" };
+            let prefix = if self.alternate { "0x" } else { "" };
+            let padding = "0".repeat(self.precision.saturating_sub(digits.len()));
+            Ok(format!("{sign}{prefix}{padding}{digits}"))
+        }
+
+        fn parse_value(&self, text: &[u8]) -> i128 {
+            let mut rest = text;
+            let negative = rest.first() == Some(&b'-');
+            if negative {
+                rest = &rest[1..];
+            }
+            if self.kind != NumberKind::Signed && self.alternate && rest.starts_with(b"0x") {
+                rest = &rest[2..];
+            }
+            let radix = if matches!(self.kind, NumberKind::HexUpper | NumberKind::HexLower) {
+                16
+            } else {
+                10
+            };
+            let magnitude =
+                i128::from_str_radix(&String::from_utf8_lossy(rest), radix).unwrap_or(0);
+            if negative {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Failure {
+        Overflow,
+        Undefined(Extent, String),
+    }
+
+    #[derive(Clone, Debug)]
+    struct Problem {
+        spot: Spot,
+        message: String,
+        range: Option<Extent>,
+    }
+
+    impl Problem {
+        fn at(extent: Extent, message: impl Into<String>) -> Problem {
+            Problem {
+                spot: extent.start,
+                message: message.into(),
+                range: Some(extent),
+            }
+        }
+
+        fn point(spot: Spot, message: impl Into<String>) -> Problem {
+            Problem {
+                spot,
+                message: message.into(),
+                range: None,
+            }
+        }
+
+        fn print(&self, sources: &Sources, out: &mut Vec<u8>) {
+            sources.render(out, self.spot, "error", &self.message, &[]);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Operator {
+        Add,
+        Subtract,
+        Multiply,
+        Divide,
+        Maximum,
+        Minimum,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Expression {
+        Literal {
+            text: Extent,
+            value: i128,
+        },
+        Use {
+            text: Extent,
+            variable: usize,
+        },
+        Binary {
+            text: Extent,
+            operator: Operator,
+            left: Box<Expression>,
+            right: Box<Expression>,
+        },
+    }
+
+    impl Expression {
+        fn text(&self) -> Extent {
+            match self {
+                Expression::Literal { text, .. }
+                | Expression::Use { text, .. }
+                | Expression::Binary { text, .. } => *text,
+            }
+        }
+
+        fn evaluate(&self, variables: &Variables, sources: &Sources) -> Result<i128, Vec<Failure>> {
+            match self {
+                Expression::Literal { value, .. } => Ok(*value),
+                Expression::Use { text, variable } => variables.numerics[*variable]
+                    .value
+                    .ok_or_else(|| vec![Failure::Undefined(*text, sources.string(*text))]),
+                Expression::Binary {
+                    operator,
+                    left,
+                    right,
+                    ..
+                } => {
+                    let first = left.evaluate(variables, sources);
+                    let second = right.evaluate(variables, sources);
+                    let (first, second) = match (first, second) {
+                        (Ok(first), Ok(second)) => (first, second),
+                        (first, second) => {
+                            let mut failures = Vec::new();
+                            if let Err(found) = first {
+                                failures.extend(found);
+                            }
+                            if let Err(found) = second {
+                                failures.extend(found);
+                            }
+                            return Err(failures);
+                        }
+                    };
+                    let computed = match operator {
+                        Operator::Add => first.checked_add(second),
+                        Operator::Subtract => first.checked_sub(second),
+                        Operator::Multiply => first.checked_mul(second),
+                        Operator::Divide => {
+                            if second == 0 {
+                                None
+                            } else {
+                                first.checked_div(second)
+                            }
+                        }
+                        Operator::Maximum => Some(first.max(second)),
+                        Operator::Minimum => Some(first.min(second)),
+                    };
+                    computed.ok_or_else(|| vec![Failure::Overflow])
+                }
+            }
+        }
+
+        fn implicit_format(
+            &self,
+            variables: &Variables,
+            sources: &Sources,
+        ) -> Result<NumberFormat, Vec<Problem>> {
+            match self {
+                Expression::Literal { .. } => Ok(NumberFormat::of(NumberKind::Unformatted)),
+                Expression::Use { variable, .. } => Ok(variables.numerics[*variable].format),
+                Expression::Binary {
+                    text, left, right, ..
+                } => {
+                    let first = left.implicit_format(variables, sources);
+                    let second = right.implicit_format(variables, sources);
+                    let (first, second) = match (first, second) {
+                        (Ok(first), Ok(second)) => (first, second),
+                        (first, second) => {
+                            let mut problems = Vec::new();
+                            if let Err(found) = first {
+                                problems.extend(found);
+                            }
+                            if let Err(found) = second {
+                                problems.extend(found);
+                            }
+                            return Err(problems);
+                        }
+                    };
+                    if first.is_set() && second.is_set() && !first.same_as(&second) {
+                        return Err(vec![Problem::at(
+                            *text,
+                            format!(
+                                "implicit format conflict between '{}' ({}) and '{}' ({}), need an explicit format specifier",
+                                sources.string(left.text()),
+                                first.name(),
+                                sources.string(right.text()),
+                                second.name()
+                            ),
+                        )]);
+                    }
+                    Ok(if first.is_set() { first } else { second })
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Numeric {
+        name: String,
+        format: NumberFormat,
+        value: Option<i128>,
+        text: Option<Extent>,
+        line: Option<usize>,
+    }
+
+    struct Variables {
+        strings: HashMap<String, Extent>,
+        defined: BTreeSet<String>,
+        numeric_names: HashMap<String, usize>,
+        numerics: Vec<Numeric>,
+        line_variable: usize,
+    }
+
+    impl Variables {
+        fn new() -> Variables {
+            Variables {
+                strings: HashMap::new(),
+                defined: BTreeSet::new(),
+                numeric_names: HashMap::new(),
+                numerics: Vec::new(),
+                line_variable: 0,
+            }
+        }
+
+        fn make_numeric(&mut self, name: &str, format: NumberFormat, line: Option<usize>) -> usize {
+            self.numerics.push(Numeric {
+                name: name.to_string(),
+                format,
+                value: None,
+                text: None,
+                line,
+            });
+            self.numerics.len() - 1
+        }
+
+        fn clear_local(&mut self) {
+            self.strings.retain(|name, _| name.starts_with('$'));
+            let local: Vec<String> = self
+                .numeric_names
+                .keys()
+                .filter(|name| !name.starts_with('$'))
+                .cloned()
+                .collect();
+            for name in local {
+                if let Some(index) = self.numeric_names.remove(&name) {
+                    self.numerics[index].value = None;
+                    self.numerics[index].text = None;
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum SubstitutionKind {
+        Text(String),
+        Number(Option<Expression>, NumberFormat),
+    }
+
+    #[derive(Clone, Debug)]
+    struct Substitution {
+        from: Extent,
+        insert_at: usize,
+        kind: SubstitutionKind,
+    }
+
+    impl Substitution {
+        fn value(&self, variables: &Variables, sources: &Sources) -> Result<String, Vec<Failure>> {
+            match &self.kind {
+                SubstitutionKind::Text(name) => variables
+                    .strings
+                    .get(name)
+                    .map(|extent| regex_escape(&sources.string(*extent)))
+                    .ok_or_else(|| vec![Failure::Undefined(self.from, name.clone())]),
+                SubstitutionKind::Number(expression, format) => {
+                    let Some(expression) = expression else {
+                        return Err(vec![Failure::Overflow]);
+                    };
+                    let value = expression.evaluate(variables, sources)?;
+                    format.render(value).map_err(|failure| vec![failure])
+                }
+            }
+        }
+
+        fn shown(&self, variables: &Variables, sources: &Sources) -> Option<String> {
+            match &self.kind {
+                SubstitutionKind::Text(name) => {
+                    let extent = variables.strings.get(name)?;
+                    let value = sources.bytes(*extent);
+                    let needs_escape = value
+                        .iter()
+                        .any(|&byte| !(32..127).contains(&byte) || byte == b'"');
+                    if needs_escape {
+                        Some(format!("\"{}\" (escaped value)", escape_for_display(value)))
+                    } else {
+                        Some(format!("\"{}\"", String::from_utf8_lossy(value)))
+                    }
+                }
+                SubstitutionKind::Number(..) => {
+                    let value = self.value(variables, sources).ok()?;
+                    Some(format!("\"{value}\""))
+                }
+            }
+        }
+    }
+
+    fn escape_for_display(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        for &byte in bytes {
+            match byte {
+                b'\\' => out.push_str("\\\\"),
+                b'\t' => out.push_str("\\t"),
+                b'\n' => out.push_str("\\n"),
+                b'"' => out.push_str("\\\""),
+                32..=126 => out.push(byte as char),
+                _ => out.push_str(&format!("\\{:03o}", byte)),
+            }
+        }
+        out
+    }
+
+    #[derive(Clone, Debug)]
+    struct Pattern {
+        check: CheckType,
+        location: Spot,
+        line: Option<usize>,
+        fixed: Option<Vec<u8>>,
+        regex: String,
+        substitutions: Vec<Substitution>,
+        string_definitions: BTreeMap<String, usize>,
+        numeric_definitions: BTreeMap<String, (usize, usize)>,
+        ignore_case: bool,
+    }
+
+    struct Found {
+        position: usize,
+        length: usize,
+    }
+
+    enum MatchError {
+        NotFound,
+        Problems(Vec<Problem>),
+    }
+
+    fn is_word_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+    }
+
+    fn trim_spaces(sources: &Sources, extent: Extent) -> Extent {
+        let bytes = sources.bytes(extent);
+        let lead = bytes
+            .iter()
+            .take_while(|&&byte| byte == b' ' || byte == b'\t')
+            .count();
+        let rest = extent.after(lead);
+        let bytes = sources.bytes(rest);
+        let tail = bytes
+            .iter()
+            .rev()
+            .take_while(|&&byte| byte == b' ' || byte == b'\t')
+            .count();
+        rest.front(rest.length - tail)
+    }
+
+    fn trim_left(sources: &Sources, extent: Extent) -> Extent {
+        let bytes = sources.bytes(extent);
+        let lead = bytes
+            .iter()
+            .take_while(|&&byte| byte == b' ' || byte == b'\t')
+            .count();
+        extent.after(lead)
+    }
+
+    fn starts(sources: &Sources, extent: Extent, text: &[u8]) -> bool {
+        sources.bytes(extent).starts_with(text)
+    }
+
+    fn find_in(sources: &Sources, extent: Extent, needle: &[u8], from: usize) -> Option<usize> {
+        let bytes = sources.bytes(extent);
+        if from > bytes.len() {
+            return None;
+        }
+        bytes[from..]
+            .windows(needle.len().max(1))
+            .position(|window| window == needle)
+            .map(|position| position + from)
+    }
+
+    struct VariableName {
+        name: String,
+        pseudo: bool,
+    }
+
+    fn parse_variable(sources: &Sources, text: &mut Extent) -> Result<VariableName, Problem> {
+        let bytes = sources.bytes(*text);
+        if bytes.is_empty() {
+            return Err(Problem::at(*text, "empty variable name"));
+        }
+        let pseudo = bytes[0] == b'@';
+        let mut index = 0;
+        if bytes[0] == b'$' || pseudo {
+            index += 1;
+        }
+        if index == bytes.len() {
+            return Err(Problem::at(
+                text.after(index),
+                format!(
+                    "empty {}variable name",
+                    if pseudo { "pseudo " } else { "global " }
+                ),
+            ));
+        }
+        let first = bytes[index];
+        if !(first == b'_' || first.is_ascii_alphabetic()) {
+            return Err(Problem::at(*text, "invalid variable name"));
+        }
+        index += 1;
+        while index < bytes.len() && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+        {
+            index += 1;
+        }
+        let name = String::from_utf8_lossy(&bytes[..index]).into_owned();
+        *text = text.after(index);
+        Ok(VariableName { name, pseudo })
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Allowed {
+        LineVariable,
+        LegacyLiteral,
+        Anything,
+    }
+
+    struct ExpressionParser<'a> {
+        sources: &'a Sources,
+        variables: &'a mut Variables,
+        line: Option<usize>,
+    }
+
+    fn consume_integer(bytes: &[u8], radix: u32) -> Option<(i128, usize)> {
+        let mut index = 0;
+        let mut radix = radix;
+        if radix == 0 {
+            if bytes.len() > 2
+                && bytes[0] == b'0'
+                && (bytes[1] == b'x' || bytes[1] == b'X')
+                && bytes[2].is_ascii_hexdigit()
+            {
+                radix = 16;
+                index = 2;
+            } else if bytes.len() > 2
+                && bytes[0] == b'0'
+                && (bytes[1] == b'b' || bytes[1] == b'B')
+                && (bytes[2] == b'0' || bytes[2] == b'1')
+            {
+                radix = 2;
+                index = 2;
+            } else if bytes.len() > 2
+                && bytes[0] == b'0'
+                && (bytes[1] == b'o')
+                && (b'0'..=b'7').contains(&bytes[2])
+            {
+                radix = 8;
+                index = 2;
+            } else if bytes.len() > 1 && bytes[0] == b'0' && bytes[1].is_ascii_digit() {
+                radix = 8;
+                index = 1;
+            } else {
+                radix = 10;
+            }
+        }
+        let start = index;
+        let mut value: i128 = 0;
+        while index < bytes.len() {
+            let digit = match bytes[index] {
+                byte @ b'0'..=b'9' => u32::from(byte - b'0'),
+                byte @ b'a'..=b'z' => u32::from(byte - b'a') + 10,
+                byte @ b'A'..=b'Z' => u32::from(byte - b'A') + 10,
+                _ => break,
+            };
+            if digit >= radix {
+                break;
+            }
+            value = value
+                .checked_mul(i128::from(radix))?
+                .checked_add(i128::from(digit))?;
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
+        Some((value, index))
+    }
+
+    impl<'a> ExpressionParser<'a> {
+        fn variable_use(
+            &mut self,
+            name: &str,
+            text: Extent,
+            pseudo: bool,
+        ) -> Result<Expression, Problem> {
+            if pseudo && name != "@LINE" {
+                return Err(Problem::at(
+                    text,
+                    format!("invalid pseudo numeric variable '{name}'"),
+                ));
+            }
+            let index = match self.variables.numeric_names.get(name) {
+                Some(&index) => index,
+                None => {
+                    let index = self.variables.make_numeric(
+                        name,
+                        NumberFormat::of(NumberKind::Unsigned),
+                        None,
+                    );
+                    self.variables.numeric_names.insert(name.to_string(), index);
+                    index
+                }
+            };
+            let defined_on = self.variables.numerics[index].line;
+            if let (Some(defined_on), Some(line)) = (defined_on, self.line) {
+                if defined_on == line {
+                    return Err(Problem::at(
+                        text,
+                        format!(
+                            "numeric variable '{name}' defined earlier in the same CHECK directive"
+                        ),
+                    ));
+                }
+            }
+            Ok(Expression::Use {
+                text,
+                variable: index,
+            })
+        }
+
+        fn operand(
+            &mut self,
+            rest: &mut Extent,
+            allowed: Allowed,
+            maybe_constraint: bool,
+        ) -> Result<Expression, Problem> {
+            if starts(self.sources, *rest, b"(") {
+                if allowed != Allowed::Anything {
+                    return Err(Problem::at(
+                        *rest,
+                        "parenthesized expression not permitted here",
+                    ));
+                }
+                return self.parenthesized(rest);
+            }
+            if allowed == Allowed::LineVariable || allowed == Allowed::Anything {
+                let saved = *rest;
+                match parse_variable(self.sources, rest) {
+                    Ok(variable) => {
+                        let name_text = saved.until_end_of(rest);
+                        if starts(self.sources, trim_left(self.sources, *rest), b"(") {
+                            if allowed != Allowed::Anything {
+                                return Err(Problem::at(name_text, "unexpected function call"));
+                            }
+                            return self.call(rest, &variable.name, name_text);
+                        }
+                        return self.variable_use(&variable.name, name_text, variable.pseudo);
+                    }
+                    Err(problem) => {
+                        if allowed == Allowed::LineVariable {
+                            return Err(problem);
+                        }
+                        *rest = saved;
+                    }
+                }
+            }
+            let saved = *rest;
+            let bytes = self.sources.bytes(*rest);
+            let negative = bytes.first() == Some(&b'-');
+            let body = &bytes[usize::from(negative)..];
+            let radix = if allowed == Allowed::LegacyLiteral {
+                10
+            } else {
+                0
+            };
+            if let Some((magnitude, used)) = consume_integer(body, radix) {
+                let consumed = used + usize::from(negative);
+                *rest = rest.after(consumed);
+                let value = if negative { -magnitude } else { magnitude };
+                return Ok(Expression::Literal {
+                    text: saved.front(consumed),
+                    value,
+                });
+            }
+            Err(Problem::at(
+                saved,
+                format!(
+                    "invalid {}operand format",
+                    if maybe_constraint {
+                        "matching constraint or "
+                    } else {
+                        ""
+                    }
+                ),
+            ))
+        }
+
+        fn parenthesized(&mut self, rest: &mut Extent) -> Result<Expression, Problem> {
+            *rest = trim_left(self.sources, *rest);
+            *rest = rest.after(1);
+            *rest = trim_left(self.sources, *rest);
+            if rest.length == 0 {
+                return Err(Problem::at(*rest, "missing operand in expression"));
+            }
+            let mut result = self.operand(rest, Allowed::Anything, false)?;
+            *rest = trim_left(self.sources, *rest);
+            while rest.length > 0 && !starts(self.sources, *rest, b")") {
+                let outer = *rest;
+                result = self.binary(outer, rest, result, false)?;
+                *rest = trim_left(self.sources, *rest);
+            }
+            if !starts(self.sources, *rest, b")") {
+                return Err(Problem::at(
+                    *rest,
+                    "missing ')' at end of nested expression",
+                ));
+            }
+            *rest = rest.after(1);
+            Ok(result)
+        }
+
+        fn binary(
+            &mut self,
+            whole: Extent,
+            rest: &mut Extent,
+            left: Expression,
+            legacy: bool,
+        ) -> Result<Expression, Problem> {
+            *rest = trim_left(self.sources, *rest);
+            if rest.length == 0 {
+                return Ok(left);
+            }
+            let operator_spot = rest.start;
+            let symbol = self.sources.bytes(*rest)[0];
+            *rest = rest.after(1);
+            let operator = match symbol {
+                b'+' => Operator::Add,
+                b'-' => Operator::Subtract,
+                other => {
+                    return Err(Problem::point(
+                        operator_spot,
+                        format!("unsupported operation '{}'", other as char),
+                    ))
+                }
+            };
+            *rest = trim_left(self.sources, *rest);
+            if rest.length == 0 {
+                return Err(Problem::at(*rest, "missing operand in expression"));
+            }
+            let allowed = if legacy {
+                Allowed::LegacyLiteral
+            } else {
+                Allowed::Anything
+            };
+            let right = self.operand(rest, allowed, false)?;
+            Ok(Expression::Binary {
+                text: whole.until_end_of(rest),
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+
+        fn call(
+            &mut self,
+            rest: &mut Extent,
+            name: &str,
+            name_text: Extent,
+        ) -> Result<Expression, Problem> {
+            *rest = trim_left(self.sources, *rest);
+            let operator = match name {
+                "add" => Operator::Add,
+                "div" => Operator::Divide,
+                "max" => Operator::Maximum,
+                "min" => Operator::Minimum,
+                "mul" => Operator::Multiply,
+                "sub" => Operator::Subtract,
+                _ => {
+                    return Err(Problem::at(
+                        name_text,
+                        format!("call to undefined function '{name}'"),
+                    ));
+                }
+            };
+            *rest = rest.after(1);
+            *rest = trim_left(self.sources, *rest);
+            let mut arguments = Vec::new();
+            while rest.length > 0 && !starts(self.sources, *rest, b")") {
+                if starts(self.sources, *rest, b",") {
+                    return Err(Problem::at(*rest, "missing argument"));
+                }
+                let outer = *rest;
+                let mut argument = self.operand(rest, Allowed::Anything, false)?;
+                while rest.length > 0 {
+                    *rest = trim_left(self.sources, *rest);
+                    if starts(self.sources, *rest, b",") || starts(self.sources, *rest, b")") {
+                        break;
+                    }
+                    argument = self.binary(outer, rest, argument, false)?;
+                }
+                arguments.push(argument);
+                *rest = trim_left(self.sources, *rest);
+                if !starts(self.sources, *rest, b",") {
+                    break;
+                }
+                *rest = rest.after(1);
+                *rest = trim_left(self.sources, *rest);
+                if starts(self.sources, *rest, b")") {
+                    return Err(Problem::at(*rest, "missing argument"));
+                }
+            }
+            if !starts(self.sources, *rest, b")") {
+                return Err(Problem::at(*rest, "missing ')' at end of call expression"));
+            }
+            *rest = rest.after(1);
+            if arguments.len() == 2 {
+                let right = arguments.pop().map(Box::new);
+                let left = arguments.pop().map(Box::new);
+                if let (Some(left), Some(right)) = (left, right) {
+                    return Ok(Expression::Binary {
+                        text: *rest,
+                        operator,
+                        left,
+                        right,
+                    });
+                }
+            }
+            Err(Problem::at(
+                name_text,
+                format!(
+                    "function '{name}' takes 2 arguments but {} given",
+                    arguments.len()
+                ),
+            ))
+        }
+    }
+
+    struct NumericBlock {
+        expression: Option<Expression>,
+        format: NumberFormat,
+        defined: Option<usize>,
+    }
+
+    fn parse_numeric_block(
+        sources: &Sources,
+        variables: &mut Variables,
+        mut text: Extent,
+        legacy: bool,
+        line: Option<usize>,
+    ) -> Result<NumericBlock, Vec<Problem>> {
+        let mut explicit = NumberFormat::of(NumberKind::Unformatted);
+        let mut precision = 0usize;
+        let bytes = sources.bytes(text).to_vec();
+        let comma = bytes.iter().position(|&byte| byte == b',');
+        let paren = bytes.iter().position(|&byte| byte == b'(');
+        if let Some(comma) = comma.filter(|&comma| paren.is_none_or(|paren| comma < paren)) {
+            let format_text = trim_spaces(sources, text.front(comma));
+            text = text.after(comma + 1);
+            let mut format_rest = format_text;
+            if !starts(sources, format_rest, b"%") {
+                return Err(vec![Problem::at(
+                    format_rest,
+                    "invalid matching format specification in expression",
+                )]);
+            }
+            format_rest = format_rest.after(1);
+            let alternate_spot = format_rest.start;
+            let alternate = starts(sources, format_rest, b"#");
+            if alternate {
+                format_rest = format_rest.after(1);
+            }
+            if starts(sources, format_rest, b".") {
+                format_rest = format_rest.after(1);
+                match consume_integer(sources.bytes(format_rest), 10) {
+                    Some((value, used)) => {
+                        precision = value as usize;
+                        format_rest = format_rest.after(used);
+                    }
+                    None => {
+                        return Err(vec![Problem::at(
+                            format_rest,
+                            "invalid precision in format specifier",
+                        )]);
+                    }
+                }
+            }
+            if format_rest.length > 0 {
+                let spot = format_rest.start;
+                let letter = sources.bytes(format_rest)[0];
+                format_rest = format_rest.after(1);
+                let kind = match letter {
+                    b'u' => NumberKind::Unsigned,
+                    b'd' => NumberKind::Signed,
+                    b'x' => NumberKind::HexLower,
+                    b'X' => NumberKind::HexUpper,
+                    _ => {
+                        return Err(vec![Problem::point(
+                            spot,
+                            "invalid format specifier in expression",
+                        )]);
+                    }
+                };
+                explicit = NumberFormat {
+                    kind,
+                    precision,
+                    alternate: alternate
+                        && matches!(kind, NumberKind::HexLower | NumberKind::HexUpper),
+                };
+            }
+            if alternate && !matches!(explicit.kind, NumberKind::HexLower | NumberKind::HexUpper) {
+                return Err(vec![Problem::point(
+                    alternate_spot,
+                    "alternate form only supported for hex values",
+                )]);
+            }
+            let leftover = trim_left(sources, format_rest);
+            if leftover.length > 0 {
+                return Err(vec![Problem::at(
+                    leftover,
+                    "invalid matching format specification in expression",
+                )]);
+            }
+        }
+        let definition_end = find_in(sources, text, b":", 0);
+        let mut definition_text = None;
+        if let Some(end) = definition_end {
+            definition_text = Some(text.front(end));
+            text = text.after(end + 1);
+        }
+        text = trim_left(sources, text);
+        let constrained = starts(sources, text, b"==");
+        if constrained {
+            text = text.after(2);
+        }
+        text = trim_left(sources, text);
+        let mut expression = None;
+        if text.length == 0 {
+            if constrained {
+                return Err(vec![Problem::at(
+                    text,
+                    "empty numeric expression should not have a constraint",
+                )]);
+            }
+        } else {
+            let tail = sources
+                .bytes(text)
+                .iter()
+                .rev()
+                .take_while(|&&byte| byte == b' ' || byte == b'\t')
+                .count();
+            text = text.front(text.length - tail);
+            let outer = text;
+            let mut rest = text;
+            let allowed = if legacy {
+                Allowed::LineVariable
+            } else {
+                Allowed::Anything
+            };
+            let mut parser = ExpressionParser {
+                sources,
+                variables,
+                line,
+            };
+            let mut result = parser
+                .operand(&mut rest, allowed, !constrained)
+                .map_err(|problem| vec![problem])?;
+            while rest.length > 0 {
+                result = parser
+                    .binary(outer, &mut rest, result, legacy)
+                    .map_err(|problem| vec![problem])?;
+                if legacy && rest.length > 0 {
+                    return Err(vec![Problem::at(
+                        rest,
+                        format!(
+                            "unexpected characters at end of expression '{}'",
+                            sources.string(rest)
+                        ),
+                    )]);
+                }
+            }
+            expression = Some(result);
+        }
+        let mut format = if explicit.is_set() {
+            explicit
+        } else if let Some(expression) = &expression {
+            expression.implicit_format(variables, sources)?
+        } else {
+            NumberFormat::of(NumberKind::Unformatted)
+        };
+        if !format.is_set() {
+            format = NumberFormat {
+                kind: NumberKind::Unsigned,
+                precision,
+                alternate: false,
+            };
+        }
+        let mut defined = None;
+        if let Some(definition) = definition_text {
+            let mut definition = trim_left(sources, definition);
+            let variable =
+                parse_variable(sources, &mut definition).map_err(|problem| vec![problem])?;
+            let name_extent = Extent::new(
+                definition.start.buffer,
+                definition.start.offset - variable.name.len(),
+                variable.name.len(),
+            );
+            if variable.pseudo {
+                return Err(vec![Problem::at(
+                    name_extent,
+                    "definition of pseudo numeric variable unsupported",
+                )]);
+            }
+            if variables.defined.contains(&variable.name) {
+                return Err(vec![Problem::at(
+                    name_extent,
+                    format!(
+                        "string variable with name '{}' already exists",
+                        variable.name
+                    ),
+                )]);
+            }
+            let leftover = trim_left(sources, definition);
+            if leftover.length > 0 {
+                return Err(vec![Problem::at(
+                    leftover,
+                    "unexpected characters after numeric variable name",
+                )]);
+            }
+            let index = match variables.numeric_names.get(&variable.name) {
+                Some(&index) => {
+                    if !variables.numerics[index].format.same_as(&format) {
+                        return Err(vec![Problem::at(
+                            leftover,
+                            "format different from previous variable definition",
+                        )]);
+                    }
+                    index
+                }
+                None => variables.make_numeric(&variable.name, format, line),
+            };
+            defined = Some(index);
+        }
+        Ok(NumericBlock {
+            expression,
+            format,
+            defined,
+        })
+    }
+
+    fn find_variable_end(
+        sources: &Sources,
+        text: Extent,
+        err: &mut Vec<u8>,
+    ) -> Result<Option<usize>, ()> {
+        let bytes = sources.bytes(text);
+        let mut offset = 0usize;
+        let mut depth = 0usize;
+        while offset < bytes.len() {
+            if bytes[offset..].starts_with(b"]]") && depth == 0 {
+                return Ok(Some(offset));
+            }
+            if bytes[offset] == b'\\' {
+                offset += 2;
+                continue;
+            }
+            match bytes[offset] {
+                b'[' => depth += 1,
+                b']' => {
+                    if depth == 0 {
+                        sources.render(
+                            err,
+                            Spot {
+                                buffer: text.start.buffer,
+                                offset: text.start.offset + offset,
+                            },
+                            "error",
+                            "missing closing \"]\" for regex variable",
+                            &[],
+                        );
+                        return Err(());
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            offset += 1;
+        }
+        Ok(None)
+    }
+
+    fn append_regex(
+        sources: &Sources,
+        err: &mut Vec<u8>,
+        regex: &mut String,
+        part: Extent,
+        groups: &mut usize,
+    ) -> Result<(), ()> {
+        let text = sources.string(part);
+        match Regex::new(&text, false, false) {
+            Ok(compiled) => {
+                regex.push_str(&text);
+                *groups += compiled.group_count();
+                Ok(())
+            }
+            Err(message) => {
+                sources.render(
+                    err,
+                    part.start,
+                    "error",
+                    &format!("invalid regex: {message}"),
+                    &[],
+                );
+                Err(())
+            }
+        }
+    }
+
+    fn print_problems(sources: &Sources, err: &mut Vec<u8>, problems: &[Problem]) {
+        for problem in problems {
+            problem.print(sources, err);
+            err.push(b'\n');
+        }
+    }
+
+    impl Pattern {
+        fn empty(check: CheckType, line: Option<usize>) -> Pattern {
+            Pattern {
+                check,
+                location: Spot::default(),
+                line,
+                fixed: None,
+                regex: String::new(),
+                substitutions: Vec::new(),
+                string_definitions: BTreeMap::new(),
+                numeric_definitions: BTreeMap::new(),
+                ignore_case: false,
+            }
+        }
+
+        fn has_variable(&self) -> bool {
+            !(self.substitutions.is_empty() && self.string_definitions.is_empty())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn parse(
+            &mut self,
+            sources: &Sources,
+            variables: &mut Variables,
+            err: &mut Vec<u8>,
+            mut text: Extent,
+            prefix: &str,
+            request: &CheckRequest,
+        ) -> Result<(), ()> {
+            let full_lines_here =
+                request.match_full_lines && self.check.directive != Directive::Not;
+            self.ignore_case = request.ignore_case;
+            self.location = text.start;
+            if !(request.strict_whitespace && request.match_full_lines) {
+                let bytes = sources.bytes(text);
+                let tail = bytes
+                    .iter()
+                    .rev()
+                    .take_while(|&&byte| byte == b' ' || byte == b'\t')
+                    .count();
+                text = text.front(text.length - tail);
+            }
+            if text.length == 0 && self.check.directive != Directive::Empty {
+                sources.render(
+                    err,
+                    self.location,
+                    "error",
+                    &format!("found empty check string with prefix '{prefix}:'"),
+                    &[],
+                );
+                return Err(());
+            }
+            if text.length > 0 && self.check.directive == Directive::Empty {
+                sources.render(
+                    err,
+                    self.location,
+                    "error",
+                    &format!(
+                        "found non-empty check string for empty check with prefix '{prefix}:'"
+                    ),
+                    &[],
+                );
+                return Err(());
+            }
+            if self.check.directive == Directive::Empty {
+                self.regex = "(\n$)".to_string();
+                return Ok(());
+            }
+            if self.check.literal {
+                self.fixed = Some(sources.bytes(text).to_vec());
+                return Ok(());
+            }
+            let bytes = sources.bytes(text).to_vec();
+            let has_block = bytes.windows(2).any(|pair| pair == b"{{" || pair == b"[[");
+            if !full_lines_here && (bytes.len() < 2 || !has_block) {
+                self.fixed = Some(bytes);
+                return Ok(());
+            }
+            if full_lines_here {
+                self.regex.push('^');
+                if !request.strict_whitespace {
+                    self.regex.push_str(" *");
+                }
+            }
+            let mut group = 1usize;
+            let mut rest = text;
+            while rest.length > 0 {
+                if starts(sources, rest, b"{{") {
+                    let Some(end) = find_in(sources, rest, b"}}", 0) else {
+                        sources.render(
+                            err,
+                            rest.start,
+                            "error",
+                            "found start of regex string with no end '}}'",
+                            &[],
+                        );
+                        return Err(());
+                    };
+                    let alternation = sources.bytes(rest).contains(&b'|');
+                    if alternation {
+                        self.regex.push('(');
+                        group += 1;
+                    }
+                    let part = Extent::new(rest.start.buffer, rest.start.offset + 2, end - 2);
+                    append_regex(sources, err, &mut self.regex, part, &mut group)?;
+                    if alternation {
+                        self.regex.push(')');
+                    }
+                    rest = rest.after(end + 2);
+                    continue;
+                }
+                if starts(sources, rest, b"[[") && !starts(sources, rest, b"[[[") {
+                    let unparsed = rest.after(2);
+                    let end = find_variable_end(sources, unparsed, err)?;
+                    let Some(end) = end else {
+                        sources.render(
+                            err,
+                            rest.start,
+                            "error",
+                            "Invalid substitution block, no ]] found",
+                            &[],
+                        );
+                        return Err(());
+                    };
+                    let mut matched = unparsed.front(end);
+                    let numeric_block = starts(sources, matched, b"#");
+                    if numeric_block {
+                        matched = matched.after(1);
+                    }
+                    rest = unparsed.after(end + 2);
+                    let mut is_definition = false;
+                    let mut needs_substitution = false;
+                    let mut legacy = false;
+                    let mut numeric = numeric_block;
+                    let mut definition_name = String::new();
+                    let mut substitution_from = Extent::default();
+                    let mut substitution_name = String::new();
+                    let mut match_regex: Option<Extent> = None;
+                    let mut wildcard: Option<String> = None;
+                    let insert_at = self.regex.len();
+                    let mut insert_at = insert_at;
+                    if !numeric {
+                        let matched_bytes = sources.bytes(matched);
+                        let colon = matched_bytes.iter().position(|&byte| byte == b':');
+                        let head = &matched_bytes[..colon.unwrap_or(matched_bytes.len())];
+                        if let Some(space) =
+                            head.iter().position(|&byte| byte == b' ' || byte == b'\t')
+                        {
+                            sources.render(
+                                err,
+                                Spot {
+                                    buffer: matched.start.buffer,
+                                    offset: matched.start.offset + space,
+                                },
+                                "error",
+                                "unexpected whitespace",
+                                &[],
+                            );
+                            return Err(());
+                        }
+                        let original = matched;
+                        let variable = match parse_variable(sources, &mut matched) {
+                            Ok(variable) => variable,
+                            Err(problem) => {
+                                print_problems(sources, err, &[problem]);
+                                return Err(());
+                            }
+                        };
+                        let name_extent = original.front(variable.name.len());
+                        is_definition = colon.is_some();
+                        needs_substitution = !is_definition;
+                        if is_definition {
+                            if variable.pseudo || !starts(sources, matched, b":") {
+                                sources.render(
+                                    err,
+                                    name_extent.start,
+                                    "error",
+                                    "invalid name in string variable definition",
+                                    &[],
+                                );
+                                return Err(());
+                            }
+                            matched = matched.after(1);
+                            if variables.numeric_names.contains_key(&variable.name) {
+                                sources.render(
+                                    err,
+                                    name_extent.start,
+                                    "error",
+                                    &format!(
+                                        "numeric variable with name '{}' already exists",
+                                        variable.name
+                                    ),
+                                    &[],
+                                );
+                                return Err(());
+                            }
+                            definition_name = variable.name.clone();
+                            match_regex = Some(matched);
+                        } else if variable.pseudo {
+                            matched = original;
+                            legacy = true;
+                            numeric = true;
+                        } else {
+                            if matched.length > 0 {
+                                sources.render(
+                                    err,
+                                    name_extent.start,
+                                    "error",
+                                    "invalid name in string variable use",
+                                    &[],
+                                );
+                                return Err(());
+                            }
+                            substitution_from = name_extent;
+                            substitution_name = variable.name.clone();
+                        }
+                    }
+                    let mut block = None;
+                    if numeric {
+                        match parse_numeric_block(sources, variables, matched, legacy, self.line) {
+                            Ok(parsed) => block = Some(parsed),
+                            Err(problems) => {
+                                print_problems(sources, err, &problems);
+                                return Err(());
+                            }
+                        }
+                        let parsed = block.as_ref().unwrap_or_else(|| unreachable!());
+                        needs_substitution = parsed.expression.is_some();
+                        if let Some(defined) = parsed.defined {
+                            is_definition = true;
+                            definition_name = variables.numerics[defined].name.clone();
+                        }
+                        if needs_substitution {
+                            substitution_from = matched;
+                        } else {
+                            wildcard = Some(parsed.format.wildcard());
+                        }
+                    }
+                    if is_definition {
+                        self.regex.push('(');
+                        insert_at += 1;
+                        if numeric {
+                            let defined = block
+                                .as_ref()
+                                .and_then(|parsed| parsed.defined)
+                                .unwrap_or(0);
+                            self.numeric_definitions
+                                .insert(definition_name.clone(), (defined, group));
+                            variables
+                                .numeric_names
+                                .insert(definition_name.clone(), defined);
+                        } else {
+                            self.string_definitions
+                                .insert(definition_name.clone(), group);
+                            variables.defined.insert(definition_name.clone());
+                        }
+                        group += 1;
+                    }
+                    if let Some(wildcard) = &wildcard {
+                        let compiled = Regex::new(wildcard, false, false).map_err(|_| ())?;
+                        self.regex.push_str(wildcard);
+                        group += compiled.group_count();
+                    } else if let Some(part) = match_regex {
+                        if part.length > 0 {
+                            append_regex(sources, err, &mut self.regex, part, &mut group)?;
+                        }
+                    }
+                    if is_definition {
+                        self.regex.push(')');
+                    }
+                    if needs_substitution {
+                        let backreference = if numeric {
+                            None
+                        } else {
+                            self.string_definitions.get(&substitution_name).copied()
+                        };
+                        if let Some(capture) = backreference {
+                            if !(1..=20).contains(&capture) {
+                                sources.render(
+                                    err,
+                                    substitution_from.start,
+                                    "error",
+                                    "Can't back-reference more than 20 variables",
+                                    &[],
+                                );
+                                return Err(());
+                            }
+                            if capture <= 9 {
+                                self.regex.push_str(&format!("\\{capture}"));
+                            } else {
+                                self.regex.push_str(&format!("\\g{{{capture}}}"));
+                            }
+                        } else {
+                            let kind = if numeric {
+                                let parsed = block.take().unwrap_or_else(|| unreachable!());
+                                SubstitutionKind::Number(parsed.expression, parsed.format)
+                            } else {
+                                SubstitutionKind::Text(substitution_name.clone())
+                            };
+                            self.substitutions.push(Substitution {
+                                from: substitution_from,
+                                insert_at,
+                                kind,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                let bytes = sources.bytes(rest);
+                let mut end = bytes.len();
+                for (index, pair) in bytes.windows(2).enumerate().skip(1) {
+                    if pair == b"{{" || pair == b"[[" {
+                        end = index;
+                        break;
+                    }
+                }
+                self.regex
+                    .push_str(&regex_escape(&String::from_utf8_lossy(&bytes[..end])));
+                rest = rest.after(end);
+            }
+            if full_lines_here {
+                if !request.strict_whitespace {
+                    self.regex.push_str(" *");
+                }
+                self.regex.push('$');
+            }
+            Ok(())
+        }
+
+        fn find(
+            &self,
+            sources: &Sources,
+            variables: &mut Variables,
+            buffer: Extent,
+        ) -> Result<Found, MatchError> {
+            if self.check.directive == Directive::EndOfFile {
+                return Ok(Found {
+                    position: buffer.length,
+                    length: 0,
+                });
+            }
+            let haystack = sources.bytes(buffer);
+            if let Some(fixed) = &self.fixed {
+                let position = if self.ignore_case {
+                    find_insensitive(haystack, fixed)
+                } else {
+                    find_bytes(haystack, fixed)
+                };
+                return position
+                    .map(|position| Found {
+                        position,
+                        length: fixed.len(),
+                    })
+                    .ok_or(MatchError::NotFound);
+            }
+            let mut expression = self.regex.clone();
+            if !self.substitutions.is_empty() {
+                if let Some(line) = self.line {
+                    let line_variable = variables.line_variable;
+                    variables.numerics[line_variable].value = Some(line as i128);
+                }
+                let mut problems = Vec::new();
+                let mut offset = 0usize;
+                for substitution in &self.substitutions {
+                    match substitution.value(variables, sources) {
+                        Ok(value) => {
+                            expression.insert_str(substitution.insert_at + offset, &value);
+                            offset += value.len();
+                        }
+                        Err(failures) => {
+                            for failure in failures {
+                                problems.push(match failure {
+                                    Failure::Overflow => Problem::at(
+                                        substitution.from,
+                                        "unable to substitute variable or numeric expression: overflow error",
+                                    ),
+                                    Failure::Undefined(extent, name) => {
+                                        Problem::at(extent, format!("undefined variable: {name}"))
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                if !problems.is_empty() {
+                    return Err(MatchError::Problems(problems));
+                }
+            }
+            let compiled = Regex::new(&expression, true, self.ignore_case)
+                .map_err(|_| MatchError::NotFound)?;
+            let spans = compiled.find(haystack).ok_or(MatchError::NotFound)?;
+            let (start, end) = spans[0].unwrap_or((0, 0));
+            for (name, group) in &self.string_definitions {
+                let (from, to) = spans
+                    .get(*group)
+                    .copied()
+                    .flatten()
+                    .unwrap_or((start, start));
+                variables.strings.insert(
+                    name.clone(),
+                    Extent::new(buffer.start.buffer, buffer.start.offset + from, to - from),
+                );
+            }
+            let skip = usize::from(self.check.directive == Directive::Empty);
+            for (name, (variable, group)) in &self.numeric_definitions {
+                let (from, to) = spans
+                    .get(*group)
+                    .copied()
+                    .flatten()
+                    .unwrap_or((start, start));
+                let format = variables.numerics[*variable].format;
+                let value = format.parse_value(&haystack[from..to]);
+                variables
+                    .numeric_names
+                    .entry(name.clone())
+                    .or_insert(*variable);
+                variables.numerics[*variable].value = Some(value);
+                variables.numerics[*variable].text = Some(Extent::new(
+                    buffer.start.buffer,
+                    buffer.start.offset + from,
+                    to - from,
+                ));
+            }
+            Ok(Found {
+                position: start + skip,
+                length: end - start - skip,
+            })
+        }
+
+        fn match_distance(&self, sources: &Sources, buffer: Extent) -> usize {
+            let example: Vec<u8> = match &self.fixed {
+                Some(fixed) if !fixed.is_empty() => fixed.clone(),
+                _ => self.regex.as_bytes().to_vec(),
+            };
+            let bytes = sources.bytes(buffer);
+            let prefix = &bytes[..example.len().min(bytes.len())];
+            let prefix = match prefix.iter().position(|&byte| byte == b'\n') {
+                Some(cut) => &prefix[..cut],
+                None => prefix,
+            };
+            edit_distance(prefix, &example)
+        }
+
+        fn regex_length(&self) -> usize {
+            self.regex.len()
+        }
+
+        fn fixed_length(&self) -> usize {
+            self.fixed.as_ref().map(Vec::len).unwrap_or(0)
+        }
+    }
+
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        if needle.len() > haystack.len() {
+            return None;
+        }
+        let mut fallback = vec![0usize; needle.len()];
+        let mut length = 0usize;
+        for index in 1..needle.len() {
+            while length > 0 && needle[index] != needle[length] {
+                length = fallback[length - 1];
+            }
+            if needle[index] == needle[length] {
+                length += 1;
+            }
+            fallback[index] = length;
+        }
+        let mut matched = 0usize;
+        for (index, &byte) in haystack.iter().enumerate() {
+            while matched > 0 && byte != needle[matched] {
+                matched = fallback[matched - 1];
+            }
+            if byte == needle[matched] {
+                matched += 1;
+                if matched == needle.len() {
+                    return Some(index + 1 - needle.len());
+                }
+            }
+        }
+        None
+    }
+
+    fn find_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        if needle.len() > haystack.len() {
+            return None;
+        }
+        (0..=haystack.len() - needle.len())
+            .find(|&at| haystack[at..at + needle.len()].eq_ignore_ascii_case(needle))
+    }
+
+    fn edit_distance(first: &[u8], second: &[u8]) -> usize {
+        let mut row: Vec<usize> = (0..=second.len()).collect();
+        for (index, &left) in first.iter().enumerate() {
+            let mut previous = row[0];
+            row[0] = index + 1;
+            for (column, &right) in second.iter().enumerate() {
+                let old = row[column + 1];
+                row[column + 1] = if left == right {
+                    previous
+                } else {
+                    1 + previous.min(row[column]).min(row[column + 1])
+                };
+                previous = old;
+            }
+        }
+        row[second.len()]
+    }
+
+    #[derive(Clone, Default, Debug)]
+    pub(super) struct CheckRequest {
+        pub(super) check_prefixes: Vec<String>,
+        pub(super) comment_prefixes: Vec<String>,
+        pub(super) strict_whitespace: bool,
+        pub(super) implicit_check_not: Vec<String>,
+        pub(super) global_defines: Vec<String>,
+        pub(super) allow_empty: bool,
+        pub(super) allow_unused_prefixes: bool,
+        pub(super) match_full_lines: bool,
+        pub(super) ignore_case: bool,
+        pub(super) default_prefix: bool,
+        pub(super) enable_var_scope: bool,
+        pub(super) allow_dag_overlap: bool,
+        pub(super) verbose: bool,
+        pub(super) very_verbose: bool,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum FoundStatus {
+        Success,
+        Excluded,
+        WrongLine,
+        Discarded,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum NoneStatus {
+        Success,
+        InvalidPattern,
+        Expected,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Note {
+        Found {
+            check: CheckType,
+            check_spot: Spot,
+            status: FoundStatus,
+            matched: Extent,
+            searched: Extent,
+        },
+        Missing {
+            check: CheckType,
+            check_spot: Spot,
+            status: NoneStatus,
+            searched: Extent,
+        },
+        Fuzzy {
+            owner: Option<usize>,
+            at: Spot,
+        },
+        Custom {
+            owner: Option<usize>,
+            text: String,
+            adds_error: bool,
+            range: Option<Extent>,
+        },
+    }
+
+    impl Note {
+        fn is_result(&self) -> bool {
+            matches!(self, Note::Found { .. } | Note::Missing { .. })
+        }
+
+        fn is_error(&self) -> bool {
+            match self {
+                Note::Found { status, .. } => {
+                    *status != FoundStatus::Success && *status != FoundStatus::Discarded
+                }
+                Note::Missing { status, .. } => *status != NoneStatus::Success,
+                Note::Fuzzy { .. } => false,
+                Note::Custom { adds_error, .. } => *adds_error,
+            }
+        }
+
+        fn match_range(&self) -> Option<Extent> {
+            match self {
+                Note::Found { matched, .. } => Some(*matched),
+                Note::Missing { .. } => None,
+                Note::Fuzzy { at, .. } => Some(Extent {
+                    start: *at,
+                    length: 0,
+                }),
+                Note::Custom { range, .. } => *range,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Notes {
+        list: Vec<Note>,
+        current: Option<usize>,
+    }
+
+    impl Notes {
+        fn push(&mut self, note: Note) {
+            let result = note.is_result();
+            self.list.push(note);
+            if result {
+                self.current = Some(self.list.len() - 1);
+            }
+        }
+
+        fn custom(&mut self, text: String, adds_error: bool, range: Option<Extent>) {
+            let owner = self.current;
+            self.push(Note::Custom {
+                owner,
+                text,
+                adds_error,
+                range,
+            });
+        }
+
+        fn fuzzy(&mut self, at: Spot) {
+            let owner = self.current;
+            self.push(Note::Fuzzy { owner, at });
+        }
+
+        fn mark_previous(&mut self, new_status: FoundStatus) {
+            if let Some(index) = self.current {
+                if let Note::Found { status, .. } = &mut self.list[index] {
+                    *status = new_status;
+                }
+            }
+        }
+
+        fn result_of(&self, index: usize) -> usize {
+            match &self.list[index] {
+                Note::Fuzzy { owner, .. } | Note::Custom { owner, .. } => owner.unwrap_or(index),
+                _ => index,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct DagOrNot {
+        pattern: Pattern,
+        prefix: String,
+    }
+
+    struct CheckString {
+        pattern: Pattern,
+        prefix: String,
+        location: Spot,
+        dag_not: Vec<DagOrNot>,
+    }
+
+    struct Session<'r> {
+        request: &'r CheckRequest,
+        sources: Sources,
+        variables: Variables,
+        err: Vec<u8>,
+        notes: Option<Notes>,
+        strings: Vec<CheckString>,
+    }
+
+    fn count_newlines(bytes: &[u8]) -> (usize, Option<usize>) {
+        let mut count = 0;
+        let mut first = None;
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] != b'\n' && bytes[at] != b'\r' {
+                at += 1;
+                continue;
+            }
+            count += 1;
+            if at + 1 < bytes.len()
+                && (bytes[at + 1] == b'\n' || bytes[at + 1] == b'\r')
+                && bytes[at] != bytes[at + 1]
+            {
+                at += 1;
+            }
+            at += 1;
+            if count == 1 {
+                first = Some(at);
+            }
+        }
+        (count, first)
+    }
+
+    fn find_check_type(
+        request: &CheckRequest,
+        bytes: &[u8],
+        prefix: &str,
+    ) -> (CheckType, usize, bool) {
+        let none = (CheckType::of(Directive::Missing), 0, false);
+        if bytes.len() <= prefix.len() {
+            return none;
+        }
+        let mut rest = prefix.len();
+        let at = |offset: usize| bytes.get(offset).copied();
+        let starts_at =
+            |offset: usize, text: &[u8]| bytes[offset.min(bytes.len())..].starts_with(text);
+        if request.comment_prefixes.iter().any(|known| known == prefix) {
+            if at(rest) == Some(b':') {
+                return (CheckType::of(Directive::Comment), rest + 1, false);
+            }
+            return none;
+        }
+        let modifiers = |mut check: CheckType, mut rest: usize| -> (CheckType, usize) {
+            if at(rest) == Some(b':') {
+                return (check, rest + 1);
+            }
+            if at(rest) != Some(b'{') {
+                return (CheckType::of(Directive::Missing), 0);
+            }
+            rest += 1;
+            loop {
+                while at(rest).is_some_and(|byte| byte.is_ascii_whitespace()) {
+                    rest += 1;
+                }
+                if starts_at(rest, b"LITERAL") {
+                    check.literal = true;
+                    rest += 7;
+                } else {
+                    return (CheckType::of(Directive::Missing), rest);
+                }
+                while at(rest).is_some_and(|byte| byte.is_ascii_whitespace()) {
+                    rest += 1;
+                }
+                if at(rest) == Some(b',') {
+                    rest += 1;
+                    continue;
+                }
+                break;
+            }
+            if !starts_at(rest, b"}:") {
+                return (CheckType::of(Directive::Missing), rest);
+            }
+            (check, rest + 2)
+        };
+        if at(rest) == Some(b':') {
+            return (CheckType::of(Directive::Plain), rest + 1, false);
+        }
+        if at(rest) == Some(b'{') {
+            let (check, after) = modifiers(CheckType::of(Directive::Plain), rest);
+            return (check, after, false);
+        }
+        let misspelled = at(rest) == Some(b'_');
+        if !misspelled && at(rest) != Some(b'-') {
+            return none;
+        }
+        rest += 1;
+        if starts_at(rest, b"COUNT-") {
+            rest += 6;
+            let digits = bytes[rest..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits == 0 {
+                return (CheckType::of(Directive::BadCount), rest, misspelled);
+            }
+            let count: i64 = String::from_utf8_lossy(&bytes[rest..rest + digits])
+                .parse()
+                .unwrap_or(-1);
+            rest += digits;
+            if count <= 0 || count > i64::from(i32::MAX) {
+                return (CheckType::of(Directive::BadCount), rest, misspelled);
+            }
+            if at(rest) != Some(b':') && at(rest) != Some(b'{') {
+                return (CheckType::of(Directive::BadCount), rest, misspelled);
+            }
+            let mut check = CheckType::of(Directive::Plain);
+            check.count = count as usize;
+            let (check, after) = modifiers(check, rest);
+            return (check, after, misspelled);
+        }
+        for combo in [
+            &b"DAG-NOT:"[..],
+            b"NOT-DAG:",
+            b"NEXT-NOT:",
+            b"NOT-NEXT:",
+            b"SAME-NOT:",
+            b"NOT-SAME:",
+            b"EMPTY-NOT:",
+            b"NOT-EMPTY:",
+        ] {
+            if starts_at(rest, combo) {
+                return (CheckType::of(Directive::BadNot), rest, misspelled);
+            }
+        }
+        for (word, directive) in [
+            (&b"NEXT"[..], Directive::Next),
+            (b"SAME", Directive::Same),
+            (b"NOT", Directive::Not),
+            (b"DAG", Directive::Dag),
+            (b"LABEL", Directive::Label),
+            (b"EMPTY", Directive::Empty),
+        ] {
+            if starts_at(rest, word) {
+                let (check, after) = modifiers(CheckType::of(directive), rest + word.len());
+                return (check, after, misspelled);
+            }
+        }
+        (CheckType::of(Directive::Missing), rest, misspelled)
+    }
+
+    fn canonicalize(text: &[u8], strict: bool) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len());
+        let mut at = 0;
+        while at < text.len() {
+            if at + 1 < text.len() && text[at] == b'\r' && text[at + 1] == b'\n' {
+                at += 1;
+                continue;
+            }
+            let byte = text[at];
+            if strict || (byte != b' ' && byte != b'\t') {
+                out.push(byte);
+                at += 1;
+                continue;
+            }
+            out.push(b' ');
+            while at + 1 < text.len() && (text[at + 1] == b' ' || text[at + 1] == b'\t') {
+                at += 1;
+            }
+            at += 1;
+        }
+        out
+    }
+
+    impl<'r> Session<'r> {
+        fn emit(&mut self, spot: Spot, kind: &str, message: &str, ranges: &[Extent]) {
+            self.sources
+                .render(&mut self.err, spot, kind, message, ranges);
+        }
+
+        fn define_globals(&mut self) -> bool {
+            if self.request.global_defines.is_empty() {
+                return true;
+            }
+            let mut text = String::new();
+            let mut slots: Vec<(usize, usize)> = Vec::new();
+            for (number, define) in self.request.global_defines.iter().enumerate() {
+                let lead = format!("Global define #{}: ", number + 1);
+                let Some(equals) = define.find('=') else {
+                    slots.push((text.len(), 0));
+                    continue;
+                };
+                if define.starts_with('#') {
+                    text.push_str(&format!("{lead}{define} (parsed as: [["));
+                    let mut substitution = define.clone();
+                    substitution.replace_range(equals..equals + 1, ":");
+                    slots.push((text.len(), substitution.len()));
+                    text.push_str(&format!("{substitution}]])\n"));
+                } else {
+                    text.push_str(&lead);
+                    slots.push((text.len(), define.len()));
+                    text.push_str(&format!("{define}\n"));
+                }
+            }
+            let buffer = self.sources.add("Global defines", text.into_bytes());
+            let mut problems: Vec<Problem> = Vec::new();
+            for (start, length) in slots {
+                let extent = Extent::new(buffer, start, length);
+                if length == 0 {
+                    problems.push(Problem::at(
+                        extent,
+                        "missing equal sign in global definition",
+                    ));
+                    continue;
+                }
+                let bytes = self.sources.bytes(extent).to_vec();
+                if bytes[0] == b'#' {
+                    match parse_numeric_block(
+                        &self.sources,
+                        &mut self.variables,
+                        extent.after(1),
+                        false,
+                        None,
+                    ) {
+                        Ok(block) => {
+                            let value = match &block.expression {
+                                Some(expression) => {
+                                    expression.evaluate(&self.variables, &self.sources)
+                                }
+                                None => Err(vec![Failure::Overflow]),
+                            };
+                            match value {
+                                Ok(value) => {
+                                    if let Some(defined) = block.defined {
+                                        self.variables.numerics[defined].value = Some(value);
+                                        let name = self.variables.numerics[defined].name.clone();
+                                        self.variables.numeric_names.insert(name, defined);
+                                    }
+                                }
+                                Err(failures) => {
+                                    for failure in failures {
+                                        match failure {
+                                            Failure::Undefined(at, name) => {
+                                                problems.push(Problem::at(
+                                                    at,
+                                                    format!("undefined variable: {name}"),
+                                                ))
+                                            }
+                                            Failure::Overflow => {
+                                                problems.push(Problem::at(extent, "overflow error"))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(found) => problems.extend(found),
+                    }
+                } else {
+                    let equals = bytes
+                        .iter()
+                        .position(|&byte| byte == b'=')
+                        .unwrap_or(bytes.len());
+                    let name_extent = extent.front(equals);
+                    let mut cursor = name_extent;
+                    match parse_variable(&self.sources, &mut cursor) {
+                        Ok(variable) => {
+                            if variable.pseudo || cursor.length > 0 {
+                                problems.push(Problem::at(
+                                    name_extent,
+                                    format!(
+                                        "invalid name in string variable definition '{}'",
+                                        self.sources.string(name_extent)
+                                    ),
+                                ));
+                                continue;
+                            }
+                            if self.variables.numeric_names.contains_key(&variable.name) {
+                                problems.push(Problem::at(
+                                    name_extent,
+                                    format!(
+                                        "numeric variable with name '{}' already exists",
+                                        variable.name
+                                    ),
+                                ));
+                                continue;
+                            }
+                            let value = extent.after(equals + 1);
+                            self.variables
+                                .strings
+                                .entry(variable.name.clone())
+                                .or_insert(value);
+                            self.variables.defined.insert(variable.name);
+                        }
+                        Err(problem) => problems.push(problem),
+                    }
+                }
+            }
+            if problems.is_empty() {
+                return true;
+            }
+            let sources = &self.sources;
+            for problem in &problems {
+                problem.print(sources, &mut self.err);
+                self.err.push(b'\n');
+            }
+            false
+        }
+
+        fn read_check_file(
+            &mut self,
+            check_buffer: usize,
+            implicit_range: &mut (usize, usize),
+        ) -> bool {
+            if !self.define_globals() {
+                return false;
+            }
+            let line_variable =
+                self.variables
+                    .make_numeric("@LINE", NumberFormat::of(NumberKind::Unsigned), None);
+            self.variables.line_variable = line_variable;
+            self.variables
+                .numeric_names
+                .insert("@LINE".to_string(), line_variable);
+            let request = self.request;
+            let mut implicit: Vec<DagOrNot> = Vec::new();
+            for pattern_text in &request.implicit_check_not {
+                let lead = "-implicit-check-not='";
+                let buffer = self.sources.add(
+                    "command line",
+                    format!("{lead}{pattern_text}'").into_bytes(),
+                );
+                if implicit_range.0 == implicit_range.1 {
+                    *implicit_range = (buffer, buffer + 1);
+                } else {
+                    implicit_range.1 += 1;
+                }
+                let mut pattern = Pattern::empty(CheckType::of(Directive::Not), None);
+                let extent = Extent::new(buffer, lead.len(), pattern_text.len());
+                let _ = pattern.parse(
+                    &self.sources,
+                    &mut self.variables,
+                    &mut self.err,
+                    extent,
+                    "IMPLICIT-CHECK",
+                    request,
+                );
+                implicit.push(DagOrNot {
+                    pattern,
+                    prefix: "IMPLICIT-CHECK".to_string(),
+                });
+            }
+            let mut dag_not = implicit.clone();
+            let mut line_number = 1usize;
+            let mut check_prefixes = request.check_prefixes.clone();
+            let mut default_prefix = request.default_prefix;
+            if check_prefixes.is_empty() {
+                check_prefixes.push("CHECK".to_string());
+                default_prefix = true;
+            }
+            let mut comment_prefixes = request.comment_prefixes.clone();
+            if comment_prefixes.is_empty() {
+                comment_prefixes = vec!["COM".to_string(), "RUN".to_string()];
+            }
+            let effective = CheckRequest {
+                comment_prefixes: comment_prefixes.clone(),
+                ..request.clone()
+            };
+            let mut prefixes: Vec<String> = check_prefixes.clone();
+            prefixes.extend(comment_prefixes.iter().cloned());
+            prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+            let input = self.sources.files[check_buffer].text.clone();
+            let mut positions: Vec<Option<usize>> = prefixes
+                .iter()
+                .map(|prefix| find_bytes(&input, prefix.as_bytes()))
+                .collect();
+            let mut not_found: BTreeSet<String> = check_prefixes.iter().cloned().collect();
+            let distinct = not_found.len();
+            let mut cursor = 0usize;
+            loop {
+                let mut chosen: Option<(usize, usize)> = None;
+                let mut check = CheckType::of(Directive::Missing);
+                let mut after_suffix = 0usize;
+                while cursor < input.len() {
+                    let mut best: Option<(usize, usize)> = None;
+                    for (index, prefix) in prefixes.iter().enumerate() {
+                        if let Some(position) = positions[index] {
+                            if position < cursor {
+                                positions[index] = find_bytes(&input[cursor..], prefix.as_bytes())
+                                    .map(|found| found + cursor);
+                            }
+                        }
+                        if let Some(position) = positions[index] {
+                            if best.is_none_or(|(at, _)| position < at) {
+                                best = Some((position, index));
+                            }
+                        }
+                    }
+                    let Some((position, index)) = best else {
+                        break;
+                    };
+                    line_number += input[cursor..position]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count();
+                    let skipped_last = if position > cursor {
+                        Some(input[position - 1])
+                    } else {
+                        None
+                    };
+                    cursor = position;
+                    if skipped_last.is_none_or(|byte| !is_word_byte(byte)) {
+                        let (found, after, misspelled) =
+                            find_check_type(&effective, &input[cursor..], &prefixes[index]);
+                        if found.directive != Directive::Missing {
+                            check = if misspelled {
+                                CheckType::of(Directive::Misspelled)
+                            } else {
+                                found
+                            };
+                            after_suffix = cursor + after;
+                            chosen = Some((position, index));
+                            break;
+                        }
+                    }
+                    let mut skip = cursor + prefixes[index].len();
+                    while skip < input.len() && is_word_byte(input[skip]) {
+                        skip += 1;
+                    }
+                    cursor = skip;
+                }
+                let Some((position, index)) = chosen else {
+                    break;
+                };
+                let used_prefix = prefixes[index].clone();
+                if check.directive != Directive::Comment {
+                    not_found.remove(&used_prefix);
+                }
+                let prefix_spot = Spot {
+                    buffer: check_buffer,
+                    offset: position,
+                };
+                cursor = after_suffix;
+                match check.directive {
+                    Directive::Misspelled => {
+                        let directive =
+                            String::from_utf8_lossy(&input[position..after_suffix]).into_owned();
+                        self.emit(
+                            prefix_spot,
+                            "error",
+                            &format!("misspelled directive '{directive}'"),
+                            &[],
+                        );
+                        return false;
+                    }
+                    Directive::BadNot => {
+                        self.emit(
+                            Spot {
+                                buffer: check_buffer,
+                                offset: cursor,
+                            },
+                            "error",
+                            &format!("unsupported -NOT combo on prefix '{used_prefix}'"),
+                            &[],
+                        );
+                        return false;
+                    }
+                    Directive::BadCount => {
+                        self.emit(
+                            Spot {
+                                buffer: check_buffer,
+                                offset: cursor,
+                            },
+                            "error",
+                            &format!(
+                                "invalid count in -COUNT specification on prefix '{used_prefix}'"
+                            ),
+                            &[],
+                        );
+                        return false;
+                    }
+                    _ => {}
+                }
+                if !(request.strict_whitespace && request.match_full_lines) {
+                    while cursor < input.len() && (input[cursor] == b' ' || input[cursor] == b'\t')
+                    {
+                        cursor += 1;
+                    }
+                }
+                let end_of_line = input[cursor..]
+                    .iter()
+                    .position(|&byte| byte == b'\n' || byte == b'\r')
+                    .map(|offset| cursor + offset)
+                    .unwrap_or(input.len());
+                let pattern_spot = Spot {
+                    buffer: check_buffer,
+                    offset: cursor,
+                };
+                let pattern_extent = Extent::new(check_buffer, cursor, end_of_line - cursor);
+                cursor = end_of_line;
+                if check.directive == Directive::Comment {
+                    continue;
+                }
+                let mut pattern = Pattern::empty(check, Some(line_number));
+                if pattern
+                    .parse(
+                        &self.sources,
+                        &mut self.variables,
+                        &mut self.err,
+                        pattern_extent,
+                        &used_prefix,
+                        request,
+                    )
+                    .is_err()
+                {
+                    return false;
+                }
+                if check.directive == Directive::Label && pattern.has_variable() {
+                    self.emit(
+                        prefix_spot,
+                        "error",
+                        &format!("found '{used_prefix}-LABEL:' with variable definition or use"),
+                        &[],
+                    );
+                    return false;
+                }
+                if matches!(
+                    check.directive,
+                    Directive::Next | Directive::Same | Directive::Empty
+                ) && self.strings.is_empty()
+                {
+                    let kind = match check.directive {
+                        Directive::Next => "NEXT",
+                        Directive::Empty => "EMPTY",
+                        _ => "SAME",
+                    };
+                    self.emit(
+                        prefix_spot,
+                        "error",
+                        &format!(
+                            "found '{used_prefix}-{kind}' without previous '{used_prefix}: line"
+                        ),
+                        &[],
+                    );
+                    return false;
+                }
+                if matches!(check.directive, Directive::Dag | Directive::Not) {
+                    dag_not.push(DagOrNot {
+                        pattern,
+                        prefix: used_prefix,
+                    });
+                    continue;
+                }
+                self.strings.push(CheckString {
+                    pattern,
+                    prefix: used_prefix,
+                    location: pattern_spot,
+                    dag_not: std::mem::replace(&mut dag_not, implicit.clone()),
+                });
+            }
+            let nothing_found = not_found.len() == distinct;
+            let unused = !request.allow_unused_prefixes && !not_found.is_empty();
+            if (nothing_found || unused) && (implicit.is_empty() || !default_prefix) {
+                let listed: Vec<String> = not_found
+                    .iter()
+                    .map(|prefix| format!("'{prefix}:'"))
+                    .collect();
+                self.err.extend_from_slice(
+                    format!(
+                        "error: no check strings found with prefix{}{}\n",
+                        if not_found.len() > 1 { "es " } else { " " },
+                        listed.join(", ")
+                    )
+                    .as_bytes(),
+                );
+                return false;
+            }
+            if !dag_not.is_empty() {
+                self.strings.push(CheckString {
+                    pattern: Pattern::empty(
+                        CheckType::of(Directive::EndOfFile),
+                        Some(line_number + 1),
+                    ),
+                    prefix: check_prefixes[0].clone(),
+                    location: Spot {
+                        buffer: check_buffer,
+                        offset: cursor.min(input.len()),
+                    },
+                    dag_not,
+                });
+            }
+            true
+        }
+
+        fn print_substitutions(&mut self, pattern: &Pattern, range: Extent, to_notes: bool) {
+            for substitution in &pattern.substitutions {
+                let Some(shown) = substitution.shown(&self.variables, &self.sources) else {
+                    continue;
+                };
+                let message = format!(
+                    "with \"{}\" equal to {}",
+                    escape_for_display(self.sources.bytes(substitution.from)),
+                    shown
+                );
+                if to_notes {
+                    if let Some(notes) = &mut self.notes {
+                        notes.custom(message, false, None);
+                    }
+                } else {
+                    self.sources
+                        .render(&mut self.err, range.start, "note", &message, &[]);
+                }
+            }
+        }
+
+        fn print_definition_attempts(&mut self, pattern: &Pattern, buffer: Extent, to_notes: bool) {
+            if pattern.string_definitions.is_empty() && pattern.numeric_definitions.is_empty() {
+                return;
+            }
+            let names: Vec<String> = pattern
+                .string_definitions
+                .keys()
+                .chain(pattern.numeric_definitions.keys())
+                .map(|name| format!("\"{name}\""))
+                .collect();
+            let message = format!(
+                "pattern attempts to capture variables: {}",
+                names.join(", ")
+            );
+            if to_notes {
+                if let Some(notes) = &mut self.notes {
+                    notes.custom(message, false, None);
+                }
+            } else {
+                self.sources
+                    .render(&mut self.err, buffer.start, "note", &message, &[]);
+            }
+        }
+
+        fn print_definitions(&mut self, pattern: &Pattern, to_notes: bool) {
+            if pattern.string_definitions.is_empty() && pattern.numeric_definitions.is_empty() {
+                return;
+            }
+            let mut captures: Vec<(String, Extent)> = Vec::new();
+            for name in pattern.string_definitions.keys() {
+                if let Some(extent) = self.variables.strings.get(name) {
+                    captures.push((name.clone(), *extent));
+                }
+            }
+            for (name, (variable, _)) in &pattern.numeric_definitions {
+                if let Some(extent) = self.variables.numerics[*variable].text {
+                    captures.push((name.clone(), extent));
+                }
+            }
+            captures.sort_by_key(|(_, extent)| (extent.start.buffer, extent.start.offset));
+            for (name, extent) in captures {
+                let message = format!("captured var \"{name}\"");
+                if to_notes {
+                    if let Some(notes) = &mut self.notes {
+                        notes.custom(message, false, Some(extent));
+                    }
+                } else {
+                    self.sources
+                        .render(&mut self.err, extent.start, "note", &message, &[extent]);
+                }
+            }
+        }
+
+        fn print_fuzzy(&mut self, pattern: &Pattern, buffer: Extent) {
+            let bytes = self.sources.bytes(buffer).to_vec();
+            let scan = bytes.len().min(4096);
+            if 4096usize * 2048 < scan * pattern.fixed_length().max(pattern.regex_length()) {
+                return;
+            }
+            let mut lines_forward = 0usize;
+            let mut best: Option<usize> = None;
+            let mut best_quality = 0f64;
+            for (index, &byte) in bytes.iter().enumerate().take(scan) {
+                if byte == b'\n' {
+                    lines_forward += 1;
+                }
+                if byte == b' ' || byte == b'\t' {
+                    continue;
+                }
+                let distance = pattern.match_distance(&self.sources, buffer.after(index));
+                let quality = distance as f64 + (lines_forward as f64 / 100.0);
+                if best.is_none() || quality < best_quality {
+                    best = Some(index);
+                    best_quality = quality;
+                }
+            }
+            if let Some(best) = best {
+                if best != 0 && best_quality < 50.0 {
+                    let spot = Spot {
+                        buffer: buffer.start.buffer,
+                        offset: buffer.start.offset + best,
+                    };
+                    if let Some(notes) = &mut self.notes {
+                        notes.fuzzy(spot);
+                    }
+                    self.sources.render(
+                        &mut self.err,
+                        spot,
+                        "note",
+                        "possible intended match here",
+                        &[],
+                    );
+                }
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn report_found(
+            &mut self,
+            expected: bool,
+            prefix: &str,
+            location: Spot,
+            pattern: &Pattern,
+            matched_count: usize,
+            buffer: Extent,
+            found: &Found,
+            problems: &[Problem],
+        ) -> bool {
+            let has_error = !expected || !problems.is_empty();
+            let mut print = true;
+            if !has_error {
+                if !self.request.verbose {
+                    return false;
+                }
+                if !self.request.very_verbose && pattern.check.directive == Directive::EndOfFile {
+                    return false;
+                }
+                print = self.notes.is_none();
+            }
+            let matched = Extent::new(
+                buffer.start.buffer,
+                buffer.start.offset + found.position,
+                found.length,
+            );
+            let status = if expected {
+                FoundStatus::Success
+            } else {
+                FoundStatus::Excluded
+            };
+            if self.notes.is_some() {
+                if let Some(notes) = &mut self.notes {
+                    notes.push(Note::Found {
+                        check: pattern.check,
+                        check_spot: location,
+                        status,
+                        matched,
+                        searched: buffer,
+                    });
+                }
+                self.print_substitutions(pattern, matched, true);
+                self.print_definitions(pattern, true);
+            }
+            if !print {
+                return has_error;
+            }
+            let mut message = format!(
+                "{}: {} string found in input",
+                pattern.check.description(prefix),
+                if expected { "expected" } else { "excluded" }
+            );
+            if pattern.check.count > 1 {
+                message.push_str(&format!(
+                    " ({} out of {})",
+                    matched_count, pattern.check.count
+                ));
+            }
+            self.emit(
+                location,
+                if expected { "remark" } else { "error" },
+                &message,
+                &[],
+            );
+            self.emit(matched.start, "note", "found here", &[matched]);
+            self.print_substitutions(pattern, matched, false);
+            self.print_definitions(pattern, false);
+            for problem in problems {
+                problem.print(&self.sources, &mut self.err);
+                if let Some(notes) = &mut self.notes {
+                    notes.custom(problem.message.clone(), true, problem.range);
+                }
+            }
+            has_error
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn report_missing(
+            &mut self,
+            expected: bool,
+            prefix: &str,
+            location: Spot,
+            pattern: &Pattern,
+            matched_count: usize,
+            buffer: Extent,
+            problems: &[Problem],
+        ) -> bool {
+            let mut has_error = expected;
+            let has_pattern_error = !problems.is_empty();
+            let mut status = if expected {
+                NoneStatus::Expected
+            } else {
+                NoneStatus::Success
+            };
+            if has_pattern_error {
+                has_error = true;
+                status = NoneStatus::InvalidPattern;
+                for problem in problems {
+                    problem.print(&self.sources, &mut self.err);
+                }
+            }
+            let mut print = true;
+            if !has_error {
+                if !self.request.very_verbose {
+                    return false;
+                }
+                print = self.notes.is_none();
+            }
+            if self.notes.is_some() {
+                if let Some(notes) = &mut self.notes {
+                    notes.push(Note::Missing {
+                        check: pattern.check,
+                        check_spot: location,
+                        status,
+                        searched: buffer,
+                    });
+                    for problem in problems {
+                        notes.custom(problem.message.clone(), false, None);
+                    }
+                }
+                self.print_substitutions(pattern, buffer, true);
+                self.print_definition_attempts(pattern, buffer, true);
+            }
+            if !print {
+                return has_error;
+            }
+            if !has_pattern_error {
+                let mut message = format!(
+                    "{}: {} string not found in input",
+                    pattern.check.description(prefix),
+                    if expected { "expected" } else { "excluded" }
+                );
+                if pattern.check.count > 1 {
+                    message.push_str(&format!(
+                        " ({} out of {})",
+                        matched_count, pattern.check.count
+                    ));
+                }
+                self.emit(
+                    location,
+                    if expected { "error" } else { "remark" },
+                    &message,
+                    &[],
+                );
+                self.emit(buffer.start, "note", "scanning from here", &[]);
+            }
+            self.print_substitutions(pattern, buffer, false);
+            self.print_definition_attempts(pattern, buffer, false);
+            if expected {
+                self.print_fuzzy(pattern, buffer);
+            }
+            has_error
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn report(
+            &mut self,
+            expected: bool,
+            prefix: &str,
+            location: Spot,
+            pattern: &Pattern,
+            matched_count: usize,
+            buffer: Extent,
+            result: &Result<Found, MatchError>,
+        ) -> bool {
+            match result {
+                Ok(found) => self.report_found(
+                    expected,
+                    prefix,
+                    location,
+                    pattern,
+                    matched_count,
+                    buffer,
+                    found,
+                    &[],
+                ),
+                Err(MatchError::NotFound) => self.report_missing(
+                    expected,
+                    prefix,
+                    location,
+                    pattern,
+                    matched_count,
+                    buffer,
+                    &[],
+                ),
+                Err(MatchError::Problems(problems)) => {
+                    let problems = problems.clone();
+                    self.report_missing(
+                        expected,
+                        prefix,
+                        location,
+                        pattern,
+                        matched_count,
+                        buffer,
+                        &problems,
+                    )
+                }
+            }
+        }
+
+        fn check_not(&mut self, buffer: Extent, nots: &[DagOrNot]) -> bool {
+            let mut failed = false;
+            for not in nots {
+                let result = not.pattern.find(&self.sources, &mut self.variables, buffer);
+                if self.report(
+                    false,
+                    &not.prefix,
+                    not.pattern.location,
+                    &not.pattern,
+                    1,
+                    buffer,
+                    &result,
+                ) {
+                    failed = true;
+                }
+            }
+            failed
+        }
+
+        fn check_dag(
+            &mut self,
+            buffer: Extent,
+            dag_not: &[DagOrNot],
+            nots: &mut Vec<DagOrNot>,
+        ) -> Option<usize> {
+            if dag_not.is_empty() {
+                return Some(0);
+            }
+            let mut start = 0usize;
+            let mut ranges: Vec<(usize, usize)> = Vec::new();
+            for (index, item) in dag_not.iter().enumerate() {
+                if item.pattern.check.directive == Directive::Not {
+                    nots.push(item.clone());
+                    continue;
+                }
+                let mut match_length;
+                let mut match_position = start;
+                let mut cursor = 0usize;
+                loop {
+                    let window = buffer.after(match_position);
+                    let result = item
+                        .pattern
+                        .find(&self.sources, &mut self.variables, window);
+                    let failed = result.is_err();
+                    if (failed || self.request.very_verbose)
+                        && self.report(
+                            true,
+                            &item.prefix,
+                            item.pattern.location,
+                            &item.pattern,
+                            1,
+                            window,
+                            &result,
+                        )
+                    {
+                        return None;
+                    }
+                    let found = match result {
+                        Ok(found) => found,
+                        Err(_) => return None,
+                    };
+                    match_length = found.length;
+                    match_position += found.position;
+                    let candidate = (match_position, match_position + match_length);
+                    if self.request.allow_dag_overlap {
+                        if ranges.is_empty() {
+                            ranges.push(candidate);
+                        } else {
+                            ranges[0].0 = ranges[0].0.min(candidate.0);
+                            ranges[0].1 = ranges[0].1.max(candidate.1);
+                        }
+                        break;
+                    }
+                    let mut overlap = false;
+                    while cursor < ranges.len() {
+                        if candidate.0 < ranges[cursor].1 {
+                            overlap = ranges[cursor].0 < candidate.1;
+                            break;
+                        }
+                        cursor += 1;
+                    }
+                    if !overlap {
+                        ranges.insert(cursor, candidate);
+                        break;
+                    }
+                    if self.request.very_verbose {
+                        if self.notes.is_some() {
+                            if let Some(notes) = &mut self.notes {
+                                notes.mark_previous(FoundStatus::Discarded);
+                            }
+                        } else {
+                            let old = Extent::new(
+                                buffer.start.buffer,
+                                buffer.start.offset + ranges[cursor].0,
+                                ranges[cursor].1 - ranges[cursor].0,
+                            );
+                            self.emit(
+                                old.start,
+                                "note",
+                                "match discarded, overlaps earlier DAG match here",
+                                &[old],
+                            );
+                        }
+                    }
+                    match_position = ranges[cursor].1;
+                }
+                if !self.request.very_verbose {
+                    let found = Found {
+                        position: match_position,
+                        length: match_length,
+                    };
+                    self.report_found(
+                        true,
+                        &item.prefix,
+                        item.pattern.location,
+                        &item.pattern,
+                        1,
+                        buffer,
+                        &found,
+                        &[],
+                    );
+                }
+                let last = index + 1 == dag_not.len()
+                    || dag_not[index + 1].pattern.check.directive == Directive::Not;
+                if last {
+                    if !nots.is_empty() {
+                        let first = ranges.first().map(|range| range.0).unwrap_or(start);
+                        let skipped = Extent::new(
+                            buffer.start.buffer,
+                            buffer.start.offset + start,
+                            first.saturating_sub(start),
+                        );
+                        let pending = std::mem::take(nots);
+                        if self.check_not(skipped, &pending) {
+                            return None;
+                        }
+                    }
+                    start = ranges.last().map(|range| range.1).unwrap_or(start);
+                    ranges.clear();
+                }
+            }
+            Some(start)
+        }
+
+        fn run_check(
+            &mut self,
+            index: usize,
+            buffer: Extent,
+            label_scan: bool,
+        ) -> Option<(usize, usize)> {
+            let string = &self.strings[index];
+            let pattern = string.pattern.clone();
+            let prefix = string.prefix.clone();
+            let location = string.location;
+            let dag_not = string.dag_not.clone();
+            let mut last_position = 0usize;
+            let mut nots: Vec<DagOrNot> = Vec::new();
+            if !label_scan {
+                last_position = self.check_dag(buffer, &dag_not, &mut nots)?;
+            }
+            let mut last_match_end = last_position;
+            let mut first_match = 0usize;
+            for occurrence in 1..=pattern.check.count {
+                let window = buffer.after(last_match_end);
+                let result = pattern.find(&self.sources, &mut self.variables, window);
+                if self.report(
+                    true, &prefix, location, &pattern, occurrence, window, &result,
+                ) {
+                    return None;
+                }
+                let found = result.ok()?;
+                if occurrence == 1 {
+                    first_match = last_position + found.position;
+                }
+                last_match_end += found.position + found.length;
+            }
+            let match_length = last_match_end - first_match;
+            if !label_scan {
+                let match_position = first_match - last_position;
+                let skipped = Extent::new(
+                    buffer.start.buffer,
+                    buffer.start.offset + last_position,
+                    match_position,
+                );
+                let skipped_bytes = self.sources.bytes(skipped).to_vec();
+                let window = buffer.after(last_position);
+                let wrong = |session: &mut Session| {
+                    if session.notes.is_some() {
+                        if session.request.verbose {
+                            if let Some(notes) = &mut session.notes {
+                                notes.mark_previous(FoundStatus::WrongLine);
+                            }
+                        } else if let Some(notes) = &mut session.notes {
+                            notes.push(Note::Found {
+                                check: pattern.check,
+                                check_spot: location,
+                                status: FoundStatus::WrongLine,
+                                matched: Extent::new(
+                                    window.start.buffer,
+                                    window.start.offset + match_position,
+                                    match_length,
+                                ),
+                                searched: window,
+                            });
+                        }
+                    }
+                };
+                if matches!(pattern.check.directive, Directive::Next | Directive::Empty) {
+                    let name = format!(
+                        "{prefix}{}",
+                        if pattern.check.directive == Directive::Empty {
+                            "-EMPTY"
+                        } else {
+                            "-NEXT"
+                        }
+                    );
+                    let (lines, first_newline) = count_newlines(&skipped_bytes);
+                    let end_spot = Spot {
+                        buffer: skipped.start.buffer,
+                        offset: skipped.end(),
+                    };
+                    if lines == 0 {
+                        self.emit(
+                            location,
+                            "error",
+                            &format!("{name}: is on the same line as previous match"),
+                            &[],
+                        );
+                        self.emit(end_spot, "note", "'next' match was here", &[]);
+                        self.emit(skipped.start, "note", "previous match ended here", &[]);
+                        wrong(self);
+                        return None;
+                    }
+                    if lines != 1 {
+                        self.emit(
+                            location,
+                            "error",
+                            &format!("{name}: is not on the line after the previous match"),
+                            &[],
+                        );
+                        self.emit(end_spot, "note", "'next' match was here", &[]);
+                        self.emit(skipped.start, "note", "previous match ended here", &[]);
+                        let first = Spot {
+                            buffer: skipped.start.buffer,
+                            offset: skipped.start.offset + first_newline.unwrap_or(0),
+                        };
+                        self.emit(
+                            first,
+                            "note",
+                            "non-matching line after previous match is here",
+                            &[],
+                        );
+                        wrong(self);
+                        return None;
+                    }
+                }
+                if pattern.check.directive == Directive::Same {
+                    let (lines, _) = count_newlines(&skipped_bytes);
+                    if lines != 0 {
+                        let end_spot = Spot {
+                            buffer: skipped.start.buffer,
+                            offset: skipped.end(),
+                        };
+                        self.emit(
+                            location,
+                            "error",
+                            &format!(
+                                "{prefix}-SAME: is not on the same line as the previous match"
+                            ),
+                            &[],
+                        );
+                        self.emit(end_spot, "note", "'next' match was here", &[]);
+                        self.emit(skipped.start, "note", "previous match ended here", &[]);
+                        wrong(self);
+                        return None;
+                    }
+                }
+                if self.check_not(skipped, &nots) {
+                    return None;
+                }
+            }
+            Some((first_match, match_length))
+        }
+
+        fn check_input(&mut self, input: Extent) -> bool {
+            let mut failed = false;
+            let mut buffer = input;
+            let total = self.strings.len();
+            let mut index = 0usize;
+            let mut label_index = 0usize;
+            loop {
+                let mut region = buffer;
+                if label_index != total {
+                    if self.strings[label_index].pattern.check.directive != Directive::Label {
+                        label_index += 1;
+                        continue;
+                    }
+                    let Some((position, length)) = self.run_check(label_index, buffer, true) else {
+                        return false;
+                    };
+                    region = buffer.front(position + length);
+                    buffer = buffer.after(position + length);
+                    label_index += 1;
+                }
+                if index != 0 && self.request.enable_var_scope {
+                    self.variables.clear_local();
+                }
+                while index != label_index {
+                    match self.run_check(index, region, false) {
+                        Some((position, length)) => {
+                            region = region.after(position + length);
+                            index += 1;
+                        }
+                        None => {
+                            failed = true;
+                            index = label_index;
+                            break;
+                        }
+                    }
+                }
+                if label_index == total {
+                    break;
+                }
+            }
+            !failed
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    enum DumpMode {
+        Never,
+        Fail,
+        Always,
+        Help,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    enum DumpFilter {
+        Error,
+        Annotation,
+        AnnotationFull,
+        All,
+    }
+
+    #[derive(Clone)]
+    struct Marker {
+        head: u8,
+        middle: u8,
+        tail: u8,
+        note: String,
+        filters_as_error: bool,
+    }
+
+    #[derive(Clone)]
+    struct Annotation {
+        order: usize,
+        label: String,
+        first_line: bool,
+        line: usize,
+        first_column: usize,
+        last_column: usize,
+        marker: Marker,
+    }
+
+    const OPEN_COLUMN: usize = usize::MAX;
+
+    fn marker_for(notes: &Notes, index: usize) -> Marker {
+        let note = &notes.list[index];
+        let result = &notes.list[notes.result_of(index)];
+        let error = note.is_error() || result.is_error();
+        let mut marker = if note.match_range().is_some() {
+            Marker {
+                head: if error { b'!' } else { b'^' },
+                middle: b'~',
+                tail: b'~',
+                note: String::new(),
+                filters_as_error: error,
+            }
+        } else {
+            Marker {
+                head: b' ',
+                middle: b' ',
+                tail: b' ',
+                note: String::new(),
+                filters_as_error: error,
+            }
+        };
+        match note {
+            Note::Found { status, .. } => match status {
+                FoundStatus::Success => {}
+                FoundStatus::Excluded => marker.note = "no match expected".to_string(),
+                FoundStatus::WrongLine => marker.note = "match on wrong line".to_string(),
+                FoundStatus::Discarded => {
+                    marker.head = b'!';
+                    marker.note = "discard: overlaps earlier match".to_string();
+                }
+            },
+            Note::Missing { status, .. } => match status {
+                NoneStatus::Success => {}
+                NoneStatus::InvalidPattern => {
+                    marker.note = "match failed for invalid pattern".to_string()
+                }
+                NoneStatus::Expected => marker.note = "no match found in search range".to_string(),
+            },
+            Note::Fuzzy { .. } => {
+                marker.head = b'?';
+                marker.note = "possible intended match".to_string();
+            }
+            Note::Custom { text, .. } => marker.note = text.clone(),
+        }
+        if note.is_error() {
+            marker.note = format!("error: {}", marker.note);
+        }
+        marker
+    }
+
+    fn result_fields(note: &Note) -> (CheckType, Spot, Extent, Option<Extent>) {
+        match note {
+            Note::Found {
+                check,
+                check_spot,
+                matched,
+                searched,
+                ..
+            } => (*check, *check_spot, *searched, Some(*matched)),
+            Note::Missing {
+                check,
+                check_spot,
+                searched,
+                ..
+            } => (*check, *check_spot, *searched, None),
+            _ => (
+                CheckType::of(Directive::Missing),
+                Spot::default(),
+                Extent::default(),
+                None,
+            ),
+        }
+    }
+
+    struct MarkerRange {
+        first: (usize, usize),
+        last: (usize, usize),
+    }
+
+    fn marker_range(sources: &Sources, range: Extent, exclusive: bool) -> MarkerRange {
+        let first = sources.line_column(range.start);
+        if exclusive {
+            let first = (first.0, first.1 - 1);
+            let last = if range.length == 0 {
+                sources.line_column(range.start)
+            } else {
+                let end = sources.line_column(Spot {
+                    buffer: range.start.buffer,
+                    offset: range.end() - 1,
+                });
+                (end.0, end.1 + 1)
+            };
+            return MarkerRange { first, last };
+        }
+        let last = if range.length == 0 {
+            first
+        } else {
+            sources.line_column(Spot {
+                buffer: range.start.buffer,
+                offset: range.end() - 1,
+            })
+        };
+        MarkerRange { first, last }
+    }
+
+    struct Labeler<'a> {
+        sources: &'a Sources,
+        check_buffer: usize,
+        implicit: (usize, usize),
+        counts: HashMap<Spot, usize>,
+        indices: HashMap<Spot, usize>,
+        prefixes: HashMap<Spot, String>,
+        next_order: usize,
+        width: usize,
+    }
+
+    impl std::hash::Hash for Spot {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.buffer.hash(state);
+            self.offset.hash(state);
+        }
+    }
+
+    impl<'a> Labeler<'a> {
+        fn expect(&mut self, check_spot: Spot, count: usize) {
+            *self.counts.entry(check_spot).or_insert(0) += count;
+        }
+
+        fn label(&mut self, check: CheckType, check_spot: Spot) -> (String, usize) {
+            let sources = self.sources;
+            let check_buffer = self.check_buffer;
+            let implicit = self.implicit;
+            let prefix = self.prefixes.entry(check_spot).or_insert_with(|| {
+                let mut text = format!("{}:", check.abbreviation());
+                if check_spot.buffer == check_buffer {
+                    text.push_str(&sources.line_column(check_spot).0.to_string());
+                } else if implicit.0 <= check_spot.buffer && check_spot.buffer < implicit.1 {
+                    text.push_str(&format!("imp{}", check_spot.buffer - implicit.0 + 1));
+                }
+                text
+            });
+            let mut label = prefix.clone();
+            let count = self.counts.get(&check_spot).copied().unwrap_or(0);
+            let index = self.indices.entry(check_spot).or_insert(0);
+            if count > 1 {
+                label.push_str(&format!("'{}", *index));
+            }
+            *index += 1;
+            self.width = self.width.max(label.len());
+            let order = self.next_order;
+            self.next_order += 1;
+            (label, order)
+        }
+    }
+
+    fn search_one_liner(sources: &Sources, searched: Extent) -> (bool, MarkerRange) {
+        let range = marker_range(sources, searched, true);
+        (range.first.0 == range.last.0, range)
+    }
+
+    fn makes_search_annotations(note: &Note) -> bool {
+        note.match_range().is_none() || note.is_error()
+    }
+
+    fn makes_note_annotations(notes: &Notes, index: usize) -> bool {
+        let note = &notes.list[index];
+        if !note.is_result() {
+            return true;
+        }
+        !(makes_search_annotations(note) && marker_for(notes, index).note.is_empty())
+    }
+
+    fn build_annotations(
+        sources: &Sources,
+        check_buffer: usize,
+        implicit: (usize, usize),
+        notes: &Notes,
+    ) -> (Vec<Annotation>, usize) {
+        let mut labeler = Labeler {
+            sources,
+            check_buffer,
+            implicit,
+            counts: HashMap::new(),
+            indices: HashMap::new(),
+            prefixes: HashMap::new(),
+            next_order: 0,
+            width: 0,
+        };
+        for index in 0..notes.list.len() {
+            let result_index = notes.result_of(index);
+            let (_, check_spot, searched, _) = result_fields(&notes.list[result_index]);
+            if notes.list[index].is_result() && makes_search_annotations(&notes.list[index]) {
+                let (one_liner, _) = search_one_liner(sources, searched);
+                labeler.expect(check_spot, if one_liner { 1 } else { 2 });
+            }
+            labeler.expect(
+                check_spot,
+                usize::from(makes_note_annotations(notes, index)),
+            );
+        }
+        let mut annotations = Vec::new();
+        let mut open_search: Option<usize> = None;
+        let close_search = |labeler: &mut Labeler,
+                            annotations: &mut Vec<Annotation>,
+                            result_index: usize,
+                            start: bool| {
+            let (check, check_spot, searched, _) = result_fields(&notes.list[result_index]);
+            let (label, order) = labeler.label(check, check_spot);
+            let (one_liner, range) = search_one_liner(sources, searched);
+            let base_error = notes.list[result_index].is_error();
+            let mut marker = Marker {
+                head: b' ',
+                middle: b' ',
+                tail: b' ',
+                note: String::new(),
+                filters_as_error: base_error,
+            };
+            if one_liner {
+                marker.head = b'{';
+                marker.middle = b' ';
+                marker.tail = b'}';
+                marker.note = "search range (exclusive bounds)".to_string();
+                annotations.push(Annotation {
+                    order,
+                    label,
+                    first_line: true,
+                    line: range.first.0,
+                    first_column: range.first.1,
+                    last_column: range.last.1,
+                    marker,
+                });
+                return true;
+            }
+            let location = if start { range.first } else { range.last };
+            marker.head = if start { b'{' } else { b'}' };
+            marker.note = format!(
+                "search range {} (exclusive)",
+                if start { "start" } else { "end" }
+            );
+            annotations.push(Annotation {
+                order,
+                label,
+                first_line: true,
+                line: location.0,
+                first_column: location.1,
+                last_column: location.1,
+                marker,
+            });
+            false
+        };
+        for index in 0..notes.list.len() {
+            if notes.list[index].is_result() {
+                if let Some(open) = open_search.take() {
+                    close_search(&mut labeler, &mut annotations, open, false);
+                }
+                if makes_search_annotations(&notes.list[index])
+                    && !close_search(&mut labeler, &mut annotations, index, true)
+                {
+                    open_search = Some(index);
+                }
+            }
+            if !makes_note_annotations(notes, index) {
+                continue;
+            }
+            let result_index = notes.result_of(index);
+            let (check, check_spot, searched, matched) = result_fields(&notes.list[result_index]);
+            let (label, order) = labeler.label(check, check_spot);
+            let mut marker = marker_for(notes, index);
+            let range = match notes.list[index].match_range() {
+                Some(range) => marker_range(sources, range, false),
+                None => {
+                    let base = match matched {
+                        Some(matched) => marker_range(sources, matched, false),
+                        None => marker_range(sources, searched, false),
+                    };
+                    MarkerRange {
+                        first: base.first,
+                        last: base.first,
+                    }
+                }
+            };
+            if range.first.0 == range.last.0 {
+                annotations.push(Annotation {
+                    order,
+                    label,
+                    first_line: true,
+                    line: range.first.0,
+                    first_column: range.first.1,
+                    last_column: range.last.1,
+                    marker,
+                });
+            } else {
+                let tail = marker.tail;
+                marker.tail = marker.middle;
+                annotations.push(Annotation {
+                    order,
+                    label: label.clone(),
+                    first_line: true,
+                    line: range.first.0,
+                    first_column: range.first.1,
+                    last_column: OPEN_COLUMN,
+                    marker: marker.clone(),
+                });
+                for line in range.first.0 + 1..=range.last.0 {
+                    let mut continued = marker.clone();
+                    continued.head = marker.middle;
+                    continued.middle = marker.middle;
+                    continued.tail = if line != range.last.0 {
+                        marker.middle
+                    } else {
+                        tail
+                    };
+                    continued.note = String::new();
+                    annotations.push(Annotation {
+                        order,
+                        label: label.clone(),
+                        first_line: false,
+                        line,
+                        first_column: 1,
+                        last_column: if line != range.last.0 {
+                            OPEN_COLUMN
+                        } else {
+                            range.last.1
+                        },
+                        marker: continued,
+                    });
+                }
+            }
+        }
+        if let Some(open) = open_search {
+            close_search(&mut labeler, &mut annotations, open, false);
+        }
+        (annotations, labeler.width)
+    }
+
+    fn dump_help() -> String {
+        [
+            "The following description was requested by -dump-input=help to",
+            "explain the input dump printed by FileCheck.",
+            "",
+            "Related command-line options:",
+            "",
+            "  - -dump-input=<value> enables or disables the input dump",
+            "  - -dump-input-filter=<value> filters the input lines",
+            "  - -dump-input-context=<N> adjusts the context of filtered lines",
+            "  - -v and -vv add more annotations",
+            "  - -color forces colors to be enabled both in the dump and below",
+            "  - -help documents the above options in more detail",
+            "",
+            "These options can also be set via FILECHECK_OPTS.  For example, for",
+            "maximum debugging output on failures:",
+            "",
+            "  $ FILECHECK_OPTS='-dump-input-filter=all -vv -color' ninja check",
+            "",
+            "Input dump annotation format:",
+            "",
+            "  - L:     labels line number L of the input file",
+            "           An extra space is added after each input line to represent the",
+            "           newline character",
+            "  - T:L    labels the only match result for either (1) a pattern of type T from",
+            "           line L of the check file if L is an integer or (2) the I-th implicit",
+            "           pattern if L is \"imp\" followed by an integer I (index origin one)",
+            "  - T:L'N  labels the Nth match result for such a pattern",
+            "  - ^~~    marks good match (reported if -v)",
+            "  - !~~    marks bad match, such as:",
+            "           - CHECK-NEXT on same line as previous match (error)",
+            "           - CHECK-NOT found (error)",
+            "           - CHECK-DAG overlapping match (discarded, reported if -vv)",
+            "  - { }    encloses search range (exclusive bounds) when no match is found or",
+            "           there is an error, such as:",
+            "           - the errors mentioned above",
+            "           - CHECK-NEXT not found (error)",
+            "           - CHECK-NOT not found (success, reported if -vv)",
+            "           - CHECK-DAG not found after discarded matches (error)",
+            "  - ?      marks fuzzy match when no match is found",
+            "  - ...    indicates elided input lines and annotations, as specified by",
+            "           -dump-input-filter and -dump-input-context",
+            "  - colors success, error, fuzzy match, discarded match, unmatched input",
+            "",
+        ]
+        .join("\n")
+    }
+
+    fn line_in_filter(filter: DumpFilter, line: usize, annotations: &[Annotation]) -> usize {
+        if filter == DumpFilter::All {
+            return line;
+        }
+        for annotation in annotations {
+            match filter {
+                DumpFilter::AnnotationFull => return annotation.line,
+                DumpFilter::Annotation => {
+                    if annotation.first_line {
+                        return annotation.line;
+                    }
+                }
+                DumpFilter::Error => {
+                    if annotation.first_line && annotation.marker.filters_as_error {
+                        return annotation.line;
+                    }
+                }
+                DumpFilter::All => {}
+            }
+        }
+        usize::MAX
+    }
+
+    fn flush_elided(out: &mut Vec<u8>, elided: &mut Vec<u8>, width: usize) {
+        if elided.is_empty() {
+            return;
+        }
+        let lines = elided.iter().filter(|&&byte| byte == b'\n').count();
+        if 3 < lines {
+            for _ in 0..3 {
+                out.extend_from_slice(format!("{:>width$}\n", ".", width = width).as_bytes());
+            }
+        } else {
+            out.extend_from_slice(elided);
+        }
+        elided.clear();
+    }
+
+    fn dump_input(
+        out: &mut Vec<u8>,
+        filter: DumpFilter,
+        context: usize,
+        label_width: usize,
+        input: &[u8],
+        mut annotations: Vec<Annotation>,
+        width: usize,
+    ) {
+        out.extend_from_slice(b"Input was:\n<<<<<<\n");
+        annotations.sort_by_key(|annotation| (annotation.line, annotation.order));
+        let mut line_count = input.iter().filter(|&&byte| byte == b'\n').count();
+        if input.last() != Some(&b'\n') {
+            line_count += 1;
+        }
+        let digits = line_count.max(1).to_string().len();
+        let width = (width.max(digits) + 3).max(label_width);
+        let mut previous_in_filter = 0usize;
+        let mut next_in_filter = 0usize;
+        let mut elided: Vec<u8> = Vec::new();
+        let mut cursor = 0usize;
+        let mut next_annotation = 0usize;
+        let mut line = 1usize;
+        while cursor < input.len() || next_annotation < annotations.len() {
+            let line_start = cursor;
+            if next_in_filter < line {
+                next_in_filter = line_in_filter(filter, line, &annotations[next_annotation..]);
+            }
+            if next_in_filter == line {
+                previous_in_filter = line;
+            }
+            let elide = (previous_in_filter == 0 || previous_in_filter + context < line)
+                && (next_in_filter == usize::MAX || line + context < next_in_filter);
+            let mut text = Vec::new();
+            text.extend_from_slice(format!("{:>width$}: ", line, width = width).as_bytes());
+            let mut newline = false;
+            while cursor < input.len() && !newline {
+                if input[cursor] == b'\n' {
+                    newline = true;
+                    text.push(b' ');
+                } else {
+                    text.push(input[cursor]);
+                }
+                cursor += 1;
+            }
+            text.push(b'\n');
+            let input_width = cursor - line_start;
+            while next_annotation < annotations.len() && annotations[next_annotation].line == line {
+                let annotation = &annotations[next_annotation];
+                text.extend_from_slice(
+                    format!("{:<width$} ", annotation.label, width = width).as_bytes(),
+                );
+                let mut column = 0usize;
+                while column < annotation.first_column {
+                    text.push(b' ');
+                    column += 1;
+                }
+                text.push(annotation.marker.head);
+                column += 1;
+                while column < annotation.last_column && column <= input_width {
+                    text.push(annotation.marker.middle);
+                    column += 1;
+                }
+                if column <= annotation.last_column && annotation.last_column != OPEN_COLUMN {
+                    text.push(annotation.marker.tail);
+                    column += 1;
+                }
+                if !annotation.marker.note.is_empty() {
+                    while column <= input_width + 1 {
+                        text.push(b' ');
+                        column += 1;
+                    }
+                    text.push(b' ');
+                    text.extend_from_slice(annotation.marker.note.as_bytes());
+                }
+                text.push(b'\n');
+                next_annotation += 1;
+            }
+            if elide {
+                elided.extend_from_slice(&text);
+            } else {
+                flush_elided(out, &mut elided, width);
+                out.extend_from_slice(&text);
+            }
+            line += 1;
+        }
+        flush_elided(out, &mut elided, width);
+        out.extend_from_slice(b">>>>>>\n");
+    }
+
+    pub(super) struct ToolResult {
+        pub(super) status: i32,
+        pub(super) stdout: Vec<u8>,
+        pub(super) stderr: Vec<u8>,
+    }
+
+    fn split_options(text: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut quote: Option<char> = None;
+        let mut started = false;
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            match quote {
+                Some(open) => {
+                    if character == open {
+                        quote = None;
+                    } else if character == '\\' && open == '"' {
+                        if let Some(next) = characters.next() {
+                            current.push(next);
+                        }
+                    } else {
+                        current.push(character);
+                    }
+                }
+                None => match character {
+                    '\'' | '"' => {
+                        quote = Some(character);
+                        started = true;
+                    }
+                    '\\' => {
+                        if let Some(next) = characters.next() {
+                            current.push(next);
+                            started = true;
+                        }
+                    }
+                    ' ' | '\t' | '\n' => {
+                        if started {
+                            words.push(std::mem::take(&mut current));
+                            started = false;
+                        }
+                    }
+                    other => {
+                        current.push(other);
+                        started = true;
+                    }
+                },
+            }
+        }
+        if started {
+            words.push(current);
+        }
+        words
+    }
+
+    pub(super) fn file_check(
+        arguments: &[String],
+        environment: &BTreeMap<String, String>,
+        stdin: &[u8],
+        read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    ) -> ToolResult {
+        let mut stderr = Vec::new();
+        let mut words: Vec<String> = Vec::new();
+        if let Some(options) = environment.get("FILECHECK_OPTS") {
+            words.extend(split_options(options));
+        }
+        words.extend(arguments.iter().skip(1).cloned());
+        let mut request = CheckRequest::default();
+        let mut check_file: Option<String> = None;
+        let mut input_file = "-".to_string();
+        let mut dump_modes: Vec<DumpMode> = Vec::new();
+        let mut dump_filters: Vec<DumpFilter> = Vec::new();
+        let mut dump_contexts: Vec<usize> = Vec::new();
+        let mut label_width = 0usize;
+        let fail = |stderr: &mut Vec<u8>, message: String| -> ToolResult {
+            stderr.extend_from_slice(message.as_bytes());
+            ToolResult {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: std::mem::take(stderr),
+            }
+        };
+        let mut index = 0;
+        let mut positional_only = false;
+        while index < words.len() {
+            let word = words[index].clone();
+            index += 1;
+            if positional_only || !word.starts_with('-') || word == "-" {
+                if check_file.is_some() {
+                    return fail(
+                        &mut stderr,
+                        "FileCheck: Too many positional arguments specified!\nCan specify at most 1 positional arguments: See: FileCheck --help\n".to_string(),
+                    );
+                }
+                check_file = Some(word);
+                continue;
+            }
+            if word == "--" {
+                positional_only = true;
+                continue;
+            }
+            let body = word.trim_start_matches('-');
+            if let Some(define) = body.strip_prefix('D') {
+                if define.is_empty() {
+                    return fail(
+                        &mut stderr,
+                        "FileCheck: for the -D option: requires a value!\n".to_string(),
+                    );
+                }
+                request.global_defines.push(define.to_string());
+                continue;
+            }
+            let (name, inline) = match body.split_once('=') {
+                Some((name, value)) => (name.to_string(), Some(value.to_string())),
+                None => (body.to_string(), None),
+            };
+            let value = |index: &mut usize| -> Option<String> {
+                if let Some(inline) = &inline {
+                    return Some(inline.clone());
+                }
+                if *index < words.len() {
+                    *index += 1;
+                    return Some(words[*index - 1].clone());
+                }
+                None
+            };
+            let flag = |inline: &Option<String>| -> bool {
+                matches!(
+                    inline.as_deref(),
+                    None | Some("true") | Some("TRUE") | Some("True") | Some("1")
+                )
+            };
+            match name.as_str() {
+                "check-prefix" | "check-prefixes" => {
+                    let Some(list) = value(&mut index) else {
+                        return fail(
+                            &mut stderr,
+                            format!("FileCheck: for the --{name} option: requires a value!\n"),
+                        );
+                    };
+                    request
+                        .check_prefixes
+                        .extend(list.split(',').map(str::to_string));
+                }
+                "comment-prefixes" => {
+                    let Some(list) = value(&mut index) else {
+                        return fail(
+                            &mut stderr,
+                            "FileCheck: for the --comment-prefixes option: requires a value!\n"
+                                .to_string(),
+                        );
+                    };
+                    request
+                        .comment_prefixes
+                        .extend(list.split(',').map(str::to_string));
+                }
+                "input-file" => {
+                    let Some(file) = value(&mut index) else {
+                        return fail(
+                            &mut stderr,
+                            "FileCheck: for the --input-file option: requires a value!\n"
+                                .to_string(),
+                        );
+                    };
+                    input_file = file;
+                }
+                "implicit-check-not" => {
+                    let Some(pattern) = value(&mut index) else {
+                        return fail(
+                            &mut stderr,
+                            "FileCheck: for the --implicit-check-not option: requires a value!\n"
+                                .to_string(),
+                        );
+                    };
+                    request.implicit_check_not.push(pattern);
+                }
+                "strict-whitespace" => request.strict_whitespace = flag(&inline),
+                "ignore-case" => request.ignore_case = flag(&inline),
+                "allow-empty" => request.allow_empty = flag(&inline),
+                "allow-unused-prefixes" => request.allow_unused_prefixes = flag(&inline),
+                "match-full-lines" => request.match_full_lines = flag(&inline),
+                "enable-var-scope" => request.enable_var_scope = flag(&inline),
+                "allow-deprecated-dag-overlap" => request.allow_dag_overlap = flag(&inline),
+                "v" => request.verbose = flag(&inline),
+                "vv" => request.very_verbose = flag(&inline),
+                "color" | "color-diagnostics" => {}
+                "dump-input" => {
+                    let Some(mode) = value(&mut index) else {
+                        return fail(
+                            &mut stderr,
+                            "FileCheck: for the --dump-input option: requires a value!\n"
+                                .to_string(),
+                        );
+                    };
+                    dump_modes.push(match mode.as_str() {
+                        "never" => DumpMode::Never,
+                        "fail" => DumpMode::Fail,
+                        "always" => DumpMode::Always,
+                        "help" => DumpMode::Help,
+                        _ => {
+                            return fail(
+                                &mut stderr,
+                                format!("FileCheck: for the --dump-input option: Cannot find option named '{mode}'!\n"),
+                            )
+                        }
+                    });
+                }
+                "dump-input-filter" => {
+                    let Some(mode) = value(&mut index) else {
+                        return fail(
+                            &mut stderr,
+                            "FileCheck: for the --dump-input-filter option: requires a value!\n"
+                                .to_string(),
+                        );
+                    };
+                    dump_filters.push(match mode.as_str() {
+                        "all" => DumpFilter::All,
+                        "annotation-full" => DumpFilter::AnnotationFull,
+                        "annotation" => DumpFilter::Annotation,
+                        "error" => DumpFilter::Error,
+                        _ => {
+                            return fail(
+                                &mut stderr,
+                                format!("FileCheck: for the --dump-input-filter option: Cannot find option named '{mode}'!\n"),
+                            )
+                        }
+                    });
+                }
+                "dump-input-context" => {
+                    let given = value(&mut index).unwrap_or_default();
+                    let Ok(count) = given.parse::<usize>() else {
+                        return fail(
+                            &mut stderr,
+                            format!("FileCheck: for the --dump-input-context option: '{given}' value invalid for uint argument!\n"),
+                        );
+                    };
+                    dump_contexts.push(count);
+                }
+                "dump-input-label-width" => {
+                    label_width = value(&mut index)
+                        .and_then(|text| text.parse::<usize>().ok())
+                        .unwrap_or(0);
+                }
+                _ => {
+                    return fail(
+                        &mut stderr,
+                        format!("FileCheck: Unknown command line argument '{word}'.  Try: 'FileCheck --help'\n"),
+                    );
+                }
+            }
+        }
+        if request.very_verbose {
+            request.verbose = true;
+        }
+        let dump_mode = dump_modes.iter().copied().max().unwrap_or(DumpMode::Fail);
+        let dump_filter =
+            dump_filters
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(if dump_mode == DumpMode::Always {
+                    DumpFilter::All
+                } else {
+                    DumpFilter::Error
+                });
+        let dump_context = dump_contexts.iter().copied().max().unwrap_or(5);
+        if dump_mode == DumpMode::Help {
+            return ToolResult {
+                status: 0,
+                stdout: dump_help().into_bytes(),
+                stderr,
+            };
+        }
+        let Some(check_name) = check_file else {
+            stderr.extend_from_slice(b"<check-file> not specified\n");
+            return ToolResult {
+                status: 2,
+                stdout: Vec::new(),
+                stderr,
+            };
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        if request.check_prefixes.is_empty() {
+            seen.insert("CHECK".to_string());
+        }
+        if request.comment_prefixes.is_empty() {
+            seen.insert("COM".to_string());
+            seen.insert("RUN".to_string());
+        }
+        for (kind, list) in [
+            ("check", &request.check_prefixes),
+            ("comment", &request.comment_prefixes),
+        ] {
+            for prefix in list.iter() {
+                if prefix.is_empty() {
+                    stderr.extend_from_slice(
+                        format!("error: supplied {kind} prefix must not be the empty string\n")
+                            .as_bytes(),
+                    );
+                    return ToolResult {
+                        status: 2,
+                        stdout: Vec::new(),
+                        stderr,
+                    };
+                }
+                if !prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                {
+                    stderr.extend_from_slice(
+                        format!(
+                            "error: supplied {kind} prefix must start with a letter and contain only alphanumeric characters, hyphens, and underscores: '{prefix}'\n"
+                        )
+                        .as_bytes(),
+                    );
+                    return ToolResult {
+                        status: 2,
+                        stdout: Vec::new(),
+                        stderr,
+                    };
+                }
+                if !seen.insert(prefix.clone()) {
+                    stderr.extend_from_slice(
+                        format!("error: supplied {kind} prefix must be unique among check and comment prefixes: '{prefix}'\n").as_bytes(),
+                    );
+                    return ToolResult {
+                        status: 2,
+                        stdout: Vec::new(),
+                        stderr,
+                    };
+                }
+            }
+        }
+        for define in &request.global_defines {
+            match define.find('=') {
+                None => {
+                    stderr.extend_from_slice(
+                        format!("Missing equal sign in command-line definition '-D{define}'\n")
+                            .as_bytes(),
+                    );
+                }
+                Some(0) => {
+                    stderr.extend_from_slice(
+                        format!("Missing variable name in command-line definition '-D{define}'\n")
+                            .as_bytes(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        if request
+            .global_defines
+            .iter()
+            .any(|define| define.find('=').is_none_or(|at| at == 0))
+        {
+            return ToolResult {
+                status: 2,
+                stdout: Vec::new(),
+                stderr,
+            };
+        }
+        let check_bytes = if check_name == "-" {
+            Some(stdin.to_vec())
+        } else {
+            read(&check_name)
+        };
+        let Some(check_bytes) = check_bytes else {
+            stderr.extend_from_slice(
+                format!("Could not open check file '{check_name}': No such file or directory\n")
+                    .as_bytes(),
+            );
+            return ToolResult {
+                status: 2,
+                stdout: Vec::new(),
+                stderr,
+            };
+        };
+        let mut session = Session {
+            request: &request,
+            sources: Sources::default(),
+            variables: Variables::new(),
+            err: stderr,
+            notes: if dump_mode == DumpMode::Never {
+                None
+            } else {
+                Some(Notes::default())
+            },
+            strings: Vec::new(),
+        };
+        let check_text = canonicalize(&check_bytes, request.strict_whitespace);
+        let check_buffer = session.sources.add(&check_name, check_text);
+        let mut implicit = (0usize, 0usize);
+        if !session.read_check_file(check_buffer, &mut implicit) {
+            return ToolResult {
+                status: 2,
+                stdout: Vec::new(),
+                stderr: session.err,
+            };
+        }
+        let input_bytes = if input_file == "-" {
+            Some(stdin.to_vec())
+        } else {
+            read(&input_file)
+        };
+        let input_name = if input_file == "-" {
+            "<stdin>".to_string()
+        } else {
+            input_file.clone()
+        };
+        let Some(input_bytes) = input_bytes else {
+            session.err.extend_from_slice(
+                format!("Could not open input file '{input_name}': No such file or directory\n")
+                    .as_bytes(),
+            );
+            return ToolResult {
+                status: 2,
+                stdout: Vec::new(),
+                stderr: session.err,
+            };
+        };
+        if input_bytes.is_empty() && !request.allow_empty {
+            session.err.extend_from_slice(
+                format!("FileCheck error: '{input_name}' is empty.\n").as_bytes(),
+            );
+            let mut line = String::from("FileCheck command line: ");
+            for argument in arguments {
+                line.push(' ');
+                line.push_str(argument);
+            }
+            line.push('\n');
+            session.err.extend_from_slice(line.as_bytes());
+            return ToolResult {
+                status: 2,
+                stdout: Vec::new(),
+                stderr: session.err,
+            };
+        }
+        let input_text = canonicalize(&input_bytes, request.strict_whitespace);
+        let input_buffer = session.sources.add(&input_name, input_text.clone());
+        let whole = session.sources.whole(input_buffer);
+        let passed = session.check_input(whole);
+        let status = if passed { 0 } else { 1 };
+        if dump_mode == DumpMode::Always || (status == 1 && dump_mode == DumpMode::Fail) {
+            let mut out = std::mem::take(&mut session.err);
+            out.extend_from_slice(
+                format!(
+                    "\nInput file: {input_name}\nCheck file: {check_name}\n\n-dump-input=help explains the following input dump.\n\n"
+                )
+                .as_bytes(),
+            );
+            let notes = session.notes.take().unwrap_or_default();
+            let (annotations, width) =
+                build_annotations(&session.sources, check_buffer, implicit, &notes);
+            dump_input(
+                &mut out,
+                dump_filter,
+                dump_context,
+                label_width,
+                &input_text,
+                annotations,
+                width,
+            );
+            session.err = out;
+        }
+        ToolResult {
+            status,
+            stdout: Vec::new(),
+            stderr: session.err,
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum ShellToken {
+        Word(String),
+        Operator(String),
+        Redirect(String, Option<u32>),
+    }
+
+    fn shell_lex(text: &str) -> Result<Vec<ShellToken>, String> {
+        let characters: Vec<char> = text.chars().collect();
+        let mut at = 0usize;
+        let mut tokens = Vec::new();
+        let quoted = |characters: &[char], at: &mut usize, delimiter: char| -> String {
+            let mut out = String::new();
+            while *at < characters.len() {
+                let character = characters[*at];
+                *at += 1;
+                if character == delimiter {
+                    return out;
+                }
+                if character == '\\' && delimiter == '"' && *at < characters.len() {
+                    let next = characters[*at];
+                    *at += 1;
+                    match next {
+                        '$' | '"' | '\\' => out.push(next),
+                        other => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                    }
+                    continue;
+                }
+                out.push(character);
+            }
+            out
+        };
+        while at < characters.len() {
+            let character = characters[at];
+            if character.is_whitespace() {
+                at += 1;
+                continue;
+            }
+            at += 1;
+            let operator = match character {
+                ';' => Some(";".to_string()),
+                '|' => {
+                    if characters.get(at) == Some(&'|') {
+                        at += 1;
+                        Some("||".to_string())
+                    } else {
+                        Some("|".to_string())
+                    }
+                }
+                '&' => match characters.get(at) {
+                    Some('&') => {
+                        at += 1;
+                        Some("&&".to_string())
+                    }
+                    Some('>') => {
+                        at += 1;
+                        tokens.push(ShellToken::Redirect("&>".to_string(), None));
+                        continue;
+                    }
+                    _ => Some("&".to_string()),
+                },
+                '>' | '<' => {
+                    let mut operator = character.to_string();
+                    match characters.get(at) {
+                        Some('&') => {
+                            operator.push('&');
+                            at += 1;
+                        }
+                        Some('>') if character == '>' => {
+                            operator.push('>');
+                            at += 1;
+                        }
+                        Some('>') if character == '<' => {
+                            operator.push('>');
+                            at += 1;
+                        }
+                        _ => {}
+                    }
+                    tokens.push(ShellToken::Redirect(operator, None));
+                    continue;
+                }
+                _ => None,
+            };
+            if let Some(operator) = operator {
+                tokens.push(ShellToken::Operator(operator));
+                continue;
+            }
+            let mut word = String::new();
+            if character == '\'' || character == '"' {
+                word.push_str(&quoted(&characters, &mut at, character));
+            } else if character == '\\' {
+                if at < characters.len() {
+                    word.push(characters[at]);
+                    at += 1;
+                }
+            } else {
+                word.push(character);
+            }
+            let mut redirect = None;
+            while at < characters.len() {
+                let next = characters[at];
+                if next.is_whitespace() || "|&;".contains(next) {
+                    break;
+                }
+                if next == '>' || next == '<' {
+                    if !word.is_empty() && word.chars().all(|digit| digit.is_ascii_digit()) {
+                        let number: u32 = word.parse().unwrap_or(1);
+                        at += 1;
+                        let mut operator = next.to_string();
+                        match characters.get(at) {
+                            Some('&') => {
+                                operator.push('&');
+                                at += 1;
+                            }
+                            Some('>') => {
+                                operator.push('>');
+                                at += 1;
+                            }
+                            _ => {}
+                        }
+                        redirect = Some(ShellToken::Redirect(operator, Some(number)));
+                    }
+                    break;
+                }
+                at += 1;
+                if next == '\'' || next == '"' {
+                    word.push_str(&quoted(&characters, &mut at, next));
+                } else if next == '\\' {
+                    if at < characters.len() {
+                        word.push(characters[at]);
+                        at += 1;
+                    }
+                } else {
+                    word.push(next);
+                }
+            }
+            match redirect {
+                Some(token) => tokens.push(token),
+                None => tokens.push(ShellToken::Word(word)),
+            }
+        }
+        Ok(tokens)
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub(super) struct ShellCommand {
+        arguments: Vec<String>,
+        redirects: Vec<(String, Option<u32>, String)>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub(super) enum ShellScript {
+        Pipeline(Vec<ShellCommand>),
+        Sequence(Box<ShellScript>, String, Box<ShellScript>),
+    }
+
+    pub(super) fn shell_parse(text: &str) -> Result<ShellScript, String> {
+        let tokens = shell_lex(text)?;
+        let mut at = 0usize;
+        let command = |at: &mut usize| -> Result<ShellCommand, String> {
+            let mut command = ShellCommand::default();
+            match tokens.get(*at) {
+                None => return Err("empty command!".to_string()),
+                Some(ShellToken::Operator(operator)) => {
+                    return Err(format!("syntax error near unexpected token '{operator}'"));
+                }
+                _ => {}
+            }
+            while let Some(token) = tokens.get(*at) {
+                match token {
+                    ShellToken::Word(word) => {
+                        command.arguments.push(word.clone());
+                        *at += 1;
+                    }
+                    ShellToken::Operator(_) => break,
+                    ShellToken::Redirect(operator, number) => {
+                        *at += 1;
+                        match tokens.get(*at) {
+                            Some(ShellToken::Word(target)) => {
+                                command
+                                    .redirects
+                                    .push((operator.clone(), *number, target.clone()));
+                                *at += 1;
+                            }
+                            _ => return Err(format!("syntax error near token '{operator}'")),
+                        }
+                    }
+                }
+            }
+            Ok(command)
+        };
+        let pipeline = |at: &mut usize| -> Result<ShellScript, String> {
+            let mut commands = vec![command(at)?];
+            while tokens.get(*at) == Some(&ShellToken::Operator("|".to_string())) {
+                *at += 1;
+                commands.push(command(at)?);
+            }
+            Ok(ShellScript::Pipeline(commands))
+        };
+        let mut script = pipeline(&mut at)?;
+        while let Some(token) = tokens.get(at) {
+            let ShellToken::Operator(operator) = token else {
+                return Err("unexpected token".to_string());
+            };
+            at += 1;
+            if at >= tokens.len() {
+                return Err(format!("missing argument to operator '{operator}'"));
+            }
+            let right = pipeline(&mut at)?;
+            script = ShellScript::Sequence(Box::new(script), operator.clone(), Box::new(right));
+        }
+        Ok(script)
+    }
+
+    pub(super) struct ToolOutcome {
+        pub(super) status: i32,
+        pub(super) stdout: Vec<u8>,
+        pub(super) stderr: Vec<u8>,
+    }
+
+    impl ToolOutcome {
+        pub(super) fn ok(stdout: Vec<u8>) -> ToolOutcome {
+            ToolOutcome {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            }
+        }
+
+        pub(super) fn failed(status: i32, stderr: impl Into<Vec<u8>>) -> ToolOutcome {
+            ToolOutcome {
+                status,
+                stdout: Vec::new(),
+                stderr: stderr.into(),
+            }
+        }
+    }
+
+    pub(super) type ToolFunction = fn(&[String], &[u8], &mut World) -> ToolOutcome;
+
+    pub(super) struct World<'t> {
+        pub(super) tree: &'t Tree,
+        pub(super) files: BTreeMap<String, Vec<u8>>,
+        pub(super) removed: BTreeSet<String>,
+        pub(super) folders: BTreeSet<String>,
+        pub(super) directory: String,
+        pub(super) environment: BTreeMap<String, String>,
+        pub(super) tools: &'t BTreeMap<String, ToolFunction>,
+        pub(super) missing_tool: Option<String>,
+    }
+
+    impl<'t> World<'t> {
+        pub(super) fn absolute(&self, path: &str) -> String {
+            if path.starts_with('/') {
+                normalize_path(path)
+            } else {
+                normalize_path(&format!("{}/{}", self.directory, path))
+            }
+        }
+
+        pub(super) fn read(&self, path: &str) -> Option<Vec<u8>> {
+            if path == "/dev/null" {
+                return Some(Vec::new());
+            }
+            let absolute = self.absolute(path);
+            if let Some(found) = self.files.get(&absolute) {
+                return Some(found.clone());
+            }
+            if self.removed.contains(&absolute) {
+                return None;
+            }
+            self.tree
+                .file(absolute.trim_start_matches('/'))
+                .map(<[u8]>::to_vec)
+        }
+
+        pub(super) fn write(&mut self, path: &str, bytes: Vec<u8>, append: bool) {
+            if path == "/dev/null" {
+                return;
+            }
+            let absolute = self.absolute(path);
+            self.removed.remove(&absolute);
+            if append {
+                let mut existing = self.read(&absolute).unwrap_or_default();
+                existing.extend_from_slice(&bytes);
+                self.files.insert(absolute, existing);
+            } else {
+                self.files.insert(absolute, bytes);
+            }
+        }
+
+        pub(super) fn remove(&mut self, path: &str, recursive: bool) {
+            let absolute = self.absolute(path);
+            self.files.remove(&absolute);
+            self.folders.remove(&absolute);
+            self.removed.insert(absolute.clone());
+            if recursive {
+                let prefix = format!("{absolute}/");
+                self.files.retain(|name, _| !name.starts_with(&prefix));
+                self.folders.retain(|name| !name.starts_with(&prefix));
+            }
+        }
+    }
+
+    fn run_pipeline(commands: &[ShellCommand], world: &mut World, stderr: &mut Vec<u8>) -> i32 {
+        let mut input: Vec<u8> = Vec::new();
+        let mut statuses = Vec::new();
+        let count = commands.len();
+        for (position, command) in commands.iter().enumerate() {
+            let mut arguments = command.arguments.clone();
+            let mut inverted = 0usize;
+            let mut expect_crash = false;
+            let mut scoped: Option<BTreeMap<String, String>> = None;
+            loop {
+                match arguments.first().map(String::as_str) {
+                    Some("not") => {
+                        arguments.remove(0);
+                        if arguments.first().map(String::as_str) == Some("--crash") {
+                            arguments.remove(0);
+                            expect_crash = true;
+                        }
+                        inverted += 1;
+                    }
+                    Some("env") => {
+                        arguments.remove(0);
+                        let mut environment =
+                            scoped.clone().unwrap_or_else(|| world.environment.clone());
+                        while let Some(first) = arguments.first().cloned() {
+                            if first == "-u" && arguments.len() > 1 {
+                                environment.remove(&arguments[1]);
+                                arguments.drain(0..2);
+                            } else if let Some(name) = first.strip_prefix("--unset=") {
+                                environment.remove(name);
+                                arguments.remove(0);
+                            } else if first == "-i" || first == "-" {
+                                environment.clear();
+                                arguments.remove(0);
+                            } else if let Some((name, value)) = first.split_once('=') {
+                                if name.is_empty() || name.contains('/') {
+                                    break;
+                                }
+                                environment.insert(name.to_string(), value.to_string());
+                                arguments.remove(0);
+                            } else {
+                                break;
+                            }
+                        }
+                        scoped = Some(environment);
+                    }
+                    _ => break,
+                }
+            }
+            let mut command_input = std::mem::take(&mut input);
+            let mut stdout_target: Option<(String, bool)> = None;
+            let mut stderr_target: Option<(String, bool)> = None;
+            let mut stderr_to_stdout = false;
+            for (operator, number, target) in &command.redirects {
+                match (operator.as_str(), number) {
+                    ("<", _) => match world.read(target) {
+                        Some(bytes) => command_input = bytes,
+                        None => {
+                            stderr.extend_from_slice(
+                                format!("{target}: No such file or directory\n").as_bytes(),
+                            );
+                            return 1;
+                        }
+                    },
+                    (">", None) | (">", Some(1)) => stdout_target = Some((target.clone(), false)),
+                    (">>", None) | (">>", Some(1)) => stdout_target = Some((target.clone(), true)),
+                    (">", Some(2)) => stderr_target = Some((target.clone(), false)),
+                    (">>", Some(2)) => stderr_target = Some((target.clone(), true)),
+                    (">&", Some(2)) if target == "1" => stderr_to_stdout = true,
+                    (">&", None) | (">&", Some(1)) if target == "2" => {}
+                    ("&>", _) => {
+                        stdout_target = Some((target.clone(), false));
+                        stderr_to_stdout = true;
+                    }
+                    _ => {
+                        stderr.extend_from_slice(
+                            format!("unsupported redirect {operator}\n").as_bytes(),
+                        );
+                        return 127;
+                    }
+                }
+            }
+            let saved_environment = scoped
+                .as_ref()
+                .map(|environment| std::mem::replace(&mut world.environment, environment.clone()));
+            let outcome = if arguments.is_empty() {
+                ToolOutcome::ok(Vec::new())
+            } else {
+                let name = arguments[0].clone();
+                match world.tools.get(&name).copied() {
+                    Some(tool) => tool(&arguments, &command_input, world),
+                    None => {
+                        world.missing_tool.get_or_insert(name.clone());
+                        ToolOutcome::failed(127, format!("'{name}': command not found\n"))
+                    }
+                }
+            };
+            if let Some(saved) = saved_environment {
+                world.environment = saved;
+            }
+            let mut out = outcome.stdout;
+            let mut err = outcome.stderr;
+            if stderr_to_stdout {
+                out.extend_from_slice(&err);
+                err = Vec::new();
+            }
+            match stdout_target {
+                Some((path, append)) => {
+                    world.write(&path, out, append);
+                }
+                None => {
+                    if position + 1 < count {
+                        input = out;
+                    }
+                }
+            }
+            match stderr_target {
+                Some((path, append)) => world.write(&path, err, append),
+                None => stderr.extend_from_slice(&err),
+            }
+            let mut status = outcome.status;
+            let crashed = status >= 128;
+            if inverted % 2 == 1 {
+                status = if expect_crash {
+                    i32::from(!crashed)
+                } else if crashed {
+                    1
+                } else {
+                    i32::from(status == 0)
+                };
+            }
+            statuses.push(status);
+        }
+        statuses
+            .iter()
+            .rev()
+            .find(|status| **status != 0)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn run_script(script: &ShellScript, world: &mut World, stderr: &mut Vec<u8>) -> i32 {
+        match script {
+            ShellScript::Pipeline(commands) => run_pipeline(commands, world, stderr),
+            ShellScript::Sequence(left, operator, right) => {
+                let first = run_script(left, world, stderr);
+                match operator.as_str() {
+                    "&&" => {
+                        if first != 0 {
+                            first
+                        } else {
+                            run_script(right, world, stderr)
+                        }
+                    }
+                    "||" => {
+                        if first == 0 {
+                            first
+                        } else {
+                            run_script(right, world, stderr)
+                        }
+                    }
+                    _ => run_script(right, world, stderr),
+                }
+            }
+        }
+    }
+
+    fn boolean_tokens(text: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let characters: Vec<char> = text.chars().collect();
+        let mut at = 0;
+        while at < characters.len() {
+            let character = characters[at];
+            if character.is_whitespace() {
+                at += 1;
+                continue;
+            }
+            if text[at..].starts_with("&&") || text[at..].starts_with("||") {
+                tokens.push(text[at..at + 2].to_string());
+                at += 2;
+                continue;
+            }
+            if "!()".contains(character) {
+                tokens.push(character.to_string());
+                at += 1;
+                continue;
+            }
+            let start = at;
+            while at < characters.len() {
+                if characters[at].is_whitespace() || "!()".contains(characters[at]) {
+                    break;
+                }
+                if text[at..].starts_with("&&") || text[at..].starts_with("||") {
+                    break;
+                }
+                at += 1;
+            }
+            tokens.push(characters[start..at].iter().collect());
+        }
+        tokens
+    }
+
+    fn evaluate_condition(text: &str, features: &BTreeSet<String>) -> bool {
+        let tokens = boolean_tokens(text);
+        fn or(tokens: &[String], at: &mut usize, features: &BTreeSet<String>) -> bool {
+            let mut value = and(tokens, at, features);
+            while tokens.get(*at).map(String::as_str) == Some("||") {
+                *at += 1;
+                let right = and(tokens, at, features);
+                value = value || right;
+            }
+            value
+        }
+        fn and(tokens: &[String], at: &mut usize, features: &BTreeSet<String>) -> bool {
+            let mut value = not(tokens, at, features);
+            while tokens.get(*at).map(String::as_str) == Some("&&") {
+                *at += 1;
+                let right = not(tokens, at, features);
+                value = value && right;
+            }
+            value
+        }
+        fn not(tokens: &[String], at: &mut usize, features: &BTreeSet<String>) -> bool {
+            match tokens.get(*at).map(String::as_str) {
+                Some("!") => {
+                    *at += 1;
+                    !not(tokens, at, features)
+                }
+                Some("(") => {
+                    *at += 1;
+                    let value = or(tokens, at, features);
+                    if tokens.get(*at).map(String::as_str) == Some(")") {
+                        *at += 1;
+                    }
+                    value
+                }
+                Some(word) => {
+                    *at += 1;
+                    if word == "true" {
+                        return true;
+                    }
+                    if word == "false" {
+                        return false;
+                    }
+                    if word.contains("{{") {
+                        let mut pattern = String::from("^");
+                        let mut rest = word;
+                        while let Some(open) = rest.find("{{") {
+                            pattern.push_str(&regex_escape(&rest[..open]));
+                            let close = rest[open..]
+                                .find("}}")
+                                .map(|offset| open + offset)
+                                .unwrap_or(rest.len());
+                            pattern.push_str(&rest[open + 2..close]);
+                            rest = &rest[(close + 2).min(rest.len())..];
+                        }
+                        pattern.push_str(&regex_escape(rest));
+                        pattern.push('$');
+                        return match Regex::new(&pattern, false, false) {
+                            Ok(regex) => features
+                                .iter()
+                                .any(|feature| regex.is_match(feature.as_bytes())),
+                            Err(_) => false,
+                        };
+                    }
+                    features.contains(word)
+                }
+                None => false,
+            }
+        }
+        let mut at = 0;
+        or(&tokens, &mut at, features)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) enum Verdict {
+        Passed,
+        Failed(String),
+        OutOfScope(String),
+        ExpectedFailure,
+        UnexpectedPass,
+    }
+
+    pub(super) struct LitSuite<'t> {
+        pub(super) tree: &'t Tree,
+        pub(super) features: BTreeSet<String>,
+        pub(super) substitutions: Vec<(String, String)>,
+        pub(super) tools: BTreeMap<String, ToolFunction>,
+    }
+
+    fn substitute(line: &str, table: &[(String, String)]) -> String {
+        let mut text = line.replace("%%", "\u{1}");
+        for _ in 0..10 {
+            let next = substitute_once(&text, table);
+            if next == text {
+                break;
+            }
+            text = next;
+        }
+        text.replace('\u{1}', "%")
+    }
+
+    fn substitute_once(line: &str, table: &[(String, String)]) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut at = 0usize;
+        let bytes = line.as_bytes();
+        while at < bytes.len() {
+            if bytes[at] == b'%' {
+                let mut best: Option<&(String, String)> = None;
+                for entry in table {
+                    if line[at..].starts_with(entry.0.as_str())
+                        && best.is_none_or(|current| entry.0.len() > current.0.len())
+                    {
+                        best = Some(entry);
+                    }
+                }
+                if let Some((key, value)) = best {
+                    out.push_str(value);
+                    at += key.len();
+                    continue;
+                }
+            }
+            let character = line[at..].chars().next().unwrap_or('\u{0}');
+            out.push(character);
+            at += character.len_utf8();
+        }
+        out
+    }
+
+    impl<'t> LitSuite<'t> {
+        pub(super) fn run_test(&self, path: &str) -> Verdict {
+            let Some(source) = self.tree.file(path) else {
+                return Verdict::Failed("the test file is missing".to_string());
+            };
+            let text = String::from_utf8_lossy(source).into_owned();
+            let keywords = [
+                "RUN:",
+                "XFAIL:",
+                "REQUIRES:",
+                "UNSUPPORTED:",
+                "ALLOW_RETRIES:",
+                "END.",
+                "DEFINE:",
+                "REDEFINE:",
+            ];
+            let mut commands: Vec<String> = Vec::new();
+            let mut pending: Option<String> = None;
+            let mut requires: Vec<String> = Vec::new();
+            let mut unsupported: Vec<String> = Vec::new();
+            let mut expected_failures: Vec<String> = Vec::new();
+            let source_path = format!("/{path}");
+            let folder = source_path
+                .rsplit_once('/')
+                .map(|(folder, _)| folder.to_string())
+                .unwrap_or_default();
+            let name = source_path.rsplit('/').next().unwrap_or("test").to_string();
+            let temporary = format!("/output{folder}/Output/{name}.tmp");
+            let mut table: Vec<(String, String)> = self.substitutions.clone();
+            let stem = name
+                .rsplit_once('.')
+                .map(|(stem, _)| stem.to_string())
+                .unwrap_or(name.clone());
+            for (key, value) in [
+                ("%s", source_path.clone()),
+                ("%S", folder.clone()),
+                ("%p", folder.clone()),
+                ("%t", temporary.clone()),
+                ("%T", format!("/output{folder}/Output")),
+                ("%/s", source_path.clone()),
+                ("%/S", folder.clone()),
+                ("%/p", folder.clone()),
+                ("%/t", temporary.clone()),
+                ("%{s:basename}", name.clone()),
+                ("%{s:stem}", stem.clone()),
+                ("%{t:stem}", format!("{name}.tmp")),
+                ("%basename_t", name.clone()),
+                ("%{pathsep}", ":".to_string()),
+                ("%{fs-sep}", "/".to_string()),
+                ("%{fs-src-root}", "/".to_string()),
+                ("%{fs-tmp-root}", "/".to_string()),
+                ("%:s", source_path.trim_start_matches('/').to_string()),
+                ("%:S", folder.trim_start_matches('/').to_string()),
+                ("%:t", temporary.trim_start_matches('/').to_string()),
+                ("%python", "%python".to_string()),
+            ] {
+                table.push((key.to_string(), value));
+            }
+            let mut pending_define: Option<(String, String)> = None;
+            for line in text.lines() {
+                let Some((offset, keyword)) = keywords
+                    .iter()
+                    .filter_map(|keyword| line.find(keyword).map(|offset| (offset, *keyword)))
+                    .min_by_key(|(offset, _)| *offset)
+                else {
+                    continue;
+                };
+                let rest = line[offset + keyword.len()..]
+                    .trim_end_matches('\r')
+                    .to_string();
+                match keyword {
+                    "END." => {
+                        if rest.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    "RUN:" => {
+                        let mut combined = match pending.take() {
+                            Some(previous) => format!("{previous} {}", rest.trim()),
+                            None => rest.trim().to_string(),
+                        };
+                        if combined.ends_with('\\') {
+                            combined.pop();
+                            pending = Some(combined.trim_end().to_string());
+                        } else {
+                            commands.push(substitute(&combined, &table));
+                        }
+                    }
+                    "REQUIRES:" => requires.extend(
+                        rest.split(',')
+                            .map(|item| item.trim().to_string())
+                            .filter(|item| !item.is_empty()),
+                    ),
+                    "UNSUPPORTED:" => unsupported.extend(
+                        rest.split(',')
+                            .map(|item| item.trim().to_string())
+                            .filter(|item| !item.is_empty()),
+                    ),
+                    "XFAIL:" => expected_failures.extend(
+                        rest.split(',')
+                            .map(|item| item.trim().to_string())
+                            .filter(|item| !item.is_empty()),
+                    ),
+                    "DEFINE:" | "REDEFINE:" => {
+                        let mut combined = match pending_define.take() {
+                            Some((_, previous)) => format!("{previous} {}", rest.trim()),
+                            None => rest.trim().to_string(),
+                        };
+                        if combined.ends_with('\\') {
+                            combined.pop();
+                            pending_define =
+                                Some((keyword.to_string(), combined.trim_end().to_string()));
+                            continue;
+                        }
+                        if let Some((key, value)) = combined.split_once('=') {
+                            let key = key.trim().to_string();
+                            let value = value.trim().to_string();
+                            table.retain(|(existing, _)| existing != &key);
+                            table.push((key, value));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(left) = pending {
+                commands.push(substitute(&left, &table));
+            }
+            if commands.is_empty() {
+                return Verdict::OutOfScope("no RUN line".to_string());
+            }
+            if let Some(missing) = requires
+                .iter()
+                .find(|condition| !evaluate_condition(condition, &self.features))
+            {
+                return Verdict::OutOfScope(format!("REQUIRES: {missing}"));
+            }
+            if let Some(blocked) = unsupported
+                .iter()
+                .find(|condition| evaluate_condition(condition, &self.features))
+            {
+                return Verdict::OutOfScope(format!("UNSUPPORTED: {blocked}"));
+            }
+            let expect_failure = expected_failures
+                .iter()
+                .any(|condition| condition == "*" || evaluate_condition(condition, &self.features));
+            let mut world = World {
+                tree: self.tree,
+                files: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                folders: BTreeSet::new(),
+                directory: folder.clone(),
+                environment: BTreeMap::new(),
+                tools: &self.tools,
+                missing_tool: None,
+            };
+            world.folders.insert(format!("/output{folder}/Output"));
+            let mut failure: Option<String> = None;
+            for command in &commands {
+                let expanded = command.clone();
+                let script = match shell_parse(&expanded) {
+                    Ok(script) => script,
+                    Err(problem) => {
+                        failure = Some(format!("cannot parse `{expanded}`: {problem}"));
+                        break;
+                    }
+                };
+                let mut stderr = Vec::new();
+                let status = run_script(&script, &mut world, &mut stderr);
+                if let Some(tool) = world.missing_tool.take() {
+                    return Verdict::OutOfScope(format!("tool: {tool}"));
+                }
+                if status != 0 {
+                    let tail = String::from_utf8_lossy(&stderr);
+                    let tail: String = tail.lines().take(12).collect::<Vec<_>>().join("\n");
+                    failure = Some(format!("`{expanded}` exited {status}\n{tail}"));
+                    break;
+                }
+            }
+            match (failure, expect_failure) {
+                (None, false) => Verdict::Passed,
+                (None, true) => Verdict::UnexpectedPass,
+                (Some(_), true) => Verdict::ExpectedFailure,
+                (Some(reason), false) => Verdict::Failed(reason),
+            }
+        }
+    }
+
+    fn unescape(text: &str) -> Vec<u8> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] != b'\\' || at + 1 >= bytes.len() {
+                out.push(bytes[at]);
+                at += 1;
+                continue;
+            }
+            at += 1;
+            match bytes[at] {
+                b'n' => out.push(b'\n'),
+                b't' => out.push(b'\t'),
+                b'r' => out.push(b'\r'),
+                b'\\' => out.push(b'\\'),
+                b'a' => out.push(7),
+                b'b' => out.push(8),
+                b'f' => out.push(12),
+                b'v' => out.push(11),
+                b'e' => out.push(27),
+                b'0'..=b'7' => {
+                    let mut value = 0u32;
+                    let mut digits = 0;
+                    while digits < 3 && at < bytes.len() && (b'0'..=b'7').contains(&bytes[at]) {
+                        value = value * 8 + u32::from(bytes[at] - b'0');
+                        at += 1;
+                        digits += 1;
+                    }
+                    out.push(value as u8);
+                    continue;
+                }
+                b'x' => {
+                    let mut value = 0u32;
+                    let mut digits = 0;
+                    at += 1;
+                    while digits < 2 && at < bytes.len() && bytes[at].is_ascii_hexdigit() {
+                        value = value * 16 + u32::from(hex_value(bytes[at]));
+                        at += 1;
+                        digits += 1;
+                    }
+                    out.push(value as u8);
+                    continue;
+                }
+                other => {
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+            at += 1;
+        }
+        out
+    }
+
+    fn tool_echo(arguments: &[String], _input: &[u8], _world: &mut World) -> ToolOutcome {
+        let mut words = &arguments[1..];
+        let mut newline = true;
+        let mut escapes = false;
+        while let Some(first) = words.first() {
+            match first.as_str() {
+                "-n" => newline = false,
+                "-e" => escapes = true,
+                "-en" | "-ne" => {
+                    newline = false;
+                    escapes = true;
+                }
+                _ => break,
+            }
+            words = &words[1..];
+        }
+        let joined = words.join(" ");
+        let mut out = if escapes {
+            unescape(&joined)
+        } else {
+            joined.into_bytes()
+        };
+        if newline {
+            out.push(b'\n');
+        }
+        ToolOutcome::ok(out)
+    }
+
+    fn tool_printf(arguments: &[String], _input: &[u8], _world: &mut World) -> ToolOutcome {
+        let Some(format) = arguments.get(1) else {
+            return ToolOutcome::failed(1, "printf: missing operand\n");
+        };
+        let values = &arguments[2..];
+        let mut out = Vec::new();
+        let mut used = 0usize;
+        loop {
+            let pattern = unescape(format);
+            let mut at = 0;
+            while at < pattern.len() {
+                if pattern[at] == b'%' && at + 1 < pattern.len() {
+                    let kind = pattern[at + 1];
+                    at += 2;
+                    match kind {
+                        b'%' => out.push(b'%'),
+                        b's' | b'd' | b'i' | b'u' | b'c' => {
+                            let value = values.get(used).cloned().unwrap_or_default();
+                            used += 1;
+                            if kind == b'c' {
+                                out.extend(value.bytes().take(1));
+                            } else if kind == b's' {
+                                out.extend_from_slice(value.as_bytes());
+                            } else {
+                                out.extend_from_slice(
+                                    value.parse::<i64>().unwrap_or(0).to_string().as_bytes(),
+                                );
+                            }
+                        }
+                        b'b' => {
+                            let value = values.get(used).cloned().unwrap_or_default();
+                            used += 1;
+                            out.extend(unescape(&value));
+                        }
+                        other => {
+                            out.push(b'%');
+                            out.push(other);
+                        }
+                    }
+                    continue;
+                }
+                out.push(pattern[at]);
+                at += 1;
+            }
+            if used == 0 || used >= values.len() {
+                break;
+            }
+        }
+        ToolOutcome::ok(out)
+    }
+
+    fn tool_true(_arguments: &[String], _input: &[u8], _world: &mut World) -> ToolOutcome {
+        ToolOutcome::ok(Vec::new())
+    }
+
+    fn tool_false(_arguments: &[String], _input: &[u8], _world: &mut World) -> ToolOutcome {
+        ToolOutcome::failed(1, Vec::new())
+    }
+
+    fn tool_cat(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let files: Vec<&String> = arguments[1..]
+            .iter()
+            .filter(|argument| !argument.starts_with('-') || argument.as_str() == "-")
+            .collect();
+        if files.is_empty() {
+            return ToolOutcome::ok(input.to_vec());
+        }
+        let mut out = Vec::new();
+        for file in files {
+            if file == "-" {
+                out.extend_from_slice(input);
+                continue;
+            }
+            match world.read(file) {
+                Some(bytes) => out.extend_from_slice(&bytes),
+                None => {
+                    return ToolOutcome::failed(
+                        1,
+                        format!("cat: {file}: No such file or directory\n"),
+                    )
+                }
+            }
+        }
+        ToolOutcome::ok(out)
+    }
+
+    fn tool_cp(arguments: &[String], _input: &[u8], world: &mut World) -> ToolOutcome {
+        let paths: Vec<&String> = arguments[1..]
+            .iter()
+            .filter(|argument| !argument.starts_with('-'))
+            .collect();
+        if paths.len() != 2 {
+            return ToolOutcome::failed(1, "cp: expected a source and a destination\n");
+        }
+        let Some(bytes) = world.read(paths[0]) else {
+            return ToolOutcome::failed(1, format!("cp: cannot stat '{}'\n", paths[0]));
+        };
+        let destination = if world.folders.contains(&world.absolute(paths[1])) {
+            format!(
+                "{}/{}",
+                paths[1],
+                paths[0].rsplit('/').next().unwrap_or(paths[0])
+            )
+        } else {
+            paths[1].clone()
+        };
+        world.write(&destination, bytes, false);
+        ToolOutcome::ok(Vec::new())
+    }
+
+    fn tool_rm(arguments: &[String], _input: &[u8], world: &mut World) -> ToolOutcome {
+        let recursive = arguments[1..]
+            .iter()
+            .any(|argument| argument.starts_with('-') && argument.contains('r'));
+        for path in arguments[1..]
+            .iter()
+            .filter(|argument| !argument.starts_with('-'))
+        {
+            world.remove(path, recursive);
+        }
+        ToolOutcome::ok(Vec::new())
+    }
+
+    fn tool_mkdir(arguments: &[String], _input: &[u8], world: &mut World) -> ToolOutcome {
+        for path in arguments[1..]
+            .iter()
+            .filter(|argument| !argument.starts_with('-'))
+        {
+            let absolute = world.absolute(path);
+            world.removed.remove(&absolute);
+            world.folders.insert(absolute);
+        }
+        ToolOutcome::ok(Vec::new())
+    }
+
+    fn tool_cd(arguments: &[String], _input: &[u8], world: &mut World) -> ToolOutcome {
+        if let Some(path) = arguments.get(1) {
+            world.directory = world.absolute(path);
+        }
+        ToolOutcome::ok(Vec::new())
+    }
+
+    fn tool_count(arguments: &[String], input: &[u8], _world: &mut World) -> ToolOutcome {
+        let expected: usize = arguments
+            .get(1)
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0);
+        let mut lines = input.iter().filter(|&&byte| byte == b'\n').count();
+        if !input.is_empty() && input.last() != Some(&b'\n') {
+            lines += 1;
+        }
+        if lines == expected {
+            ToolOutcome::ok(Vec::new())
+        } else {
+            ToolOutcome::failed(1, format!("Expected {expected} lines, got {lines}.\n"))
+        }
+    }
+
+    fn tool_diff(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let paths: Vec<&String> = arguments[1..]
+            .iter()
+            .filter(|argument| !argument.starts_with('-') || argument.as_str() == "-")
+            .collect();
+        if paths.len() != 2 {
+            return ToolOutcome::failed(2, "diff: expected two files\n");
+        }
+        let read = |world: &World, path: &str| -> Option<Vec<u8>> {
+            if path == "-" {
+                Some(input.to_vec())
+            } else {
+                world.read(path)
+            }
+        };
+        let (Some(first), Some(second)) = (read(world, paths[0]), read(world, paths[1])) else {
+            return ToolOutcome::failed(2, "diff: a file is missing\n");
+        };
+        if first == second {
+            ToolOutcome::ok(Vec::new())
+        } else {
+            ToolOutcome {
+                status: 1,
+                stdout: format!("Files {} and {} differ\n", paths[0], paths[1]).into_bytes(),
+                stderr: Vec::new(),
+            }
+        }
+    }
+
+    fn tool_split_file(arguments: &[String], _input: &[u8], world: &mut World) -> ToolOutcome {
+        let mut leading = false;
+        let mut positional = Vec::new();
+        for argument in &arguments[1..] {
+            match argument.as_str() {
+                "--leading-lines" => leading = true,
+                "--no-leading-lines" => leading = false,
+                other => positional.push(other.to_string()),
+            }
+        }
+        if positional.len() != 2 {
+            return ToolOutcome::failed(
+                1,
+                "split-file: expected an input and an output directory\n",
+            );
+        }
+        let Some(bytes) = world.read(&positional[0]) else {
+            return ToolOutcome::failed(
+                1,
+                format!(
+                    "split-file: error: {}: No such file or directory\n",
+                    positional[0]
+                ),
+            );
+        };
+        let output = positional[1].clone();
+        world.remove(&output, true);
+        let mut parts: Vec<(String, usize, usize, usize)> = Vec::new();
+        let mut at = 0usize;
+        let mut line_number = 0usize;
+        while at < bytes.len() {
+            let end = bytes[at..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|offset| at + offset)
+                .unwrap_or(bytes.len());
+            line_number += 1;
+            let line = &bytes[at..end];
+            let marker = if line.starts_with(b"//") { 6 } else { 5 };
+            let next = (end + 1).min(bytes.len());
+            if line.len() >= marker && line[marker - 4..].starts_with(b"--- ") {
+                let name = String::from_utf8_lossy(&line[marker..]).into_owned();
+                if let Some(last) = parts.last_mut() {
+                    last.2 = at;
+                }
+                parts.push((
+                    name,
+                    next,
+                    bytes.len(),
+                    if leading { line_number } else { 0 },
+                ));
+            }
+            at = next;
+        }
+        if parts.is_empty() {
+            return ToolOutcome::failed(
+                1,
+                format!(
+                    "split-file: error: {}: no part separator was found\n",
+                    positional[0]
+                ),
+            );
+        }
+        let output_absolute = world.absolute(&output);
+        world.folders.insert(output_absolute.clone());
+        for (name, start, end, lines) in parts {
+            let mut content = vec![b'\n'; lines];
+            content.extend_from_slice(&bytes[start.min(end)..end]);
+            world.write(&format!("{output_absolute}/{name}"), content, false);
+        }
+        ToolOutcome::ok(Vec::new())
+    }
+
+    fn basic_to_extended(pattern: &str) -> String {
+        let mut out = String::new();
+        let mut characters = pattern.chars().peekable();
+        let mut in_bracket = false;
+        while let Some(character) = characters.next() {
+            if in_bracket {
+                out.push(character);
+                if character == ']' {
+                    in_bracket = false;
+                }
+                continue;
+            }
+            match character {
+                '[' => {
+                    in_bracket = true;
+                    out.push('[');
+                    if characters.peek() == Some(&'^') {
+                        out.push('^');
+                        characters.next();
+                    }
+                    if characters.peek() == Some(&']') {
+                        out.push(']');
+                        characters.next();
+                    }
+                }
+                '\\' => match characters.next() {
+                    Some(special @ ('(' | ')' | '{' | '}' | '+' | '?' | '|')) => out.push(special),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push_str("\\\\"),
+                },
+                '(' | ')' | '{' | '}' | '+' | '?' | '|' => {
+                    out.push('\\');
+                    out.push(character);
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    enum SedAddress {
+        Every,
+        Line(usize),
+        Last,
+        Pattern(Regex),
+    }
+
+    enum SedAction {
+        Substitute {
+            regex: Regex,
+            replacement: Vec<u8>,
+            global: bool,
+            print: bool,
+        },
+        Delete,
+        Print,
+    }
+
+    struct SedRule {
+        address: SedAddress,
+        negate: bool,
+        action: SedAction,
+    }
+
+    fn sed_delimited(text: &str, delimiter: char) -> Option<(String, usize)> {
+        let mut out = String::new();
+        let mut characters = text.char_indices();
+        while let Some((offset, character)) = characters.next() {
+            if character == '\\' {
+                if let Some((_, next)) = characters.next() {
+                    if next == delimiter {
+                        out.push(next);
+                    } else {
+                        out.push('\\');
+                        out.push(next);
+                    }
+                }
+                continue;
+            }
+            if character == delimiter {
+                return Some((out, offset + character.len_utf8()));
+            }
+            out.push(character);
+        }
+        None
+    }
+
+    fn sed_rules(script: &str, extended: bool) -> Result<Vec<SedRule>, String> {
+        let translate = |pattern: &str| {
+            if extended {
+                pattern.to_string()
+            } else {
+                basic_to_extended(pattern)
+            }
+        };
+        let mut rules = Vec::new();
+        let mut rest = script.trim_start();
+        while !rest.is_empty() {
+            rest = rest.trim_start_matches([';', '\n', ' ', '\t']);
+            if rest.is_empty() {
+                break;
+            }
+            let mut address = SedAddress::Every;
+            if rest.starts_with('/') {
+                let (pattern, used) =
+                    sed_delimited(&rest[1..], '/').ok_or("unterminated address regex")?;
+                let regex =
+                    Regex::new(&translate(&pattern), false, false).map_err(str::to_string)?;
+                address = SedAddress::Pattern(regex);
+                rest = &rest[1 + used..];
+            } else if rest.starts_with('$') {
+                address = SedAddress::Last;
+                rest = &rest[1..];
+            } else if rest.starts_with(|character: char| character.is_ascii_digit()) {
+                let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                address = SedAddress::Line(rest[..digits].parse().unwrap_or(0));
+                rest = &rest[digits..];
+            }
+            rest = rest.trim_start();
+            let negate = rest.starts_with('!');
+            if negate {
+                rest = rest[1..].trim_start();
+            }
+            let Some(command) = rest.chars().next() else {
+                return Err("missing command".to_string());
+            };
+            rest = &rest[command.len_utf8()..];
+            let action = match command {
+                'd' => SedAction::Delete,
+                'p' => SedAction::Print,
+                's' => {
+                    let delimiter = rest.chars().next().ok_or("unterminated `s' command")?;
+                    rest = &rest[delimiter.len_utf8()..];
+                    let (pattern, used) =
+                        sed_delimited(rest, delimiter).ok_or("unterminated `s' command")?;
+                    rest = &rest[used..];
+                    let (replacement, used) =
+                        sed_delimited(rest, delimiter).ok_or("unterminated `s' command")?;
+                    rest = &rest[used..];
+                    let flags_end = rest.find([';', '\n', '}']).unwrap_or(rest.len());
+                    let flags = rest[..flags_end].trim();
+                    rest = &rest[flags_end..];
+                    let regex = Regex::new(&translate(&pattern), false, flags.contains('I'))
+                        .map_err(str::to_string)?;
+                    SedAction::Substitute {
+                        regex,
+                        replacement: replacement.into_bytes(),
+                        global: flags.contains('g'),
+                        print: flags.contains('p'),
+                    }
+                }
+                other => return Err(format!("unsupported sed command: {other}")),
+            };
+            rules.push(SedRule {
+                address,
+                negate,
+                action,
+            });
+        }
+        Ok(rules)
+    }
+
+    fn sed_substitute(
+        regex: &Regex,
+        replacement: &[u8],
+        global: bool,
+        text: &[u8],
+    ) -> (Vec<u8>, bool) {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        let mut changed = false;
+        while at <= text.len() {
+            let Some(spans) = regex.find(&text[at..]) else {
+                break;
+            };
+            changed = true;
+            let (start, end) = spans[0].unwrap_or((0, 0));
+            out.extend_from_slice(&text[at..at + start]);
+            let mut index = 0;
+            while index < replacement.len() {
+                let byte = replacement[index];
+                if byte == b'&' {
+                    out.extend_from_slice(&text[at + start..at + end]);
+                } else if byte == b'\\' && index + 1 < replacement.len() {
+                    index += 1;
+                    let next = replacement[index];
+                    if next.is_ascii_digit() {
+                        if let Some(Some((from, to))) = spans.get(usize::from(next - b'0')) {
+                            out.extend_from_slice(&text[at + from..at + to]);
+                        }
+                    } else if next == b'n' {
+                        out.push(b'\n');
+                    } else if next == b't' {
+                        out.push(b'\t');
+                    } else {
+                        out.push(next);
+                    }
+                } else {
+                    out.push(byte);
+                }
+                index += 1;
+            }
+            if end == start {
+                if at + start < text.len() {
+                    out.push(text[at + start]);
+                }
+                at += start + 1;
+            } else {
+                at += end;
+            }
+            if !global {
+                break;
+            }
+        }
+        if at <= text.len() {
+            out.extend_from_slice(&text[at..]);
+        }
+        (out, changed)
+    }
+
+    fn tool_sed(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let mut scripts = Vec::new();
+        let mut files = Vec::new();
+        let mut extended = false;
+        let mut quiet = false;
+        let mut index = 1;
+        while index < arguments.len() {
+            let argument = &arguments[index];
+            match argument.as_str() {
+                "-e" => {
+                    if let Some(script) = arguments.get(index + 1) {
+                        scripts.push(script.clone());
+                    }
+                    index += 2;
+                    continue;
+                }
+                "-E" | "-r" => extended = true,
+                "-n" => quiet = true,
+                _ if argument.starts_with('-') && argument.len() > 1 => {}
+                _ => {
+                    if scripts.is_empty() {
+                        scripts.push(argument.clone());
+                    } else {
+                        files.push(argument.clone());
+                    }
+                }
+            }
+            index += 1;
+        }
+        let mut rules = Vec::new();
+        for script in &scripts {
+            match sed_rules(script, extended) {
+                Ok(found) => rules.extend(found),
+                Err(problem) => {
+                    return ToolOutcome::failed(1, format!("sed: -e expression #1: {problem}\n"))
+                }
+            }
+        }
+        let mut text = Vec::new();
+        if files.is_empty() {
+            text.extend_from_slice(input);
+        } else {
+            for file in &files {
+                match world.read(file) {
+                    Some(bytes) => text.extend_from_slice(&bytes),
+                    None => {
+                        return ToolOutcome::failed(
+                            2,
+                            format!("sed: can't read {file}: No such file or directory\n"),
+                        )
+                    }
+                }
+            }
+        }
+        let ends_with_newline = text.last() == Some(&b'\n');
+        let lines: Vec<&[u8]> = text.split(|&byte| byte == b'\n').collect();
+        let count = if ends_with_newline {
+            lines.len() - 1
+        } else {
+            lines.len()
+        };
+        let mut out = Vec::new();
+        for (number, line) in lines.iter().take(count).enumerate() {
+            let last = number + 1 == count;
+            let terminate = !last || ends_with_newline;
+            let mut space = line.to_vec();
+            let mut deleted = false;
+            for rule in &rules {
+                let hit = match &rule.address {
+                    SedAddress::Every => true,
+                    SedAddress::Line(target) => *target == number + 1,
+                    SedAddress::Last => last,
+                    SedAddress::Pattern(regex) => regex.is_match(&space),
+                };
+                if hit == rule.negate {
+                    continue;
+                }
+                match &rule.action {
+                    SedAction::Delete => {
+                        deleted = true;
+                        break;
+                    }
+                    SedAction::Print => {
+                        out.extend_from_slice(&space);
+                        out.push(b'\n');
+                    }
+                    SedAction::Substitute {
+                        regex,
+                        replacement,
+                        global,
+                        print,
+                    } => {
+                        let (changed_text, changed) =
+                            sed_substitute(regex, replacement, *global, &space);
+                        space = changed_text;
+                        if changed && *print {
+                            out.extend_from_slice(&space);
+                            out.push(b'\n');
+                        }
+                    }
+                }
+            }
+            if deleted || quiet {
+                continue;
+            }
+            out.extend_from_slice(&space);
+            if terminate {
+                out.push(b'\n');
+            }
+        }
+        ToolOutcome::ok(out)
+    }
+
+    fn tool_file_check(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let environment = world.environment.clone();
+        let result = {
+            let reader = |path: &str| world.read(path);
+            file_check(arguments, &environment, input, &reader)
+        };
+        ToolOutcome {
+            status: result.status,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }
+    }
+
+    pub(super) fn standard_tools() -> BTreeMap<String, ToolFunction> {
+        let mut tools: BTreeMap<String, ToolFunction> = BTreeMap::new();
+        tools.insert("echo".to_string(), tool_echo);
+        tools.insert("@echo".to_string(), tool_echo);
+        tools.insert("printf".to_string(), tool_printf);
+        tools.insert("true".to_string(), tool_true);
+        tools.insert(":".to_string(), tool_true);
+        tools.insert("false".to_string(), tool_false);
+        tools.insert("cat".to_string(), tool_cat);
+        tools.insert("cp".to_string(), tool_cp);
+        tools.insert("rm".to_string(), tool_rm);
+        tools.insert("mkdir".to_string(), tool_mkdir);
+        tools.insert("cd".to_string(), tool_cd);
+        tools.insert("count".to_string(), tool_count);
+        tools.insert("diff".to_string(), tool_diff);
+        tools.insert("split-file".to_string(), tool_split_file);
+        tools.insert("sed".to_string(), tool_sed);
+        tools.insert("FileCheck".to_string(), tool_file_check);
+        tools
+    }
+
+    pub(super) struct SuiteReport {
+        pub(super) name: String,
+        pub(super) outcomes: BTreeMap<String, Verdict>,
+    }
+
+    impl SuiteReport {
+        pub(super) fn counts(&self) -> (usize, usize, usize) {
+            let mut passed = 0;
+            let mut failed = 0;
+            let mut out_of_scope = 0;
+            for verdict in self.outcomes.values() {
+                match verdict {
+                    Verdict::Passed | Verdict::ExpectedFailure => passed += 1,
+                    Verdict::Failed(_) | Verdict::UnexpectedPass => failed += 1,
+                    Verdict::OutOfScope(_) => out_of_scope += 1,
+                }
+            }
+            (passed, failed, out_of_scope)
+        }
+
+        pub(super) fn digest(&self) -> String {
+            let mut text = String::new();
+            for (name, verdict) in &self.outcomes {
+                let kind = match verdict {
+                    Verdict::Passed => "passed".to_string(),
+                    Verdict::ExpectedFailure => "expected-failure".to_string(),
+                    Verdict::Failed(_) => "failed".to_string(),
+                    Verdict::UnexpectedPass => "unexpected-pass".to_string(),
+                    Verdict::OutOfScope(reason) => format!("out-of-scope {reason}"),
+                };
+                text.push_str(&format!("{name}\t{kind}\n"));
+            }
+            crate::hash::sha256(text.as_bytes()).to_hex()
+        }
+
+        pub(super) fn publish(&self) -> String {
+            let (passed, failed, out_of_scope) = self.counts();
+            let line = format!(
+                "SUITE {} passed={} failed={} out_of_scope={} total={} digest={}",
+                self.name,
+                passed,
+                failed,
+                out_of_scope,
+                self.outcomes.len(),
+                self.digest()
+            );
+            let folder = repository().join("Tests").join("suites");
+            let _ = std::fs::create_dir_all(&folder);
+            let mut details = format!("{line}\n");
+            let mut scope: BTreeMap<String, usize> = BTreeMap::new();
+            for (name, verdict) in &self.outcomes {
+                match verdict {
+                    Verdict::Failed(reason) => details.push_str(&format!(
+                        "FAILED {name}\n    {}\n",
+                        reason.replace('\n', "\n    ")
+                    )),
+                    Verdict::UnexpectedPass => {
+                        details.push_str(&format!("UNEXPECTED PASS {name}\n"))
+                    }
+                    Verdict::OutOfScope(reason) => *scope.entry(reason.clone()).or_insert(0) += 1,
+                    _ => {}
+                }
+            }
+            details.push_str("\nOut of scope, by reason:\n");
+            for (reason, count) in &scope {
+                details.push_str(&format!("{count:>8}  {reason}\n"));
+            }
+            let _ = std::fs::write(folder.join(format!("{}.txt", self.name)), details);
+            println!("{line}");
+            line
+        }
+    }
+
+    pub(super) fn suite_threads() -> usize {
+        std::env::var("APK_BUILDER_SUITE_THREADS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|count| count.get())
+                    .unwrap_or(1)
+            })
+    }
+
+    pub(super) fn run_parallel(
+        paths: Vec<String>,
+        work: &(dyn Fn(&str) -> Verdict + Sync),
+    ) -> BTreeMap<String, Verdict> {
+        let threads = suite_threads().min(paths.len().max(1));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results: Mutex<BTreeMap<String, Verdict>> = Mutex::new(BTreeMap::new());
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = paths.get(index) else {
+                        break;
+                    };
+                    let verdict =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(path)))
+                            .unwrap_or_else(|_| Verdict::Failed("the runner panicked".to_string()));
+                    if let Ok(mut held) = results.lock() {
+                        held.insert(path.clone(), verdict);
+                    }
+                });
+            }
+        });
+        results.into_inner().unwrap_or_default()
+    }
+
+    pub(super) fn lit_tests(tree: &Tree, root: &str, suffixes: &[&str]) -> Vec<String> {
+        tree.paths_under(root)
+            .into_iter()
+            .filter(|path| {
+                let relative = &path[root.len()..];
+                !relative
+                    .split('/')
+                    .any(|part| part == "Inputs" || part == "Output")
+                    && suffixes.iter().any(|suffix| path.ends_with(suffix))
+                    && !path.ends_with("lit.local.cfg")
+                    && !path.ends_with("lit.cfg.py")
+            })
+            .collect()
+    }
+}
+
+mod reference_checks {
+    use super::reference::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn spans(pattern: &str, text: &str) -> Option<Vec<Option<(usize, usize)>>> {
+        Regex::new(pattern, true, false)
+            .unwrap_or_else(|problem| panic!("{pattern}: {problem}"))
+            .find(text.as_bytes())
+    }
+
+    #[test]
+    fn the_regex_engine_finds_the_leftmost_longest_match() {
+        assert_eq!(spans("a|ab", "xabc").unwrap()[0], Some((1, 3)));
+        assert_eq!(spans("abcd|b", "abcd").unwrap()[0], Some((0, 4)));
+        let found = spans("(a|ab)(c|bcd)", "abcd").unwrap();
+        assert_eq!(found[0], Some((0, 4)));
+        assert_eq!(found[1], Some((0, 1)));
+        assert_eq!(found[2], Some((1, 4)));
+        assert_eq!(spans("x*", "aaa").unwrap()[0], Some((0, 0)));
+        assert_eq!(spans("[0-9]+", "ab 123 45").unwrap()[0], Some((3, 6)));
+        assert_eq!(spans("b{2,3}", "abbbbc").unwrap()[0], Some((1, 4)));
+        assert_eq!(spans("(ab){2}", "ababab").unwrap()[0], Some((0, 4)));
+        assert!(spans("q", "abc").is_none());
+    }
+
+    #[test]
+    fn the_regex_engine_reads_lines_the_way_filecheck_asks() {
+        assert_eq!(spans("^b", "a\nb").unwrap()[0], Some((2, 3)));
+        assert_eq!(spans("a$", "a\nb").unwrap()[0], Some((0, 1)));
+        assert_eq!(spans("a.*", "abc\ndef").unwrap()[0], Some((0, 3)));
+        assert_eq!(spans("[^x]+", "ab\ncd").unwrap()[0], Some((0, 2)));
+        assert_eq!(
+            spans("[[:digit:]][[:alpha:]]", "1 2b").unwrap()[0],
+            Some((2, 4))
+        );
+        assert_eq!(spans("a\\nb", "a\nb").unwrap()[0], Some((0, 3)));
+        assert_eq!(spans("\\x41", "zA").unwrap()[0], Some((1, 2)));
+        assert_eq!(spans("[\\n]", "an\\").unwrap()[0], Some((1, 2)));
+        assert_eq!(spans("[[:<:]]cat", "concat cat").unwrap()[0], Some((7, 10)));
+        assert_eq!(spans("(a+)b\\1", "xaabaa").unwrap()[0], Some((1, 6)));
+        let folded = Regex::new("hello", true, true)
+            .unwrap()
+            .find(b"say HeLLo")
+            .unwrap();
+        assert_eq!(folded[0], Some((4, 9)));
+    }
+
+    #[test]
+    fn the_regex_engine_refuses_what_posix_refuses_with_its_words() {
+        for (pattern, expected) in [
+            ("a**", REGEX_BAD_REPETITION),
+            ("*a", REGEX_BAD_REPETITION),
+            ("(", REGEX_BAD_PARENTHESES),
+            ("a)", REGEX_BAD_PARENTHESES),
+            ("[a", REGEX_BAD_BRACKETS),
+            ("", REGEX_EMPTY),
+            ("a||b", REGEX_EMPTY),
+            ("a{1", REGEX_BAD_BRACES),
+            ("a{2,1}", REGEX_BAD_COUNT),
+            ("[[:nope:]]", REGEX_BAD_CLASS),
+            ("[z-a]", REGEX_BAD_RANGE),
+            ("\\", REGEX_TRAILING_BACKSLASH),
+            ("\\1", REGEX_BAD_BACKREFERENCE),
+        ] {
+            match Regex::new(pattern, true, false) {
+                Ok(_) => panic!("{pattern:?} was accepted"),
+                Err(found) => assert_eq!(found, expected, "{pattern:?}"),
+            }
+        }
+        assert_eq!(regex_escape("a.b*[c]"), "a\\.b\\*\\[c\\]");
+    }
+
+    fn check(check_text: &str, input: &str, extra: &[&str]) -> (i32, String) {
+        let mut arguments = vec!["FileCheck".to_string()];
+        arguments.extend(extra.iter().map(|word| word.to_string()));
+        arguments.push("/check.txt".to_string());
+        let files: BTreeMap<String, Vec<u8>> =
+            [("/check.txt".to_string(), check_text.as_bytes().to_vec())]
+                .into_iter()
+                .collect();
+        let reader = |path: &str| files.get(path).cloned();
+        let result = file_check(&arguments, &BTreeMap::new(), input.as_bytes(), &reader);
+        (
+            result.status,
+            String::from_utf8_lossy(&result.stderr).into_owned(),
+        )
+    }
+
+    #[test]
+    fn filecheck_matches_in_order_and_says_why_when_it_does_not() {
+        assert_eq!(check("CHECK: one\nCHECK: two\n", "one\ntwo\n", &[]).0, 0);
+        let (status, stderr) = check("CHECK: two\nCHECK: one\n", "one\ntwo\n", &[]);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.starts_with("/check.txt:2:8: error: CHECK: expected string not found in input\nCHECK: one\n       ^\n<stdin>:2:4: note: scanning from here\ntwo\n   ^\n"),
+            "{stderr}"
+        );
+        let (status, stderr) = check("CHECK: a\nCHECK-NEXT: c\n", "a\nb\nc\n", &[]);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains("error: CHECK-NEXT: is not on the line after the previous match"),
+            "{stderr}"
+        );
+        assert_eq!(check("CHECK: a\nCHECK-SAME: b\n", "a b\n", &[]).0, 0);
+        assert_eq!(
+            check("CHECK: a\nCHECK-EMPTY:\nCHECK-NEXT: b\n", "a\n\nb\n", &[]).0,
+            0
+        );
+        assert_eq!(check("CHECK-COUNT-3: x\n", "x x\nx\n", &[]).0, 0);
+        assert_eq!(check("CHECK-COUNT-3: x\n", "x x\n", &[]).0, 1);
+    }
+
+    #[test]
+    fn filecheck_handles_variables_numbers_and_the_line_pseudo_variable() {
+        assert_eq!(
+            check(
+                "CHECK: x=[[V:[0-9]+]]\nCHECK: y=[[V]]\n",
+                "x=12 y=12\n",
+                &[]
+            )
+            .0,
+            0
+        );
+        assert_eq!(
+            check(
+                "CHECK: x=[[V:[0-9]+]]\nCHECK: y=[[V]]\n",
+                "x=12 y=13\n",
+                &[]
+            )
+            .0,
+            1
+        );
+        let (status, stderr) = check("CHECK: [[#N:]] [[#N+1]]\n", "4 5\n", &[]);
+        assert_eq!(status, 2);
+        assert!(
+            stderr.contains("numeric variable 'N' defined earlier in the same CHECK directive"),
+            "{stderr}"
+        );
+        assert_eq!(
+            check("CHECK: [[#N:]]\nCHECK-SAME: [[#N+1]]\n", "4 5\n", &[]).0,
+            0
+        );
+        assert_eq!(
+            check(
+                "CHECK: [[#%x,A:]]\nCHECK-SAME: [[#mul(A,2)]]\n",
+                "1f 3e\n",
+                &[]
+            )
+            .0,
+            0
+        );
+        assert_eq!(
+            check(
+                "CHECK: [[#%x,A:]]\nCHECK-SAME: [[#%X,mul(A,2)]]\n",
+                "1f 3e\n",
+                &[]
+            )
+            .0,
+            1
+        );
+        assert!(
+            check("CHECK: [[#A:]]\nCHECK-SAME: [[#A*2]]\n", "1 2\n", &[])
+                .1
+                .contains("unsupported operation '*'")
+        );
+        assert_eq!(
+            check(
+                "CHECK: [[#%X,A:]]\nCHECK-SAME: [[#add(A,1)]]\n",
+                "F 10\n",
+                &[]
+            )
+            .0,
+            0
+        );
+        assert_eq!(check("CHECK: [[#%.3u,W:]]\n", "007\n", &[]).0, 0);
+        assert_eq!(check("CHECK: line [[@LINE]]\n", "line 1\n", &[]).0, 0);
+        assert_eq!(check("\nCHECK: next [[@LINE+1]]\n", "next 3\n", &[]).0, 0);
+        assert_eq!(check("CHECK: v=[[VAL]]\n", "v=7\n", &["-DVAL=7"]).0, 0);
+        assert_eq!(check("CHECK: v=[[#VAL+1]]\n", "v=8\n", &["-D#VAL=7"]).0, 0);
+        let (status, stderr) = check("CHECK: [[UNDEF]]\n", "x\n", &[]);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains("error: undefined variable: UNDEF"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn filecheck_handles_dag_not_label_and_full_lines() {
+        assert_eq!(
+            check("CHECK-DAG: b\nCHECK-DAG: a\nCHECK: c\n", "a\nb\nc\n", &[]).0,
+            0
+        );
+        assert_eq!(
+            check("CHECK: a\nCHECK-NOT: x\nCHECK: c\n", "a\nb\nc\n", &[]).0,
+            0
+        );
+        let (status, stderr) = check("CHECK: a\nCHECK-NOT: b\nCHECK: c\n", "a\nb\nc\n", &[]);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains("error: CHECK-NOT: excluded string found in input"),
+            "{stderr}"
+        );
+        assert_eq!(
+            check(
+                "CHECK-LABEL: f:\nCHECK: x\nCHECK-LABEL: g:\nCHECK: y\n",
+                "f:\nx\ng:\ny\n",
+                &[]
+            )
+            .0,
+            0
+        );
+        assert_eq!(
+            check(
+                "CHECK-LABEL: f:\nCHECK: y\nCHECK-LABEL: g:\n",
+                "f:\nx\ng:\ny\n",
+                &[]
+            )
+            .0,
+            1
+        );
+        assert_eq!(
+            check("CHECK: abc\n", "  abc  \n", &["--match-full-lines"]).0,
+            0
+        );
+        assert_eq!(
+            check("CHECK: abc\n", "x abc\n", &["--match-full-lines"]).0,
+            1
+        );
+        assert_eq!(check("CHECK: a b\n", "a\t \tb\n", &[]).0, 0);
+        assert_eq!(
+            check("CHECK: a b\n", "a\t \tb\n", &["--strict-whitespace"]).0,
+            1
+        );
+        assert_eq!(check("CHECK: ABC\n", "abc\n", &["--ignore-case"]).0, 0);
+        assert_eq!(check("CHECK{LITERAL}: [[x]]\n", "[[x]]\n", &[]).0, 0);
+        assert_eq!(
+            check("CHECK: a\n", "a\nzz\n", &["--implicit-check-not=zz"]).0,
+            1
+        );
+        assert_eq!(check("FOO: a\n", "a\n", &["--check-prefix=FOO"]).0, 0);
+        let (status, stderr) = check("CHECK: a\n", "a\n", &["--check-prefixes=CHECK,BAR"]);
+        assert_eq!(status, 2);
+        assert!(
+            stderr.contains("error: no check strings found with prefix 'BAR:'"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn the_shell_reads_pipes_redirects_and_quotes_the_way_lit_does() {
+        let tree = Tree::of(&[]).unwrap();
+        let tools = standard_tools();
+        let mut world = World {
+            tree: &tree,
+            files: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            folders: BTreeSet::new(),
+            directory: "/work".to_string(),
+            environment: BTreeMap::new(),
+            tools: &tools,
+            missing_tool: None,
+        };
+        let run = |world: &mut World, line: &str| -> i32 {
+            let script = shell_parse(line).unwrap();
+            let mut stderr = Vec::new();
+            run_script(&script, world, &mut stderr)
+        };
+        assert_eq!(run(&mut world, "echo 'hello world' > out.txt"), 0);
+        assert_eq!(world.read("/work/out.txt").unwrap(), b"hello world\n");
+        assert_eq!(
+            run(&mut world, "echo more >> out.txt && cat out.txt | count 2"),
+            0
+        );
+        assert_eq!(run(&mut world, "not false"), 0);
+        assert_eq!(run(&mut world, "not true"), 1);
+        assert_eq!(
+            run(&mut world, "printf 'a\\nb\\n' | sed 's/b/c/' > s.txt"),
+            0
+        );
+        assert_eq!(world.read("/work/s.txt").unwrap(), b"a\nc\n");
+        assert_eq!(run(&mut world, "false | true"), 1);
+        assert_eq!(run(&mut world, "nosuchtool"), 127);
+        assert_eq!(world.missing_tool.as_deref(), Some("nosuchtool"));
+    }
+
+    fn bundle_names(prefix: &str) -> Vec<String> {
+        catalogue()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with(prefix))
+            .collect()
+    }
+
+    struct Shuffle(u64);
+
+    impl Shuffle {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, limit: u64) -> u64 {
+            self.next() % limit.max(1)
+        }
+
+        fn pick<'a>(&mut self, choices: &[&'a str]) -> &'a str {
+            choices[self.below(choices.len() as u64) as usize]
+        }
+    }
+
+    fn random_atom(random: &mut Shuffle, depth: u32) -> String {
+        match random.below(if depth == 0 { 4 } else { 5 }) {
+            0 => random.pick(&["a", "b", "c", " "]).to_string(),
+            1 => ".".to_string(),
+            2 => random
+                .pick(&["[ab]", "[^a]", "[a-c]", "[[:alpha:]]", "[^ b]", "[c ]"])
+                .to_string(),
+            3 => random.pick(&["a", "b", "c"]).to_string(),
+            _ => format!("({})", random_alternation(random, depth - 1)),
+        }
+    }
+
+    fn random_piece(random: &mut Shuffle, depth: u32) -> String {
+        let atom = random_atom(random, depth);
+        let suffix = match random.below(8) {
+            0 => "*".to_string(),
+            1 => "+".to_string(),
+            2 => "?".to_string(),
+            3 => {
+                let low = random.below(3);
+                let high = low + random.below(3);
+                format!("{{{low},{high}}}")
+            }
+            4 => format!("{{{}}}", random.below(3) + 1),
+            _ => String::new(),
+        };
+        format!("{atom}{suffix}")
+    }
+
+    fn random_alternation(random: &mut Shuffle, depth: u32) -> String {
+        let branches = 1 + random.below(3);
+        let mut out = Vec::new();
+        for _ in 0..branches {
+            let pieces = 1 + random.below(3);
+            out.push(
+                (0..pieces)
+                    .map(|_| random_piece(random, depth))
+                    .collect::<String>(),
+            );
+        }
+        out.join("|")
+    }
+
+    fn random_pattern(random: &mut Shuffle) -> String {
+        let head = random.pick(&["a", "b", "c", "[ab]", "[^ ]"]);
+        let mut pattern = format!("{head}({})", random_alternation(random, 2));
+        if random.below(6) == 0 {
+            pattern.insert(0, '^');
+        }
+        if random.below(6) == 0 {
+            pattern.push('$');
+        }
+        pattern
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_regex_oracle() {
+        let folder = repository().join("Tests").join("oracle");
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        let mut random = Shuffle(0x9E37_79B9_7F4A_7C15);
+        let mut outcomes = BTreeMap::new();
+        for case in 0..4000 {
+            let pattern = random_pattern(&mut random);
+            let lines: Vec<String> = (0..8)
+                .map(|_| {
+                    let length = random.below(14);
+                    (0..length)
+                        .map(|_| random.pick(&["a", "b", "c", " "]))
+                        .collect::<String>()
+                })
+                .collect();
+            let text = lines.join("\n") + "\n";
+            let input = folder.join(format!("case{}.txt", case % 16));
+            std::fs::write(&input, &text).expect("the case is written");
+            let output = std::process::Command::new("timeout")
+                .env("LC_ALL", "C")
+                .args(["5", "grep", "-Eonb", "-e", &pattern])
+                .arg(&input)
+                .output()
+                .expect("grep runs");
+            if output.status.code() == Some(124) {
+                outcomes.insert(
+                    format!("{case:04} {pattern}"),
+                    Verdict::OutOfScope("grep did not answer in five seconds".to_string()),
+                );
+                continue;
+            }
+            let mut expected: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+            let mut starts = Vec::new();
+            let mut offset = 0usize;
+            for line in &lines {
+                starts.push(offset);
+                offset += line.len() + 1;
+            }
+            for row in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut fields = row.splitn(3, ':');
+                let (Some(line), Some(at), Some(matched)) =
+                    (fields.next(), fields.next(), fields.next())
+                else {
+                    continue;
+                };
+                let line: usize = line.parse().unwrap_or(0);
+                let at: usize = at.parse().unwrap_or(0);
+                let local = at - starts[line - 1];
+                expected
+                    .entry(line)
+                    .or_insert((local, local + matched.len()));
+            }
+            let regex = match Regex::new(&pattern, false, false) {
+                Ok(regex) => regex,
+                Err(problem) => {
+                    outcomes.insert(
+                        format!("{case:04} {pattern}"),
+                        Verdict::Failed(format!("refused: {problem}")),
+                    );
+                    continue;
+                }
+            };
+            let mut mismatch = None;
+            for (index, line) in lines.iter().enumerate() {
+                let ours = regex
+                    .find(line.as_bytes())
+                    .and_then(|spans| spans[0])
+                    .filter(|(start, end)| end > start);
+                let theirs = expected.get(&(index + 1)).copied();
+                if ours != theirs {
+                    mismatch = Some(format!("line {line:?}: ours {ours:?}, grep {theirs:?}"));
+                    break;
+                }
+            }
+            outcomes.insert(
+                format!("{case:04} {pattern}"),
+                match mismatch {
+                    None => Verdict::Passed,
+                    Some(reason) => Verdict::Failed(reason),
+                },
+            );
+        }
+        let report = SuiteReport {
+            name: "regex-oracle".to_string(),
+            outcomes,
+        };
+        report.publish();
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_bundles() {
+        let listed = catalogue().expect("the bundles are listed");
+        assert_eq!(listed.len(), 30, "thirty bundles are expected under New/");
+        let mut outcomes = BTreeMap::new();
+        for (name, _) in &listed {
+            let verdict = match bundle(name) {
+                Ok(read) => {
+                    assert_eq!(&read.name, name);
+                    assert!(
+                        read.summary.iter().any(|line| line.starts_with('#')),
+                        "{name} has no summary"
+                    );
+                    let declared = read.declared.unwrap_or(usize::MAX);
+                    for entry in &read.entries {
+                        outcomes.insert(format!("{name}/{}", entry.path), Verdict::Passed);
+                    }
+                    if declared == read.entries.len() {
+                        Verdict::Passed
+                    } else {
+                        Verdict::Failed(format!(
+                            "declares {declared} records and holds {}",
+                            read.entries.len()
+                        ))
+                    }
+                }
+                Err(problem) => Verdict::Failed(problem),
+            };
+            outcomes.insert(format!("{name}#header"), verdict);
+            release(name);
+        }
+        let report = SuiteReport {
+            name: "bundles".to_string(),
+            outcomes,
+        };
+        let (_, failed, _) = report.counts();
+        report.publish();
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_filecheck() {
+        let names = bundle_names("Test_03");
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the FileCheck tests are present");
+        let root = "llvm-project/llvm/test/FileCheck/";
+        let tests = lit_tests(&tree, root, &[".txt", ".test"]);
+        let suite = LitSuite {
+            tree: &tree,
+            features: ["shell".to_string()].into_iter().collect(),
+            substitutions: vec![(
+                "%ProtectFileCheckOutput".to_string(),
+                "env -u FILECHECK_OPTS".to_string(),
+            )],
+            tools: standard_tools(),
+        };
+        let outcomes = run_parallel(tests, &|path| suite.run_test(path));
+        let report = SuiteReport {
+            name: "filecheck".to_string(),
+            outcomes,
+        };
+        report.publish();
+    }
+}

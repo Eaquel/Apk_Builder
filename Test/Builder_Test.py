@@ -17,6 +17,7 @@ Everything a check writes goes under Tests/, which is never committed.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -37,6 +38,10 @@ TERMINAL_SPEECH = ROOT / "Terminal_Speech.rs"
 VIBE_CODING = ROOT / "Vibe_Coding.rs"
 CORE_TESTS = TEST / "Builder_Test.rs"
 TEST_DRIVER = TEST / "Builder_Test.py"
+BASELINE = TEST / "Builder_Test_Baseline.json"
+REFERENCE_SUITES = ["bundles", "filecheck"]
+ORACLE_SUITES = ["regex-oracle"]
+RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
@@ -131,6 +136,7 @@ def check_layout() -> str:
         CORE_TESTS,
         ROOT / "Cargo.toml",
         TEST_DRIVER,
+        BASELINE,
         ROOT / "build.gradle.kts",
         ROOT / "settings.gradle.kts",
         ROOT / "gradle.properties",
@@ -802,6 +808,108 @@ def check_speech() -> str:
         f"in each of {len(spoken) // 2} languages spoken"
     )
 
+SUITE_LINE = re.compile(
+    r"SUITE (\S+) passed=(\d+) failed=(\d+) out_of_scope=(\d+) total=(\d+) digest=([0-9a-f]+)$",
+    re.M,
+)
+
+def bundles_present() -> bool:
+    """The reference bundles are in this repository's history."""
+    done = run(["git", "ls-tree", "HEAD", "--", "New"], check=False)
+    return done.returncode == 0 and "New" in done.stdout
+
+def run_suites(names: list[str], threads: int | None = None) -> dict[str, dict]:
+    """Every named suite, run once, read back from the lines it prints."""
+    env = {"APK_BUILDER_SUITE_THREADS": str(threads)} if threads else {}
+    tests = [f"tests::reference_checks::suite_{name.replace('-', '_')}" for name in names]
+    done = run(
+        ["cargo", "test", "--locked", "--lib", "--", "--ignored", "--exact", *tests,
+         "--nocapture", "--test-threads=1"],
+        env=env,
+    )
+    found: dict[str, dict] = {}
+    for match in SUITE_LINE.finditer(done.stdout):
+        found[match.group(1)] = {
+            "passed": int(match.group(2)),
+            "failed": int(match.group(3)),
+            "out_of_scope": int(match.group(4)),
+            "total": int(match.group(5)),
+            "digest": match.group(6),
+        }
+    silent = [name for name in names if name not in found]
+    if silent:
+        raise AssertionError(f"these suites printed no result: {silent}")
+    return found
+
+def hold_ground(found: dict[str, dict]) -> str:
+    """No suite may give back a test it once passed.
+
+    The baseline holds, for every suite, how many tests passed and how many
+    failed the last time someone recorded it. A run that passes fewer or fails
+    more is a regression and fails the gate by name. A run that does better is
+    reported, so the baseline can be raised with --record and the gain kept.
+    """
+    held = json.loads(BASELINE.read_text(encoding="utf-8"))
+    suites = held.setdefault("suites", {})
+    if RECORDING["on"]:
+        for name, now in found.items():
+            suites[name] = {key: now[key] for key in ("passed", "failed", "out_of_scope", "total")}
+        BASELINE.write_text(json.dumps(held, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return "recorded " + ", ".join(f"{name} {now['passed']}/{now['total']}" for name, now in found.items())
+    trouble: list[str] = []
+    gains: list[str] = []
+    for name, now in found.items():
+        was = suites.get(name)
+        if was is None:
+            trouble.append(f"{name} has no baseline; run with --record")
+            continue
+        if now["passed"] < was["passed"]:
+            trouble.append(f"{name} passes {now['passed']}, the baseline says {was['passed']}")
+        if now["failed"] > was["failed"]:
+            trouble.append(f"{name} fails {now['failed']}, the baseline allows {was['failed']}")
+        if now["passed"] > was["passed"] or now["failed"] < was["failed"]:
+            gains.append(name)
+    if trouble:
+        raise AssertionError("; ".join(trouble))
+    summary = ", ".join(
+        f"{name} {now['passed']}/{now['total']}"
+        + (f" ({now['out_of_scope']} out of scope)" if now["out_of_scope"] else "")
+        for name, now in found.items()
+    )
+    if gains:
+        summary += f"; better than the baseline in {', '.join(gains)}, record it"
+    return summary
+
+def check_suites() -> str:
+    """Every reference suite keeps every test it has ever passed."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo is not on this machine")
+    if not bundles_present():
+        raise Skip("the reference bundles are not in this checkout")
+    return hold_ground(run_suites(REFERENCE_SUITES))
+
+def check_differential() -> str:
+    """Our engines and an independent implementation agree on the same input."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo is not on this machine")
+    if shutil.which("grep") is None or shutil.which("timeout") is None:
+        raise Skip("grep or timeout is not on this machine")
+    return hold_ground(run_suites(ORACLE_SUITES))
+
+def check_determinism() -> str:
+    """One worker or many, every suite reaches the same verdict on every test."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo is not on this machine")
+    if not bundles_present():
+        raise Skip("the reference bundles are not in this checkout")
+    names = REFERENCE_SUITES + ORACLE_SUITES
+    alone = run_suites(names, threads=1)
+    together = run_suites(names, threads=max(2, os.cpu_count() or 2))
+    differ = [name for name in names if alone[name]["digest"] != together[name]["digest"]]
+    if differ:
+        raise AssertionError(f"these suites answer differently with more workers: {differ}")
+    return f"{len(names)} suites, identical digests on one worker and on many"
+
 CHECKS: dict[str, tuple[str, object]] = {
     "layout": ("the tree is the agreed one", check_layout),
     "comments": ("no file explains itself", check_comments),
@@ -816,6 +924,9 @@ CHECKS: dict[str, tuple[str, object]] = {
     "bridge": ("the native bridge", check_bridge),
     "installable": ("what Android would accept", check_installable),
     "reproducible": ("byte-for-byte rebuild", check_reproducible),
+    "suites": ("every reference suite holds its ground", check_suites),
+    "differential": ("our engines agree with independent ones", check_differential),
+    "determinism": ("the same verdicts on one worker and many", check_determinism),
 }
 
 DEFAULT = [
@@ -831,7 +942,10 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="every check, the slow ones too")
     parser.add_argument("--strict", action="store_true",
                         help="a check that cannot run here is a failure")
+    parser.add_argument("--record", action="store_true",
+                        help="write the suite results as the new baseline")
     chosen = parser.parse_args()
+    RECORDING["on"] = chosen.record
 
     if chosen.list:
         width = max(len(name) for name in CHECKS)
