@@ -63259,6 +63259,7 @@ block5(%e: ref, %original: i32):
              class %Base abstract { fields [i32] methods [-] }\n\
              class %Face interface { fields [] methods [-] }\n\
              class %Leaf : %Base { fields [ref] methods [@Leaf.run] implements %Face [@Leaf.run] }\n\
+             class %Quads array <4 x i32> { fields [] methods [] }\n\
              global @data size 8 align 8 mutable internal zero\n\
              function @Leaf.run(ref) -> i32 internal {\nblock0(%self: ref):\n    %v: i32 = const 1\n    return %v\n}\n\
              function @callee(i32) -> i32 internal {\nblock0(%x: i32):\n    return %x\n}\n\
@@ -63379,7 +63380,7 @@ block5(%e: ref, %original: i32):
             "%T: i32 = call_indirect (i32) -> i32 %fa(%a)",
             "call @convention3(%a)",
             "%obj: ref = allocate %Leaf",
-            "%arr: ref = allocate_array <4 x i32> %a",
+            "%arr: ref = allocate_array %Quads %a",
             "store_field %Leaf 0 %obj, %a",
             "store_field %Leaf 1 %obj, %r",
             "%T: i32 = load_field %Leaf 0 %obj",
@@ -64064,6 +64065,18 @@ block5(%e: ref, %original: i32):
             module("class %C abstract { fields [] methods [] }\nfunction @f() -> ref export {\nblock0:\n    %r: ref = allocate %C\n    return %r\n}\n"),
         ));
         cases.push((
+            Rule::ArrayClass,
+            module("class %C { fields [] methods [] }\nfunction @f(i32) -> ref export {\nblock0(%n: i32):\n    %r: ref = allocate_array %C %n\n    return %r\n}\n"),
+        ));
+        cases.push((
+            Rule::ArrayClass,
+            module("class %A array i32 { fields [] methods [] }\nfunction @f() -> ref export {\nblock0:\n    %r: ref = allocate %A\n    return %r\n}\n"),
+        ));
+        cases.push((
+            Rule::ArrayClass,
+            module("class %A array i32 { fields [i8] methods [] }\n"),
+        ));
+        cases.push((
             Rule::LaneRange,
             module("function @f(<4 x i32>) -> i32 export {\nblock0(%v: <4 x i32>):\n    %x: i32 = extract_lane 9 %v\n    return %x\n}\n"),
         ));
@@ -64527,6 +64540,11 @@ class %Dog : %Animal { fields [] methods [@Dog.sound] }
 class %Cat : %Animal { fields [] methods [@Cat.sound] }
 class %Greeter interface { fields [] methods [-, @Greeter.twice] }
 class %Robot { fields [] methods [] implements %Greeter [@Robot.greet, -] }
+class %Identified { fields [] methods [@Identified.id] }
+class %Longs array i64 : %Identified { fields [] methods [@Identified.id] }
+class %Bytes array i8 : %Identified { fields [] methods [@Identified.id] }
+class %Things array ref : %Identified { fields [] methods [@Identified.id] }
+class %Dogs array ref : %Things { fields [] methods [@Identified.id] }
 global @greeting size 6 align 1 internal bytes "68656c6c6f00"
 global @scratch size 8 align 8 mutable internal zero
 global @handlers size 16 align 8 internal bytes "00000000000000000000000000000000" relocate 0 function @add 0 relocate 8 function @subtract 0
@@ -64538,6 +64556,42 @@ function @exit(i32) import
 function @abort() import
 function @missing() -> i32 import
 function @omni.print_line(ref) import
+function @Identified.id(ref) -> i32 internal {
+block0(%self: ref):
+    %v: i32 = const 77
+    return %v
+}
+function @arrays_are_objects() -> i32 export {
+block0:
+    %two: i32 = const 2
+    %dogs: ref = allocate_array %Dogs %two
+    %d: ref = allocate %Dog
+    %zero: i32 = const 0
+    store_element ref %dogs, %zero, %d
+    %back: ref = load_element ref %dogs, %zero
+    %same: bool = same_object %d, %back
+    %is_things: bool = instance_of %Things %dogs
+    %is_identified: bool = instance_of %Identified %dogs
+    %bytes: ref = allocate_array %Bytes %two
+    %is_dogs: bool = instance_of %Dogs %bytes
+    %m: ptr = virtual_method %Identified 0 %bytes
+    %id: i32 = call_indirect (ref) -> i32 %m(%bytes)
+    %a: i32 = zext %same
+    %b: i32 = zext %is_things
+    %c: i32 = zext %is_identified
+    %e: i32 = zext %is_dogs
+    %ten: i32 = const 10
+    %s1: i32 = mul %a, %ten
+    %s2: i32 = add %s1, %b
+    %s3: i32 = mul %s2, %ten
+    %s4: i32 = add %s3, %c
+    %s5: i32 = mul %s4, %ten
+    %s6: i32 = add %s5, %e
+    %scale: i32 = const 10000
+    %s7: i32 = mul %id, %scale
+    %s8: i32 = add %s7, %s6
+    return %s8
+}
 function @Dog.sound(ref) -> i32 internal {
 block0(%self: ref):
     %v: i32 = const 1
@@ -64656,7 +64710,7 @@ block3:
 }
 function @arrays(i32, i32) -> i64 export {
 block0(%n: i32, %at: i32):
-    %arr: ref = allocate_array i64 %n
+    %arr: ref = allocate_array %Longs %n
     %zero: i32 = const 0
     jump block1(%zero)
 block1(%i: i32):
@@ -64908,7 +64962,7 @@ block2:
 function @negative_array() -> ref export {
 block0:
     %n: i32 = const -1
-    %a: ref = allocate_array i8 %n
+    %a: ref = allocate_array %Bytes %n
     return %a
 }
 function @uncaught() -> i32 export {
@@ -65012,6 +65066,10 @@ block0:
         assert_eq!(
             returned(&programs, "vectors", Vec::new()),
             int(Type::I32, 13)
+        );
+        assert_eq!(
+            returned(&programs, "arrays_are_objects", Vec::new()),
+            int(Type::I32, 771_110)
         );
         assert_eq!(
             returned(&programs, "poison_flows", Vec::new()),
@@ -65127,7 +65185,7 @@ block0:
             .iter()
             .any(|violation| violation.rule == Rule::VirtualTable));
         let memory_bound = module(
-            "function @malloc(i64) -> ptr import\nfunction @f() -> ptr export {\nblock0:\n    %n: i32 = const 100000000\n    %a: ref = allocate_array i64 %n\n    %p: ptr = null\n    return %p\n}\n",
+            "class %Longs array i64 { fields [] methods [] }\nfunction @f() -> ptr export {\nblock0:\n    %n: i32 = const 100000000\n    %a: ref = allocate_array %Longs %n\n    %p: ptr = null\n    return %p\n}\n",
         );
         let limits = Limits {
             memory: 1 << 20,

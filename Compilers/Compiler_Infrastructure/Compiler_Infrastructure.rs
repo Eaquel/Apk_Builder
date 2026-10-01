@@ -524,7 +524,7 @@ pub enum Operation {
     Call(FunctionId),
     CallIndirect(Signature),
     Allocate(ClassId),
-    AllocateArray(Type),
+    AllocateArray(ClassId),
     LoadField(ClassId, u32),
     StoreField(ClassId, u32),
     LoadElement(Type),
@@ -733,6 +733,7 @@ pub struct ClassType {
     pub parent: Option<ClassId>,
     pub interface: bool,
     pub abstract_class: bool,
+    pub element: Option<Type>,
     pub fields: Vec<Type>,
     pub methods: Vec<Option<FunctionId>>,
     pub implementations: Vec<(ClassId, Vec<Option<FunctionId>>)>,
@@ -1682,7 +1683,9 @@ impl<'m> Printer<'m> {
                 )
             }
             Operation::Allocate(class) => format!("allocate {}", self.class_name(*class)),
-            Operation::AllocateArray(ty) => with(format!("allocate_array {}", ty.text())),
+            Operation::AllocateArray(class) => {
+                with(format!("allocate_array {}", self.class_name(*class)))
+            }
             Operation::LoadField(class, index) => {
                 with(format!("load_field {} {index}", self.class_name(*class)))
             }
@@ -1824,6 +1827,9 @@ impl<'m> Printer<'m> {
             }
             if class.abstract_class {
                 line.push_str(" abstract");
+            }
+            if let Some(element) = class.element {
+                line.push_str(&format!(" array {}", element.text()));
             }
             if let Some(parent) = class.parent {
                 line.push_str(&format!(" : {}", self.class_name(parent)));
@@ -2673,9 +2679,9 @@ impl TextReader {
             }
             "allocate" => Operation::Allocate(self.class_ref()?),
             "allocate_array" => {
-                let ty = self.tokens.ty()?;
+                let class = self.class_ref()?;
                 arguments = self.value_list(function, values)?;
-                Operation::AllocateArray(ty)
+                Operation::AllocateArray(class)
             }
             "load_field" | "store_field" | "virtual_method" | "interface_method" => {
                 let class = self.class_ref()?;
@@ -2960,6 +2966,9 @@ impl TextReader {
         };
         class.interface = self.tokens.eat_word("interface");
         class.abstract_class = self.tokens.eat_word("abstract");
+        if self.tokens.eat_word("array") {
+            class.element = Some(self.tokens.ty()?);
+        }
         if self.tokens.eat_punct(':') {
             class.parent = Some(self.class_ref()?);
         }
@@ -3373,9 +3382,9 @@ impl BodyWriter<'_> {
                 out.byte(30);
                 out.unsigned(u64::from(class.0));
             }
-            Operation::AllocateArray(ty) => {
+            Operation::AllocateArray(class) => {
                 out.byte(31);
-                out.ty(*ty);
+                out.unsigned(u64::from(class.0));
             }
             Operation::LoadField(class, index) => {
                 out.byte(32);
@@ -3695,9 +3704,15 @@ impl Module {
             if class.parent.is_some() {
                 flags |= 4;
             }
+            if class.element.is_some() {
+                flags |= 8;
+            }
             out.byte(flags);
             if let Some(parent) = class.parent {
                 out.unsigned(u64::from(parent.0));
+            }
+            if let Some(element) = class.element {
+                out.ty(element);
             }
             out.types(&class.fields);
             out.slots(&class.methods);
@@ -4107,7 +4122,7 @@ impl Decoder<'_> {
             28 => Operation::Call(FunctionId(self.index(counts.functions)?)),
             29 => Operation::CallIndirect(self.signature()?),
             30 => Operation::Allocate(ClassId(self.index(counts.classes)?)),
-            31 => Operation::AllocateArray(self.ty()?),
+            31 => Operation::AllocateArray(ClassId(self.index(counts.classes)?)),
             32 => Operation::LoadField(ClassId(self.index(counts.classes)?), self.small()?),
             33 => Operation::StoreField(ClassId(self.index(counts.classes)?), self.small()?),
             34 => Operation::LoadElement(self.ty()?),
@@ -4301,9 +4316,14 @@ impl Decoder<'_> {
         }
         for _ in 0..counts.classes {
             let name = self.text()?;
-            let flags = self.flags(7)?;
+            let flags = self.flags(15)?;
             let parent = if flags & 4 != 0 {
                 Some(ClassId(self.index(counts.classes)?))
+            } else {
+                None
+            };
+            let element = if flags & 8 != 0 {
+                Some(self.ty()?)
             } else {
                 None
             };
@@ -4320,6 +4340,7 @@ impl Decoder<'_> {
                 parent,
                 interface: flags & 1 != 0,
                 abstract_class: flags & 2 != 0,
+                element,
                 fields,
                 methods,
                 implementations,
@@ -4442,6 +4463,7 @@ named_enum!(Rule {
     FieldRange = "field-range",
     MethodSlot = "method-slot",
     AbstractAllocation = "abstract-allocation",
+    ArrayClass = "array-class",
     LaneRange = "lane-range",
     NoReturn = "noreturn",
     NoUnwind = "nounwind",
@@ -4794,6 +4816,11 @@ impl<'m> Verifier<'m> {
                 || !class.implementations.is_empty())
         {
             self.report(Rule::InterfaceShape, shown.clone(), None, None);
+        }
+        if class.element.is_some()
+            && (class.interface || class.abstract_class || !class.fields.is_empty())
+        {
+            self.report(Rule::ArrayClass, shown.clone(), None, None);
         }
         let concrete = !class.interface && !class.abstract_class;
         if concrete && self.leaves_a_method_abstract(class) {
@@ -5476,15 +5503,25 @@ impl<'v, 'm> FunctionVerifier<'v, 'm> {
                     Some(data) if data.interface || data.abstract_class => {
                         self.report(Rule::AbstractAllocation, Some(block), Some(position))
                     }
+                    Some(data) if data.element.is_some() => {
+                        self.report(Rule::ArrayClass, Some(block), Some(position))
+                    }
                     Some(_) => {}
                 }
             }
-            Operation::AllocateArray(_) => {
+            Operation::AllocateArray(class) => {
                 wanted_count = 1;
                 if count(1) {
                     self.expect(is_word(arguments[0]), Rule::OperandType, block, position);
                 }
                 rule_ok = produces(Some(Type::REFERENCE));
+                match module.classes.get(class.index()) {
+                    None => self.report(Rule::SymbolRange, Some(block), Some(position)),
+                    Some(data) if data.element.is_none() => {
+                        self.report(Rule::ArrayClass, Some(block), Some(position))
+                    }
+                    Some(_) => {}
+                }
             }
             Operation::LoadField(class, index) | Operation::StoreField(class, index) => {
                 let storing = matches!(instruction.operation, Operation::StoreField(..));
@@ -6356,8 +6393,15 @@ struct Allocation {
 
 #[derive(Clone, Debug)]
 pub enum Object {
-    Instance { class: ClassId, fields: Vec<Datum> },
-    Array { element: Type, items: Vec<Datum> },
+    Instance {
+        class: ClassId,
+        fields: Vec<Datum>,
+    },
+    Array {
+        class: ClassId,
+        element: Type,
+        items: Vec<Datum>,
+    },
     Text(String),
 }
 
@@ -6700,6 +6744,13 @@ impl Machine {
         handle
             .checked_sub(1)
             .and_then(|at| self.objects.get_mut(at as usize))
+    }
+
+    pub fn class_of(&self, handle: u32) -> Option<ClassId> {
+        match self.object(handle)? {
+            Object::Instance { class, .. } | Object::Array { class, .. } => Some(*class),
+            Object::Text(_) => None,
+        }
     }
 
     pub fn text(&self, handle: u32) -> Option<&str> {
@@ -7862,7 +7913,8 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                     bytes,
                 )?)
             }
-            Operation::AllocateArray(ty) => {
+            Operation::AllocateArray(class) => {
+                let ty = &module.classes[class.index()].element.unwrap_or(Type::I8);
                 let bits = argument_types[0].element().bits();
                 let length = signed(integer_of(&arguments[0])?, bits);
                 if length < 0 {
@@ -7879,6 +7931,7 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                 let items = vec![Datum::zero(*ty); length as usize];
                 Datum::Reference(self.machine.new_object(
                     Object::Array {
+                        class: *class,
                         element: *ty,
                         items,
                     },
@@ -7918,7 +7971,8 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                 let bits = argument_types[1].element().bits();
                 let index = signed(integer_of(&arguments[1])?, bits);
                 let storing = matches!(instruction.operation, Operation::StoreElement(_));
-                let Some(Object::Array { element, items }) = self.machine.object_mut(handle) else {
+                let Some(Object::Array { element, items, .. }) = self.machine.object_mut(handle)
+                else {
                     return Err(Stop::from(Trap::TypeConfusion));
                 };
                 if *element != *ty {
@@ -7946,12 +8000,10 @@ impl<'m, 'h> Interpreter<'m, 'h> {
             }
             Operation::InstanceOf(class) => {
                 let handle = reference_of(&arguments[0])?;
-                let holds = match self.machine.object(handle) {
-                    Some(Object::Instance { class: owner, .. }) => {
-                        module.is_subclass(*owner, *class)
-                    }
-                    _ => false,
-                };
+                let holds = self
+                    .machine
+                    .class_of(handle)
+                    .is_some_and(|owner| module.is_subclass(owner, *class));
                 Datum::Integer(u128::from(holds))
             }
             Operation::VirtualMethod(class, slot) | Operation::InterfaceMethod(class, slot) => {
@@ -7959,11 +8011,9 @@ impl<'m, 'h> Interpreter<'m, 'h> {
                 if handle == 0 {
                     return Err(Stop::from(Trap::NullReference));
                 }
-                let Some(Object::Instance { class: owner, .. }) = self.machine.object(handle)
-                else {
+                let Some(owner) = self.machine.class_of(handle) else {
                     return Err(Stop::from(Trap::TypeConfusion));
                 };
-                let owner = *owner;
                 let chosen = if matches!(instruction.operation, Operation::VirtualMethod(..)) {
                     if !module.is_subclass(owner, *class) {
                         return Err(Stop::from(Trap::TypeConfusion));
