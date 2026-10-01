@@ -65,6 +65,13 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@v5
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/New/
+            !/Compilers/Kotlin/*.txt
 
       - name: Install the pinned JDK
         uses: actions/setup-java@v5
@@ -90,7 +97,7 @@ jobs:
           test "$(rustc --version | cut -d' ' -f2)" = "$APK_BUILDER_RUST_VERSION"
 
       - name: Run every check that needs no Android build
-        run: ./Builder_Test.py --strict layout format lint dependencies strings core
+        run: ./Test/Builder_Test.py --strict layout format lint dependencies strings core
 
   apk:
     name: Builder APK
@@ -98,6 +105,13 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@v5
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/New/
+            !/Compilers/Kotlin/*.txt
 
       - name: Install the pinned JDK
         uses: actions/setup-java@v5
@@ -236,7 +250,7 @@ jobs:
       # build: the package and the bundle first, then the Core suite reading
       # the real package this job just produced.
       - name: Run every check that needs the Android build
-        run: ./Builder_Test.py --strict release core bridge installable reproducible
+        run: ./Test/Builder_Test.py --strict release core bridge installable reproducible
 
       - name: Report what the release artifacts are
         run: |

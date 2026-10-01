@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Every check this project has, run from one place.
 
-    ./Builder_Test.py                 every check that can run here
-    ./Builder_Test.py core strings    only the checks named
-    ./Builder_Test.py --list          what the names are
-    ./Builder_Test.py --strict        a check that cannot run here fails
+    ./Test/Builder_Test.py                 every check that can run here
+    ./Test/Builder_Test.py core strings    only the checks named
+    ./Test/Builder_Test.py --list          what the names are
+    ./Test/Builder_Test.py --strict        a check that cannot run here fails
 
 A check that needs a tool this machine does not have is reported as
 SKIPPED and does not fail the run, unless --strict is passed. Continuous
@@ -27,14 +27,16 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
+TEST = ROOT / "Test"
 WORK = ROOT / "Tests"
 CORE = ROOT / "Builder.rs"
 SPEECH = ROOT / "Diagnostic_Speech.rs"
 TERMINAL = ROOT / "Terminal.rs"
 TERMINAL_SPEECH = ROOT / "Terminal_Speech.rs"
 VIBE_CODING = ROOT / "Vibe_Coding.rs"
-CORE_TESTS = ROOT / "Builder_Test.rs"
+CORE_TESTS = TEST / "Builder_Test.rs"
+TEST_DRIVER = TEST / "Builder_Test.py"
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
@@ -128,7 +130,7 @@ def check_layout() -> str:
         VIBE_CODING,
         CORE_TESTS,
         ROOT / "Cargo.toml",
-        ROOT / "Builder_Test.py",
+        TEST_DRIVER,
         ROOT / "build.gradle.kts",
         ROOT / "settings.gradle.kts",
         ROOT / "gradle.properties",
@@ -170,10 +172,16 @@ def check_layout() -> str:
         raise AssertionError("the old Old_Layout.rs / Plugins layout is still here")
 
     stray = sorted(
-        path.name for path in ROOT.glob("*.py") if path.name != "Builder_Test.py"
+        str(path.relative_to(ROOT))
+        for path in list(ROOT.glob("*.py")) + list(TEST.glob("*.py"))
+        if path != TEST_DRIVER
     )
     if stray:
-        raise AssertionError(f"tests live in Builder_Test.py alone, found {stray}")
+        raise AssertionError(f"tests live in Test/Builder_Test.py alone, found {stray}")
+
+    for moved in ("Builder_Test.rs", "Builder_Test.py"):
+        if (ROOT / moved).exists():
+            raise AssertionError(f"{moved} belongs in Test/, not at the root")
 
     sources = [
         CORE, SPEECH, TERMINAL, TERMINAL_SPEECH, VIBE_CODING, ANDROID
@@ -208,7 +216,7 @@ def check_comments() -> str:
         VIBE_CODING,
         CORE_TESTS,
         KOTLIN,
-        ROOT / "Builder_Test.py",
+        TEST_DRIVER,
         ROOT / "build.gradle.kts",
         ROOT / "settings.gradle.kts",
         ROOT / "Builder/build.gradle.kts",

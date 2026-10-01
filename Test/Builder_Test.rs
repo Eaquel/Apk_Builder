@@ -40416,7 +40416,7 @@ mod java_diagnostic {
 
     #[test]
     fn every_code_the_java_compiler_raises_is_explained() {
-        let source = include_str!("Compilers/Java/Java.rs");
+        let source = include_str!("../Compilers/Java/Java.rs");
         let mut raised: Vec<String> = Vec::new();
         let held: Vec<char> = source.chars().collect();
         let mut at = 0usize;
