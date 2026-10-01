@@ -40999,7 +40999,7 @@ mod kotlin {
         assert!(crate::compilers::kotlin_diagnostic::known(&refused.code));
     }
 
-    fn standard_library() -> Option<(std::path::PathBuf, Vec<u8>)> {
+    pub(super) fn standard_library() -> Option<(std::path::PathBuf, Vec<u8>)> {
         if let Ok(named) = std::env::var("APK_BUILDER_KOTLIN_STDLIB") {
             let path = std::path::PathBuf::from(named);
             let bytes = std::fs::read(&path).ok()?;
@@ -41029,7 +41029,7 @@ mod kotlin {
         Some((path, bytes))
     }
 
-    fn facade_of(file: &str, text: &str) -> String {
+    pub(super) fn facade_of(file: &str, text: &str) -> String {
         let package = text.lines().find_map(|line| {
             line.trim()
                 .strip_prefix("package ")
@@ -41076,7 +41076,7 @@ mod kotlin {
         first.parse().ok()
     }
 
-    fn find_java() -> Option<std::path::PathBuf> {
+    pub(super) fn find_java() -> Option<std::path::PathBuf> {
         let mut places: Vec<std::path::PathBuf> = Vec::new();
         if let Ok(home) = std::env::var("JAVA_HOME") {
             places.push(std::path::Path::new(&home).join("bin").join("java"));
@@ -41100,7 +41100,7 @@ mod kotlin {
             .find(|held| java_release(held).is_some_and(|release| release >= 25))
     }
 
-    fn compiled(
+    pub(super) fn compiled(
         kotlin: &[(String, String)],
         java: &[(String, String)],
         library: &[u8],
@@ -41110,7 +41110,7 @@ mod kotlin {
         compile_mixed(kotlin, java, &classpath, vec![library.to_vec()])
     }
 
-    fn written(directory: &std::path::Path, classes: &[(String, Vec<u8>)]) {
+    pub(super) fn written(directory: &std::path::Path, classes: &[(String, Vec<u8>)]) {
         for (name, bytes) in classes {
             let file = directory.join(name);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -41118,7 +41118,7 @@ mod kotlin {
         }
     }
 
-    fn answer(
+    pub(super) fn answer(
         java: &std::path::Path,
         directory: &std::path::Path,
         library: &std::path::Path,
@@ -41948,7 +41948,7 @@ public class BoxMain {
 }
 "####;
 
-    const KOTLIN_TEST: &str = r####"package kotlin.test
+    pub(super) const KOTLIN_TEST: &str = r####"package kotlin.test
 
 fun assertEquals(expected: Any?, actual: Any?, message: String? = null) {
     if (expected != actual) throw AssertionError((if (message == null) "" else message + ". ") + "Expected <" + expected + ">, actual <" + actual + ">.")
@@ -63189,6 +63189,251 @@ mod reference_checks {
             pattern.push('$');
         }
         pattern
+    }
+
+    const BOX_ROOT: &str = "kotlin/compiler/testData/codegen/box/";
+
+    fn box_scope(text: &str) -> Option<&'static str> {
+        let mut targets: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("// ") else {
+                continue;
+            };
+            let (key, value) = match rest.split_once(':') {
+                Some((key, value)) => (key.trim(), value.trim()),
+                None => (rest.trim(), ""),
+            };
+            let names_native = value.split(',').any(|one| one.trim() == "NATIVE");
+            match key {
+                "TARGET_BACKEND" => targets.push(value.to_string()),
+                "IGNORE_BACKEND"
+                | "IGNORE_BACKEND_K2"
+                | "IGNORE_BACKEND_K1"
+                | "DONT_TARGET_EXACT_BACKEND"
+                    if names_native =>
+                {
+                    return Some("the test leaves the native backend out");
+                }
+                "MODULE" => return Some("the test spans more than one module"),
+                "WITH_REFLECT" | "FULL_JDK" => return Some("the test needs the full JVM platform"),
+                _ => {}
+            }
+        }
+        let native = targets
+            .iter()
+            .any(|one| one.split(',').any(|target| target.trim() == "NATIVE"));
+        if !targets.is_empty() && !native {
+            return Some("the test targets another backend");
+        }
+        None
+    }
+
+    fn without_markers(text: &str) -> String {
+        let text = text.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("<!") {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at + 2..];
+            match tail.find("!>") {
+                Some(end)
+                    if tail[..end].chars().all(|one| {
+                        one.is_ascii_uppercase() || one.is_ascii_digit() || "_(), :\"".contains(one)
+                    }) =>
+                {
+                    rest = &tail[end + 2..];
+                }
+                _ => {
+                    out.push_str("<!");
+                    rest = tail;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    type Sources = Vec<(String, String)>;
+
+    fn box_files(name: &str, text: &str) -> (Sources, Sources) {
+        let text = without_markers(text);
+        let mut files: Vec<(String, String)> = Vec::new();
+        let mut current: Option<(String, String)> = None;
+        for line in text.split_inclusive('\n') {
+            if let Some(rest) = line.trim_end().strip_prefix("// FILE:") {
+                if let Some(done) = current.take() {
+                    files.push(done);
+                }
+                let named = rest.split_whitespace().next().unwrap_or("Main.kt");
+                current = Some((named.replace('/', "__"), String::new()));
+            } else if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+            }
+        }
+        if let Some(done) = current.take() {
+            files.push(done);
+        }
+        if files.is_empty() {
+            files.push((name.to_string(), text));
+        }
+        let kotlin = files
+            .iter()
+            .filter(|(named, _)| named.ends_with(".kt"))
+            .cloned()
+            .collect();
+        let java = files
+            .iter()
+            .filter(|(named, _)| named.ends_with(".java"))
+            .cloned()
+            .collect();
+        (kotlin, java)
+    }
+
+    thread_local! {
+        static OMNI_BASE: std::cell::RefCell<Option<crate::compilers::kotlin::native::translate::ClassFiles>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn omni_answer(
+        made: &[(String, Vec<u8>)],
+        facade: &str,
+        library: &[u8],
+    ) -> Result<String, String> {
+        use crate::compilers::compiler_infrastructure::{
+            Datum, Finish, Interpreter, Layout, Limits, Object, StandardHost,
+        };
+        use crate::compilers::kotlin::native::{lowering, translate::ClassFiles};
+        let base = OMNI_BASE.with(|held| {
+            let mut held = held.borrow_mut();
+            if held.is_none() {
+                let mut fresh = ClassFiles::new();
+                lowering::add_runtime(&mut fresh).map_err(|problem| problem.code.clone())?;
+                fresh
+                    .add_jar(library)
+                    .map_err(|problem| problem.code.clone())?;
+                *held = Some(fresh);
+            }
+            held.clone().ok_or_else(|| "no base".to_string())
+        })?;
+        let mut files = base;
+        for (name, bytes) in made {
+            if name.ends_with(".class") && name != "BoxMain.class" {
+                files
+                    .add_class(bytes.clone())
+                    .map_err(|problem| problem.code.clone())?;
+            }
+        }
+        let descriptor = files
+            .get(facade)
+            .and_then(|class| {
+                class
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "box" && method.descriptor.starts_with("()"))
+                    .map(|method| method.descriptor.clone())
+            })
+            .ok_or_else(|| "no box function".to_string())?;
+        let roots = vec![(facade.to_string(), "box".to_string(), descriptor, true)];
+        let (module, entries, _) = lowering::lower(&mut files, &roots, Layout::Lp64, "box")
+            .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
+        let mut host = StandardHost;
+        let mut interpreter = Interpreter::new(&module, &mut host, Limits::default())
+            .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
+        let handle = match interpreter.call(entries[0], Vec::new()) {
+            Ok(Finish::Returned(Some(Datum::Reference(handle)))) => handle,
+            Ok(other) => return Err(format!("finishes with {other:?}")),
+            Err(problem) => return Err(format!("{} {:?}", problem.code, problem.context)),
+        };
+        let machine = interpreter.machine();
+        let Some(Object::Instance { fields, .. }) = machine.object(handle) else {
+            return Err("box answers something other than text".to_string());
+        };
+        for field in fields {
+            if let Datum::Reference(array) = field {
+                if let Some(items) = machine.items(*array) {
+                    let units: Vec<u16> = items
+                        .iter()
+                        .map(|item| item.as_integer().unwrap_or(0) as u16)
+                        .collect();
+                    return Ok(String::from_utf16_lossy(&units));
+                }
+            }
+        }
+        Err("box answers text without characters".to_string())
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_kotlin_omni() {
+        let Some((library_path, library)) = super::kotlin::standard_library() else {
+            panic!("the kotlin-omni suite needs a kotlin-stdlib");
+        };
+        let Some(java) = super::kotlin::find_java() else {
+            panic!("the kotlin-omni suite needs java");
+        };
+        let names = bundle_names("Test_13");
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the Kotlin box tests are present");
+        let tests: Vec<String> = tree
+            .paths_under(BOX_ROOT)
+            .into_iter()
+            .filter(|path| path.ends_with(".kt"))
+            .collect();
+        let folder = repository().join("Tests").join("kotlin-omni");
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        let outcomes = run_parallel(tests, &|path| {
+            let Some(bytes) = tree.file(path) else {
+                return Verdict::Failed("the test cannot be read".to_string());
+            };
+            let text = String::from_utf8_lossy(bytes).to_string();
+            if let Some(reason) = box_scope(&text) {
+                return Verdict::OutOfScope(reason.to_string());
+            }
+            let file = path.rsplit('/').next().unwrap_or("Main.kt");
+            let (mut kotlin, mut java_sources) = box_files(file, &text);
+            let Some((box_file, box_text)) = kotlin
+                .iter()
+                .find(|(_, body)| body.contains("fun box()"))
+                .cloned()
+            else {
+                return Verdict::OutOfScope("the test has no box function".to_string());
+            };
+            let facade = super::kotlin::facade_of(&box_file, &box_text);
+            if text.contains("kotlin.test") {
+                kotlin.push((
+                    "Test.kt".to_string(),
+                    super::kotlin::KOTLIN_TEST.to_string(),
+                ));
+            }
+            let runner = format!(
+                "public class BoxMain {{\n    public static void main(String[] args) {{\n        System.out.print(\"\\n=\" + {}.box());\n    }}\n}}\n",
+                facade.replace('/', ".")
+            );
+            java_sources.push(("BoxMain.java".to_string(), runner));
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::kotlin::compiled(&kotlin, &java_sources, &library)
+            }));
+            let Ok(Ok(made)) = made else {
+                return Verdict::OutOfScope("our compiler does not build it yet".to_string());
+            };
+            let here = folder.join(path[BOX_ROOT.len()..].replace('/', "_"));
+            super::kotlin::written(&here, &made);
+            let said = super::kotlin::answer(&java, &here, &library_path);
+            std::fs::remove_dir_all(&here).ok();
+            if said != "OK" {
+                return Verdict::OutOfScope("the JVM does not answer OK".to_string());
+            }
+            match omni_answer(&made, &facade, &library) {
+                Ok(answer) if answer == "OK" => Verdict::Passed,
+                Ok(answer) => Verdict::Failed(format!("Omni answers {answer}")),
+                Err(problem) => Verdict::Failed(problem),
+            }
+        });
+        let report = SuiteReport {
+            name: "kotlin-omni".to_string(),
+            outcomes,
+        };
+        report.publish();
     }
 
     #[test]

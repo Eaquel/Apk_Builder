@@ -40849,7 +40849,7 @@ pub mod native {
 
         pub const ROOT: &str = "java/lang/Object";
 
-        #[derive(Default)]
+        #[derive(Clone, Default)]
         pub struct ClassFiles {
             bytes: HashMap<String, Vec<u8>>,
             parsed: HashMap<String, Rc<jvm::Class>>,

@@ -41,6 +41,7 @@ TEST_DRIVER = TEST / "Builder_Test.py"
 BASELINE = TEST / "Builder_Test_Baseline.json"
 REFERENCE_SUITES = ["bundles", "filecheck"]
 ORACLE_SUITES = ["regex-oracle"]
+KOTLIN_SUITES = ["kotlin-omni"]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -943,6 +944,27 @@ def check_differential() -> str:
         raise Skip("grep or timeout is not on this machine")
     return hold_ground(run_suites(ORACLE_SUITES))
 
+def kotlin_standard_library() -> Path | None:
+    """The newest kotlin-stdlib this machine holds, the way the Core suite finds it."""
+    named = os.environ.get("APK_BUILDER_KOTLIN_STDLIB")
+    if named:
+        return Path(named) if Path(named).is_file() else None
+    base = Path.home() / ".gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib"
+    found = sorted(base.glob("*/*/kotlin-stdlib-*.jar")) if base.is_dir() else []
+    return found[-1] if found else None
+
+def check_kotlin_omni() -> str:
+    """Every Kotlin box test the JVM answers OK answers OK on Omni IR too."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo is not on this machine")
+    if not bundles_present():
+        raise Skip("the reference bundles are not in this checkout")
+    if shutil.which("java") is None and not os.environ.get("JAVA_HOME"):
+        raise Skip("java is not on this machine")
+    if kotlin_standard_library() is None:
+        raise Skip("no kotlin-stdlib is on this machine")
+    return hold_ground(run_suites(KOTLIN_SUITES))
+
 def check_determinism() -> str:
     """One worker or many, every suite reaches the same verdict on every test."""
     if shutil.which("cargo") is None:
@@ -975,6 +997,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "suites": ("every reference suite holds its ground", check_suites),
     "differential": ("our engines agree with independent ones", check_differential),
     "determinism": ("the same verdicts on one worker and many", check_determinism),
+    "kotlin-omni": ("Kotlin answers the same on Omni IR as on the JVM", check_kotlin_omni),
 }
 
 DEFAULT = [
