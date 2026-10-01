@@ -13,6 +13,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
         "EI008",
         "The program used more stack than it was allowed to.",
     ),
+    ("EI200", "The object file could not be read."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

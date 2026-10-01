@@ -66457,8 +66457,11 @@ block0:
             seen, ordered,
             "the catalogue is sorted and holds every code once"
         );
-        let source =
-            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs");
+        let source = [
+            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/Elf.rs"),
+        ]
+        .concat();
         let mut raised = BTreeSet::new();
         for (at, _) in source.match_indices("\"EI") {
             let code = &source[at + 1..at + 6];
@@ -66535,6 +66538,285 @@ block0:
                 names.insert((name, Rule::named(name).is_some())),
                 "{name} twice"
             );
+        }
+    }
+}
+
+mod object_files {
+    use crate::compilers::elf::*;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    pub(super) fn work_folder(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "builder-object-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("a work folder");
+        path
+    }
+
+    pub(super) fn tool_missing(tool: &str) -> bool {
+        let present = Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|done| done.status.success())
+            .unwrap_or(false);
+        if !present {
+            assert!(
+                std::env::var("APK_BUILDER_REQUIRE_LINKER_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_LINKER_CONFORMANCE is set but {tool} is not here"
+            );
+            eprintln!("object file conformance: {tool} is not available here");
+        }
+        !present
+    }
+
+    pub(super) fn assemble(folder: &Path, name: &str, triple: &str, source: &str) -> Vec<u8> {
+        let input = folder.join(format!("{name}.s"));
+        let output = folder.join(format!("{name}.o"));
+        std::fs::write(&input, source).expect("the source is written");
+        let done = Command::new("llvm-mc")
+            .args(["-filetype=obj", &format!("-triple={triple}"), "-o"])
+            .arg(&output)
+            .arg(&input)
+            .output()
+            .expect("llvm-mc runs");
+        assert!(
+            done.status.success(),
+            "llvm-mc {triple}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        std::fs::read(&output).expect("the object is read")
+    }
+
+    const SAMPLE_X86_64: &str = r#"
+        .section .text.hot,"axG",@progbits,hot_group,comdat
+        .globl hot
+        .type hot,@function
+hot:
+        movq value@GOTPCREL(%rip), %rax
+        call external@PLT
+        ret
+        .size hot, .-hot
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        leaq message(%rip), %rsi
+        movl $60, %eax
+        syscall
+        .data
+        .p2align 3
+message:
+        .asciz "hello"
+        .quad hot
+        .weak weak_one
+        .quad weak_one
+        .section .tdata,"awT",@progbits
+        .globl value
+value:
+        .long 7
+        .section .init_array,"aw",@init_array
+        .quad hot
+        .section .note.example,"a",@note
+        .long 4, 4, 1
+        .asciz "abc"
+        .long 42
+        .comm shared_block, 64, 16
+"#;
+
+    #[test]
+    fn hashes_match_the_published_functions() {
+        assert_eq!(gnu_hash(b""), 5381);
+        assert_eq!(gnu_hash(b"printf"), 0x156b_2bb8);
+        assert_eq!(system_five_hash(b"printf"), 0x077905a6);
+        assert_eq!(system_five_hash(b""), 0);
+        assert_eq!(gnu_hash_mask_words(Encoding::LITTLE_64, 0), 1);
+        assert_eq!(gnu_hash_mask_words(Encoding::LITTLE_64, 5), 1);
+        assert_eq!(gnu_hash_mask_words(Encoding::LITTLE_64, 6), 2);
+    }
+
+    #[test]
+    fn a_string_table_shares_repeated_names() {
+        let mut table = StringTable::new();
+        assert_eq!(table.add(""), 0);
+        let first = table.add("alpha");
+        assert_eq!(table.add("alpha"), first);
+        let second = table.add("beta");
+        assert_eq!(table.bytes(), b"\0alpha\0beta\0");
+        assert_eq!(string_at(table.bytes(), second).as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn what_is_not_an_elf_file_is_refused_with_its_reason() {
+        let refused = ElfFile::parse(b"not an object").unwrap_err();
+        assert_eq!(refused.code, "EI200");
+        assert!(refused
+            .context
+            .iter()
+            .any(|line| line == "Reason: not an ELF file"));
+        let mut truncated = assemble_or_skip_minimal();
+        if truncated.is_empty() {
+            return;
+        }
+        truncated.truncate(80);
+        assert_eq!(ElfFile::parse(&truncated).unwrap_err().code, "EI200");
+    }
+
+    fn assemble_or_skip_minimal() -> Vec<u8> {
+        if tool_missing("llvm-mc") {
+            return Vec::new();
+        }
+        let folder = work_folder("minimal");
+        let bytes = assemble(&folder, "minimal", "x86_64-linux-gnu", "ret\n");
+        std::fs::remove_dir_all(&folder).ok();
+        bytes
+    }
+
+    #[test]
+    fn objects_from_every_target_survive_a_round_trip_byte_for_byte() {
+        if tool_missing("llvm-mc") {
+            return;
+        }
+        let folder = work_folder("round-trip");
+        let samples = [
+            ("x86_64-linux-gnu", SAMPLE_X86_64.to_string()),
+            (
+                "i386-linux-gnu",
+                "        .text\n        .globl _start\n_start:\n        call helper\n        movl message, %eax\nhelper:\n        ret\n        .data\nmessage:\n        .long _start\n        .section .tbss,\"awT\",@nobits\n        .zero 8\n".to_string(),
+            ),
+            (
+                "aarch64-linux-gnu",
+                "        .text\n        .globl _start\n_start:\n        adrp x0, message\n        add x0, x0, :lo12:message\n        bl helper\n        ret\nhelper:\n        ret\n        .data\nmessage:\n        .xword _start\n".to_string(),
+            ),
+            (
+                "armv7a-linux-gnueabihf",
+                "        .syntax unified\n        .text\n        .globl _start\n        .type _start,%function\n_start:\n        .fnstart\n        movw r0, :lower16:message\n        movt r0, :upper16:message\n        bl helper\n        bx lr\n        .fnend\n        .thumb\n        .type helper,%function\nhelper:\n        bx lr\n        .data\nmessage:\n        .long _start\n".to_string(),
+            ),
+            (
+                "armebv7a-linux-gnueabi",
+                "        .text\n        .globl _start\n_start:\n        bl _start\n        .data\n        .long _start\n".to_string(),
+            ),
+        ];
+        for (index, (triple, source)) in samples.iter().enumerate() {
+            let bytes = assemble(&folder, &format!("sample{index}"), triple, source);
+            let parsed = ElfFile::parse(&bytes).unwrap_or_else(|problem| {
+                panic!("{triple}: {} {:?}", problem.message, problem.context)
+            });
+            assert_eq!(parsed.header.file_type, file_type::RELOCATABLE);
+            assert_eq!(
+                parsed.to_bytes(),
+                bytes,
+                "{triple} changed in the round trip"
+            );
+            let table = parsed.symbol_table().expect("a symbol table");
+            let symbols = parsed.symbols(table).expect("the symbols are read");
+            assert!(
+                symbols.iter().any(|symbol| symbol.name == "_start"),
+                "{triple}"
+            );
+            for (position, section) in parsed.sections.iter().enumerate() {
+                if section.kind == section_type::RELOCATIONS
+                    || section.kind == section_type::RELOCATIONS_WITH_ADDENDS
+                {
+                    let relocations = parsed.relocations(position).expect("relocations");
+                    let mut again = Vec::new();
+                    for relocation in &relocations {
+                        encode_relocation(
+                            parsed.encoding(),
+                            relocation,
+                            section.kind == section_type::RELOCATIONS_WITH_ADDENDS,
+                            &mut again,
+                        );
+                    }
+                    assert_eq!(again, section.data, "{triple} {}", section.name);
+                }
+                if section.kind == section_type::SYMBOL_TABLE {
+                    let mut again = Vec::new();
+                    for symbol in parsed.symbols(position).expect("symbols") {
+                        encode_symbol(parsed.encoding(), &symbol, &mut again);
+                    }
+                    assert_eq!(again, section.data, "{triple} symbols");
+                }
+                if section.kind == section_type::GROUP {
+                    let group = parsed.group(position).expect("a group");
+                    assert_eq!(group.flags, group_flag::COMDAT);
+                    assert!(!group.members.is_empty());
+                }
+                if section.kind == section_type::NOTE {
+                    let notes = parsed.notes(position).expect("notes");
+                    let mut again = Vec::new();
+                    for note in &notes {
+                        encode_note(parsed.encoding(), note, section.alignment, &mut again);
+                    }
+                    assert_eq!(again, section.data, "{triple} notes");
+                }
+            }
+            let mut relaid = parsed.clone();
+            relaid.assign_object_layout();
+            relaid.rebuild_section_names();
+            let rewritten = ElfFile::parse(&relaid.to_bytes()).expect("the relaid object reads");
+            assert_eq!(rewritten.sections.len(), parsed.sections.len());
+            let names = parsed.header.section_name_table as usize;
+            for (position, (before, after)) in
+                parsed.sections.iter().zip(&rewritten.sections).enumerate()
+            {
+                assert_eq!(before.name, after.name);
+                if position != names {
+                    assert_eq!(before.data, after.data);
+                }
+            }
+        }
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn programs_and_libraries_on_this_machine_survive_a_round_trip() {
+        let mut checked = 0;
+        for candidate in [
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            "/usr/bin/ls",
+            "/usr/bin/env",
+            "/lib64/ld-linux-x86-64.so.2",
+        ] {
+            let Ok(bytes) = std::fs::read(candidate) else {
+                continue;
+            };
+            let parsed = ElfFile::parse(&bytes)
+                .unwrap_or_else(|problem| panic!("{candidate}: {:?}", problem.context));
+            assert_eq!(
+                parsed.to_bytes(),
+                bytes,
+                "{candidate} changed in the round trip"
+            );
+            let dynamic = parsed.dynamic_entries().expect("dynamic entries");
+            if parsed.header.file_type == file_type::SHARED && !dynamic.is_empty() {
+                let mut again = Vec::new();
+                encode_dynamic(parsed.encoding(), &dynamic, &mut again);
+                let index = parsed.sections_of_kind(section_type::DYNAMIC)[0];
+                assert_eq!(
+                    &parsed.sections[index].data[..again.len()],
+                    again.as_slice()
+                );
+                if let Some(table) = parsed.dynamic_symbol_table() {
+                    let symbols = parsed.symbols(table).expect("dynamic symbols");
+                    let versions = parsed.version_symbols();
+                    assert_eq!(versions.len(), symbols.len(), "{candidate}");
+                    let definitions = parsed.version_definitions().expect("definitions");
+                    let needs = parsed.version_needs().expect("needs");
+                    assert!(!definitions.is_empty() || !needs.is_empty(), "{candidate}");
+                }
+            }
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("object file conformance: no system library is readable here");
         }
     }
 }

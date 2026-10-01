@@ -13,6 +13,8 @@ pub mod compilers {
     pub mod compiler_infrastructure_diagnostic;
     #[path = "Compilers/Cpp.rs"]
     pub mod cpp;
+    #[path = "Compilers/Compiler_Infrastructure/Elf.rs"]
+    pub mod elf;
     #[path = "Compilers/Java/Java.rs"]
     pub mod java;
     #[path = "Compilers/Java/Java_Diagnostic.rs"]
