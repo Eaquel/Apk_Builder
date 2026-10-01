@@ -27091,6 +27091,47 @@ mod java {
     }
 
     #[test]
+    fn text_longer_than_a_constant_can_hold_is_split_where_the_bytes_run_out() {
+        let pictures = "\\uD83C\\uDF09".repeat(12_000);
+        let source = format!(
+            "package com.my.app;\n\npublic final class Wide {{\n    static String text() {{\n        return \"{pictures}\" + \"!\";\n    }}\n\n    public static void main(String[] arguments) {{\n        String text = text();\n        System.out.print(text.length() + \" \" + text.codePointAt(23_998) + \" \" + text.charAt(24_000));\n    }}\n}}\n"
+        );
+        let (_, bytes) = compile_one(&source, &empty()).expect("the long text compiles");
+        let class = crate::jvm::read(&bytes).expect("the class file reads back");
+        let pieces: Vec<&String> = class
+            .constants
+            .iter()
+            .filter_map(|constant| match constant {
+                crate::jvm::Constant::Utf8(text) if text.starts_with('\u{1F309}') => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(pieces.len() >= 2, "the text is held in more than one piece");
+        for piece in &pieces {
+            assert!(crate::binary::modified_utf8::encode(piece).len() <= 65_535);
+        }
+        let joined: usize = pieces.iter().map(|piece| piece.chars().count()).sum();
+        assert_eq!(joined, 12_001);
+        let Some(java) = super::kotlin::find_java() else {
+            return;
+        };
+        let directory =
+            std::env::temp_dir().join(format!("builder-java-wide-{}", std::process::id()));
+        let file = directory.join("com/my/app/Wide.class");
+        std::fs::create_dir_all(file.parent().expect("a folder")).expect("a folder");
+        std::fs::write(&file, &bytes).expect("the class is written");
+        let done = std::process::Command::new(java)
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .arg("-cp")
+            .arg(&directory)
+            .arg("com.my.app.Wide")
+            .output()
+            .expect("java runs");
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(String::from_utf8_lossy(&done.stdout), "24001 127753 !");
+    }
+
+    #[test]
     fn a_less_than_comparison_treats_not_a_number_as_false() {
         let source = r#"
             package com.my.app;
@@ -41762,6 +41803,79 @@ false
         assert_eq!(
             String::from_utf8_lossy(interpreter.machine().stdout()),
             OMNI_PROGRAM_PRINTS
+        );
+    }
+
+    const OMNI_COPIES: &str = r####"package omni.copies
+
+import java.util.concurrent.ThreadLocalRandom
+
+open class Base(var label: String) : Cloneable {
+    public override fun clone(): Any = super.clone()
+}
+
+class Point(label: String, var x: Int, var y: Long) : Base(label)
+
+enum class Color { RED, GREEN }
+
+fun main() {
+    val first = Point("a", 3, 4L)
+    val second = first.clone() as Point
+    second.label = "b"
+    second.x = 30
+    println("${first.label} ${first.x} ${first.y} ${second.label} ${second.x} ${second.y} ${first === second}")
+    try {
+        Refuser().copy()
+        println("copied")
+    } catch (refused: CloneNotSupportedException) {
+        println("refused ${refused.message}")
+    }
+    val colors = Color.values()
+    println("${colors.joinToString()} ${colors !== Color.values()}")
+    val random = java.util.Random(42)
+    println("${random.nextInt()} ${random.nextInt(100)} ${random.nextLong()} ${random.nextBoolean()} ${random.nextDouble()} ${random.nextInt(5, 10)} ${random.nextLong(1000)} ${random.nextFloat()} ${random.nextGaussian()} ${random.nextInt(64)} ${random.nextLong(-5, 5)}")
+    println("${ThreadLocalRandom.current().nextInt(5, 6)} ${kotlin.random.Random.nextInt(7, 8)}")
+}
+"####;
+
+    const OMNI_REFUSER: &str = "package omni.copies;\n\npublic class Refuser {\n    public Object copy() throws CloneNotSupportedException {\n        return clone();\n    }\n}\n";
+
+    const OMNI_COPIES_PRINT: &str = "a 3 4 b 30 4 false
+refused omni.copies.Refuser
+RED, GREEN true
+-1170105035 63 -5843495416241995736 false 0.9420735430282128 8 717 0.9033722 -0.8890108504574524 44 1
+5 7
+";
+
+    #[test]
+    fn objects_copy_themselves_and_random_numbers_follow_the_jdk_on_omni_ir() {
+        use crate::compilers::compiler_infrastructure::{
+            Datum, Finish, Interpreter, Limits, StandardHost,
+        };
+        let Some((_, library)) = standard_library() else {
+            eprintln!("kotlin omni: no kotlin-stdlib to compile against");
+            return;
+        };
+        let kotlin = vec![("Copies.kt".to_string(), OMNI_COPIES.to_string())];
+        let java = vec![("Refuser.java".to_string(), OMNI_REFUSER.to_string())];
+        let options = native_options(&["-target", "linux_x64", "-o", "copies"]).expect("parses");
+        let lowered = native::lower_to_omni(&kotlin, &java, &options, vec![library])
+            .expect("the program lowers to Omni IR");
+        lowered
+            .module
+            .verify()
+            .expect("the module keeps every rule");
+        let mut host = StandardHost;
+        let mut interpreter = Interpreter::new(&lowered.module, &mut host, Limits::default())
+            .expect("the module loads");
+        let entry = lowered.entry.expect("a program has an entry");
+        let finish = interpreter
+            .call(entry, vec![Datum::Reference(0)])
+            .expect("main finishes");
+        assert_eq!(finish, Finish::Returned(None));
+        assert_eq!(
+            String::from_utf8_lossy(interpreter.machine().stdout()),
+            OMNI_COPIES_PRINT
         );
     }
 

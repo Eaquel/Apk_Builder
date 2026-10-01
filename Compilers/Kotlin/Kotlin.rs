@@ -43227,9 +43227,7 @@ public class Object {
         return getClass().getName() + "@" + Integer.toHexString(hashCode());
     }
 
-    protected Object clone() throws CloneNotSupportedException {
-        throw new CloneNotSupportedException(getClass().getName());
-    }
+    protected native Object clone() throws CloneNotSupportedException;
 
     protected void finalize() throws Throwable {
     }
@@ -51329,6 +51327,245 @@ public interface Queue<E> extends Collection<E> {
 "####,
             ),
             (
+                "java/util/Random.java",
+                r####"package java.util;
+
+public class Random implements java.io.Serializable {
+    private static final long MULTIPLIER = 0x5DEECE66DL;
+    private static final long ADDEND = 0xBL;
+    private static final long MASK = (1L << 48) - 1;
+    private static final double DOUBLE_UNIT = 1.0 / (1L << 53);
+    private static final float FLOAT_UNIT = 1.0f / (1 << 24);
+    private static long seedUniquifier = 8682522807148012L;
+
+    private long seed;
+    private double nextNextGaussian;
+    private boolean haveNextNextGaussian;
+
+    public Random() {
+        this(seedUniquifier() ^ System.nanoTime());
+    }
+
+    public Random(long seed) {
+        this.seed = initialScramble(seed);
+    }
+
+    private static long seedUniquifier() {
+        seedUniquifier = seedUniquifier * 1181783497276652981L;
+        return seedUniquifier;
+    }
+
+    private static long initialScramble(long seed) {
+        return (seed ^ MULTIPLIER) & MASK;
+    }
+
+    public void setSeed(long seed) {
+        this.seed = initialScramble(seed);
+        haveNextNextGaussian = false;
+    }
+
+    protected int next(int bits) {
+        seed = (seed * MULTIPLIER + ADDEND) & MASK;
+        return (int) (seed >>> (48 - bits));
+    }
+
+    public void nextBytes(byte[] bytes) {
+        int at = 0;
+        int length = bytes.length;
+        while (at < length) {
+            int random = nextInt();
+            int count = Math.min(length - at, 4);
+            while (count-- > 0) {
+                bytes[at++] = (byte) random;
+                random >>= 8;
+            }
+        }
+    }
+
+    public int nextInt() {
+        return next(32);
+    }
+
+    public int nextInt(int bound) {
+        if (bound <= 0) {
+            throw new IllegalArgumentException("bound must be positive");
+        }
+        int random = next(31);
+        int mask = bound - 1;
+        if ((bound & mask) == 0) {
+            return (int) ((bound * (long) random) >> 31);
+        }
+        int unsigned = random;
+        while (unsigned - (random = unsigned % bound) + mask < 0) {
+            unsigned = next(31);
+        }
+        return random;
+    }
+
+    public int nextInt(int origin, int bound) {
+        if (origin >= bound) {
+            throw new IllegalArgumentException("bound must be greater than origin");
+        }
+        int random = nextInt();
+        int range = bound - origin;
+        int mask = range - 1;
+        if ((range & mask) == 0) {
+            return (random & mask) + origin;
+        }
+        if (range > 0) {
+            int unsigned = random >>> 1;
+            while (unsigned + mask - (random = unsigned % range) < 0) {
+                unsigned = nextInt() >>> 1;
+            }
+            return random + origin;
+        }
+        while (random < origin || random >= bound) {
+            random = nextInt();
+        }
+        return random;
+    }
+
+    public long nextLong() {
+        return ((long) next(32) << 32) + next(32);
+    }
+
+    public long nextLong(long bound) {
+        if (bound <= 0) {
+            throw new IllegalArgumentException("bound must be positive");
+        }
+        long mask = bound - 1;
+        long random = nextLong();
+        if ((bound & mask) == 0L) {
+            return random & mask;
+        }
+        long unsigned = random >>> 1;
+        while (unsigned + mask - (random = unsigned % bound) < 0L) {
+            unsigned = nextLong() >>> 1;
+        }
+        return random;
+    }
+
+    public long nextLong(long origin, long bound) {
+        if (origin >= bound) {
+            throw new IllegalArgumentException("bound must be greater than origin");
+        }
+        long random = nextLong();
+        long range = bound - origin;
+        long mask = range - 1;
+        if ((range & mask) == 0L) {
+            return (random & mask) + origin;
+        }
+        if (range > 0L) {
+            long unsigned = random >>> 1;
+            while (unsigned + mask - (random = unsigned % range) < 0L) {
+                unsigned = nextLong() >>> 1;
+            }
+            return random + origin;
+        }
+        while (random < origin || random >= bound) {
+            random = nextLong();
+        }
+        return random;
+    }
+
+    public boolean nextBoolean() {
+        return next(1) != 0;
+    }
+
+    public float nextFloat() {
+        return next(24) * FLOAT_UNIT;
+    }
+
+    public float nextFloat(float bound) {
+        if (!(bound > 0.0f && bound < Float.POSITIVE_INFINITY)) {
+            throw new IllegalArgumentException("bound must be finite and positive");
+        }
+        float random = nextFloat() * bound;
+        if (random >= bound) {
+            random = below(bound);
+        }
+        return random;
+    }
+
+    public float nextFloat(float origin, float bound) {
+        if (!(origin < bound && bound - origin < Float.POSITIVE_INFINITY)) {
+            throw new IllegalArgumentException("bound must be greater than origin");
+        }
+        float random = nextFloat() * (bound - origin) + origin;
+        if (random >= bound) {
+            random = below(bound);
+        }
+        return random;
+    }
+
+    public double nextDouble() {
+        return (((long) next(26) << 27) + next(27)) * DOUBLE_UNIT;
+    }
+
+    public double nextDouble(double bound) {
+        if (!(bound > 0.0 && bound < Double.POSITIVE_INFINITY)) {
+            throw new IllegalArgumentException("bound must be finite and positive");
+        }
+        double random = nextDouble() * bound;
+        if (random >= bound) {
+            random = below(bound);
+        }
+        return random;
+    }
+
+    public double nextDouble(double origin, double bound) {
+        if (!(origin < bound && bound - origin < Double.POSITIVE_INFINITY)) {
+            throw new IllegalArgumentException("bound must be greater than origin");
+        }
+        double random = nextDouble() * (bound - origin) + origin;
+        if (random >= bound) {
+            random = below(bound);
+        }
+        return random;
+    }
+
+    public double nextGaussian() {
+        if (haveNextNextGaussian) {
+            haveNextNextGaussian = false;
+            return nextNextGaussian;
+        }
+        double first;
+        double second;
+        double radius;
+        do {
+            first = 2 * nextDouble() - 1;
+            second = 2 * nextDouble() - 1;
+            radius = first * first + second * second;
+        } while (radius >= 1 || radius == 0);
+        double multiplier = Math.sqrt(-2 * Math.log(radius) / radius);
+        nextNextGaussian = second * multiplier;
+        haveNextNextGaussian = true;
+        return first * multiplier;
+    }
+
+    static float below(float value) {
+        if (value > 0.0f) {
+            return Float.intBitsToFloat(Float.floatToRawIntBits(value) - 1);
+        }
+        if (value < 0.0f) {
+            return Float.intBitsToFloat(Float.floatToRawIntBits(value) + 1);
+        }
+        return -Float.MIN_VALUE;
+    }
+
+    static double below(double value) {
+        if (value > 0.0) {
+            return Double.longBitsToDouble(Double.doubleToRawLongBits(value) - 1L);
+        }
+        if (value < 0.0) {
+            return Double.longBitsToDouble(Double.doubleToRawLongBits(value) + 1L);
+        }
+        return -Double.MIN_VALUE;
+    }
+}
+"####,
+            ),
+            (
                 "java/util/RandomAccess.java",
                 r####"package java.util;
 
@@ -51434,6 +51671,80 @@ public interface Set<E> extends Collection<E> {
             return (Set<E>) items;
         }
         return (Set<E>) ImmutableCollections.setOf(items.toArray(), false);
+    }
+}
+"####,
+            ),
+            (
+                "java/util/concurrent/ThreadLocalRandom.java",
+                r####"package java.util.concurrent;
+
+import java.util.Random;
+
+public class ThreadLocalRandom extends Random {
+    private static final long GAMMA = 0x9e3779b97f4a7c15L;
+    private static final double DOUBLE_UNIT = 1.0 / (1L << 53);
+    private static final float FLOAT_UNIT = 1.0f / (1 << 24);
+    private static ThreadLocalRandom instance;
+
+    private long state;
+
+    private ThreadLocalRandom() {
+        super(0L);
+        state = mix64(System.currentTimeMillis()) ^ mix64(System.nanoTime());
+    }
+
+    public static ThreadLocalRandom current() {
+        if (instance == null) {
+            instance = new ThreadLocalRandom();
+        }
+        return instance;
+    }
+
+    private static long mix64(long value) {
+        value = (value ^ (value >>> 33)) * 0xff51afd7ed558ccdL;
+        value = (value ^ (value >>> 33)) * 0xc4ceb9fe1a85ec53L;
+        return value ^ (value >>> 33);
+    }
+
+    private static int mix32(long value) {
+        value = (value ^ (value >>> 33)) * 0x62a9d9ed799705f5L;
+        return (int) (((value ^ (value >>> 28)) * 0xcb24d0a5c88c35b3L) >>> 32);
+    }
+
+    private long nextSeed() {
+        state = state + GAMMA;
+        return state;
+    }
+
+    public void setSeed(long seed) {
+        if (instance != null) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    protected int next(int bits) {
+        return nextInt() >>> (32 - bits);
+    }
+
+    public int nextInt() {
+        return mix32(nextSeed());
+    }
+
+    public long nextLong() {
+        return mix64(nextSeed());
+    }
+
+    public boolean nextBoolean() {
+        return nextInt() < 0;
+    }
+
+    public float nextFloat() {
+        return (nextInt() >>> 8) * FLOAT_UNIT;
+    }
+
+    public double nextDouble() {
+        return (nextLong() >>> 11) * DOUBLE_UNIT;
     }
 }
 "####,
@@ -54561,6 +54872,10 @@ public final class Faults {
         return new ClassCastException("class " + value.getClass().getName() + " cannot be cast to class " + target);
     }
 
+    public static CloneNotSupportedException cloneRefused(Object value) {
+        return new CloneNotSupportedException(value.getClass().getName());
+    }
+
     public static NegativeArraySizeException negativeSize(int length) {
         return new NegativeArraySizeException(String.valueOf(length));
     }
@@ -54710,6 +55025,7 @@ public final class Numbers {
             matches!(
                 (owner, name, descriptor),
                 (ROOT, "getClass", "()Ljava/lang/Class;")
+                    | (ROOT, "clone", "()Ljava/lang/Object;")
                     | (
                         "omni/runtime/Arrays",
                         "newInstance",
@@ -55771,6 +56087,141 @@ public final class Numbers {
                 })
             }
 
+            fn clone_body(&mut self, label: &str) -> Result<Function, Diagnostic> {
+                type Copied = (usize, usize, String, Vec<(usize, u32, Type)>);
+                let cloneable = self
+                    .classes
+                    .iter()
+                    .position(|held| held.name == "java/lang/Cloneable");
+                let mut candidates: Vec<Copied> = Vec::new();
+                for at in 0..self.classes.len() {
+                    let held = &self.classes[at];
+                    if !held.instantiated
+                        || held.interface
+                        || held.abstract_class
+                        || held.external
+                        || held.element.is_some()
+                    {
+                        continue;
+                    }
+                    let Some(cloneable) = cloneable else {
+                        continue;
+                    };
+                    if !self.interface_closure(at).contains(&cloneable) {
+                        continue;
+                    }
+                    let mut chain = Vec::new();
+                    let mut current = Some(at);
+                    while let Some(one) = current {
+                        chain.push(one);
+                        current = self.classes[one].parent;
+                    }
+                    chain.reverse();
+                    let mut fields = Vec::new();
+                    let mut base = 0usize;
+                    for one in chain {
+                        for (position, (_, descriptor)) in
+                            self.classes[one].fields.iter().enumerate()
+                        {
+                            fields.push((one, (base + position) as u32, storage(descriptor)));
+                        }
+                        base += self.classes[one].fields.len();
+                    }
+                    candidates.push((self.depth(at), at, self.classes[at].name.clone(), fields));
+                }
+                candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.2.cmp(&right.2)));
+                type Cloned = ((usize, usize, usize), usize, String, FunctionId);
+                let mut arrays: Vec<Cloned> = Vec::new();
+                for at in 0..self.classes.len() {
+                    if !self.classes[at].instantiated || self.classes[at].element.is_none() {
+                        continue;
+                    }
+                    let name = self.classes[at].name.clone();
+                    let dimensions = name.chars().take_while(|one| *one == '[').count();
+                    let element = name
+                        .trim_start_matches('[')
+                        .strip_prefix('L')
+                        .and_then(|rest| rest.strip_suffix(';'))
+                        .and_then(|named| self.class_index.get(named).copied());
+                    let rank = match element {
+                        None => (dimensions, 3, 0),
+                        Some(found) if self.classes[found].name == ROOT => (dimensions, 0, 0),
+                        Some(found) if self.classes[found].interface => {
+                            (dimensions, 1, self.interface_closure(found).len())
+                        }
+                        Some(found) => (dimensions, 2, self.depth(found)),
+                    };
+                    let cloner = self.array_clone(at)?;
+                    arrays.push((rank, at, name, cloner));
+                }
+                arrays.sort_by(|left, right| right.0.cmp(&left.0).then(left.2.cmp(&right.2)));
+                let signature = Signature::new(vec![Type::REFERENCE], Some(Type::REFERENCE));
+                self.build_function(label, signature, move |body, values| {
+                    let this = values[0];
+                    for (_, class, _, cloner) in arrays {
+                        let holds = body
+                            .builder
+                            .push(
+                                Operation::InstanceOf(ClassId(class as u32)),
+                                vec![this],
+                                Some(Type::BOOL),
+                            )
+                            .unwrap_or(this);
+                        let found = body.builder.create_block();
+                        let next = body.builder.create_block();
+                        body.builder.branch(holds, found, next);
+                        body.builder.switch_to(found);
+                        let copy = body.call(cloner, vec![this]);
+                        body.builder.ret(copy);
+                        body.builder.switch_to(next);
+                    }
+                    for (_, class, _, fields) in candidates {
+                        let holds = body
+                            .builder
+                            .push(
+                                Operation::InstanceOf(ClassId(class as u32)),
+                                vec![this],
+                                Some(Type::BOOL),
+                            )
+                            .unwrap_or(this);
+                        let found = body.builder.create_block();
+                        let next = body.builder.create_block();
+                        body.builder.branch(holds, found, next);
+                        body.builder.switch_to(found);
+                        let copy = body
+                            .builder
+                            .push(
+                                Operation::Allocate(ClassId(class as u32)),
+                                Vec::new(),
+                                Some(Type::REFERENCE),
+                            )
+                            .unwrap_or(this);
+                        for (holder, index, ty) in fields {
+                            let value = body
+                                .builder
+                                .push(
+                                    Operation::LoadField(ClassId(holder as u32), index),
+                                    vec![this],
+                                    Some(ty),
+                                )
+                                .unwrap_or(this);
+                            body.builder.push(
+                                Operation::StoreField(ClassId(holder as u32), index),
+                                vec![copy, value],
+                                None,
+                            );
+                        }
+                        body.builder.ret(Some(copy));
+                        body.builder.switch_to(next);
+                    }
+                    body.fault(
+                        "cloneRefused",
+                        "(Ljava/lang/Object;)Ljava/lang/CloneNotSupportedException;",
+                        vec![this],
+                    )
+                })
+            }
+
             fn new_array_body(&mut self, label: &str) -> Result<Function, Diagnostic> {
                 let fallback = self.declare("[Ljava/lang/Object;")?;
                 self.instantiate(fallback);
@@ -56133,6 +56584,7 @@ public final class Numbers {
                         let native = self.methods[method].name.clone();
                         let made = match native.as_str() {
                             "getClass" => self.class_of_body(&label)?,
+                            "clone" => self.clone_body(&label)?,
                             "newInstance" => self.new_array_body(&label)?,
                             _ => self.class_table_body(&label, &native)?,
                         };

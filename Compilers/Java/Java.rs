@@ -10830,17 +10830,26 @@ public class OptionalDouble {
     public native double orElse(double fallback);
 }
 
-public class Random {
+public class Random implements java.io.Serializable {
     public native Random();
     public native Random(long seed);
+    public native void setSeed(long seed);
+    protected native int next(int bits);
+    public native void nextBytes(byte[] bytes);
     public native int nextInt();
     public native int nextInt(int bound);
+    public native int nextInt(int origin, int bound);
     public native long nextLong();
-    public native double nextDouble();
-    public native float nextFloat();
+    public native long nextLong(long bound);
+    public native long nextLong(long origin, long bound);
     public native boolean nextBoolean();
+    public native float nextFloat();
+    public native float nextFloat(float bound);
+    public native float nextFloat(float origin, float bound);
+    public native double nextDouble();
+    public native double nextDouble(double bound);
+    public native double nextDouble(double origin, double bound);
     public native double nextGaussian();
-    public native void setSeed(long seed);
     public native java.util.stream.IntStream ints(long count);
 }
 
@@ -12098,12 +12107,27 @@ impl Emitter<'_> {
 
     fn push_string(&mut self, text: &str) {
         if crate::binary::modified_utf8::encode(text).len() > 65_535 {
-            let characters: Vec<char> = text.chars().collect();
-            let mut first = true;
-            for piece in characters.chunks(16_000) {
-                let piece: String = piece.iter().collect();
-                self.push_string(&piece);
-                if !first {
+            let mut pieces: Vec<String> = Vec::new();
+            let mut piece = String::new();
+            let mut size = 0usize;
+            for character in text.chars() {
+                let width = match u32::from(character) {
+                    0x01..=0x7f => 1,
+                    0 | 0x80..=0x7ff => 2,
+                    0x800..=0xffff => 3,
+                    _ => 6,
+                };
+                if size + width > 65_535 {
+                    pieces.push(std::mem::take(&mut piece));
+                    size = 0;
+                }
+                piece.push(character);
+                size += width;
+            }
+            pieces.push(piece);
+            for (at, piece) in pieces.iter().enumerate() {
+                self.push_string(piece);
+                if at > 0 {
                     let concat = self.pool.method(
                         "java/lang/String",
                         "concat",
@@ -12114,7 +12138,6 @@ impl Emitter<'_> {
                     self.pops(2);
                     self.pushes(&Type::Object("java/lang/String".to_string(), Vec::new()));
                 }
-                first = false;
             }
             return;
         }
