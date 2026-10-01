@@ -66457,8 +66457,11 @@ block0:
             seen, ordered,
             "the catalogue is sorted and holds every code once"
         );
-        let source =
-            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs");
+        let source = [
+            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/TableGen.rs"),
+        ]
+        .concat();
         let mut raised = BTreeSet::new();
         for (at, _) in source.match_indices("\"EI") {
             let code = &source[at + 1..at + 6];
@@ -66535,6 +66538,281 @@ block0:
                 names.insert((name, Rule::named(name).is_some())),
                 "{name} twice"
             );
+        }
+    }
+}
+
+mod table_gen {
+    use super::reference::*;
+    use crate::compilers::table_gen::*;
+    use std::collections::BTreeMap;
+
+    pub(super) const LLVM_ROOT: &str = "llvm-project/llvm/";
+
+    pub(super) const TARGETS: &[&str] = &["X86", "ARM", "AArch64"];
+
+    pub(super) fn llvm_sources() -> BTreeMap<String, String> {
+        let tree = Tree::of(&["Beta_01_LLVM_Core"]).expect("the LLVM core bundle is present");
+        let mut files = BTreeMap::new();
+        let mut prefixes = vec![format!("{LLVM_ROOT}include/llvm/")];
+        for target in TARGETS {
+            prefixes.push(format!("{LLVM_ROOT}lib/Target/{target}/"));
+        }
+        for prefix in &prefixes {
+            for path in tree.paths_under(prefix) {
+                if !path.ends_with(".td") {
+                    continue;
+                }
+                if let Some(bytes) = tree.file(&path) {
+                    files.insert(
+                        path[LLVM_ROOT.len()..].to_string(),
+                        String::from_utf8_lossy(bytes).into_owned(),
+                    );
+                }
+            }
+        }
+        files
+    }
+
+    pub(super) fn read_target<'a>(
+        files: &'a BTreeMap<String, String>,
+        target: &str,
+    ) -> Reading<'a> {
+        read_records(
+            files,
+            &format!("lib/Target/{target}/{target}.td"),
+            &["include".to_string(), format!("lib/Target/{target}")],
+            &[],
+            false,
+        )
+    }
+
+    const FEATURE_SOURCE: &str = r##"def op;
+class Base<int width, string tag = "plain"> {
+  bits<8> Encoding = !cast<bits<8>>(width);
+  string Tag = tag # "_" # width;
+  list<int> Squares = !foreach(x, !range(width), !mul(x, x));
+  int Total = !foldl(0, Squares, sum, x, !add(sum, x));
+  dag Shape = (op $a, 1:$b);
+}
+multiclass Pair<int n> {
+  def _low : Base<n>;
+  def _high : Base<!add(n, 1), "high">;
+}
+defm Item : Pair<3>;
+defset list<Base> All = {
+  foreach i = 0...2 in
+    def Each#i : Base<i>;
+}
+defvar Names = !foreach(r, All, !cast<string>(r));
+def Summary {
+  list<string> Seen = Names;
+  string Joined = !interleave(Names, ",");
+  int Picked = !cond(!eq(!size(Names), 3) : 1, true : 0);
+  string Kind = !switch(2, 1 : "one", 2 : "two", "many");
+  bits<4> Mixed = { 1, 0, ?, 1 };
+  list<int> Slice = !listconcat([1, 2, 3, 4][1...2], [9]);
+  string Upper = !toupper("abc");
+  bit Matched = !match("vaddps", "^v.*ps$");
+}
+let Tag = "overridden" in
+def Lettered : Base<5>;
+if !eq(1, 1) then {
+  def Chosen : Base<7>;
+}
+def : Base<9>;
+"##;
+
+    const FEATURE_RECORDS: &str = r##"------------- Classes -----------------
+class Base<int Base:width = ?, string Base:tag = "plain"> {
+  bits<8> Encoding = { !cast<bits<8>>(Base:width){7}, !cast<bits<8>>(Base:width){6}, !cast<bits<8>>(Base:width){5}, !cast<bits<8>>(Base:width){4}, !cast<bits<8>>(Base:width){3}, !cast<bits<8>>(Base:width){2}, !cast<bits<8>>(Base:width){1}, !cast<bits<8>>(Base:width){0} };
+  string Tag = !strconcat(Base:tag, !strconcat("_", !cast<string>(Base:width)));
+  list<int> Squares = !foreach(x, !range(0, Base:width, 1), !mul(x, x));
+  int Total = !foldl(0, Squares, sum, x, !add(sum, x));
+  dag Shape = (op ?:$a, 1:$b);
+}
+------------- Defs -----------------
+def Chosen {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 1, 1, 1 };
+  string Tag = "plain_7";
+  list<int> Squares = [0, 1, 4, 9, 16, 25, 36];
+  int Total = 91;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Each0 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  string Tag = "plain_0";
+  list<int> Squares = [];
+  int Total = 0;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Each1 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 0, 1 };
+  string Tag = "plain_1";
+  list<int> Squares = [0];
+  int Total = 0;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Each2 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 1, 0 };
+  string Tag = "plain_2";
+  list<int> Squares = [0, 1];
+  int Total = 1;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Item_high {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 1, 0, 0 };
+  string Tag = "high_4";
+  list<int> Squares = [0, 1, 4, 9];
+  int Total = 14;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Item_low {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 1, 1 };
+  string Tag = "plain_3";
+  list<int> Squares = [0, 1, 4];
+  int Total = 5;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Lettered {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 1, 0, 1 };
+  string Tag = "overridden";
+  list<int> Squares = [0, 1, 4, 9, 16];
+  int Total = 30;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Summary {
+  list<string> Seen = ["Each0", "Each1", "Each2"];
+  string Joined = "Each0,Each1,Each2";
+  int Picked = 1;
+  string Kind = "two";
+  bits<4> Mixed = { 1, 0, ?, 1 };
+  list<int> Slice = [2, 3, 9];
+  string Upper = "ABC";
+  bit Matched = 1;
+}
+def anonymous_0 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 1, 0, 0, 1 };
+  string Tag = "plain_9";
+  list<int> Squares = [0, 1, 4, 9, 16, 25, 36, 49, 64];
+  int Total = 204;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def op {
+}
+"##;
+
+    pub(super) const LLVM_24_RECORD_DIGESTS: &[(&str, &str)] = &[
+        (
+            "X86",
+            "e59f22e2ccdfe9c36e22e9f35a130f9b673d45b3fbb2c23ddec36022a267dede",
+        ),
+        (
+            "ARM",
+            "2acad9781fc4036c6c4d776d6cb771f88c7fafd6c0d4bfd50d810e70eaa7035f",
+        ),
+        (
+            "AArch64",
+            "673f7ceb06264b7a9e714d9f8df79ae2c2786dd44637b25fd9111eccb2b631e6",
+        ),
+    ];
+
+    fn single_file(text: &str) -> BTreeMap<String, String> {
+        let mut files = BTreeMap::new();
+        files.insert("main.td".to_string(), text.to_string());
+        files
+    }
+
+    #[test]
+    fn the_language_prints_the_records_llvm_prints() {
+        let files = single_file(FEATURE_SOURCE);
+        let reading = read_records(&files, "main.td", &[], &[], false);
+        assert!(reading.succeeded, "{}", reading.render_messages());
+        assert_eq!(reading.keeper.print_records(), FEATURE_RECORDS);
+    }
+
+    #[test]
+    fn a_broken_source_says_where_and_why_the_way_llvm_does() {
+        let files = single_file("class A {\n  dag Shape = (op $a);\n}\n");
+        let reading = read_records(&files, "main.td", &[], &[], false);
+        assert!(!reading.succeeded);
+        let rendered = reading.render_messages();
+        assert!(
+            rendered.starts_with("main.td:2:16: error: Variable not defined: 'op'\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("main.td:2:19: error: expected ';' after declaration"),
+            "{rendered}"
+        );
+        let diagnostic = reading.diagnostic();
+        assert_eq!(diagnostic.code, "EI101");
+        assert!(diagnostic.context.contains(&"Line: 2".to_string()));
+        assert!(diagnostic
+            .context
+            .contains(&"Reason: Variable not defined: 'op'".to_string()));
+    }
+
+    #[test]
+    fn the_preprocessor_and_includes_follow_the_macros_given() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "main.td".to_string(),
+            "#ifdef WIDE\ninclude \"wide.td\"\n#else\ndef Narrow;\n#endif\n".to_string(),
+        );
+        files.insert("inc/wide.td".to_string(), "def Wide;\n".to_string());
+        let wide = read_records(
+            &files,
+            "main.td",
+            &["inc".to_string()],
+            &["WIDE".to_string()],
+            false,
+        );
+        assert!(wide.succeeded, "{}", wide.render_messages());
+        assert!(wide.keeper.find_definition("Wide").is_some());
+        assert!(wide.dependencies.contains("inc/wide.td"));
+        let narrow = read_records(&files, "main.td", &["inc".to_string()], &[], false);
+        assert!(narrow.keeper.find_definition("Narrow").is_some());
+        assert!(narrow.keeper.find_definition("Wide").is_none());
+    }
+
+    #[test]
+    fn every_target_reads_to_the_records_llvm_24_prints() {
+        let files = llvm_sources();
+        for (target, expected) in LLVM_24_RECORD_DIGESTS {
+            let reading = read_target(&files, target);
+            assert!(reading.succeeded, "{target}: {}", reading.render_messages());
+            let printed = reading.keeper.print_records();
+            assert_eq!(
+                crate::hash::sha256(printed.as_bytes()).to_hex(),
+                *expected,
+                "{target} prints records that differ from llvm-tblgen 24"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_target_records() {
+        let files = llvm_sources();
+        let folder = repository().join("Tests").join("tablegen");
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        for target in TARGETS {
+            let started = std::time::Instant::now();
+            let reading = read_target(&files, target);
+            println!(
+                "{target}: succeeded={} errors={} in {:?}",
+                reading.succeeded,
+                reading.keeper.errors,
+                started.elapsed()
+            );
+            let messages = reading.render_messages();
+            print!("{}", &messages[..messages.len().min(4000)]);
+            std::fs::write(
+                folder.join(format!("{target}.records")),
+                reading.keeper.print_records(),
+            )
+            .expect("the records are written");
         }
     }
 }

@@ -27,6 +27,8 @@ pub mod compilers {
     pub mod kotlin_fixer;
     #[path = "Compilers/Rust.rs"]
     pub mod rust;
+    #[path = "Compilers/Compiler_Infrastructure/TableGen.rs"]
+    pub mod table_gen;
 }
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
