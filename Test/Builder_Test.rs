@@ -41226,6 +41226,28 @@ mod kotlin {
     }
 
     #[test]
+    fn delegation_forwards_only_what_an_instance_can_answer() {
+        let Some((_, library)) = standard_library() else {
+            eprintln!("kotlin delegation: no kotlin-stdlib to compile against");
+            return;
+        };
+        let source = "class Thing(delegate: CharSequence) : CharSequence by delegate\n\nfun box(): String = if (Thing(\"hello\").length == 5) \"OK\" else \"Fail\"\n";
+        let kotlin = vec![("Thing.kt".to_string(), source.to_string())];
+        let made = compiled(&kotlin, &[], &library).expect("the delegation compiles");
+        let thing = made
+            .iter()
+            .find(|(name, _)| name == "Thing.class")
+            .map(|(_, bytes)| crate::jvm::read(bytes).expect("Thing reads back"))
+            .expect("Thing is made");
+        let names: Vec<&str> = thing.methods.iter().map(|one| one.name.as_str()).collect();
+        assert!(names.contains(&"length"), "{names:?}");
+        assert!(
+            !names.contains(&"compare"),
+            "a static interface method is not forwarded: {names:?}"
+        );
+    }
+
+    #[test]
     fn kotlin_and_java_reach_each_other_in_one_build() {
         let Some((library_path, library)) = standard_library() else {
             eprintln!("kotlin and java: no kotlin-stdlib to compile against");
@@ -41566,6 +41588,14 @@ fun main() {
     println(listOf(3, 1, 2).sortedDescending().map { it * 2 })
     println("Kotlin".lowercase().uppercase().reversed())
     println(setOf(4, 2, 4, 8).size)
+    println(Square(1.0)::class.simpleName + " " + Token.Number(1).javaClass.simpleName)
+    println(java.util.Map.of("k", 1))
+    println("a-b--c".split(Regex("-+")))
+    val local = object : Shape {
+        override val area: Double
+            get() = 2.0
+    }
+    println(local.javaClass.simpleName.isEmpty())
 }
 "####;
 
@@ -41586,6 +41616,10 @@ a#b#c#
 [6, 4, 2]
 NILTOK
 3
+Square Number
+{k=1}
+[a, b, c]
+false
 ";
 
     #[test]

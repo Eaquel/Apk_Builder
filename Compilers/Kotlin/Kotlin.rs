@@ -24688,10 +24688,12 @@ pub mod lower {
                 };
                 let mut members: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
                 for function in &held.functions {
-                    if (function.static_
-                        || !(function.abstract_
-                            || held.is_interface() && function.source.is_none() && !function.java)
-                            && !(held.is_interface() && function.java && function.abstract_))
+                    if function.static_ {
+                        continue;
+                    }
+                    if !(function.abstract_
+                        || held.is_interface() && function.source.is_none() && !function.java)
+                        && !(held.is_interface() && function.java && function.abstract_)
                         && !(held.is_interface() && function.abstract_)
                     {
                         continue;
@@ -44493,6 +44495,21 @@ public interface CharSequence {
     default boolean isEmpty() {
         return length() == 0;
     }
+
+    static int compare(CharSequence left, CharSequence right) {
+        if (left == right) {
+            return 0;
+        }
+        int shared = Math.min(left.length(), right.length());
+        for (int at = 0; at < shared; at++) {
+            char one = left.charAt(at);
+            char two = right.charAt(at);
+            if (one != two) {
+                return one - two;
+            }
+        }
+        return left.length() - right.length();
+    }
 }
 "####,
             ),
@@ -44981,9 +44998,10 @@ public final class Character implements java.io.Serializable, Comparable<Charact
                 "java/lang/Class.java",
                 r####"package java.lang;
 
-public final class Class<T> implements java.io.Serializable {
+public final class Class<T> implements java.io.Serializable, java.lang.reflect.Type, java.lang.reflect.GenericDeclaration {
     private final String name;
     private final boolean primitive;
+    private int described = -1;
 
     private Class(String name, boolean primitive) {
         this.name = name;
@@ -45009,24 +45027,139 @@ public final class Class<T> implements java.io.Serializable {
         return name;
     }
 
+    private int bits() {
+        if (described < 0) {
+            described = primitive || isArray() ? 0 : omni.runtime.Classes.describe(name);
+        }
+        return described;
+    }
+
     public String getSimpleName() {
         if (isArray()) {
             return getComponentType().getSimpleName() + "[]";
         }
-        int dot = name.lastIndexOf('.');
-        String simple = name.substring(dot + 1);
-        int dollar = simple.lastIndexOf('$');
-        if (dollar >= 0 && dollar + 1 < simple.length()) {
-            String rest = simple.substring(dollar + 1);
-            boolean digits = true;
-            for (int at = 0; at < rest.length(); at++) {
-                if (!Character.isDigit(rest.charAt(at))) {
-                    digits = false;
-                }
-            }
-            return digits ? "" : rest;
+        if (primitive) {
+            return name;
         }
-        return simple;
+        if ((bits() & omni.runtime.Classes.ANONYMOUS) != 0) {
+            return "";
+        }
+        String inner = omni.runtime.Classes.simpleName(name);
+        if (inner != null) {
+            return inner;
+        }
+        int dot = name.lastIndexOf('.');
+        return name.substring(dot + 1);
+    }
+
+    public boolean isAnonymousClass() {
+        return (bits() & omni.runtime.Classes.ANONYMOUS) != 0;
+    }
+
+    public boolean isLocalClass() {
+        return (bits() & omni.runtime.Classes.LOCAL) != 0;
+    }
+
+    public boolean isMemberClass() {
+        return (bits() & omni.runtime.Classes.MEMBER) != 0;
+    }
+
+    public boolean isEnum() {
+        return (bits() & omni.runtime.Classes.ENUM) != 0;
+    }
+
+    public boolean isAnnotation() {
+        return (bits() & omni.runtime.Classes.ANNOTATION) != 0;
+    }
+
+    public boolean isSynthetic() {
+        return (bits() & omni.runtime.Classes.SYNTHETIC) != 0;
+    }
+
+    public int getModifiers() {
+        int bits = bits();
+        int modifiers = 0x0001;
+        if ((bits & omni.runtime.Classes.INTERFACE) != 0) {
+            modifiers |= 0x0200 | 0x0400;
+        }
+        if ((bits & omni.runtime.Classes.ABSTRACT) != 0) {
+            modifiers |= 0x0400;
+        }
+        if ((bits & omni.runtime.Classes.FINAL) != 0 || primitive || isArray()) {
+            modifiers |= 0x0010;
+        }
+        return modifiers;
+    }
+
+    @SuppressWarnings("unchecked")
+    public Class<? super T> getSuperclass() {
+        if (primitive || isInterface()) {
+            return null;
+        }
+        if (isArray()) {
+            return (Class<? super T>) omni.runtime.Classes.named("java.lang.Object");
+        }
+        String above = omni.runtime.Classes.superName(name);
+        return above == null ? null : (Class<? super T>) omni.runtime.Classes.named(above);
+    }
+
+    public Class<?> getEnclosingClass() {
+        if (primitive || isArray()) {
+            return null;
+        }
+        String outer = omni.runtime.Classes.enclosingName(name);
+        return outer == null ? null : omni.runtime.Classes.named(outer);
+    }
+
+    public Class<?> getDeclaringClass() {
+        return isMemberClass() ? getEnclosingClass() : null;
+    }
+
+    public java.lang.reflect.Method getEnclosingMethod() {
+        String method = primitive || isArray() ? null : omni.runtime.Classes.enclosingMethod(name);
+        if (method == null || method.equals("<init>") || method.equals("<clinit>")) {
+            return null;
+        }
+        return java.lang.reflect.Method.of(getEnclosingClass(), method);
+    }
+
+    @SuppressWarnings("unchecked")
+    public java.lang.reflect.Constructor<?> getEnclosingConstructor() {
+        String method = primitive || isArray() ? null : omni.runtime.Classes.enclosingMethod(name);
+        if (method == null || !method.equals("<init>")) {
+            return null;
+        }
+        return java.lang.reflect.Constructor.of((Class<Object>) getEnclosingClass());
+    }
+
+    public java.lang.reflect.Type[] getGenericInterfaces() {
+        return new java.lang.reflect.Type[0];
+    }
+
+    public static Class<?> forName(String name) throws ClassNotFoundException {
+        if ((omni.runtime.Classes.describe(name) & omni.runtime.Classes.KNOWN) == 0) {
+            throw new ClassNotFoundException(name);
+        }
+        return omni.runtime.Classes.named(name);
+    }
+
+    public static Class<?> forName(String name, boolean initialize, Object loader) throws ClassNotFoundException {
+        return forName(name);
+    }
+
+    @SuppressWarnings("unchecked")
+    public T newInstance() throws InstantiationException, IllegalAccessException {
+        if (primitive || isArray() || isInterface()) {
+            throw new InstantiationException(name);
+        }
+        return (T) omni.runtime.Classes.create(name);
+    }
+
+    public java.lang.reflect.Constructor<T> getDeclaredConstructor(Class<?>... types) throws NoSuchMethodException {
+        if (types.length != 0) {
+            throw new NoSuchMethodException(name + ".<init>()");
+        }
+        return java.lang.reflect.Constructor.of(this);
     }
 
     public String getCanonicalName() {
@@ -45047,7 +45180,7 @@ public final class Class<T> implements java.io.Serializable {
     }
 
     public boolean isInterface() {
-        return false;
+        return (bits() & omni.runtime.Classes.INTERFACE) != 0;
     }
 
     public Class<?> getComponentType() {
@@ -45085,11 +45218,20 @@ public final class Class<T> implements java.io.Serializable {
 
     @SuppressWarnings("unchecked")
     public T cast(Object value) {
+        if (value != null && !isInstance(value)) {
+            throw new ClassCastException("Cannot cast " + value.getClass().getName() + " to " + getTypeName());
+        }
         return (T) value;
     }
 
     public boolean isInstance(Object value) {
-        return value != null && omni.runtime.Classes.of(value) == this;
+        if (value == null || primitive) {
+            return false;
+        }
+        if (value.getClass() == this) {
+            return true;
+        }
+        return omni.runtime.Classes.isInstance(name, value);
     }
 
     public String toString() {
@@ -45591,6 +45733,21 @@ public final class Float extends Number implements Comparable<Float> {
 "####,
             ),
             (
+                "java/lang/IllegalAccessException.java",
+                r####"package java.lang;
+
+public class IllegalAccessException extends ReflectiveOperationException {
+    public IllegalAccessException() {
+        super();
+    }
+
+    public IllegalAccessException(String message) {
+        super(message);
+    }
+}
+"####,
+            ),
+            (
                 "java/lang/IllegalArgumentException.java",
                 r####"package java.lang;
 
@@ -45678,6 +45835,21 @@ public class IndexOutOfBoundsException extends RuntimeException {
 
     public IndexOutOfBoundsException(long index) {
         super("Index out of range: " + index);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/InstantiationException.java",
+                r####"package java.lang;
+
+public class InstantiationException extends ReflectiveOperationException {
+    public InstantiationException() {
+        super();
+    }
+
+    public InstantiationException(String message) {
+        super(message);
     }
 }
 "####,
@@ -46638,6 +46810,21 @@ public class NoSuchMethodError extends IncompatibleClassChangeError {
 
     public NoSuchMethodError(Throwable cause) {
         super(cause);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/NoSuchMethodException.java",
+                r####"package java.lang;
+
+public class NoSuchMethodException extends ReflectiveOperationException {
+    public NoSuchMethodException() {
+        super();
+    }
+
+    public NoSuchMethodException(String message) {
+        super(message);
     }
 }
 "####,
@@ -48543,6 +48730,126 @@ public final class Array {
 
     public static int getLength(Object array) {
         return omni.runtime.Arrays.length(array);
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/reflect/Constructor.java",
+                r####"package java.lang.reflect;
+
+public final class Constructor<T> implements Member, GenericDeclaration {
+    private final Class<T> owner;
+
+    Constructor(Class<T> owner) {
+        this.owner = owner;
+    }
+
+    public static <T> Constructor<T> of(Class<T> owner) {
+        return new Constructor<T>(owner);
+    }
+
+    public Class<T> getDeclaringClass() {
+        return owner;
+    }
+
+    public String getName() {
+        return owner.getName();
+    }
+
+    public int getModifiers() {
+        return 0;
+    }
+
+    @SuppressWarnings("unchecked")
+    public T newInstance(Object... arguments) throws InstantiationException {
+        if (arguments.length != 0) {
+            throw new IllegalArgumentException("wrong number of arguments: " + arguments.length + " expected: 0");
+        }
+        return (T) omni.runtime.Classes.create(owner.getName());
+    }
+
+    public String toString() {
+        return owner.getName() + "()";
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/reflect/GenericDeclaration.java",
+                r####"package java.lang.reflect;
+
+public interface GenericDeclaration {
+}
+"####,
+            ),
+            (
+                "java/lang/reflect/Member.java",
+                r####"package java.lang.reflect;
+
+public interface Member {
+    Class<?> getDeclaringClass();
+
+    String getName();
+
+    int getModifiers();
+}
+"####,
+            ),
+            (
+                "java/lang/reflect/Method.java",
+                r####"package java.lang.reflect;
+
+public final class Method implements Member, GenericDeclaration {
+    private final Class<?> owner;
+    private final String name;
+
+    Method(Class<?> owner, String name) {
+        this.owner = owner;
+        this.name = name;
+    }
+
+    public static Method of(Class<?> owner, String name) {
+        return new Method(owner, name);
+    }
+
+    public Class<?> getDeclaringClass() {
+        return owner;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public int getModifiers() {
+        return 0;
+    }
+
+    public boolean equals(Object other) {
+        if (!(other instanceof Method)) {
+            return false;
+        }
+        Method that = (Method) other;
+        return owner == that.owner && name.equals(that.name);
+    }
+
+    public int hashCode() {
+        return owner.getName().hashCode() ^ name.hashCode();
+    }
+
+    public String toString() {
+        return owner.getName() + "." + name + "()";
+    }
+}
+"####,
+            ),
+            (
+                "java/lang/reflect/Type.java",
+                r####"package java.lang.reflect;
+
+public interface Type {
+    default String getTypeName() {
+        return toString();
     }
 }
 "####,
@@ -53201,6 +53508,290 @@ public class HashSet<E> extends AbstractSet<E> implements Set<E>, Cloneable, jav
 "####,
             ),
             (
+                "java/util/ImmutableCollections.java",
+                r####"package java.util;
+
+final class ImmutableCollections {
+    private ImmutableCollections() {
+    }
+
+    static UnsupportedOperationException refused() {
+        return new UnsupportedOperationException();
+    }
+
+    static List<Object> listOf(Object[] items) {
+        for (Object item : items) {
+            Objects.requireNonNull(item);
+        }
+        return new ListN(items);
+    }
+
+    static Set<Object> setOf(Object[] items, boolean strict) {
+        LinkedHashSet<Object> made = new LinkedHashSet<Object>();
+        for (Object item : items) {
+            Objects.requireNonNull(item);
+            if (!made.add(item) && strict) {
+                throw new IllegalArgumentException("duplicate element: " + item);
+            }
+        }
+        return new SetN(made);
+    }
+
+    static Map<Object, Object> mapOf(Object[] pairs) {
+        LinkedHashMap<Object, Object> made = new LinkedHashMap<Object, Object>();
+        for (int at = 0; at < pairs.length; at += 2) {
+            Object key = Objects.requireNonNull(pairs[at]);
+            Object value = Objects.requireNonNull(pairs[at + 1]);
+            if (made.put(key, value) != null) {
+                throw new IllegalArgumentException("duplicate key: " + key);
+            }
+        }
+        return new MapN(made);
+    }
+
+    static final class ListN extends AbstractList<Object> implements RandomAccess, java.io.Serializable {
+        private final Object[] items;
+
+        ListN(Object[] items) {
+            this.items = items;
+        }
+
+        public Object get(int index) {
+            Objects.checkIndex(index, items.length);
+            return items[index];
+        }
+
+        public int size() {
+            return items.length;
+        }
+
+        public boolean contains(Object element) {
+            Objects.requireNonNull(element);
+            return indexOf(element) >= 0;
+        }
+
+        public int indexOf(Object element) {
+            Objects.requireNonNull(element);
+            for (int at = 0; at < items.length; at++) {
+                if (element.equals(items[at])) {
+                    return at;
+                }
+            }
+            return -1;
+        }
+
+        public int lastIndexOf(Object element) {
+            Objects.requireNonNull(element);
+            for (int at = items.length - 1; at >= 0; at--) {
+                if (element.equals(items[at])) {
+                    return at;
+                }
+            }
+            return -1;
+        }
+
+        public Object[] toArray() {
+            return Arrays.copyOf(items, items.length, Object[].class);
+        }
+
+        public boolean add(Object element) {
+            throw refused();
+        }
+
+        public void add(int index, Object element) {
+            throw refused();
+        }
+
+        public Object set(int index, Object element) {
+            throw refused();
+        }
+
+        public Object remove(int index) {
+            throw refused();
+        }
+
+        public boolean remove(Object element) {
+            throw refused();
+        }
+
+        public boolean addAll(Collection<?> other) {
+            throw refused();
+        }
+
+        public boolean removeAll(Collection<?> other) {
+            throw refused();
+        }
+
+        public boolean retainAll(Collection<?> other) {
+            throw refused();
+        }
+
+        public void clear() {
+            throw refused();
+        }
+
+        public void sort(Comparator<? super Object> order) {
+            throw refused();
+        }
+    }
+
+    static final class SetN extends AbstractSet<Object> implements java.io.Serializable {
+        private final LinkedHashSet<Object> items;
+
+        SetN(LinkedHashSet<Object> items) {
+            this.items = items;
+        }
+
+        public int size() {
+            return items.size();
+        }
+
+        public boolean contains(Object element) {
+            Objects.requireNonNull(element);
+            return items.contains(element);
+        }
+
+        public Iterator<Object> iterator() {
+            Iterator<Object> walk = items.iterator();
+            return new Iterator<Object>() {
+                public boolean hasNext() {
+                    return walk.hasNext();
+                }
+
+                public Object next() {
+                    return walk.next();
+                }
+
+                public void remove() {
+                    throw refused();
+                }
+            };
+        }
+
+        public boolean add(Object element) {
+            throw refused();
+        }
+
+        public boolean remove(Object element) {
+            throw refused();
+        }
+
+        public void clear() {
+            throw refused();
+        }
+    }
+
+    static final class Pair<K, V> implements Map.Entry<K, V>, java.io.Serializable {
+        private final K key;
+        private final V value;
+
+        Pair(K key, V value) {
+            this.key = key;
+            this.value = value;
+        }
+
+        public K getKey() {
+            return key;
+        }
+
+        public V getValue() {
+            return value;
+        }
+
+        public V setValue(V fresh) {
+            throw refused();
+        }
+
+        public boolean equals(Object other) {
+            if (!(other instanceof Map.Entry)) {
+                return false;
+            }
+            Map.Entry<?, ?> that = (Map.Entry<?, ?>) other;
+            return key.equals(that.getKey()) && value.equals(that.getValue());
+        }
+
+        public int hashCode() {
+            return key.hashCode() ^ value.hashCode();
+        }
+
+        public String toString() {
+            return key + "=" + value;
+        }
+    }
+
+    static final class MapN extends AbstractMap<Object, Object> implements java.io.Serializable {
+        private final LinkedHashMap<Object, Object> items;
+
+        MapN(LinkedHashMap<Object, Object> items) {
+            this.items = items;
+        }
+
+        public int size() {
+            return items.size();
+        }
+
+        public boolean containsKey(Object key) {
+            Objects.requireNonNull(key);
+            return items.containsKey(key);
+        }
+
+        public boolean containsValue(Object value) {
+            Objects.requireNonNull(value);
+            return items.containsValue(value);
+        }
+
+        public Object get(Object key) {
+            Objects.requireNonNull(key);
+            return items.get(key);
+        }
+
+        public Set<Map.Entry<Object, Object>> entrySet() {
+            MapN self = this;
+            return new AbstractSet<Map.Entry<Object, Object>>() {
+                public int size() {
+                    return self.items.size();
+                }
+
+                public Iterator<Map.Entry<Object, Object>> iterator() {
+                    Iterator<Map.Entry<Object, Object>> walk = self.items.entrySet().iterator();
+                    return new Iterator<Map.Entry<Object, Object>>() {
+                        public boolean hasNext() {
+                            return walk.hasNext();
+                        }
+
+                        public Map.Entry<Object, Object> next() {
+                            Map.Entry<Object, Object> entry = walk.next();
+                            return new Pair<Object, Object>(entry.getKey(), entry.getValue());
+                        }
+
+                        public void remove() {
+                            throw refused();
+                        }
+                    };
+                }
+            };
+        }
+
+        public Object put(Object key, Object value) {
+            throw refused();
+        }
+
+        public Object remove(Object key) {
+            throw refused();
+        }
+
+        public void putAll(Map<?, ?> other) {
+            throw refused();
+        }
+
+        public void clear() {
+            throw refused();
+        }
+    }
+}
+"####,
+            ),
+            (
                 "java/util/Iterator.java",
                 r####"package java.util;
 
@@ -53960,9 +54551,73 @@ public interface List<E> extends Collection<E> {
         return remove(size() - 1);
     }
 
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of() {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4, E e5) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4, e5});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4, E e5, E e6) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4, e5, e6});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4, e5, e6, e7});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7, E e8) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4, e5, e6, e7, e8});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7, E e8, E e9) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4, e5, e6, e7, e8, e9});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7, E e8, E e9, E e10) {
+        return (List<E>) ImmutableCollections.listOf(new Object[] {e1, e2, e3, e4, e5, e6, e7, e8, e9, e10});
+    }
+
     @SafeVarargs
+    @SuppressWarnings("unchecked")
     static <E> List<E> of(E... elements) {
-        return Collections.unmodifiableList(new ArrayList<E>(Arrays.asList(elements)));
+        return (List<E>) ImmutableCollections.listOf(elements.clone());
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> List<E> copyOf(Collection<? extends E> items) {
+        if (items instanceof ImmutableCollections.ListN) {
+            return (List<E>) items;
+        }
+        return (List<E>) ImmutableCollections.listOf(items.toArray());
     }
 }
 "####,
@@ -54149,6 +54804,90 @@ public interface Map<K, V> {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of() {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7, K k8, V v8) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7, K k8, V v8, K k9, V v9) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8, k9, v9});
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7, K k8, V v8, K k9, V v9, K k10, V v10) {
+        return (Map<K, V>) ImmutableCollections.mapOf(new Object[] {k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8, k9, v9, k10, v10});
+    }
+
+    @SafeVarargs
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> ofEntries(Map.Entry<? extends K, ? extends V>... entries) {
+        Object[] pairs = new Object[entries.length * 2];
+        for (int at = 0; at < entries.length; at++) {
+            pairs[at * 2] = entries[at].getKey();
+            pairs[at * 2 + 1] = entries[at].getValue();
+        }
+        return (Map<K, V>) ImmutableCollections.mapOf(pairs);
+    }
+
+    static <K, V> Map.Entry<K, V> entry(K key, V value) {
+        return new ImmutableCollections.Pair<K, V>(Objects.requireNonNull(key), Objects.requireNonNull(value));
+    }
+
+    @SuppressWarnings("unchecked")
+    static <K, V> Map<K, V> copyOf(Map<? extends K, ? extends V> map) {
+        if (map instanceof ImmutableCollections.MapN) {
+            return (Map<K, V>) map;
+        }
+        Object[] pairs = new Object[map.size() * 2];
+        int at = 0;
+        for (Map.Entry<? extends K, ? extends V> entry : map.entrySet()) {
+            pairs[at++] = entry.getKey();
+            pairs[at++] = entry.getValue();
+        }
+        return (Map<K, V>) ImmutableCollections.mapOf(pairs);
+    }
+
     interface Entry<K, V> {
         K getKey();
 
@@ -54314,9 +55053,73 @@ public interface Set<E> extends Collection<E> {
 
     void clear();
 
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of() {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4, E e5) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4, e5}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4, E e5, E e6) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4, e5, e6}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4, e5, e6, e7}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7, E e8) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4, e5, e6, e7, e8}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7, E e8, E e9) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4, e5, e6, e7, e8, e9}, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> of(E e1, E e2, E e3, E e4, E e5, E e6, E e7, E e8, E e9, E e10) {
+        return (Set<E>) ImmutableCollections.setOf(new Object[] {e1, e2, e3, e4, e5, e6, e7, e8, e9, e10}, true);
+    }
+
     @SafeVarargs
+    @SuppressWarnings("unchecked")
     static <E> Set<E> of(E... elements) {
-        return Collections.unmodifiableSet(new LinkedHashSet<E>(Arrays.asList(elements)));
+        return (Set<E>) ImmutableCollections.setOf(elements.clone(), true);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> copyOf(Collection<? extends E> items) {
+        if (items instanceof ImmutableCollections.SetN) {
+            return (Set<E>) items;
+        }
+        return (Set<E>) ImmutableCollections.setOf(items.toArray(), false);
     }
 }
 "####,
@@ -57328,7 +58131,40 @@ public final class Arrays {
 import java.util.HashMap;
 
 public final class Classes {
+    public static final int INTERFACE = 1;
+    public static final int ABSTRACT = 2;
+    public static final int ANONYMOUS = 4;
+    public static final int LOCAL = 8;
+    public static final int MEMBER = 16;
+    public static final int ENUM = 32;
+    public static final int ANNOTATION = 64;
+    public static final int KNOWN = 128;
+    public static final int FINAL = 256;
+    public static final int SYNTHETIC = 512;
+
     private static HashMap<String, Class<?>> known;
+
+    public static native int describe(String name);
+
+    public static native String simpleName(String name);
+
+    public static native String enclosingMethod(String name);
+
+    public static native String enclosingName(String name);
+
+    public static native String superName(String name);
+
+    public static native boolean isInstance(String name, Object value);
+
+    static native Object make(String name);
+
+    public static Object create(String name) throws InstantiationException {
+        Object made = make(name);
+        if (made == null) {
+            throw new InstantiationException(name);
+        }
+        return made;
+    }
 
     private Classes() {
     }
@@ -57559,7 +58395,50 @@ public final class Numbers {
                         "newInstance",
                         "(Ljava/lang/String;I)Ljava/lang/Object;"
                     )
+                    | (CLASSES, "describe", "(Ljava/lang/String;)I")
+                    | (
+                        CLASSES,
+                        "simpleName",
+                        "(Ljava/lang/String;)Ljava/lang/String;"
+                    )
+                    | (
+                        CLASSES,
+                        "enclosingMethod",
+                        "(Ljava/lang/String;)Ljava/lang/String;"
+                    )
+                    | (
+                        CLASSES,
+                        "enclosingName",
+                        "(Ljava/lang/String;)Ljava/lang/String;"
+                    )
+                    | (
+                        CLASSES,
+                        "superName",
+                        "(Ljava/lang/String;)Ljava/lang/String;"
+                    )
+                    | (
+                        CLASSES,
+                        "isInstance",
+                        "(Ljava/lang/String;Ljava/lang/Object;)Z"
+                    )
+                    | (CLASSES, "make", "(Ljava/lang/String;)Ljava/lang/Object;")
             )
+        }
+
+        fn java_hash(text: &str) -> i32 {
+            let mut hash: i32 = 0;
+            for unit in text.encode_utf16() {
+                hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+            }
+            hash
+        }
+
+        #[derive(Clone)]
+        enum Answer {
+            Number(i32),
+            Text(Option<String>),
+            Instance(usize),
+            Fresh(usize, FunctionId, Option<FunctionId>),
         }
 
         #[derive(Clone, Debug, Default)]
@@ -57627,6 +58506,8 @@ public final class Numbers {
             lambdas: u32,
             roots: Vec<FunctionId>,
             deferred: Vec<usize>,
+            reflected: BTreeSet<String>,
+            named: BTreeSet<String>,
         }
 
         impl<'a> Lowering<'a> {
@@ -57648,6 +58529,8 @@ public final class Numbers {
                     lambdas: 0,
                     roots: Vec::new(),
                     deferred: Vec::new(),
+                    reflected: BTreeSet::new(),
+                    named: BTreeSet::new(),
                 }
             }
 
@@ -58625,6 +59508,279 @@ public final class Numbers {
                 })
             }
 
+            fn discover_named_classes(&mut self) -> Result<(), Diagnostic> {
+                let texts: Vec<String> = self
+                    .helpers
+                    .keys()
+                    .filter_map(|key| key.strip_prefix("literal\u{0}"))
+                    .filter(|text| {
+                        text.contains('.')
+                            && !text.starts_with('.')
+                            && text.chars().all(|one| {
+                                one.is_alphanumeric() || one == '.' || one == '$' || one == '_'
+                            })
+                    })
+                    .map(str::to_string)
+                    .collect();
+                for text in texts {
+                    let name = internal(&text);
+                    if self.reflected.contains(&name) {
+                        continue;
+                    }
+                    if !self.class_index.contains_key(&name) && self.files.get(&name).is_none() {
+                        continue;
+                    }
+                    let class = self.declare(&name)?;
+                    if self.classes[class].external {
+                        continue;
+                    }
+                    self.reflected.insert(name.clone());
+                    let info = &self.classes[class];
+                    if info.interface || info.abstract_class || info.element.is_some() {
+                        continue;
+                    }
+                    let key = (name, "<init>".to_string(), "()V".to_string());
+                    if let Some(constructor) = self.method_index.get(&key).copied() {
+                        self.instantiate(class);
+                        self.function_of(constructor);
+                    }
+                }
+                Ok(())
+            }
+
+            fn reflectable(&self) -> BTreeSet<usize> {
+                let mut starts: Vec<usize> = (0..self.classes.len())
+                    .filter(|at| self.classes[*at].instantiated)
+                    .collect();
+                for name in self.named.iter().chain(self.reflected.iter()) {
+                    if let Some(found) = self.class_index.get(name) {
+                        starts.push(*found);
+                    }
+                }
+                let mut out = BTreeSet::new();
+                for start in starts {
+                    let mut current = Some(start);
+                    while let Some(held) = current {
+                        if !out.insert(held) {
+                            break;
+                        }
+                        current = self.classes[held].parent;
+                    }
+                }
+                out
+            }
+
+            fn answers(&mut self, native: &str) -> Result<Vec<(String, Answer)>, Diagnostic> {
+                let mut made = Vec::new();
+                for index in self.reflectable() {
+                    let info = self.classes[index].clone();
+                    if info.external || info.element.is_some() || info.name.starts_with('[') {
+                        continue;
+                    }
+                    let shown = info.name.replace('/', ".");
+                    let Some(file) = self.files.get(&info.name) else {
+                        continue;
+                    };
+                    let own = file
+                        .inner_classes
+                        .iter()
+                        .find(|entry| internal(&entry.0) == info.name)
+                        .cloned();
+                    let local_or_anonymous = file.enclosing_method.is_some();
+                    let inner_name = own.as_ref().and_then(|entry| entry.2.clone());
+                    let outer = own.as_ref().and_then(|entry| entry.1.clone());
+                    let answer = match native {
+                        "describe" => {
+                            let flags = file.access_flags;
+                            let mut bits = 128;
+                            if info.interface {
+                                bits |= 1;
+                            }
+                            if info.abstract_class {
+                                bits |= 2;
+                            }
+                            if local_or_anonymous && inner_name.is_none() {
+                                bits |= 4;
+                            }
+                            if local_or_anonymous && inner_name.is_some() {
+                                bits |= 8;
+                            }
+                            if !local_or_anonymous && outer.is_some() {
+                                bits |= 16;
+                            }
+                            let parent = info.parent.map(|held| self.classes[held].name.clone());
+                            if flags & 0x4000 != 0 && parent.as_deref() == Some("java/lang/Enum") {
+                                bits |= 32;
+                            }
+                            if flags & 0x2000 != 0 {
+                                bits |= 64;
+                            }
+                            if flags & 0x0010 != 0 {
+                                bits |= 256;
+                            }
+                            if flags & 0x1000 != 0 {
+                                bits |= 512;
+                            }
+                            Answer::Number(bits)
+                        }
+                        "simpleName" => Answer::Text(if !local_or_anonymous && outer.is_none() {
+                            None
+                        } else {
+                            Some(inner_name.clone().unwrap_or_default())
+                        }),
+                        "enclosingMethod" => {
+                            Answer::Text(file.enclosing_method.as_ref().and_then(|(_, method)| {
+                                method.as_ref().map(|(name, _)| name.clone())
+                            }))
+                        }
+                        "enclosingName" => Answer::Text(
+                            file.enclosing_method
+                                .as_ref()
+                                .map(|(class, _)| internal(class))
+                                .or_else(|| outer.map(|held| internal(&held)))
+                                .map(|held| held.replace('/', ".")),
+                        ),
+                        "superName" => Answer::Text(if info.interface {
+                            None
+                        } else {
+                            info.parent
+                                .map(|held| self.classes[held].name.replace('/', "."))
+                        }),
+                        "isInstance" => Answer::Instance(index),
+                        _ => {
+                            if !self.reflected.contains(&info.name)
+                                || info.interface
+                                || info.abstract_class
+                            {
+                                continue;
+                            }
+                            let key = (info.name.clone(), "<init>".to_string(), "()V".to_string());
+                            let Some(constructor) = self.method_index.get(&key).copied() else {
+                                continue;
+                            };
+                            let function = self.function_of(constructor);
+                            let ensure = self.ensure(index)?;
+                            Answer::Fresh(index, function, ensure)
+                        }
+                    };
+                    made.push((shown, answer));
+                }
+                made.sort_by(|left, right| left.0.cmp(&right.0));
+                Ok(made)
+            }
+
+            fn class_table_body(
+                &mut self,
+                label: &str,
+                native: &str,
+            ) -> Result<Function, Diagnostic> {
+                let answers = self.answers(native)?;
+                let hash = self.resolve(STRING, "hashCode", "()I", false)?;
+                let hash = self.function_of(hash);
+                let equals = self.resolve(STRING, "equals", "(Ljava/lang/Object;)Z", false)?;
+                let equals = self.function_of(equals);
+                let numeric = native == "isInstance" || native == "describe";
+                let mut parameters = vec![Type::REFERENCE];
+                if native == "isInstance" {
+                    parameters.push(Type::REFERENCE);
+                }
+                let result = if numeric { Type::I32 } else { Type::REFERENCE };
+                let signature = Signature::new(parameters, Some(result));
+                let mut buckets: BTreeMap<i32, Vec<(String, Answer)>> = BTreeMap::new();
+                for (name, answer) in answers {
+                    buckets
+                        .entry(java_hash(&name))
+                        .or_default()
+                        .push((name, answer));
+                }
+                self.build_function(label, signature, move |body, values| {
+                    let name = values[0];
+                    let fallback = body.builder.create_block();
+                    let checked = body.builder.create_block();
+                    let null = body.builder.null(Type::REFERENCE);
+                    let absent = body.builder.compare(Comparison::Equal, name, null);
+                    body.builder.branch(absent, fallback, checked);
+                    body.builder.switch_to(checked);
+                    let code = body
+                        .builder
+                        .call(hash, Some(Type::I32), vec![name])
+                        .unwrap_or(name);
+                    let mut cases = Vec::new();
+                    let mut targets = Vec::new();
+                    for (code, entries) in buckets {
+                        let block = body.builder.create_block();
+                        cases.push((i128::from(code), BlockCall::to(block)));
+                        targets.push((block, entries));
+                    }
+                    body.builder.terminate(Terminator::Switch {
+                        value: code,
+                        cases,
+                        default: BlockCall::to(fallback),
+                    });
+                    for (block, entries) in targets {
+                        body.builder.switch_to(block);
+                        for (text, answer) in entries {
+                            let literal = body.string(&text)?;
+                            let zero = body.builder.integer(Type::I32, 0);
+                            let same = body
+                                .builder
+                                .call(equals, Some(Type::I32), vec![literal, name])
+                                .unwrap_or(zero);
+                            let same = body.builder.compare(Comparison::NotEqual, same, zero);
+                            let found = body.builder.create_block();
+                            let next = body.builder.create_block();
+                            body.builder.branch(same, found, next);
+                            body.builder.switch_to(found);
+                            let made = match answer {
+                                Answer::Number(number) => {
+                                    body.builder.integer(Type::I32, i128::from(number))
+                                }
+                                Answer::Text(Some(text)) => body.string(&text)?,
+                                Answer::Text(None) => body.builder.null(Type::REFERENCE),
+                                Answer::Instance(class) => {
+                                    let holds = body
+                                        .builder
+                                        .push(
+                                            Operation::InstanceOf(ClassId(class as u32)),
+                                            vec![values[1]],
+                                            Some(Type::BOOL),
+                                        )
+                                        .unwrap_or(zero);
+                                    body.builder
+                                        .convert(Conversion::ZeroExtend, holds, Type::I32)
+                                }
+                                Answer::Fresh(class, constructor, ensure) => {
+                                    if let Some(ensure) = ensure {
+                                        body.builder.call(ensure, None, Vec::new());
+                                    }
+                                    let made = body
+                                        .builder
+                                        .push(
+                                            Operation::Allocate(ClassId(class as u32)),
+                                            Vec::new(),
+                                            Some(Type::REFERENCE),
+                                        )
+                                        .unwrap_or(name);
+                                    body.builder.call(constructor, None, vec![made]);
+                                    made
+                                }
+                            };
+                            body.builder.ret(Some(made));
+                            body.builder.switch_to(next);
+                        }
+                        body.builder.jump(fallback, Vec::new());
+                    }
+                    body.builder.switch_to(fallback);
+                    let made = if numeric {
+                        body.builder.integer(Type::I32, 0)
+                    } else {
+                        body.builder.null(Type::REFERENCE)
+                    };
+                    body.builder.ret(Some(made));
+                    Ok(())
+                })
+            }
+
             fn settle(&mut self) -> Result<(), Diagnostic> {
                 let mut seen = None;
                 loop {
@@ -58638,9 +59794,12 @@ public final class Numbers {
                         self.instantiate(class);
                     }
                     self.run()?;
+                    self.discover_named_classes()?;
+                    self.run()?;
                     let mark = (
                         self.classes.iter().filter(|held| held.instantiated).count(),
                         self.classes.len(),
+                        self.named.len() + self.reflected.len(),
                     );
                     if seen == Some(mark) {
                         return Ok(());
@@ -58651,10 +59810,11 @@ public final class Numbers {
                             continue;
                         };
                         let label = self.functions[id.index()].name.clone();
-                        let made = if self.methods[method].name == "getClass" {
-                            self.class_of_body(&label)?
-                        } else {
-                            self.new_array_body(&label)?
+                        let native = self.methods[method].name.clone();
+                        let made = match native.as_str() {
+                            "getClass" => self.class_of_body(&label)?,
+                            "newInstance" => self.new_array_body(&label)?,
+                            _ => self.class_table_body(&label, &native)?,
                         };
                         self.functions[id.index()] = made;
                     }
@@ -59358,7 +60518,10 @@ public final class Numbers {
                 through_interface: bool,
             ) -> Result<Option<Value>, Diagnostic> {
                 let class = self.lowering.declare(owner)?;
-                let resolved = self.lowering.find_method(class, name, descriptor);
+                let resolved = self
+                    .lowering
+                    .find_method(class, name, descriptor)
+                    .filter(|found| !self.lowering.methods[*found].is_static);
                 if let Some(found) = resolved {
                     let held = &self.lowering.methods[found];
                     let direct = held.private
@@ -59397,6 +60560,14 @@ public final class Numbers {
                             .lowering
                             .external_method(owner, name, descriptor, false),
                     };
+                    if self.lowering.methods[method].is_static {
+                        let label = format!("instance:{owner}.{name}{descriptor}");
+                        self.lowering.missing.insert(label.clone());
+                        let target = self
+                            .lowering
+                            .import(&label, signature_of(descriptor, false));
+                        return Ok(self.call(target, arguments));
+                    }
                     return Ok(self.invoke_method(method, arguments));
                 };
                 let target = self
@@ -59513,6 +60684,12 @@ public final class Numbers {
                 current: Option<usize>,
             ) -> Result<Option<Value>, Diagnostic> {
                 let method = self.lowering.resolve(owner, name, descriptor, true)?;
+                if !self.lowering.methods[method].is_static {
+                    let label = format!("static:{owner}.{name}{descriptor}");
+                    self.lowering.missing.insert(label.clone());
+                    let target = self.lowering.import(&label, signature_of(descriptor, true));
+                    return Ok(self.call(target, arguments));
+                }
                 let class = self.lowering.methods[method].owner;
                 self.initialize(class, current)?;
                 Ok(self.invoke_method(method, arguments))
@@ -60736,6 +61913,9 @@ public final class Numbers {
                     }
                     Some(jvm::Constant::Class(name)) => {
                         let name = utf8(self.class, *name).unwrap_or_default();
+                        if !name.starts_with('[') {
+                            self.body.lowering.named.insert(name.clone());
+                        }
                         let shown = name.replace('/', ".");
                         let text = self.body.string(&shown)?;
                         let made = self.body.static_call(
