@@ -23,6 +23,18 @@
       "out_of_scope": 2,
       "passed": 3998,
       "total": 4000
+    },
+    "tablegen-lit": {
+      "failed": 0,
+      "out_of_scope": 266,
+      "passed": 190,
+      "total": 456
+    },
+    "tablegen-oracle": {
+      "failed": 0,
+      "out_of_scope": 307,
+      "passed": 152,
+      "total": 459
     }
   }
 }

@@ -61805,6 +61805,7 @@ mod reference {
             let mut stdout_target: Option<(String, bool)> = None;
             let mut stderr_target: Option<(String, bool)> = None;
             let mut stderr_to_stdout = false;
+            let mut stderr_to_pipe = false;
             for (operator, number, target) in &command.redirects {
                 match (operator.as_str(), number) {
                     ("<", _) => match world.read(target) {
@@ -61820,7 +61821,10 @@ mod reference {
                     (">>", None) | (">>", Some(1)) => stdout_target = Some((target.clone(), true)),
                     (">", Some(2)) => stderr_target = Some((target.clone(), false)),
                     (">>", Some(2)) => stderr_target = Some((target.clone(), true)),
-                    (">&", Some(2)) if target == "1" => stderr_to_stdout = true,
+                    (">&", Some(2)) if target == "1" => match &stdout_target {
+                        None => stderr_to_pipe = true,
+                        Some((path, _)) => stderr_target = Some((path.clone(), true)),
+                    },
                     (">&", None) | (">&", Some(1)) if target == "2" => {}
                     ("&>", _) => {
                         stdout_target = Some((target.clone(), false));
@@ -61858,12 +61862,20 @@ mod reference {
                 out.extend_from_slice(&err);
                 err = Vec::new();
             }
+            let mut piped_error = Vec::new();
+            if stderr_to_pipe {
+                piped_error = std::mem::take(&mut err);
+            }
             match stdout_target {
                 Some((path, append)) => {
                     world.write(&path, out, append);
+                    if position + 1 < count {
+                        input = piped_error;
+                    }
                 }
                 None => {
                     if position + 1 < count {
+                        out.extend_from_slice(&piped_error);
                         input = out;
                     }
                 }
@@ -66641,8 +66653,11 @@ block0:
             seen, ordered,
             "the catalogue is sorted and holds every code once"
         );
-        let source =
-            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs");
+        let source = [
+            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/TableGen.rs"),
+        ]
+        .concat();
         let mut raised = BTreeSet::new();
         for (at, _) in source.match_indices("\"EI") {
             let code = &source[at + 1..at + 6];
@@ -66719,6 +66734,671 @@ block0:
                 names.insert((name, Rule::named(name).is_some())),
                 "{name} twice"
             );
+        }
+    }
+}
+
+mod table_gen {
+    use super::reference::*;
+    use crate::compilers::table_gen::*;
+    use std::collections::BTreeMap;
+
+    pub(super) const LLVM_ROOT: &str = "llvm-project/llvm/";
+
+    pub(super) const TARGETS: &[&str] = &["X86", "ARM", "AArch64"];
+
+    pub(super) fn llvm_sources() -> BTreeMap<String, String> {
+        let tree = Tree::of(&["Beta_01_LLVM_Core"]).expect("the LLVM core bundle is present");
+        let mut files = BTreeMap::new();
+        let mut prefixes = vec![format!("{LLVM_ROOT}include/llvm/")];
+        for target in TARGETS {
+            prefixes.push(format!("{LLVM_ROOT}lib/Target/{target}/"));
+        }
+        for prefix in &prefixes {
+            for path in tree.paths_under(prefix) {
+                if !path.ends_with(".td") {
+                    continue;
+                }
+                if let Some(bytes) = tree.file(&path) {
+                    files.insert(
+                        path[LLVM_ROOT.len()..].to_string(),
+                        String::from_utf8_lossy(bytes).into_owned(),
+                    );
+                }
+            }
+        }
+        files
+    }
+
+    pub(super) fn read_target<'a>(
+        files: &'a BTreeMap<String, String>,
+        target: &str,
+    ) -> Reading<'a> {
+        read_records(
+            files,
+            &format!("lib/Target/{target}/{target}.td"),
+            &["include".to_string(), format!("lib/Target/{target}")],
+            &[],
+            false,
+        )
+    }
+
+    const FEATURE_SOURCE: &str = r##"def op;
+class Base<int width, string tag = "plain"> {
+  bits<8> Encoding = !cast<bits<8>>(width);
+  string Tag = tag # "_" # width;
+  list<int> Squares = !foreach(x, !range(width), !mul(x, x));
+  int Total = !foldl(0, Squares, sum, x, !add(sum, x));
+  dag Shape = (op $a, 1:$b);
+}
+multiclass Pair<int n> {
+  def _low : Base<n>;
+  def _high : Base<!add(n, 1), "high">;
+}
+defm Item : Pair<3>;
+defset list<Base> All = {
+  foreach i = 0...2 in
+    def Each#i : Base<i>;
+}
+defvar Names = !foreach(r, All, !cast<string>(r));
+def Summary {
+  list<string> Seen = Names;
+  string Joined = !interleave(Names, ",");
+  int Picked = !cond(!eq(!size(Names), 3) : 1, true : 0);
+  string Kind = !switch(2, 1 : "one", 2 : "two", "many");
+  bits<4> Mixed = { 1, 0, ?, 1 };
+  list<int> Slice = !listconcat([1, 2, 3, 4][1...2], [9]);
+  string Upper = !toupper("abc");
+  bit Matched = !match("vaddps", "^v.*ps$");
+}
+let Tag = "overridden" in
+def Lettered : Base<5>;
+if !eq(1, 1) then {
+  def Chosen : Base<7>;
+}
+def : Base<9>;
+"##;
+
+    const FEATURE_RECORDS: &str = r##"------------- Classes -----------------
+class Base<int Base:width = ?, string Base:tag = "plain"> {
+  bits<8> Encoding = { !cast<bits<8>>(Base:width){7}, !cast<bits<8>>(Base:width){6}, !cast<bits<8>>(Base:width){5}, !cast<bits<8>>(Base:width){4}, !cast<bits<8>>(Base:width){3}, !cast<bits<8>>(Base:width){2}, !cast<bits<8>>(Base:width){1}, !cast<bits<8>>(Base:width){0} };
+  string Tag = !strconcat(Base:tag, !strconcat("_", !cast<string>(Base:width)));
+  list<int> Squares = !foreach(x, !range(0, Base:width, 1), !mul(x, x));
+  int Total = !foldl(0, Squares, sum, x, !add(sum, x));
+  dag Shape = (op ?:$a, 1:$b);
+}
+------------- Defs -----------------
+def Chosen {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 1, 1, 1 };
+  string Tag = "plain_7";
+  list<int> Squares = [0, 1, 4, 9, 16, 25, 36];
+  int Total = 91;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Each0 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  string Tag = "plain_0";
+  list<int> Squares = [];
+  int Total = 0;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Each1 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 0, 1 };
+  string Tag = "plain_1";
+  list<int> Squares = [0];
+  int Total = 0;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Each2 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 1, 0 };
+  string Tag = "plain_2";
+  list<int> Squares = [0, 1];
+  int Total = 1;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Item_high {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 1, 0, 0 };
+  string Tag = "high_4";
+  list<int> Squares = [0, 1, 4, 9];
+  int Total = 14;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Item_low {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 0, 1, 1 };
+  string Tag = "plain_3";
+  list<int> Squares = [0, 1, 4];
+  int Total = 5;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Lettered {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 0, 1, 0, 1 };
+  string Tag = "overridden";
+  list<int> Squares = [0, 1, 4, 9, 16];
+  int Total = 30;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def Summary {
+  list<string> Seen = ["Each0", "Each1", "Each2"];
+  string Joined = "Each0,Each1,Each2";
+  int Picked = 1;
+  string Kind = "two";
+  bits<4> Mixed = { 1, 0, ?, 1 };
+  list<int> Slice = [2, 3, 9];
+  string Upper = "ABC";
+  bit Matched = 1;
+}
+def anonymous_0 {	// Base
+  bits<8> Encoding = { 0, 0, 0, 0, 1, 0, 0, 1 };
+  string Tag = "plain_9";
+  list<int> Squares = [0, 1, 4, 9, 16, 25, 36, 49, 64];
+  int Total = 204;
+  dag Shape = (op ?:$a, 1:$b);
+}
+def op {
+}
+"##;
+
+    pub(super) const LLVM_24_RECORD_DIGESTS: &[(&str, &str)] = &[
+        (
+            "X86",
+            "e59f22e2ccdfe9c36e22e9f35a130f9b673d45b3fbb2c23ddec36022a267dede",
+        ),
+        (
+            "ARM",
+            "2acad9781fc4036c6c4d776d6cb771f88c7fafd6c0d4bfd50d810e70eaa7035f",
+        ),
+        (
+            "AArch64",
+            "673f7ceb06264b7a9e714d9f8df79ae2c2786dd44637b25fd9111eccb2b631e6",
+        ),
+    ];
+
+    fn single_file(text: &str) -> BTreeMap<String, String> {
+        let mut files = BTreeMap::new();
+        files.insert("main.td".to_string(), text.to_string());
+        files
+    }
+
+    #[test]
+    fn the_language_prints_the_records_llvm_prints() {
+        let files = single_file(FEATURE_SOURCE);
+        let reading = read_records(&files, "main.td", &[], &[], false);
+        assert!(reading.succeeded, "{}", reading.render_messages());
+        assert_eq!(reading.keeper.print_records(), FEATURE_RECORDS);
+    }
+
+    #[test]
+    fn a_broken_source_says_where_and_why_the_way_llvm_does() {
+        let files = single_file("class A {\n  dag Shape = (op $a);\n}\n");
+        let reading = read_records(&files, "main.td", &[], &[], false);
+        assert!(!reading.succeeded);
+        let rendered = reading.render_messages();
+        assert!(
+            rendered.starts_with("main.td:2:16: error: Variable not defined: 'op'\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("main.td:2:19: error: expected ';' after declaration"),
+            "{rendered}"
+        );
+        let diagnostic = reading.diagnostic();
+        assert_eq!(diagnostic.code, "EI101");
+        assert!(diagnostic.context.contains(&"Line: 2".to_string()));
+        assert!(diagnostic
+            .context
+            .contains(&"Reason: Variable not defined: 'op'".to_string()));
+    }
+
+    #[test]
+    fn the_preprocessor_and_includes_follow_the_macros_given() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "main.td".to_string(),
+            "#ifdef WIDE\ninclude \"wide.td\"\n#else\ndef Narrow;\n#endif\n".to_string(),
+        );
+        files.insert("inc/wide.td".to_string(), "def Wide;\n".to_string());
+        let wide = read_records(
+            &files,
+            "main.td",
+            &["inc".to_string()],
+            &["WIDE".to_string()],
+            false,
+        );
+        assert!(wide.succeeded, "{}", wide.render_messages());
+        assert!(wide.keeper.find_definition("Wide").is_some());
+        assert!(wide.dependencies.contains("inc/wide.td"));
+        let narrow = read_records(&files, "main.td", &["inc".to_string()], &[], false);
+        assert!(narrow.keeper.find_definition("Narrow").is_some());
+        assert!(narrow.keeper.find_definition("Wide").is_none());
+    }
+
+    #[test]
+    fn every_target_reads_to_the_records_llvm_24_prints() {
+        let files = llvm_sources();
+        for (target, expected) in LLVM_24_RECORD_DIGESTS {
+            let reading = read_target(&files, target);
+            assert!(reading.succeeded, "{target}: {}", reading.render_messages());
+            let printed = reading.keeper.print_records();
+            assert_eq!(
+                crate::hash::sha256(printed.as_bytes()).to_hex(),
+                *expected,
+                "{target} prints records that differ from llvm-tblgen 24"
+            );
+        }
+    }
+
+    fn source_file(path: &str) -> bool {
+        ![".h", ".cpp", ".c", ".py", ".cfg", ".txt", ".json", ".def"]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+    }
+
+    fn gather_folder(world: &World, folder: &str, files: &mut BTreeMap<String, String>) {
+        let folder = folder.trim_end_matches('/');
+        let prefix = format!("{}/", folder.trim_start_matches('/'));
+        for path in world.tree.paths_under(&prefix) {
+            if !source_file(&path) {
+                continue;
+            }
+            let key = format!("/{path}");
+            if files.contains_key(&key) {
+                continue;
+            }
+            if let Some(bytes) = world.read(&key) {
+                files.insert(key, String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+        let written: Vec<(String, Vec<u8>)> = world
+            .files
+            .iter()
+            .filter(|(path, _)| path.starts_with(&format!("{folder}/")))
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect();
+        for (path, bytes) in written {
+            files.insert(path, String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
+
+    pub(super) fn tool_llvm_tblgen(
+        arguments: &[String],
+        input: &[u8],
+        world: &mut World,
+    ) -> ToolOutcome {
+        let mut includes: Vec<String> = Vec::new();
+        let mut macros: Vec<String> = Vec::new();
+        let mut file: Option<String> = None;
+        let mut output: Option<String> = None;
+        let mut warn = true;
+        let mut action = "print-records".to_string();
+        let mut class = String::new();
+        let mut dependency_file: Option<String> = None;
+        let mut index = 1;
+        while index < arguments.len() {
+            let argument = arguments[index].clone();
+            index += 1;
+            if argument == "-" || !argument.starts_with('-') {
+                file = Some(argument);
+                continue;
+            }
+            let bare = argument
+                .strip_prefix("--")
+                .unwrap_or_else(|| &argument[1..])
+                .to_string();
+            let value = |index: &mut usize| -> String {
+                let found = arguments.get(*index).cloned().unwrap_or_default();
+                *index += 1;
+                found
+            };
+            match bare.as_str() {
+                "I" => includes.push(value(&mut index)),
+                "D" => {
+                    if index >= arguments.len() {
+                        return ToolOutcome::failed(
+                            1,
+                            "llvm-tblgen: for the -D option: requires a value!\n",
+                        );
+                    }
+                    macros.push(value(&mut index))
+                }
+                "o" => output = Some(value(&mut index)),
+                "class" => class = value(&mut index),
+                "d" => dependency_file = Some(value(&mut index)),
+                "print-records" | "print-enums" | "null-backend" | "print-detailed-records" => {
+                    action = bare.clone()
+                }
+                "no-warn-on-unused-template-args" => warn = false,
+                "write-if-changed" | "time-phases" => {}
+                other if other.starts_with('I') => includes.push(other[1..].to_string()),
+                other if other.starts_with('D') => macros.push(other[1..].to_string()),
+                other if other.starts_with("o=") => output = Some(other[2..].to_string()),
+                other if other.starts_with("class=") => class = other[6..].to_string(),
+                _ => {
+                    world
+                        .missing_tool
+                        .get_or_insert(format!("llvm-tblgen {argument}"));
+                    return ToolOutcome::failed(127, format!("unsupported option {argument}\n"));
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        let main_shown = file.clone().unwrap_or_else(|| "-".to_string());
+        let main = match file.as_deref() {
+            None | Some("-") => {
+                files.insert(
+                    "<stdin>".to_string(),
+                    String::from_utf8_lossy(input).into_owned(),
+                );
+                "<stdin>".to_string()
+            }
+            Some(path) => match world.read(path) {
+                Some(bytes) => {
+                    files.insert(path.to_string(), String::from_utf8_lossy(&bytes).into_owned());
+                    path.to_string()
+                }
+                None => {
+                    return ToolOutcome::failed(
+                        1,
+                        format!(
+                            "llvm-tblgen: Could not open input file '{path}': No such file or directory\n"
+                        ),
+                    )
+                }
+            },
+        };
+        let directories: Vec<String> = includes
+            .iter()
+            .map(|directory| world.absolute(directory))
+            .collect();
+        for directory in &directories {
+            gather_folder(world, directory, &mut files);
+        }
+        let reading = read_records(&files, &main, &directories, &macros, warn);
+        let mut stderr = reading.render_messages().into_bytes();
+        if !reading.parsed {
+            return ToolOutcome::failed(1, stderr);
+        }
+        if reading.keeper.errors > 0 {
+            stderr.extend_from_slice(
+                format!("llvm-tblgen: {} errors.\n", reading.keeper.errors).as_bytes(),
+            );
+            return ToolOutcome::failed(1, stderr);
+        }
+        let printed = match action.as_str() {
+            "print-enums" => {
+                let mut keeper = reading.keeper;
+                if keeper.find_class(&class).is_none() {
+                    stderr.extend_from_slice(
+                        format!("error: The class '{class}' is not defined\n").as_bytes(),
+                    );
+                    return ToolOutcome::failed(1, stderr);
+                }
+                let mut out = String::new();
+                for record in keeper.derived_definitions(&class) {
+                    out.push_str(&keeper.record_name_text(record));
+                    out.push_str(", ");
+                }
+                out.push('\n');
+                out
+            }
+            "null-backend" => String::new(),
+            "print-detailed-records" => reading.print_detailed_records(&main_shown),
+            _ => reading.keeper.print_records(),
+        };
+        if let Some(path) = dependency_file {
+            let target = output.clone().unwrap_or_else(|| "-".to_string());
+            if target == "-" {
+                return ToolOutcome::failed(
+                    1,
+                    "llvm-tblgen: the option -d must be used together with -o\n",
+                );
+            }
+            let mut listed = format!("{target}:");
+            if main_shown != "-" {
+                listed.push(' ');
+                listed.push_str(&main_shown);
+            }
+            for dependency in &reading.dependencies {
+                listed.push(' ');
+                listed.push_str(dependency);
+            }
+            listed.push('\n');
+            world.write(&path, listed.into_bytes(), false);
+        }
+        let mut outcome = ToolOutcome::ok(Vec::new());
+        outcome.stderr = stderr;
+        match output.as_deref() {
+            None | Some("-") => outcome.stdout = printed.into_bytes(),
+            Some(path) => world.write(path, printed.into_bytes(), false),
+        }
+        outcome
+    }
+
+    pub(super) fn publish_with_scope(report: &SuiteReport) {
+        let mut listed = String::new();
+        for (name, verdict) in &report.outcomes {
+            if let Verdict::OutOfScope(reason) = verdict {
+                listed.push_str(&format!("{name}\t{reason}\n"));
+            }
+        }
+        let folder = repository().join("Tests").join("suites");
+        let _ = std::fs::create_dir_all(&folder);
+        let _ = std::fs::write(
+            folder.join(format!("{}-out-of-scope.txt", report.name)),
+            listed,
+        );
+        report.publish();
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_tablegen_lit() {
+        let tree = Tree::of(&["Beta_01_LLVM_Core", "Test_04_LLVM_Transforms"])
+            .expect("the TableGen tests are present");
+        let root = "llvm-project/llvm/test/TableGen/";
+        let tests: Vec<String> = lit_tests(&tree, root, &[".td", ".test"])
+            .into_iter()
+            .filter(|path| !path[root.len()..].split('/').any(|part| part == "Common"))
+            .collect();
+        let mut tools = standard_tools();
+        tools.insert("llvm-tblgen".to_string(), tool_llvm_tblgen);
+        let suite = LitSuite {
+            tree: &tree,
+            features: ["shell".to_string()].into_iter().collect(),
+            substitutions: Vec::new(),
+            tools,
+        };
+        let outcomes = run_parallel(tests, &|path| suite.run_test(path));
+        let report = SuiteReport {
+            name: "tablegen-lit".to_string(),
+            outcomes,
+        };
+        publish_with_scope(&report);
+    }
+
+    const VERSION_DIFFERENCES: &[(&str, &str)] = &[
+        (
+            "test/TableGen/dag-subst.td",
+            "LLVM 24 prints a dag operator name as :$name where 18.1.3 printed :name",
+        ),
+        (
+            "test/TableGen/getbit-cond.td",
+            "LLVM 24 takes bit 0 of a bit-typed !cond as the !cond itself where 18.1.3 printed {0}",
+        ),
+        (
+            "test/TableGen/getbit-foldl.td",
+            "LLVM 24 takes bit 0 of a bit-typed !foldl as the !foldl itself where 18.1.3 printed {0}",
+        ),
+        (
+            "test/TableGen/isa-non-primary.td",
+            "LLVM 24 leaves !isa unfolded for a value of a superclass type where 18.1.3 folded it to 0",
+        ),
+        (
+            "test/TableGen/submulticlass-leteq.td",
+            "LLVM 24 applies a let inside a sub-multiclass after the template arguments where 18.1.3 did not",
+        ),
+        (
+            "test/TableGen/unsetop.td",
+            "LLVM 24 keeps the name of an unset dag operator where 18.1.3 dropped it",
+        ),
+        (
+            "test/TableGen/usevalname.td",
+            "LLVM 24 prints a dag operator name as :$name where 18.1.3 printed :name",
+        ),
+    ];
+
+    fn system_tablegen_version() -> Option<String> {
+        let output = std::process::Command::new("llvm-tblgen")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let at = text.find("LLVM version ")?;
+        let version = text[at + "LLVM version ".len()..]
+            .split_whitespace()
+            .next()?
+            .to_string();
+        Some(version)
+    }
+
+    fn first_error(stderr: &str) -> String {
+        for line in stderr.lines() {
+            if let Some(at) = line.find("error: ") {
+                return line[at..].to_string();
+            }
+        }
+        stderr.lines().next().unwrap_or("").to_string()
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_tablegen_oracle() {
+        let tree = Tree::of(&["Beta_01_LLVM_Core", "Test_04_LLVM_Transforms"])
+            .expect("the TableGen sources and tests are present");
+        let folder = repository().join("Tests").join("tablegen-oracle");
+        let mut prefixes = vec![
+            format!("{LLVM_ROOT}include/llvm/"),
+            format!("{LLVM_ROOT}test/TableGen/"),
+        ];
+        for target in TARGETS {
+            prefixes.push(format!("{LLVM_ROOT}lib/Target/{target}/"));
+        }
+        let mut files = BTreeMap::new();
+        for prefix in &prefixes {
+            for path in tree.paths_under(prefix) {
+                if !source_file(&path) {
+                    continue;
+                }
+                let Some(bytes) = tree.file(&path) else {
+                    continue;
+                };
+                let relative = path[LLVM_ROOT.len()..].to_string();
+                let target = folder.join(&relative);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).expect("a work folder");
+                }
+                std::fs::write(&target, bytes).expect("a source is written");
+                files.insert(relative, String::from_utf8_lossy(bytes).into_owned());
+            }
+        }
+        let mut cases: Vec<String> = files
+            .keys()
+            .filter(|path| {
+                path.starts_with("test/TableGen/")
+                    && path.ends_with(".td")
+                    && !path.contains("/Inputs/")
+                    && !path.contains("/Common/")
+            })
+            .cloned()
+            .collect();
+        for target in TARGETS {
+            cases.push(format!("lib/Target/{target}/{target}.td"));
+        }
+        let version = system_tablegen_version();
+        let outcomes = run_parallel(cases, &|main| {
+            let Some(version) = version.as_deref() else {
+                return Verdict::OutOfScope("llvm-tblgen is not on this machine".to_string());
+            };
+            let directory = main
+                .rsplit_once('/')
+                .map(|(folder, _)| folder)
+                .unwrap_or("");
+            let includes = vec![directory.to_string(), "include".to_string()];
+            let mut command = std::process::Command::new("timeout");
+            command.current_dir(&folder).arg("120").arg("llvm-tblgen");
+            for include in &includes {
+                command.arg("-I").arg(include);
+            }
+            let Ok(theirs) = command.arg(main).output() else {
+                return Verdict::OutOfScope("llvm-tblgen could not start".to_string());
+            };
+            if !theirs.status.success() {
+                let stderr = String::from_utf8_lossy(&theirs.stderr);
+                let reason = match theirs.status.code() {
+                    Some(1) => first_error(&stderr),
+                    Some(code) => format!("exits with status {code}"),
+                    None => "crashes".to_string(),
+                };
+                return Verdict::OutOfScope(format!(
+                    "llvm-tblgen {version} cannot read it: {reason}"
+                ));
+            }
+            let reading = read_records(&files, main, &includes, &[], true);
+            if !reading.succeeded {
+                return Verdict::Failed(format!(
+                    "llvm-tblgen {version} reads it and we do not:\n{}",
+                    reading.render_messages()
+                ));
+            }
+            let ours = reading.keeper.print_records();
+            let expected = String::from_utf8_lossy(&theirs.stdout);
+            if ours == expected {
+                return Verdict::Passed;
+            }
+            if let Some((_, reason)) = VERSION_DIFFERENCES.iter().find(|(path, _)| *path == main) {
+                return Verdict::OutOfScope(format!(
+                    "llvm-tblgen {version} prints it differently: {reason}; the bundled LLVM 24 test of this file passes"
+                ));
+            }
+            let difference = ours
+                .lines()
+                .zip(expected.lines())
+                .enumerate()
+                .find(|(_, (left, right))| left != right)
+                .map(|(line, (left, right))| {
+                    format!("line {}: ours `{left}`, theirs `{right}`", line + 1)
+                })
+                .unwrap_or_else(|| "the outputs differ in length".to_string());
+            Verdict::Failed(difference)
+        });
+        let report = SuiteReport {
+            name: "tablegen-oracle".to_string(),
+            outcomes,
+        };
+        publish_with_scope(&report);
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_target_records() {
+        let files = llvm_sources();
+        let folder = repository().join("Tests").join("tablegen");
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        for target in TARGETS {
+            let started = std::time::Instant::now();
+            let reading = read_target(&files, target);
+            println!(
+                "{target}: succeeded={} errors={} in {:?}",
+                reading.succeeded,
+                reading.keeper.errors,
+                started.elapsed()
+            );
+            let messages = reading.render_messages();
+            print!("{}", &messages[..messages.len().min(4000)]);
+            std::fs::write(
+                folder.join(format!("{target}.records")),
+                reading.keeper.print_records(),
+            )
+            .expect("the records are written");
         }
     }
 }
