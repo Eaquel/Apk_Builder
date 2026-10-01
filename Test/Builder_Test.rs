@@ -41567,14 +41567,19 @@ mod kotlin {
 
         fn generate(
             &mut self,
-            module: &native::ir::Module,
+            lowered: &native::Lowered,
             options: &native::Options,
         ) -> Result<Vec<native::Artifact>, crate::diag::Diagnostic> {
-            self.seen = module.functions.iter().filter(|one| one.has_body()).count();
+            self.seen = lowered
+                .module
+                .functions
+                .iter()
+                .filter(|one| !one.blocks.is_empty())
+                .count();
             Ok(vec![native::Artifact {
                 name: format!("{}.o", options.module()),
                 kind: native::ArtifactKind::Object,
-                bytes: module.print().into_bytes(),
+                bytes: lowered.module.to_text().into_bytes(),
             }])
         }
     }
@@ -41585,7 +41590,7 @@ mod kotlin {
         fn link(
             &mut self,
             objects: Vec<native::Artifact>,
-            _: &native::ir::Module,
+            _: &native::Lowered,
             options: &native::Options,
         ) -> Result<Vec<native::Artifact>, crate::diag::Diagnostic> {
             let bytes = objects.into_iter().flat_map(|one| one.bytes).collect();
@@ -41734,8 +41739,9 @@ false
         };
         let kotlin = vec![("Sample.kt".to_string(), OMNI_PROGRAM.to_string())];
         let options = native_options(&["-target", "linux_x64", "-o", "sample"]).expect("parses");
-        let (module, entries, _) = native::lower_to_omni(&kotlin, &[], &options, vec![library])
+        let lowered = native::lower_to_omni(&kotlin, &[], &options, vec![library])
             .expect("the program lowers to Omni IR");
+        let module = &lowered.module;
         module.verify().expect("the module keeps every rule");
         let text = module.to_text();
         assert_eq!(
@@ -41747,9 +41753,10 @@ false
         );
         let mut host = StandardHost;
         let mut interpreter =
-            Interpreter::new(&module, &mut host, Limits::default()).expect("the module loads");
+            Interpreter::new(module, &mut host, Limits::default()).expect("the module loads");
+        let entry = lowered.entry.expect("a program has an entry");
         let finish = interpreter
-            .call(entries[0], vec![Datum::Reference(0)])
+            .call(entry, vec![Datum::Reference(0)])
             .expect("main finishes");
         assert_eq!(finish, Finish::Returned(None));
         assert_eq!(
@@ -41759,61 +41766,104 @@ false
     }
 
     #[test]
-    fn a_kotlin_program_lowers_to_native_ir_that_holds_together() {
+    fn a_kotlin_program_lowers_to_omni_ir_that_holds_together() {
+        use crate::compilers::compiler_infrastructure::{
+            Datum, Finish, GlobalContent, Interpreter, Limits, Linkage, Module, StandardHost,
+            Terminator,
+        };
         let Some((_, library)) = standard_library() else {
             eprintln!("kotlin native: no kotlin-stdlib to compile against");
             return;
         };
         let kotlin = vec![("Shapes.kt".to_string(), NATIVE_PROGRAM.to_string())];
         let options = native_options(&["-target", "linux_x64", "-o", "shapes"]).expect("parses");
-        let (module, missing) = native::lower_to_ir(&kotlin, &[], &options, vec![library.clone()])
+        let lowered = native::lower_to_omni(&kotlin, &[], &options, vec![library.clone()])
             .expect("the program lowers");
+        let module = &lowered.module;
         module.verify().expect("the module verifies");
-        let entry = module.entry.expect("a program has an entry");
-        assert!(module.function(entry).name.contains("main"));
-        assert!(module.functions.iter().filter(|one| one.has_body()).count() > 20);
-        assert!(module.strings.iter().any(|one| one == "two areas"));
-        let square = module
-            .class_named("shapes/Square")
-            .expect("Square is a class");
-        let shape = module
-            .class_named("shapes/Shape")
-            .expect("Shape is an interface");
-        assert!(module.class(shape).flags.interface);
-        assert!(module.class(square).flags.instantiated);
-        assert!(module.is_subclass(square, shape));
-        assert!(module.class(square).size >= 16);
+        let entry = lowered.entry.expect("a program has an entry");
+        assert!(module.functions[entry.index()].name.contains("main"));
+        assert!(
+            module
+                .functions
+                .iter()
+                .filter(|one| !one.blocks.is_empty())
+                .count()
+                > 20
+        );
+        let spoken: Vec<u8> = "two areas"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         assert!(module
-            .class(square)
-            .itable
+            .globals
             .iter()
-            .any(|(interface, _)| *interface == shape));
-        assert!(module
+            .any(|one| one.content == GlobalContent::Bytes(spoken.clone())));
+        let class = |name: &str| {
+            module
+                .classes
+                .iter()
+                .position(|one| one.name == name)
+                .unwrap_or_else(|| panic!("{name} is a class"))
+        };
+        let square = class("shapes/Square");
+        let shape = class("shapes/Shape");
+        assert!(module.classes[shape].interface);
+        assert!(!module.classes[square].interface && !module.classes[square].abstract_class);
+        assert!(!module.classes[square].fields.is_empty());
+        assert!(module.classes[square]
+            .implementations
+            .iter()
+            .any(|(interface, _)| interface.index() == shape));
+        let total = lowered
             .exports
             .iter()
-            .any(|one| one.symbol == "shapes_total"));
+            .find(|one| one.symbol == "shapes_total")
+            .expect("shapes_total is exported");
+        assert_eq!(total.descriptor, "(I)I");
+        assert_eq!(
+            module.functions[total.function.index()].name,
+            "shapes_total"
+        );
+        assert_eq!(
+            module.functions[total.function.index()].linkage,
+            Linkage::Export
+        );
+        assert!(module.functions.iter().any(|one| one
+            .blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Terminator::Invoke { .. }))));
         assert!(module
             .functions
             .iter()
-            .any(|one| one.blocks.iter().any(|block| !block.handlers.is_empty())));
-        assert!(missing.iter().any(|one| one.starts_with("java/")));
-        let platform = module
-            .class_named("kotlin/native/Platform")
-            .expect("Platform is carried");
-        assert!(module
-            .class(platform)
-            .methods
-            .iter()
-            .any(|one| module.function(*one).name.contains("getOsFamily")));
-        assert!(module.class_named("kotlin/native/OsFamily").is_some());
-        let refused = native::finish(module.clone(), missing.clone(), &options, None)
-            .expect_err("no backend");
+            .any(|one| one.name.starts_with("kotlin/native/Platform.getOsFamily")));
+        class("kotlin/native/OsFamily");
+        let mut host = StandardHost;
+        let mut interpreter =
+            Interpreter::new(module, &mut host, Limits::default()).expect("the module loads");
+        let arguments = if module.functions[entry.index()]
+            .signature
+            .parameters
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            vec![Datum::Reference(0)]
+        };
+        assert_eq!(
+            interpreter.call(entry, arguments).expect("main finishes"),
+            Finish::Returned(None)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(interpreter.machine().stdout()),
+            "shape of 4.0, circle shape of 3.0 6 LINUX 64\n"
+        );
+        let refused = native::finish(lowered.clone(), &options, None).expect_err("no backend");
         assert_eq!(refused.code, "EK408");
         let mut code = PretendCode { seen: 0 };
         let mut linker = PretendLinker;
         let made = native::finish(
-            module.clone(),
-            missing.clone(),
+            lowered.clone(),
             &options,
             Some(native::Toolchain {
                 code: &mut code,
@@ -41827,8 +41877,7 @@ false
         let windows = native_options(&["-target", "mingw_x64", "-o", "shapes"]).expect("parses");
         let mut code = PretendCode { seen: 0 };
         let refused = native::finish(
-            module.clone(),
-            missing.clone(),
+            lowered.clone(),
             &windows,
             Some(native::Toolchain {
                 code: &mut code,
@@ -41840,10 +41889,15 @@ false
         let static_options =
             native_options(&["-target", "linux_x64", "-p", "static", "-o", "shapes"])
                 .expect("parses");
-        let (library_module, _) =
-            native::lower_to_ir(&kotlin, &[], &static_options, vec![library.clone()])
+        let library_lowered =
+            native::lower_to_omni(&kotlin, &[], &static_options, vec![library.clone()])
                 .expect("a library lowers");
-        let header = native::header(&library_module, &static_options);
+        assert!(library_lowered.entry.is_none());
+        library_lowered
+            .module
+            .verify()
+            .expect("the library module verifies");
+        let header = native::header(&library_lowered, &static_options);
         let text = String::from_utf8(header.bytes).expect("header text");
         assert_eq!(header.name, "libshapes_api.h");
         assert!(
@@ -41853,14 +41907,30 @@ false
         let klib_options =
             native_options(&["-target", "linux_x64", "-p", "library", "-o", "shapes"])
                 .expect("parses");
-        let packed = native::finish(library_module, Vec::new(), &klib_options, None)
+        let packed = native::finish(library_lowered.clone(), &klib_options, None)
             .expect("a klib needs no backend");
         assert_eq!(packed.artifacts[0].name, "shapes.klib");
+        let bytes = &packed.artifacts[0].bytes;
         let mut sink = Sink::new();
-        let archive =
-            crate::archive::read(&packed.artifacts[0].bytes, &mut sink).expect("the klib is a zip");
+        let archive = crate::archive::read(bytes, &mut sink).expect("the klib is a zip");
         assert!(archive.entry("default/manifest").is_some());
-        assert!(archive.entry("default/ir/module.kir").is_some());
+        let stored = archive
+            .entry("default/ir/module.omni")
+            .expect("the klib carries the module");
+        let from = stored.data_offset as usize;
+        let held = &bytes[from..from + stored.compressed_size as usize];
+        let data = match stored.compression {
+            crate::archive::Compression::Stored => held.to_vec(),
+            crate::archive::Compression::Deflate => {
+                crate::inflate::raw(held).expect("the module inflates")
+            }
+            crate::archive::Compression::Other(_) => panic!("the module is packed oddly"),
+        };
+        assert_eq!(data, library_lowered.module.to_binary());
+        let read_back = Module::from_binary(&data).expect("the module reads back");
+        read_back.verify().expect("the module read back verifies");
+        assert_eq!(read_back.to_binary(), data);
+        assert_eq!(read_back.to_text(), library_lowered.module.to_text());
     }
 
     #[test]
@@ -41870,13 +41940,13 @@ false
         };
         let kotlin = vec![("Lib.kt".to_string(), "fun helper() = 1\n".to_string())];
         let options = native_options(&["-target", "linux_x64"]).expect("parses");
-        let refused = native::lower_to_ir(&kotlin, &[], &options, vec![library.clone()])
+        let refused = native::lower_to_omni(&kotlin, &[], &options, vec![library.clone()])
             .expect_err("no main");
         assert_eq!(refused.code, "EK407");
         let named =
             native_options(&["-target", "linux_x64", "-e", "nowhere.start"]).expect("parses");
         let refused =
-            native::lower_to_ir(&kotlin, &[], &named, vec![library]).expect_err("no such entry");
+            native::lower_to_omni(&kotlin, &[], &named, vec![library]).expect_err("no such entry");
         assert_eq!(refused.code, "EK406");
     }
 
@@ -63399,7 +63469,7 @@ mod reference_checks {
     }
 
     thread_local! {
-        static OMNI_BASE: std::cell::RefCell<Option<crate::compilers::kotlin::native::translate::ClassFiles>> =
+        static OMNI_BASE: std::cell::RefCell<Option<crate::compilers::kotlin::native::class_files::ClassFiles>> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -63411,7 +63481,7 @@ mod reference_checks {
         use crate::compilers::compiler_infrastructure::{
             Datum, Finish, Interpreter, Layout, Limits, Object, StandardHost,
         };
-        use crate::compilers::kotlin::native::{lowering, translate::ClassFiles};
+        use crate::compilers::kotlin::native::{class_files::ClassFiles, lowering};
         let base = OMNI_BASE.with(|held| {
             let mut held = held.borrow_mut();
             if held.is_none() {
@@ -63443,12 +63513,12 @@ mod reference_checks {
             })
             .ok_or_else(|| "no box function".to_string())?;
         let roots = vec![(facade.to_string(), "box".to_string(), descriptor, true)];
-        let (module, entries, _) = lowering::lower(&mut files, &roots, Layout::Lp64, "box")
+        let lowered = lowering::lower(&mut files, &roots, Layout::Lp64, "box")
             .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
         let mut host = StandardHost;
-        let mut interpreter = Interpreter::new(&module, &mut host, Limits::default())
+        let mut interpreter = Interpreter::new(&lowered.module, &mut host, Limits::default())
             .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
-        let handle = match interpreter.call(entries[0], Vec::new()) {
+        let handle = match interpreter.call(lowered.entries[0], Vec::new()) {
             Ok(Finish::Returned(Some(Datum::Reference(handle)))) => handle,
             Ok(other) => return Err(format!("finishes with {other:?}")),
             Err(problem) => return Err(format!("{} {:?}", problem.code, problem.context)),
