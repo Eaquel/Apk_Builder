@@ -174,11 +174,33 @@ def check_layout() -> str:
         raise AssertionError(f"Compilers/Kotlin holds {kotlin}, expected {wanted_kotlin}")
 
     infrastructure = sorted(path.name for path in INFRASTRUCTURE.iterdir())
-    wanted_infrastructure = ["Compiler_Infrastructure.rs", "Compiler_Infrastructure_Diagnostic.rs"]
-    if infrastructure != wanted_infrastructure:
+    needed_infrastructure = ["Compiler_Infrastructure.rs", "Compiler_Infrastructure_Diagnostic.rs"]
+    allowed_infrastructure = needed_infrastructure + [
+        "TableGen.rs",
+        "Armv7.rs",
+        "Armv8.rs",
+        "X86.rs",
+        "X86_64.rs",
+        "Elf.rs",
+        "Pe.rs",
+        "Linker.rs",
+        "Tables",
+        "Tables.manifest",
+    ]
+    absent = [name for name in needed_infrastructure if name not in infrastructure]
+    foreign = [name for name in infrastructure if name not in allowed_infrastructure]
+    if absent or foreign:
         raise AssertionError(
-            f"Compilers/Compiler_Infrastructure holds {infrastructure}, expected {wanted_infrastructure}"
+            f"Compilers/Compiler_Infrastructure holds {infrastructure}, "
+            f"it needs {needed_infrastructure} and allows only {allowed_infrastructure}"
         )
+    tables = INFRASTRUCTURE / "Tables"
+    if tables.exists():
+        held = sorted(path.name for path in tables.iterdir())
+        allowed_tables = ["Armv7.bin", "Armv8.bin", "X86.bin", "X86_64.bin"]
+        stray_tables = [name for name in held if name not in allowed_tables]
+        if not tables.is_dir() or stray_tables:
+            raise AssertionError(f"Compilers/Compiler_Infrastructure/Tables holds {held}, allowed {allowed_tables}")
 
     folders = sorted(path.name for path in COMPILERS.iterdir() if path.is_dir())
     wanted_folders = ["Compiler_Infrastructure", "Java", "Kotlin"]

@@ -992,6 +992,7 @@ pub enum Statement {
         what: Written,
         name: String,
         value: Option<Expression>,
+        fixed: bool,
     },
     Express(Expression),
     If {
@@ -1268,6 +1269,7 @@ pub fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
                 lengths: vec![Expression::Int(constants.len() as i64)],
                 empty: 0,
             }),
+            fixed: false,
         },
     )];
     for position in 0..constants.len() {
@@ -2941,9 +2943,11 @@ impl Parser {
         Ok(out)
     }
 
-    fn eat_final(&mut self) -> Result<(), Diagnostic> {
+    fn eat_final(&mut self) -> Result<bool, Diagnostic> {
+        let mut fixed = false;
         loop {
             if self.eat_word("final") {
+                fixed = true;
                 continue;
             }
             if self.is_mark("@") && !matches!(self.ahead(1), Token::Keyword("interface")) {
@@ -2952,7 +2956,7 @@ impl Parser {
                 self.held_annotations.truncate(before);
                 continue;
             }
-            return Ok(());
+            return Ok(fixed);
         }
     }
 
@@ -4201,14 +4205,14 @@ impl Parser {
         }
 
         if self.is_word("final") && self.ahead(1) != &Token::End {
-            self.eat_final()?;
-            let statement = self.declaration()?;
+            let fixed = self.eat_final()?;
+            let statement = self.declaration(fixed)?;
             self.want_mark(";")?;
             return Ok(statement);
         }
 
         if self.looks_like_declaration() {
-            let statement = self.declaration()?;
+            let statement = self.declaration(false)?;
             self.want_mark(";")?;
             return Ok(statement);
         }
@@ -4218,7 +4222,7 @@ impl Parser {
         Ok(Statement::Express(expression))
     }
 
-    fn declaration(&mut self) -> Result<Statement, Diagnostic> {
+    fn declaration(&mut self, fixed: bool) -> Result<Statement, Diagnostic> {
         let base = self.written_type()?;
         let mut declared = Vec::new();
         loop {
@@ -4236,7 +4240,12 @@ impl Parser {
                 None
             };
             declared.push(Positioned {
-                node: Statement::Declare { what, name, value },
+                node: Statement::Declare {
+                    what,
+                    name,
+                    value,
+                    fixed,
+                },
                 line,
                 column,
             });
@@ -4511,6 +4520,7 @@ impl Parser {
                             what: Written::Inferred,
                             name: format!("$closing{}", resources.len()),
                             value: Some(Expression::Name(named)),
+                            fixed: true,
                         },
                         line,
                         column,
@@ -4520,7 +4530,7 @@ impl Parser {
                     }
                     continue;
                 }
-                let node = self.declaration()?;
+                let node = self.declaration(true)?;
                 let Statement::Declare { value: Some(_), .. } = &node else {
                     return Err(at(
                         "EJ118",
@@ -4701,8 +4711,8 @@ impl Parser {
         if !self.is_mark(";") {
             let (line, column) = (self.line(), self.column());
             let node = if self.is_word("final") || self.looks_like_declaration() {
-                self.eat_final()?;
-                self.declaration()?
+                let fixed = self.eat_final()?;
+                self.declaration(fixed)?
             } else {
                 Statement::Express(self.expression()?)
             };
@@ -4898,7 +4908,7 @@ impl Parser {
 
                 if operator == Unary::Negate {
                     if let Expression::Int(value) = of {
-                        return Ok(Expression::Int(-value));
+                        return Ok(Expression::Int(i64::from((value as i32).wrapping_neg())));
                     }
                     if let Expression::Long(value) = of {
                         return Ok(Expression::Long(value.wrapping_neg()));
@@ -6763,6 +6773,7 @@ struct Local {
     name: String,
     slot: u16,
     what: Type,
+    constant: Option<Expression>,
 }
 
 #[derive(Clone)]
@@ -7241,8 +7252,38 @@ impl<'a> Emitter<'a> {
             name: name.to_string(),
             slot,
             what,
+            constant: None,
         });
         slot
+    }
+
+    fn hold_constant(&mut self, what: &Written, value: &Expression) {
+        let Some(local) = self.locals.last() else {
+            return;
+        };
+        let plain = matches!(
+            local.what,
+            Type::Boolean
+                | Type::Byte
+                | Type::Short
+                | Type::Char
+                | Type::Int
+                | Type::Long
+                | Type::Float
+                | Type::Double
+        );
+        if !plain && local.what != text_type() {
+            return;
+        }
+        let Some(found) = self.constant_of(value) else {
+            return;
+        };
+        let Some(held) = held_as(what, found) else {
+            return;
+        };
+        if let Some(local) = self.locals.last_mut() {
+            local.constant = Some(held);
+        }
     }
 
     fn local(&self, name: &str) -> Option<Local> {
@@ -9388,8 +9429,8 @@ public class Integer extends Number implements Comparable<Integer> {
 }
 
 public class Long extends Number implements Comparable<Long> {
-    public static final long MAX_VALUE;
-    public static final long MIN_VALUE;
+    public static final long MAX_VALUE = 9223372036854775807L;
+    public static final long MIN_VALUE = -9223372036854775808L;
     public native Long(long value) throws java.lang.NumberFormatException ;
     public native long longValue();
     public native int compareTo(Long other);
@@ -12731,7 +12772,16 @@ impl Emitter<'_> {
                 operator,
                 left,
                 right,
-            } => self.binary(*operator, left, right, line),
+            } => {
+                if *operator == Binary::Add {
+                    if let Some(Expression::Str(text)) = self.constant_of(expression) {
+                        self.expecting = None;
+                        self.push_string(&text);
+                        return Ok(text_type());
+                    }
+                }
+                self.binary(*operator, left, right, line)
+            }
             Expression::Conditional {
                 condition,
                 then,
@@ -16497,7 +16547,12 @@ impl Emitter<'_> {
                 self.close();
                 Ok(())
             }
-            Statement::Declare { what, name, value } => {
+            Statement::Declare {
+                what,
+                name,
+                value,
+                fixed,
+            } => {
                 if matches!(what, Written::Inferred) {
                     let Some(expression) = value else {
                         return Err(self.resolve(what, line).unwrap_err());
@@ -16524,6 +16579,9 @@ impl Emitter<'_> {
                     }
                     let slot = self.declare(name, found.clone());
                     self.store(slot, &found);
+                    if *fixed {
+                        self.hold_constant(what, expression);
+                    }
                     return Ok(());
                 }
                 let target = self.resolve(what, line)?;
@@ -16550,6 +16608,9 @@ impl Emitter<'_> {
                 }
                 let slot = self.declare(name, target.clone());
                 self.store(slot, &target);
+                if let (true, Some(expression)) = (*fixed, value) {
+                    self.hold_constant(what, expression);
+                }
                 Ok(())
             }
             Statement::Express(expression) => {
@@ -18313,24 +18374,48 @@ impl Emitter<'_> {
     }
 
     fn case_constant(&self, label: &Expression) -> Option<Expression> {
-        if let Expression::Name(name) = label {
-            if self.local(name).is_some() {
-                return None;
+        self.constant_of(label)
+    }
+
+    fn constant_of(&self, expression: &Expression) -> Option<Expression> {
+        fold_constant(expression, &mut |named| self.constant_named(named))
+    }
+
+    fn constant_named(&self, named: &Expression) -> Option<Expression> {
+        match named {
+            Expression::Name(name) => {
+                if let Some(local) = self.local(name) {
+                    return local.constant;
+                }
+                if let Some(found) = constant_within(self.classpath, self.unit, named, 0) {
+                    return Some(found);
+                }
+                if self.unit.fields.iter().any(|field| field.name == *name) {
+                    return None;
+                }
+                let mut owners = vec![self.this_class.clone()];
+                owners.extend(self.the_classes_around());
+                owners.extend(self.holders());
+                owners.extend(self.imported_statically(name));
+                owners
+                    .iter()
+                    .find_map(|owner| self.classpath.constant(owner, name).cloned())
             }
+            Expression::Field { of, .. } => {
+                let mut first = of.as_ref();
+                while let Expression::Field { of, .. } = first {
+                    first = of;
+                }
+                let Expression::Name(head) = first else {
+                    return None;
+                };
+                if self.local(head).is_some() {
+                    return None;
+                }
+                constant_within(self.classpath, self.unit, named, 0)
+            }
+            _ => None,
         }
-        if let Some(found) = constant_within(self.classpath, self.unit, label, 0) {
-            return Some(found);
-        }
-        let Expression::Name(name) = label else {
-            return None;
-        };
-        let mut owners = vec![self.this_class.clone()];
-        owners.extend(self.the_classes_around());
-        owners.extend(self.holders());
-        owners.extend(self.imported_statically(name));
-        owners
-            .iter()
-            .find_map(|owner| self.classpath.constant(owner, name).cloned())
     }
 
     fn integer_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
@@ -20474,7 +20559,7 @@ fn constant_within(
     }
     let own = |name: &str| -> Option<Option<Expression>> {
         let field = unit.fields.iter().find(|field| field.name == name)?;
-        if !field.modifiers.static_ || !field.modifiers.final_ {
+        if !field.modifiers.final_ {
             return Some(None);
         }
         Some(
@@ -21225,7 +21310,9 @@ fn locals_declared(statement: &Statement, out: &mut Vec<(Written, String, Option
         }
     };
     match statement {
-        Statement::Declare { what, name, value } => {
+        Statement::Declare {
+            what, name, value, ..
+        } => {
             out.push((what.clone(), name.clone(), value.clone()));
         }
         Statement::Block(held) | Statement::Several(held) => all(held, out),

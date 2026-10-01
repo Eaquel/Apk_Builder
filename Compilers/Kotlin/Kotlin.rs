@@ -10217,9 +10217,18 @@ pub mod lower {
     }
 
     pub fn rep_of(ty: &Ty) -> Rep {
+        rep_within(ty, &mut Vec::new())
+    }
+
+    fn rep_within(ty: &Ty, seen: &mut Vec<String>) -> Rep {
         if let Ty::Class { name, .. } = ty {
-            if let Some(inner) = unboxed_value(ty) {
-                return Rep::Value(jvm_class_of(name), Box::new(rep_of(&inner)));
+            if !seen.contains(name) {
+                if let Some(inner) = unboxed_value(ty) {
+                    seen.push(name.clone());
+                    let held = rep_within(&inner, seen);
+                    seen.pop();
+                    return Rep::Value(jvm_class_of(name), Box::new(held));
+                }
             }
         }
         match ty {
@@ -10557,6 +10566,7 @@ pub mod lower {
                 what,
                 name: name.clone(),
                 value,
+                fixed: false,
             });
             name
         }
@@ -10592,6 +10602,7 @@ pub mod lower {
                             what: rep_written(&value.rep),
                             name: name.clone(),
                             value: Some(value.j.clone()),
+                            fixed: false,
                         },
                         spot,
                     ),
@@ -10647,12 +10658,14 @@ pub mod lower {
                         values: vec![initial],
                         line: self.spot.line,
                     }),
+                    fixed: false,
                 });
             } else if !matches!(rep, Rep::Never | Rep::Void) {
                 self.emit(S::Declare {
                     what: rep_written(&rep),
                     name: jvm,
                     value,
+                    fixed: false,
                 });
             }
             if let Some(scope) = self.scopes.last_mut() {
@@ -11407,6 +11420,7 @@ pub mod lower {
                                 what: rep_written(&rep),
                                 name: name.clone(),
                                 value: None,
+                                fixed: false,
                             });
                             let mut body = body;
                             body.push(at_line(
@@ -11569,12 +11583,18 @@ pub mod lower {
             let mut pieces: Vec<(J, usize, Ty, Rep)> = Vec::new();
             for part in parts {
                 match part {
-                    tree::Part::Text(text) => pieces.push((
-                        J::Str(text.clone()),
-                        self.mark(),
-                        Ty::string(),
-                        Rep::Ref(STRING.to_string()),
-                    )),
+                    tree::Part::Text(text) => {
+                        if let Some((J::Str(before), _, _, _)) = pieces.last_mut() {
+                            before.push_str(text);
+                            continue;
+                        }
+                        pieces.push((
+                            J::Str(text.clone()),
+                            self.mark(),
+                            Ty::string(),
+                            Rep::Ref(STRING.to_string()),
+                        ))
+                    }
                     tree::Part::Value(expr) => {
                         let mark = self.mark();
                         let value = self.value(expr, None)?;
@@ -12503,6 +12523,7 @@ pub mod lower {
                 what: rep_written(&rep),
                 name: name.clone(),
                 value: None,
+                fixed: false,
             });
             self.emit(S::If {
                 condition: test,
@@ -12655,6 +12676,7 @@ pub mod lower {
                         what: W::Boolean,
                         name: name.clone(),
                         value: Some(J::Boolean(false)),
+                        fixed: false,
                     });
                     let mut setup = condition_setup;
                     setup.push(at_line(
@@ -12679,6 +12701,7 @@ pub mod lower {
                             what: W::Boolean,
                             name: name.clone(),
                             value: Some(J::Boolean(false)),
+                            fixed: false,
                         });
                         let mut body = setup;
                         body.push(at_line(
@@ -12855,6 +12878,7 @@ pub mod lower {
                     what: rep_written(&rep),
                     name: name.clone(),
                     value: None,
+                    fixed: false,
                 });
             }
             self.emit(S::Block(body));
@@ -13017,6 +13041,7 @@ pub mod lower {
                     what: rep_written(&rep),
                     name: name.clone(),
                     value: Some(default_value(&rep)),
+                    fixed: false,
                 });
             }
             let mut finished = Vec::new();
@@ -13164,9 +13189,9 @@ pub mod lower {
             let mut rest = Vec::new();
             for one in inner {
                 match &one.node {
-                    S::Declare { what, name, value }
-                        if visible.iter().any(|local| local.jvm == *name) =>
-                    {
+                    S::Declare {
+                        what, name, value, ..
+                    } if visible.iter().any(|local| local.jvm == *name) => {
                         declarations.push(at_line(
                             S::Declare {
                                 what: what.clone(),
@@ -13180,6 +13205,7 @@ pub mod lower {
                                     W::Int | W::Short | W::Byte => J::Int(0),
                                     _ => J::Null,
                                 }),
+                                fixed: false,
                             },
                             self.spot,
                         ));
@@ -13905,6 +13931,7 @@ pub mod lower {
                 what: rep_written(&rep),
                 name: name.clone(),
                 value: Some(J::Null),
+                fixed: false,
             });
             self.emit(S::If {
                 condition: binary(java::Binary::NotEqual, held.j.clone(), J::Null),
@@ -17491,6 +17518,7 @@ pub mod lower {
                     arguments: Vec::new(),
                     outer: None,
                 }),
+                fixed: false,
             });
             for index in list {
                 let ArgValue::Ready(value) = &given[*index].value else {
@@ -17516,6 +17544,7 @@ pub mod lower {
                                 what: W::Int,
                                 name: counter.clone(),
                                 value: Some(J::Int(0)),
+                                fixed: false,
                             },
                             self.spot,
                         )],
@@ -17552,6 +17581,7 @@ pub mod lower {
                     lengths: vec![length],
                     empty: 0,
                 }),
+                fixed: false,
             });
             let counter = self.temp_name("i");
             let got = call(
@@ -17579,6 +17609,7 @@ pub mod lower {
                         what: W::Int,
                         name: counter.clone(),
                         value: Some(J::Int(0)),
+                        fixed: false,
                     },
                     self.spot,
                 )],
@@ -18390,6 +18421,7 @@ pub mod lower {
                                 what: W::Int,
                                 name: counter.clone(),
                                 value: Some(J::Int(0)),
+                                fixed: false,
                             },
                             self.spot,
                         )],
@@ -23242,6 +23274,7 @@ pub mod lower {
                                     what: rep_written(&rep),
                                     name: name.clone(),
                                     value: Some(access),
+                                    fixed: false,
                                 });
                                 method.emit(S::If {
                                     condition: binary(
@@ -23898,6 +23931,7 @@ pub mod lower {
                     arguments,
                     outer: None,
                 }),
+                fixed: false,
             });
             self.bind_local(Local {
                 name: function.name.clone(),
@@ -24953,6 +24987,7 @@ pub mod lower {
                         what: W::Int,
                         name: "result".to_string(),
                         value: Some(J::Int(0)),
+                        fixed: false,
                     },
                     spot,
                 )];
@@ -25032,6 +25067,7 @@ pub mod lower {
                             what: named(jvm),
                             name: "that".to_string(),
                             value: Some(cast(named(jvm), other.clone())),
+                            fixed: false,
                         },
                         spot,
                     ),

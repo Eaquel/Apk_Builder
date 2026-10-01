@@ -27002,6 +27002,95 @@ mod java {
     }
 
     #[test]
+    fn constant_text_is_joined_while_compiling_as_the_language_requires() {
+        let source = r#"
+            package com.my.app;
+
+            final class Folding {
+                static final String JOINED = "ab" + "cd";
+                final String own = "ow";
+
+                static String joined() {
+                    return "a" + "b" + 1 + 'c' + 2L + true;
+                }
+
+                static String local() {
+                    final String head = "lo";
+                    return head + "cal";
+                }
+
+                String member() {
+                    return own + "n";
+                }
+
+                static String bounds() {
+                    return "i" + Integer.MIN_VALUE + Long.MIN_VALUE;
+                }
+
+                static String field() {
+                    return JOINED + "!";
+                }
+
+                static String loose() {
+                    String head = "lo";
+                    return head + "cal";
+                }
+
+                static int chosen(int x) {
+                    final int seven = 7;
+                    switch (x) {
+                        case seven:
+                            return 1;
+                        default:
+                            return 0;
+                    }
+                }
+            }
+        "#;
+        let (_, bytes) = compile_one(source, &empty()).expect("the constant text compiles");
+        let class = crate::jvm::read(&bytes).expect("the class file reads back");
+        let code_of = |name: &str| {
+            class
+                .methods
+                .iter()
+                .find(|method| method.name == name)
+                .and_then(|method| method.code.as_ref())
+                .map(|code| code.bytes.clone())
+                .expect("the method has code")
+        };
+        let calls = |code: &[u8]| code.iter().any(|byte| matches!(byte, 0xb6..=0xba));
+        for name in ["joined", "local", "member", "bounds", "field"] {
+            assert!(
+                !calls(&code_of(name)),
+                "constant text in {name} is joined while compiling"
+            );
+        }
+        assert!(
+            calls(&code_of("loose")),
+            "text held in a variable that is not final is joined while running"
+        );
+        let holds = |text: &str| {
+            bytes
+                .windows(text.len())
+                .any(|window| window == text.as_bytes())
+        };
+        for text in [
+            "ab1c2true",
+            "local",
+            "own",
+            "i-2147483648-9223372036854775808",
+            "abcd!",
+        ] {
+            assert!(holds(text), "the class holds the joined text {text}");
+        }
+        let chosen = code_of("chosen");
+        assert!(
+            chosen.contains(&0xaa) || chosen.contains(&0xab) || chosen.contains(&0xa0),
+            "a final local with a constant value labels a case"
+        );
+    }
+
+    #[test]
     fn a_less_than_comparison_treats_not_a_number_as_false() {
         let source = r#"
             package com.my.app;
@@ -41223,6 +41312,18 @@ mod kotlin {
                 "; no java to run them"
             }
         );
+    }
+
+    #[test]
+    fn a_value_class_bounded_by_itself_has_a_representation() {
+        let Some((_, library)) = standard_library() else {
+            eprintln!("kotlin value classes: no kotlin-stdlib to compile against");
+            return;
+        };
+        let source = "value class Looped<T : Looped<T>?>(val x: T)\n\nfun box(): String {\n    val made = Looped(null)\n    return if (made.toString().isEmpty()) \"Fail\" else \"OK\"\n}\n";
+        let kotlin = vec![("Looped.kt".to_string(), source.to_string())];
+        let made = compiled(&kotlin, &[], &library).expect("the representation stops at itself");
+        assert!(made.iter().any(|(name, _)| name == "Looped.class"));
     }
 
     #[test]
@@ -62789,18 +62890,26 @@ mod reference {
         let results: Mutex<BTreeMap<String, Verdict>> = Mutex::new(BTreeMap::new());
         std::thread::scope(|scope| {
             for _ in 0..threads {
-                scope.spawn(|| loop {
-                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(path) = paths.get(index) else {
-                        break;
-                    };
-                    let verdict =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(path)))
-                            .unwrap_or_else(|_| Verdict::Failed("the runner panicked".to_string()));
-                    if let Ok(mut held) = results.lock() {
-                        held.insert(path.clone(), verdict);
-                    }
-                });
+                std::thread::Builder::new()
+                    .stack_size(256 << 20)
+                    .spawn_scoped(scope, || loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(path) = paths.get(index) else {
+                            break;
+                        };
+                        if std::env::var_os("APK_BUILDER_SUITE_TRACE").is_some() {
+                            eprintln!("suite: {path}");
+                        }
+                        let verdict =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(path)))
+                                .unwrap_or_else(|_| {
+                                    Verdict::Failed("the runner panicked".to_string())
+                                });
+                        if let Ok(mut held) = results.lock() {
+                            held.insert(path.clone(), verdict);
+                        }
+                    })
+                    .expect("a suite worker starts");
             }
         });
         results.into_inner().unwrap_or_default()
@@ -63362,6 +63471,44 @@ mod reference_checks {
         Err("box answers text without characters".to_string())
     }
 
+    fn jvm_answer(
+        java: &std::path::Path,
+        directory: &std::path::Path,
+        library: &std::path::Path,
+    ) -> Option<String> {
+        let mut child = std::process::Command::new(java)
+            .env_remove("JAVA_TOOL_OPTIONS")
+            .arg("-cp")
+            .arg(format!("{}:{}", directory.display(), library.display()))
+            .arg("BoxMain")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() < std::time::Duration::from_secs(30) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                _ => {
+                    child.kill().ok();
+                    child.wait().ok();
+                    return None;
+                }
+            }
+        }
+        let mut said = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            std::io::Read::read_to_string(&mut out, &mut said).ok();
+        }
+        Some(match said.rsplit_once("\n=") {
+            Some((_, answer)) => answer.to_string(),
+            None => said,
+        })
+    }
+
     #[test]
     #[ignore]
     fn suite_kotlin_omni() {
@@ -63418,10 +63565,12 @@ mod reference_checks {
             };
             let here = folder.join(path[BOX_ROOT.len()..].replace('/', "_"));
             super::kotlin::written(&here, &made);
-            let said = super::kotlin::answer(&java, &here, &library_path);
+            let said = jvm_answer(&java, &here, &library_path);
             std::fs::remove_dir_all(&here).ok();
-            if said != "OK" {
-                return Verdict::OutOfScope("the JVM does not answer OK".to_string());
+            match said {
+                Some(said) if said == "OK" => {}
+                Some(_) => return Verdict::OutOfScope("the JVM does not answer OK".to_string()),
+                None => return Verdict::OutOfScope("the JVM does not answer in time".to_string()),
             }
             match omni_answer(&made, &facade, &library) {
                 Ok(answer) if answer == "OK" => Verdict::Passed,
