@@ -7,6 +7,10 @@
 pub mod compilers {
     #[path = "Android.rs"]
     pub mod android;
+    #[path = "Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs"]
+    pub mod compiler_infrastructure;
+    #[path = "Compilers/Compiler_Infrastructure/Compiler_Infrastructure_Diagnostic.rs"]
+    pub mod compiler_infrastructure_diagnostic;
     #[path = "Compilers/Cpp.rs"]
     pub mod cpp;
     #[path = "Compilers/Java/Java.rs"]
@@ -891,6 +895,15 @@ pub mod diag {
             let said = crate::speech::sentence(&self.message);
             if said != self.message {
                 return said;
+            }
+            if self.code.starts_with("EI") && crate::speech::chosen() != "en" {
+                if let Some(translated) =
+                    crate::compilers::compiler_infrastructure_diagnostic::explain(&self.code)
+                {
+                    if translated != self.message {
+                        return translated;
+                    }
+                }
             }
             if self.code.starts_with("EJ") && crate::speech::chosen() != "en" {
                 if let Some(translated) = crate::compilers::java_diagnostic::explain(&self.code) {

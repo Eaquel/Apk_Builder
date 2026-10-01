@@ -97,7 +97,7 @@ jobs:
           test "$(rustc --version | cut -d' ' -f2)" = "$APK_BUILDER_RUST_VERSION"
 
       - name: Run every check that needs no Android build
-        run: ./Test/Builder_Test.py --strict layout format lint dependencies strings core
+        run: ./Test/Builder_Test.py --strict layout comments templates speech independence format lint dependencies strings core
 
       - name: Hold every reference suite, oracle comparison and determinism check
         run: ./Test/Builder_Test.py --strict suites differential determinism

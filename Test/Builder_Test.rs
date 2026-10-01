@@ -63069,3 +63069,2700 @@ mod reference_checks {
         report.publish();
     }
 }
+
+mod compiler_infrastructure {
+    use crate::compilers::compiler_infrastructure::*;
+    use crate::compilers::compiler_infrastructure_diagnostic as catalogue;
+    use crate::diag::Diagnostic;
+    use std::collections::BTreeSet;
+
+    fn parse(text: &str) -> Module {
+        match Module::from_text(text) {
+            Ok(module) => module,
+            Err(diagnostic) => panic!("{} {:?}\n{text}", diagnostic.message, diagnostic.context),
+        }
+    }
+
+    fn module_text(name: &str, body: &str) -> String {
+        format!("omni 1\nmodule \"{name}\"\nlayout lp64\n{body}")
+    }
+
+    fn module(body: &str) -> Module {
+        parse(&module_text("test", body))
+    }
+
+    fn execute(
+        module: &Module,
+        function: &str,
+        arguments: Vec<Datum>,
+        limits: Limits,
+    ) -> (Result<Finish, Diagnostic>, Vec<u8>) {
+        let mut host = StandardHost;
+        let mut interpreter = match Interpreter::new(module, &mut host, limits) {
+            Ok(interpreter) => interpreter,
+            Err(diagnostic) => return (Err(diagnostic), Vec::new()),
+        };
+        let id = module
+            .function_named(function)
+            .expect("the function is in the module");
+        let outcome = interpreter.call(id, arguments);
+        let output = interpreter.machine().stdout().to_vec();
+        (outcome, output)
+    }
+
+    fn returned(module: &Module, function: &str, arguments: Vec<Datum>) -> Datum {
+        match execute(module, function, arguments, Limits::default()).0 {
+            Ok(Finish::Returned(Some(datum))) => datum,
+            other => panic!("{function} did not return a value: {other:?}"),
+        }
+    }
+
+    fn stopped(module: &Module, function: &str, arguments: Vec<Datum>) -> Diagnostic {
+        match execute(module, function, arguments, Limits::default()).0 {
+            Err(diagnostic) => diagnostic,
+            other => panic!("{function} did not stop: {other:?}"),
+        }
+    }
+
+    fn trap_reason(module: &Module, function: &str, arguments: Vec<Datum>) -> String {
+        let diagnostic = stopped(module, function, arguments);
+        assert_eq!(diagnostic.code, "EI004", "{diagnostic:?}");
+        diagnostic
+            .context
+            .iter()
+            .find_map(|line| line.strip_prefix("Reason: "))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn int(ty: Type, value: i128) -> Datum {
+        Datum::integer(ty, value)
+    }
+
+    const CORPUS: &str = r#"omni 1
+module "corpus"
+layout lp64
+file "corpus.c"
+file "second file.c"
+string "hello"
+string "quote \" and backslash \\ and newline \n and control \u{1}"
+struct %pair { i32, i64 }
+struct %packed packed { i8, i32, <4 x f32> }
+struct %empty { }
+class %Object { fields [] methods [@Object.hash] }
+class %Shape abstract : %Object { fields [f64] methods [@Object.hash, -] }
+class %Named interface { fields [] methods [-, @Named.describe] }
+class %Circle : %Shape { fields [f64, ref] methods [@Circle.hash, @Circle.area] implements %Named [@Circle.name, -] }
+global @counter size 4 align 4 mutable export zero
+global @table size 16 align 8 internal bytes "00000000000000000000000000000000" relocate 0 function @add 0 relocate 8 global @counter 2
+global @tls size 8 align 8 mutable thread_local weak zero
+global @"odd name" size 1 align 1 internal bytes "ff"
+function @puts(ptr) -> i32 c import
+function @log(i32) system variadic import
+function @Object.hash(ref) -> i32 internal readonly {
+block0(%self: ref):
+    %h: i32 = const 7
+    return %h
+}
+function @Circle.hash(ref) -> i32 internal {
+block0(%self: ref):
+    %r: f64 = load_field %Circle 1 %self
+    %i: i32 = fptosi_sat %r
+    return %i
+}
+function @Circle.area(ref) -> f64 internal {
+block0(%self: ref):
+    %r: f64 = load_field %Circle 1 %self
+    %pi: f64 = fconst 0x400921fb54442d18
+    %rr: f64 = fmul %r, %r
+    %a: f64 = fmul %pi, %rr
+    return %a
+}
+function @Circle.name(ref) -> ref internal {
+block0(%self: ref):
+    %s: ref = string 0
+    return %s
+}
+function @Named.describe(ref) -> ref internal {
+block0(%self: ref):
+    %s: ref = string 1
+    return %s
+}
+function @add(i32, i32) -> i32 fast export inline nounwind {
+block0(%a: i32, %b: i32):
+    %c: i32 = add %a, %b !loc 0:3:5
+    return %c
+}
+function @throwing(i32) -> i32 internal noinline {
+block0(%x: i32):
+    %e: ref = allocate %Circle
+    throw %e
+}
+function @stop() internal noreturn cold {
+block0:
+    trap 3
+    unreachable
+}
+function @weakling() weak {
+block0:
+    return
+}
+function @main() -> i32 export entry {
+block0:
+    %one: i32 = const 1
+    %two: i32 = const 2
+    %sum: i32 = call @add(%one, %two) !loc 1:10:2
+    %table: ptr = global_address @table
+    %first: ptr = load align 8 %table
+    %again: i32 = call_indirect (i32, i32) -> i32 fast %first(%sum, %two)
+    switch %again, [4: block1, 5: block2(%again)], default block3
+block1:
+    jump block3
+block2(%v: i32):
+    %r: i32 = invoke call @throwing(%v) to block4(%r) unwind block5(%v)
+block3:
+    %zero: i32 = const 0
+    return %zero
+block4(%w: i32):
+    return %w
+block5(%e: ref, %original: i32):
+    %name: ptr = interface_method %Named 1 %e
+    %text: ref = call_indirect (ref) -> ref %name(%e)
+    %is: bool = instance_of %Shape %e
+    %as: i32 = zext %is
+    %total: i32 = add %as, %original
+    return %total
+}
+"#;
+
+    fn conversion_source(conversion: Conversion) -> (&'static str, &'static str) {
+        match conversion {
+            Conversion::ZeroExtend | Conversion::SignExtend => ("i64", "%a"),
+            Conversion::Truncate => ("i8", "%a"),
+            Conversion::FloatExtend => ("f64", "%f"),
+            Conversion::FloatTruncate => ("f32", "%x"),
+            Conversion::SignedToFloat | Conversion::UnsignedToFloat => ("f64", "%a"),
+            Conversion::FloatToSigned
+            | Conversion::FloatToUnsigned
+            | Conversion::FloatToSignedSaturating
+            | Conversion::FloatToUnsignedSaturating => ("i32", "%x"),
+            Conversion::Bitcast => ("i64", "%x"),
+            Conversion::PointerToInteger => ("i64", "%p"),
+            Conversion::IntegerToPointer => ("ptr", "%wide"),
+        }
+    }
+
+    fn coverage_text() -> String {
+        let mut out = String::from(
+            "omni 1\nmodule \"coverage\"\nlayout lp64\nfile \"coverage.c\"\nstring \"text\"\n\
+             struct %pair { i32, i64 }\n\
+             class %Base abstract { fields [i32] methods [-] }\n\
+             class %Face interface { fields [] methods [-] }\n\
+             class %Leaf : %Base { fields [ref] methods [@Leaf.run] implements %Face [@Leaf.run] }\n\
+             global @data size 8 align 8 mutable internal zero\n\
+             function @Leaf.run(ref) -> i32 internal {\nblock0(%self: ref):\n    %v: i32 = const 1\n    return %v\n}\n\
+             function @callee(i32) -> i32 internal {\nblock0(%x: i32):\n    return %x\n}\n\
+             function @weakling() weak {\nblock0:\n    return\n}\n",
+        );
+        for (index, convention) in Convention::ALL.iter().enumerate() {
+            out.push_str(&format!(
+                "function @convention{index}(i32) {} import\n",
+                convention.name()
+            ));
+        }
+        for (index, attribute) in Attribute::ALL.iter().enumerate() {
+            out.push_str(&format!(
+                "function @attributed{index}() internal {} {{\nblock0:\n    unreachable\n}}\n",
+                attribute.name()
+            ));
+        }
+        let mut body = String::from(
+            "function @everything(i32, i32, f64, f64, <4 x i32>, <2 x f64>, ptr, ref, f32) -> i32 export {\n\
+             block0(%a: i32, %b: i32, %x: f64, %y: f64, %v: <4 x i32>, %w: <2 x f64>, %p: ptr, %r: ref, %f: f32):\n\
+             \x20   %wide: i64 = zext %a\n\
+             \x20   %cond: bool = icmp eq %a, %b\n",
+        );
+        let mut next = 0usize;
+        let mut line = |text: String| {
+            body.push_str("    ");
+            body.push_str(&text.replace("%T", &format!("%t{next}")));
+            body.push('\n');
+            next += 1;
+        };
+        for op in BinaryOp::ALL {
+            let name = op.name();
+            if op.is_float() {
+                line(format!("%T: f64 = {name} %x, %y"));
+                line(format!("%T: <2 x f64> = {name} %w, %w"));
+            } else if op.yields_bool() {
+                line(format!("%T: bool = {name} %a, %b"));
+            } else {
+                line(format!("%T: i32 = {name} %a, %b"));
+                line(format!("%T: <4 x i32> = {name} %v, %v"));
+            }
+        }
+        for op in UnaryOp::ALL {
+            let name = op.name();
+            if op.is_float() {
+                line(format!("%T: f64 = {name} %x"));
+                line(format!("%T: <2 x f64> = {name} %w"));
+            } else {
+                line(format!("%T: i32 = {name} %a"));
+                line(format!("%T: <4 x i32> = {name} %v"));
+            }
+        }
+        for comparison in Comparison::ALL {
+            line(format!("%T: bool = icmp {} %a, %b", comparison.name()));
+        }
+        line("%T: bool = icmp eq %r, %r".to_string());
+        line("%T: bool = icmp ult %p, %p".to_string());
+        for comparison in FloatComparison::ALL {
+            line(format!("%T: bool = fcmp {} %x, %y", comparison.name()));
+        }
+        for conversion in Conversion::ALL {
+            let (to, from) = conversion_source(*conversion);
+            line(format!("%T: {to} = {} {from}", conversion.name()));
+        }
+        for (index, op) in AtomicOp::ALL.iter().enumerate() {
+            let ordering = Ordering::ALL[index % Ordering::ALL.len()];
+            line(format!(
+                "%T: i32 = atomic_update {} {} %p, %a",
+                op.name(),
+                ordering.name()
+            ));
+        }
+        line("%T: ptr = atomic_update xchg seq_cst %p, %p".to_string());
+        for ordering in ["relaxed", "acquire", "seq_cst"] {
+            line(format!("%T: i32 = load atomic {ordering} align 4 %p"));
+        }
+        for ordering in ["relaxed", "release", "seq_cst"] {
+            line(format!("store atomic {ordering} align 4 %a, %p"));
+        }
+        for ordering in ["acquire", "release", "acq_rel", "seq_cst"] {
+            line(format!("fence {ordering}"));
+        }
+        for text in [
+            "%T: i32 = compare_exchange seq_cst relaxed %p, %a, %b",
+            "%T: ptr = compare_exchange acq_rel acquire %p, %p, %p",
+            "%T: i32 = const -5",
+            "%T: i128 = const 170141183460469231731687303715884105727",
+            "%T: i128 = const -170141183460469231731687303715884105728",
+            "%T: bool = const 1",
+            "%T: f64 = fconst 0x3ff0000000000000",
+            "%T: f32 = fconst 0x7fc00000",
+            "%T: ptr = null",
+            "%T: ref = null",
+            "%T: i32 = poison",
+            "%T: <4 x i32> = poison",
+            "%T: ptr = global_address @data",
+            "%fa: ptr = function_address @callee",
+            "%T: ref = string 0",
+            "%T: i32 = select %cond, %a, %b",
+            "%T: <4 x i32> = splat %a",
+            "%T: i32 = extract_lane 3 %v",
+            "%T: <4 x i32> = insert_lane 0 %v, %a",
+            "%slot: ptr = stack_slot size 16 align 8",
+            "%T: i32 = load align 4 %slot",
+            "%T: i32 = load volatile align 4 %slot",
+            "%T: <2 x f64> = load align 16 %slot",
+            "store align 4 %a, %slot",
+            "store volatile atomic release align 4 %a, %slot",
+            "store align 8 %r, %slot",
+            "%T: ptr = offset %slot, %wide",
+            "%T: ptr = field_address %pair 1 %slot",
+            "%T: ptr = element_address i64 %slot, %a",
+            "memory_copy %slot, %p, %wide",
+            "memory_move %slot, %p, %wide",
+            "%byte: i8 = trunc %a",
+            "memory_fill %slot, %byte, %wide",
+            "%T: i32 = call @callee(%a)",
+            "%T: i32 = call_indirect (i32) -> i32 %fa(%a)",
+            "call @convention3(%a)",
+            "%obj: ref = allocate %Leaf",
+            "%arr: ref = allocate_array <4 x i32> %a",
+            "store_field %Leaf 0 %obj, %a",
+            "store_field %Leaf 1 %obj, %r",
+            "%T: i32 = load_field %Leaf 0 %obj",
+            "store_element <4 x i32> %arr, %a, %v",
+            "%T: <4 x i32> = load_element <4 x i32> %arr, %a",
+            "%T: i64 = array_length %arr",
+            "%T: bool = instance_of %Face %obj",
+            "%T: ptr = virtual_method %Base 0 %obj",
+            "%T: ptr = interface_method %Face 0 %obj",
+            "%T: bool = same_object %obj, %r",
+            "trap 9",
+        ] {
+            line(text.to_string());
+        }
+        body.push_str(
+            "    branch %cond, block1, block2\n\
+             block1:\n    switch %a, [0: block3, 1: block4, -1: block5], default block5\n\
+             block2:\n    %ir: i32 = invoke call @callee(%a) to block3 unwind block6\n\
+             block3:\n    jump block5\n\
+             block4:\n    %ir2: i32 = invoke call_indirect (i32) -> i32 %fa(%a) to block7(%ir2) unwind block6\n\
+             block5:\n    return %a\n\
+             block6(%e: ref):\n    throw %e\n\
+             block7(%z: i32):\n    return %z\n\
+             block8:\n    unreachable\n}\n",
+        );
+        out.push_str(&body);
+        out
+    }
+
+    fn operation_kind(operation: &Operation) -> &'static str {
+        match operation {
+            Operation::IntegerConstant(_) => "const",
+            Operation::FloatConstant(_) => "fconst",
+            Operation::Null => "null",
+            Operation::Poison => "poison",
+            Operation::GlobalAddress(_) => "global_address",
+            Operation::FunctionAddress(_) => "function_address",
+            Operation::StringConstant(_) => "string",
+            Operation::Binary(_) => "binary",
+            Operation::Unary(_) => "unary",
+            Operation::Compare(_) => "icmp",
+            Operation::FloatCompare(_) => "fcmp",
+            Operation::Convert(_) => "convert",
+            Operation::Select => "select",
+            Operation::Splat => "splat",
+            Operation::ExtractLane(_) => "extract_lane",
+            Operation::InsertLane(_) => "insert_lane",
+            Operation::StackSlot { .. } => "stack_slot",
+            Operation::Load { .. } => "load",
+            Operation::Store { .. } => "store",
+            Operation::Offset => "offset",
+            Operation::FieldAddress(..) => "field_address",
+            Operation::ElementAddress(_) => "element_address",
+            Operation::AtomicUpdate(..) => "atomic_update",
+            Operation::CompareExchange(..) => "compare_exchange",
+            Operation::Fence(_) => "fence",
+            Operation::MemoryCopy => "memory_copy",
+            Operation::MemoryMove => "memory_move",
+            Operation::MemoryFill => "memory_fill",
+            Operation::Call(_) => "call",
+            Operation::CallIndirect(_) => "call_indirect",
+            Operation::Allocate(_) => "allocate",
+            Operation::AllocateArray(_) => "allocate_array",
+            Operation::LoadField(..) => "load_field",
+            Operation::StoreField(..) => "store_field",
+            Operation::LoadElement(_) => "load_element",
+            Operation::StoreElement(_) => "store_element",
+            Operation::ArrayLength => "array_length",
+            Operation::InstanceOf(_) => "instance_of",
+            Operation::VirtualMethod(..) => "virtual_method",
+            Operation::InterfaceMethod(..) => "interface_method",
+            Operation::SameObject => "same_object",
+            Operation::Trap(_) => "trap",
+        }
+    }
+
+    fn terminator_kind(terminator: &Terminator) -> &'static str {
+        match terminator {
+            Terminator::Jump(_) => "jump",
+            Terminator::Branch { .. } => "branch",
+            Terminator::Switch { .. } => "switch",
+            Terminator::Return(_) => "return",
+            Terminator::Unreachable => "unreachable",
+            Terminator::Throw(_) => "throw",
+            Terminator::Invoke { .. } => "invoke",
+        }
+    }
+
+    fn round_trips(module: &Module) {
+        let canonical = module.canonical();
+        let text = module.to_text();
+        let reread = parse(&text);
+        assert_eq!(reread, canonical, "text does not round trip:\n{text}");
+        assert_eq!(reread.to_text(), text, "printing is not stable");
+        let binary = module.to_binary();
+        let decoded = Module::from_binary(&binary).expect("the binary reads back");
+        assert_eq!(decoded, canonical, "binary does not round trip");
+        assert_eq!(decoded.to_binary(), binary, "the binary is not stable");
+        assert_eq!(decoded.to_text(), text, "text through binary is not stable");
+        assert_eq!(parse(&text).to_binary(), binary, "text and binary disagree");
+    }
+
+    #[test]
+    fn the_corpus_verifies_and_round_trips_through_text_and_binary() {
+        let corpus = parse(CORPUS);
+        assert_eq!(corpus.violations(), Vec::new());
+        round_trips(&corpus);
+        assert_eq!(corpus.layout, Layout::Lp64);
+        assert_eq!(
+            corpus.strings[1],
+            "quote \" and backslash \\ and newline \n and control \u{1}"
+        );
+        assert!(corpus.global_named("odd name").is_some());
+        let main = &corpus.functions[corpus.function_named("main").expect("main").index()];
+        assert!(main.attributes.contains(&Attribute::Entry));
+        assert_eq!(returned(&corpus, "main", Vec::new()), int(Type::I32, 6));
+    }
+
+    #[test]
+    fn printing_renumbers_values_in_definition_order() {
+        let read = parse(&module_text(
+            "golden",
+            "function @add(i32, i32) -> i32 export {\nblock0(%left: i32, %right: i32):\n    %sum: i32 = add %left, %right\n    return %sum\n}\n",
+        ));
+        assert_eq!(
+            read.to_text(),
+            "omni 1\nmodule \"golden\"\nlayout lp64\nfunction @add(i32, i32) -> i32 export {\nblock0(%0: i32, %1: i32):\n    %2: i32 = add %0, %1\n    return %2\n}\n"
+        );
+    }
+
+    #[test]
+    fn every_operation_and_every_named_choice_is_covered_and_round_trips() {
+        let coverage = parse(&coverage_text());
+        assert_eq!(coverage.violations(), Vec::new());
+        round_trips(&coverage);
+        let mut operations = BTreeSet::new();
+        let mut terminators = BTreeSet::new();
+        let mut binary = BTreeSet::new();
+        let mut unary = BTreeSet::new();
+        let mut comparisons = BTreeSet::new();
+        let mut float_comparisons = BTreeSet::new();
+        let mut conversions = BTreeSet::new();
+        let mut atomics = BTreeSet::new();
+        let mut orderings = BTreeSet::new();
+        let mut conventions = BTreeSet::new();
+        let mut attributes = BTreeSet::new();
+        let mut linkages = BTreeSet::new();
+        for function in &coverage.functions {
+            conventions.insert(function.signature.convention());
+            attributes.extend(function.attributes.iter().copied());
+            linkages.insert(function.linkage);
+            let mut seen: Vec<&Instruction> = function.instructions.iter().collect();
+            for data in &function.blocks {
+                terminators.insert(terminator_kind(&data.terminator));
+                if let Terminator::Invoke { call, .. } = &data.terminator {
+                    seen.push(call);
+                }
+            }
+            for instruction in seen {
+                operations.insert(operation_kind(&instruction.operation));
+                match &instruction.operation {
+                    Operation::Binary(op) => {
+                        binary.insert(*op);
+                    }
+                    Operation::Unary(op) => {
+                        unary.insert(*op);
+                    }
+                    Operation::Compare(comparison) => {
+                        comparisons.insert(*comparison);
+                    }
+                    Operation::FloatCompare(comparison) => {
+                        float_comparisons.insert(*comparison);
+                    }
+                    Operation::Convert(conversion) => {
+                        conversions.insert(*conversion);
+                    }
+                    Operation::AtomicUpdate(op, ordering) => {
+                        atomics.insert(*op);
+                        orderings.insert(*ordering);
+                    }
+                    Operation::CompareExchange(success, failure) => {
+                        orderings.insert(*success);
+                        orderings.insert(*failure);
+                    }
+                    Operation::Load {
+                        ordering: Some(ordering),
+                        ..
+                    }
+                    | Operation::Store {
+                        ordering: Some(ordering),
+                        ..
+                    }
+                    | Operation::Fence(ordering) => {
+                        orderings.insert(*ordering);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for global in &coverage.globals {
+            linkages.insert(global.linkage);
+        }
+        assert_eq!(operations.len(), 42, "{operations:?}");
+        assert_eq!(terminators.len(), 7, "{terminators:?}");
+        assert_eq!(binary.len(), BinaryOp::ALL.len());
+        assert_eq!(unary.len(), UnaryOp::ALL.len());
+        assert_eq!(comparisons.len(), Comparison::ALL.len());
+        assert_eq!(float_comparisons.len(), FloatComparison::ALL.len());
+        assert_eq!(conversions.len(), Conversion::ALL.len());
+        assert_eq!(atomics.len(), AtomicOp::ALL.len());
+        assert_eq!(orderings.len(), Ordering::ALL.len());
+        assert_eq!(conventions.len(), Convention::ALL.len());
+        assert_eq!(attributes.len(), Attribute::ALL.len());
+        assert_eq!(linkages.len(), Linkage::ALL.len(), "{linkages:?}");
+    }
+
+    #[test]
+    fn every_layout_is_written_and_read_back() {
+        for layout in Layout::ALL {
+            let mut text = coverage_text();
+            text = text.replacen("layout lp64", &format!("layout {}", layout.name()), 1);
+            let read = parse(&text);
+            assert_eq!(read.layout, *layout);
+            round_trips(&read);
+        }
+        assert_eq!(Layout::Ilp32.data().pointer_bytes, 4);
+        assert_eq!(Layout::I386.data().align_of(Type::I64), 4);
+        let pair = StructType {
+            name: "pair".to_string(),
+            fields: vec![Type::I8, Type::I64, Type::I16],
+            packed: false,
+        };
+        assert_eq!(
+            DataLayout::LP64.struct_layout(&pair),
+            (vec![0, 8, 16], 24, 8)
+        );
+        assert_eq!(
+            DataLayout::I386.struct_layout(&pair),
+            (vec![0, 4, 12], 16, 4)
+        );
+        let packed = StructType {
+            packed: true,
+            ..pair
+        };
+        assert_eq!(
+            DataLayout::LP64.struct_layout(&packed),
+            (vec![0, 1, 9], 11, 1)
+        );
+    }
+
+    #[test]
+    fn the_text_reader_names_the_line_the_reason_and_what_it_found() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "function @f() export {\nblock0:\n    %x: i32 = frobnicate\n    return\n}\n",
+                &["Line: 6", "Reason: unknown-operation", "Found: frobnicate"],
+            ),
+            (
+                "function @f() export {\nblock0:\n    return %ghost\n}\n",
+                &["Reason: undefined-value", "Found: %ghost"],
+            ),
+            (
+                "function @f() export {\nblock0:\n    jump block7\n}\n",
+                &["Line: 6", "Reason: undefined-block", "Found: block7"],
+            ),
+            (
+                "function @f() export {\nblock1:\n    return\n}\n",
+                &["Reason: block-order", "Found: block1"],
+            ),
+            (
+                "function @f() export {\nblock0:\n    %a: i32 = const 1\n    %a: i32 = const 2\n    return\n}\n",
+                &["Reason: duplicate-value", "Found: %a"],
+            ),
+            (
+                "function @f() export {\nblock0:\n    return\n}\nfunction @f() export {\nblock0:\n    return\n}\n",
+                &["Line: 8", "Reason: duplicate-name", "Found: @f"],
+            ),
+            (
+                "function @f() export {\nblock0:\n    call @nowhere()\n    return\n}\n",
+                &["Reason: unknown-name", "Found: @nowhere"],
+            ),
+            (
+                "function @f(i33) export\n",
+                &["Line: 4", "Reason: unknown-type", "Found: i33"],
+            ),
+            (
+                "function @f(<1 x i32>) export\n",
+                &["Reason: unknown-type", "Found: <1 x i32>"],
+            ),
+            (
+                "function @f() export {\nblock0:\n    %c: i32 = const 99999999999999999999999999999999999999999\n    return\n}\n",
+                &["Reason: invalid-number"],
+            ),
+            ("string \"open\n", &["Reason: unclosed-string"]),
+            ("string \"\\q\"\n", &["Reason: unknown-escape", "Found: \\q"]),
+            ("global @g size 1 align 1 internal bytes \"0g\"\n", &["Reason: invalid-hex"]),
+            ("function @f() nowhere\n", &["Reason: unknown-keyword", "Found: nowhere"]),
+            ("function @f(\n", &["Reason: unexpected-end", "Expected: word"]),
+            ("function @f() export {\nblock0 return\n}\n", &["Reason: unexpected-token", "Expected: :", "Found: return"]),
+            ("# nothing\n", &["Reason: unexpected-character", "Found: #"]),
+            ("frobnicate\n", &["Reason: unknown-keyword", "Found: frobnicate"]),
+        ];
+        for (body, wanted) in cases {
+            let error = Module::from_text(&module_text("bad", body)).expect_err(body);
+            assert_eq!(error.code, "EI001");
+            assert_eq!(error.message, "The intermediate text could not be read.");
+            for line in *wanted {
+                assert!(
+                    error.context.iter().any(|held| held == line),
+                    "{body}: {:?} lacks {line}",
+                    error.context
+                );
+            }
+        }
+        let error = Module::from_text("omni 2\nmodule \"m\"\nlayout lp64\n").expect_err("version");
+        assert!(error
+            .context
+            .contains(&"Reason: unknown-version".to_string()));
+        let error = Module::from_text("omni 1\nmodule \"m\"\nlayout lp128\n").expect_err("layout");
+        assert!(error.context.contains(&"Found: lp128".to_string()));
+    }
+
+    #[test]
+    fn the_binary_reader_refuses_what_it_cannot_trust() {
+        let corpus = parse(CORPUS);
+        let binary = corpus.to_binary();
+        assert_eq!(&binary[..4], b"OMNI");
+        let reason = |bytes: &[u8]| -> String {
+            let error = Module::from_binary(bytes).expect_err("refused");
+            assert_eq!(error.code, "EI002");
+            assert!(error
+                .context
+                .iter()
+                .any(|line| line.starts_with("Offset: ")));
+            error
+                .context
+                .iter()
+                .find_map(|line| line.strip_prefix("Reason: "))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(reason(b"ELF\x7f"), "not-intermediate-binary");
+        assert_eq!(reason(b"OMNI\x02"), "unknown-version");
+        let mut trailing = binary.clone();
+        trailing.push(0);
+        assert_eq!(reason(&trailing), "trailing-bytes");
+        let mut overlong = b"OMNI".to_vec();
+        overlong.extend_from_slice(&[0x81, 0x00]);
+        assert_eq!(reason(&overlong), "overlong-number");
+        let mut huge = b"OMNI\x01".to_vec();
+        huge.extend_from_slice(&[0xff; 11]);
+        assert_eq!(reason(&huge), "number-too-large");
+        let mut counted = b"OMNI\x01\x01m\x00".to_vec();
+        counted.extend_from_slice(&[0xff, 0xff, 0x03]);
+        assert_eq!(reason(&counted), "count-too-large");
+        for cut in 0..binary.len() {
+            assert!(
+                Module::from_binary(&binary[..cut]).is_err(),
+                "a prefix of {cut} bytes was accepted"
+            );
+        }
+    }
+
+    struct Shuffle(u64);
+
+    impl Shuffle {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, limit: u64) -> u64 {
+            self.next() % limit.max(1)
+        }
+    }
+
+    #[test]
+    fn damaged_binaries_and_texts_are_refused_or_read_without_a_panic() {
+        let mut random = Shuffle(0x0DDB_A11C_AFE5_EED5);
+        let sources = [parse(CORPUS), parse(&coverage_text())];
+        let mut accepted = 0usize;
+        for source in &sources {
+            let binary = source.to_binary();
+            for _ in 0..1500 {
+                let mut damaged = binary.clone();
+                for _ in 0..=random.below(3) {
+                    let at = random.below(damaged.len() as u64) as usize;
+                    match random.below(3) {
+                        0 => damaged[at] = random.next() as u8,
+                        1 => damaged[at] ^= 1 << random.below(8),
+                        _ => {
+                            damaged.truncate(at.max(4));
+                        }
+                    }
+                }
+                if let Ok(read) = Module::from_binary(&damaged) {
+                    accepted += 1;
+                    if read.verify().is_ok() {
+                        let again = parse(&read.to_text());
+                        assert_eq!(again, read.canonical());
+                        let mut host = StandardHost;
+                        let limits = Limits {
+                            fuel: 20_000,
+                            ..Limits::default()
+                        };
+                        if let Ok(mut interpreter) = Interpreter::new(&read, &mut host, limits) {
+                            for (index, function) in read.functions.iter().enumerate() {
+                                if function.signature.parameters.is_empty() {
+                                    let _ = interpreter.call(FunctionId(index as u32), Vec::new());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let text: Vec<char> = source.to_text().chars().collect();
+            for _ in 0..600 {
+                let mut damaged = text.clone();
+                for _ in 0..=random.below(3) {
+                    let at = random.below(damaged.len() as u64) as usize;
+                    match random.below(3) {
+                        0 => {
+                            damaged.remove(at);
+                        }
+                        1 => damaged.insert(
+                            at,
+                            [
+                                '%', '@', '"', '{', '}', '(', ')', ',', ':', '-', '7', 'x', '\\',
+                                '\n',
+                            ][random.below(14) as usize],
+                        ),
+                        _ => {
+                            let other = random.below(damaged.len() as u64) as usize;
+                            damaged.swap(at, other);
+                        }
+                    }
+                }
+                let damaged: String = damaged.into_iter().collect();
+                if let Ok(read) = Module::from_text(&damaged) {
+                    let _ = read.violations();
+                    let _ = Module::from_binary(&read.to_binary())
+                        .expect("a module read from text writes a readable binary");
+                }
+            }
+        }
+        assert!(
+            accepted > 0,
+            "no damaged binary was accepted at all, so the walk proved nothing"
+        );
+    }
+
+    fn rule_cases() -> Vec<(Rule, Module)> {
+        let mut cases = Vec::new();
+        let unit = "function @f() export {\nblock0:\n    return\n}\n";
+        let thrower =
+            "function @g() -> i32 export {\nblock0:\n    %c: i32 = const 1\n    return %c\n}\n";
+        cases.push((
+            Rule::DuplicateName,
+            module(&format!("global @f size 1 align 1 internal zero\n{unit}")),
+        ));
+        let mut nameless = module(unit);
+        nameless.functions[0].name.clear();
+        cases.push((Rule::EmptyName, nameless));
+        let mut stray = module("function @f() export {\nblock0:\n    call @f()\n    return\n}\n");
+        stray.functions[0].instructions[0].operation = Operation::Call(FunctionId(7));
+        cases.push((Rule::SymbolRange, stray));
+        cases.push((
+            Rule::StringRange,
+            module("function @f() export {\nblock0:\n    %s: ref = string 3\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::FileRange,
+            module("function @f() export {\nblock0:\n    %c: i32 = const 1 !loc 4:1:1\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::ClassHierarchy,
+            module(
+                "class %A : %B { fields [] methods [] }\nclass %B : %A { fields [] methods [] }\n",
+            ),
+        ));
+        cases.push((
+            Rule::InterfaceShape,
+            module("class %I interface { fields [i32] methods [] }\n"),
+        ));
+        cases.push((
+            Rule::VirtualTable,
+            module("class %C { fields [] methods [-] }\n"),
+        ));
+        cases.push((
+            Rule::VirtualTable,
+            module("class %I interface { fields [] methods [-] }\nclass %C { fields [] methods [] implements %I [-] }\n"),
+        ));
+        cases.push((
+            Rule::MethodSignature,
+            module("class %C { fields [] methods [@m] }\nfunction @m(i32) internal {\nblock0(%x: i32):\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::Implementation,
+            module("class %A { fields [] methods [] }\nclass %B { fields [] methods [] implements %A [] }\n"),
+        ));
+        cases.push((
+            Rule::GlobalShape,
+            module("global @g size 4 align 4 internal bytes \"00\"\n"),
+        ));
+        cases.push((
+            Rule::Alignment,
+            module("global @g size 4 align 3 internal zero\n"),
+        ));
+        cases.push((
+            Rule::RelocationRange,
+            module("global @g size 8 align 8 internal zero relocate 4 global @g 0\n"),
+        ));
+        cases.push((
+            Rule::Declaration,
+            module("function @f() import {\nblock0:\n    return\n}\n"),
+        ));
+        let mut bodiless = module(unit);
+        bodiless.functions[0].blocks.clear();
+        cases.push((Rule::Declaration, bodiless));
+        cases.push((
+            Rule::EntryFunction,
+            module("function @f() export entry {\nblock0:\n    return\n}\nfunction @g() export entry {\nblock0:\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::EntryBlock,
+            module("function @f(i32) export {\nblock0(%a: i64):\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::EntryBlock,
+            module("function @f() export {\nblock0:\n    jump block0\n}\n"),
+        ));
+        let mut astray =
+            module("function @f() export {\nblock0:\n    jump block1\nblock1:\n    return\n}\n");
+        astray.functions[0].blocks[0].terminator = Terminator::Jump(BlockCall::to(Block(9)));
+        cases.push((Rule::BlockTarget, astray));
+        cases.push((
+            Rule::EdgeArguments,
+            module("function @f() export {\nblock0:\n    jump block1\nblock1(%x: i32):\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::UnwindBlock,
+            module(&format!(
+                "{thrower}function @f() export {{\nblock0:\n    %r: i32 = invoke call @g() to block1 unwind block2\nblock1:\n    return\nblock2(%e: i32):\n    return\n}}\n"
+            )),
+        ));
+        cases.push((
+            Rule::UnwindBlock,
+            module(&format!(
+                "{thrower}function @f(ref) export {{\nblock0(%x: ref):\n    %r: i32 = invoke call @g() to block1 unwind block2\nblock1:\n    jump block2(%x)\nblock2(%e: ref):\n    return\n}}\n"
+            )),
+        ));
+        let mut twice =
+            module("function @f() export {\nblock0:\n    %c: i32 = const 1\n    return\n}\n");
+        let first = twice.functions[0].blocks[0].instructions[0];
+        twice.functions[0].blocks[0].instructions.push(first);
+        cases.push((Rule::InstructionPlacement, twice));
+        let mut far =
+            module("function @f(i32) -> i32 export {\nblock0(%a: i32):\n    return %a\n}\n");
+        far.functions[0].blocks[0].terminator = Terminator::Return(Some(Value(40)));
+        cases.push((Rule::ValueRange, far));
+        let mut doubled = module(
+            "function @f() export {\nblock0:\n    %a: i32 = const 1\n    %b: i32 = const 2\n    return\n}\n",
+        );
+        let result = doubled.functions[0].instructions[0].result;
+        doubled.functions[0].instructions[1].result = result;
+        cases.push((Rule::ValueDefinedTwice, doubled));
+        let mut ghostly = module(
+            "function @f() -> i32 export {\nblock0:\n    %a: i32 = const 1\n    return %a\n}\n",
+        );
+        let ghost = ghostly.functions[0].new_value(Type::I32);
+        ghostly.functions[0].blocks[0].terminator = Terminator::Return(Some(ghost));
+        cases.push((Rule::ValueUndefined, ghostly));
+        cases.push((
+            Rule::Dominance,
+            module("function @f(bool) -> i32 export {\nblock0(%c: bool):\n    branch %c, block1, block2\nblock1:\n    %x: i32 = const 1\n    jump block2\nblock2:\n    return %x\n}\n"),
+        ));
+        cases.push((
+            Rule::Dominance,
+            module("function @f() -> i32 export {\nblock0:\n    %y: i32 = add %x, %x\n    %x: i32 = const 1\n    return %y\n}\n"),
+        ));
+        cases.push((
+            Rule::OperandCount,
+            module("function @f(i32) -> i32 export {\nblock0(%a: i32):\n    %b: i32 = add %a\n    return %b\n}\n"),
+        ));
+        cases.push((
+            Rule::OperandType,
+            module("function @f(i32, f64) -> i32 export {\nblock0(%a: i32, %x: f64):\n    %b: i32 = add %a, %x\n    return %b\n}\n"),
+        ));
+        cases.push((
+            Rule::OperandType,
+            module("function @f(i32) export {\nblock0(%a: i32):\n    branch %a, block1, block1\nblock1:\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::ResultType,
+            module("function @f(i32) -> i64 export {\nblock0(%a: i32):\n    %b: i64 = add %a, %a\n    return %b\n}\n"),
+        ));
+        cases.push((
+            Rule::ReturnType,
+            module("function @f() -> i32 export {\nblock0:\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::CallSignature,
+            module("function @g(i32) export {\nblock0(%x: i32):\n    return\n}\nfunction @f(i64) export {\nblock0(%a: i64):\n    call @g(%a)\n    return\n}\n"),
+        ));
+        let mut misused = module(&format!(
+            "{thrower}function @f() -> i32 export {{\nblock0:\n    %r: i32 = invoke call @g() to block1(%r) unwind block2\nblock1(%v: i32):\n    return %v\nblock2(%e: ref):\n    throw %e\n}}\n"
+        ));
+        if let Terminator::Invoke { call, .. } = &mut misused.functions[1].blocks[0].terminator {
+            call.operation = Operation::Binary(BinaryOp::Add);
+        }
+        cases.push((Rule::InvokeCall, misused));
+        cases.push((
+            Rule::InvokeResult,
+            module(&format!(
+                "{thrower}function @f() -> i32 export {{\nblock0:\n    %r: i32 = invoke call @g() to block1 unwind block2\nblock1:\n    return %r\nblock2(%e: ref):\n    throw %e\n}}\n"
+            )),
+        ));
+        cases.push((
+            Rule::InvokeResult,
+            module(&format!(
+                "{thrower}function @f() -> i32 export {{\nblock0:\n    %r: i32 = invoke call @g() to block1(%r) unwind block2(%r)\nblock1(%v: i32):\n    return %v\nblock2(%e: ref, %w: i32):\n    return %w\n}}\n"
+            )),
+        ));
+        cases.push((
+            Rule::SwitchCases,
+            module("function @f(i32) export {\nblock0(%a: i32):\n    switch %a, [1: block1, 1: block1], default block1\nblock1:\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::SwitchCases,
+            module("function @f(i8) export {\nblock0(%a: i8):\n    switch %a, [255: block1, -1: block1], default block1\nblock1:\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::ImmediateRange,
+            module(
+                "function @f() -> i8 export {\nblock0:\n    %c: i8 = const 300\n    return %c\n}\n",
+            ),
+        ));
+        cases.push((
+            Rule::ImmediateRange,
+            module("function @f() -> f32 export {\nblock0:\n    %c: f32 = fconst 0x100000000\n    return %c\n}\n"),
+        ));
+        cases.push((
+            Rule::AtomicOrdering,
+            module("function @f(ptr) -> i32 export {\nblock0(%p: ptr):\n    %v: i32 = load atomic release align 4 %p\n    return %v\n}\n"),
+        ));
+        cases.push((
+            Rule::AtomicOrdering,
+            module("function @f(ptr, i32) -> i32 export {\nblock0(%p: ptr, %a: i32):\n    %v: i32 = compare_exchange relaxed seq_cst %p, %a, %a\n    return %v\n}\n"),
+        ));
+        cases.push((
+            Rule::AtomicOrdering,
+            module("function @f() export {\nblock0:\n    fence relaxed\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::ConversionTypes,
+            module("function @f(ref) -> i64 export {\nblock0(%r: ref):\n    %v: i64 = ptrtoint %r\n    return %v\n}\n"),
+        ));
+        cases.push((
+            Rule::ConversionTypes,
+            module("function @f(i64) -> i32 export {\nblock0(%a: i64):\n    %v: i32 = zext %a\n    return %v\n}\n"),
+        ));
+        cases.push((
+            Rule::FieldRange,
+            module("struct %s { i32 }\nfunction @f(ptr) -> ptr export {\nblock0(%p: ptr):\n    %q: ptr = field_address %s 3 %p\n    return %q\n}\n"),
+        ));
+        cases.push((
+            Rule::FieldRange,
+            module("class %C { fields [i32] methods [] }\nfunction @f(ref) -> i32 export {\nblock0(%r: ref):\n    %v: i32 = load_field %C 1 %r\n    return %v\n}\n"),
+        ));
+        cases.push((
+            Rule::MethodSlot,
+            module("class %C { fields [] methods [] }\nfunction @f(ref) -> ptr export {\nblock0(%r: ref):\n    %m: ptr = virtual_method %C 2 %r\n    return %m\n}\n"),
+        ));
+        cases.push((
+            Rule::MethodSlot,
+            module("class %C { fields [] methods [] }\nfunction @f(ref) -> ptr export {\nblock0(%r: ref):\n    %m: ptr = interface_method %C 0 %r\n    return %m\n}\n"),
+        ));
+        cases.push((
+            Rule::AbstractAllocation,
+            module("class %C abstract { fields [] methods [] }\nfunction @f() -> ref export {\nblock0:\n    %r: ref = allocate %C\n    return %r\n}\n"),
+        ));
+        cases.push((
+            Rule::LaneRange,
+            module("function @f(<4 x i32>) -> i32 export {\nblock0(%v: <4 x i32>):\n    %x: i32 = extract_lane 9 %v\n    return %x\n}\n"),
+        ));
+        cases.push((
+            Rule::NoReturn,
+            module("function @f() export noreturn {\nblock0:\n    return\n}\n"),
+        ));
+        cases.push((
+            Rule::NoUnwind,
+            module("function @f(ref) export nounwind {\nblock0(%e: ref):\n    throw %e\n}\n"),
+        ));
+        cases
+    }
+
+    #[test]
+    fn every_rule_of_the_verifier_is_broken_once_and_caught() {
+        let mut caught = BTreeSet::new();
+        for (rule, broken) in rule_cases() {
+            let found: Vec<Rule> = broken
+                .violations()
+                .iter()
+                .map(|violation| violation.rule)
+                .collect();
+            assert!(
+                found.contains(&rule),
+                "{} was not caught, found {found:?}\n{}",
+                rule.name(),
+                broken.to_text()
+            );
+            let error = broken
+                .verify()
+                .expect_err("a broken module does not verify");
+            assert_eq!(error.code, "EI003");
+            assert_eq!(
+                error.message,
+                "The intermediate form broke one of its rules."
+            );
+            assert!(error.context.iter().any(|line| line.starts_with("Rule: ")));
+            caught.insert(rule);
+        }
+        let mut function = Function::new("open", Signature::default(), Linkage::Export);
+        let mut builder = FunctionBuilder::new(&mut function);
+        let entry = builder.create_block();
+        builder.switch_to(entry);
+        let error = builder.finish().expect_err("an open block is refused");
+        assert!(
+            error
+                .context
+                .contains(&"Rule: unterminated-block".to_string()),
+            "{error:?}"
+        );
+        assert!(error.context.contains(&"Block: block0".to_string()));
+        caught.insert(Rule::UnterminatedBlock);
+        let all: BTreeSet<Rule> = Rule::ALL.iter().copied().collect();
+        let missed: Vec<&str> = all.difference(&caught).map(|rule| rule.name()).collect();
+        assert!(missed.is_empty(), "no case breaks {missed:?}");
+    }
+
+    #[test]
+    fn a_rule_is_reported_with_its_function_block_and_position() {
+        let broken = module(
+            "function @f(i32) -> i32 export {\nblock0(%a: i32):\n    %b: i32 = const 1\n    %c: i64 = add %a, %b\n    return %a\n}\n",
+        );
+        let error = broken.verify().expect_err("refused");
+        assert_eq!(
+            error.context,
+            vec![
+                "Rule: result-type",
+                "Name: @f",
+                "Block: block0",
+                "Instruction: 1"
+            ]
+        );
+    }
+
+    macro_rules! reference_binary {
+        ($name:ident, $signed:ty, $unsigned:ty) => {
+            fn $name(op: BinaryOp, left: $unsigned, right: $unsigned) -> Option<u128> {
+                let (a, b) = (left as $signed, right as $signed);
+                let bits = <$unsigned>::BITS;
+                let amount = (right % bits as $unsigned) as u32;
+                let value: u128 = match op {
+                    BinaryOp::Add => left.wrapping_add(right) as u128,
+                    BinaryOp::Subtract => left.wrapping_sub(right) as u128,
+                    BinaryOp::Multiply => left.wrapping_mul(right) as u128,
+                    BinaryOp::DivideSigned => a.checked_div(b).map_or_else(
+                        || if b == 0 { None } else { Some(a as $unsigned) },
+                        |q| Some(q as $unsigned),
+                    )? as u128,
+                    BinaryOp::DivideUnsigned => left.checked_div(right)? as u128,
+                    BinaryOp::RemainderSigned => {
+                        if b == 0 {
+                            return None;
+                        }
+                        a.wrapping_rem(b) as $unsigned as u128
+                    }
+                    BinaryOp::RemainderUnsigned => left.checked_rem(right)? as u128,
+                    BinaryOp::And => (left & right) as u128,
+                    BinaryOp::Or => (left | right) as u128,
+                    BinaryOp::Xor => (left ^ right) as u128,
+                    BinaryOp::ShiftLeft => left.wrapping_shl(amount) as u128,
+                    BinaryOp::ShiftRightLogical => left.wrapping_shr(amount) as u128,
+                    BinaryOp::ShiftRightArithmetic => a.wrapping_shr(amount) as $unsigned as u128,
+                    BinaryOp::RotateLeft => left.rotate_left(amount) as u128,
+                    BinaryOp::RotateRight => left.rotate_right(amount) as u128,
+                    BinaryOp::MinimumSigned => a.min(b) as $unsigned as u128,
+                    BinaryOp::MaximumSigned => a.max(b) as $unsigned as u128,
+                    BinaryOp::MinimumUnsigned => left.min(right) as u128,
+                    BinaryOp::MaximumUnsigned => left.max(right) as u128,
+                    BinaryOp::AddSaturatingSigned => a.saturating_add(b) as $unsigned as u128,
+                    BinaryOp::AddSaturatingUnsigned => left.saturating_add(right) as u128,
+                    BinaryOp::SubtractSaturatingSigned => a.saturating_sub(b) as $unsigned as u128,
+                    BinaryOp::SubtractSaturatingUnsigned => left.saturating_sub(right) as u128,
+                    BinaryOp::AddOverflowsSigned => u128::from(a.overflowing_add(b).1),
+                    BinaryOp::AddOverflowsUnsigned => u128::from(left.overflowing_add(right).1),
+                    BinaryOp::SubtractOverflowsSigned => u128::from(a.overflowing_sub(b).1),
+                    BinaryOp::SubtractOverflowsUnsigned => {
+                        u128::from(left.overflowing_sub(right).1)
+                    }
+                    BinaryOp::MultiplyOverflowsSigned => u128::from(a.overflowing_mul(b).1),
+                    BinaryOp::MultiplyOverflowsUnsigned => {
+                        u128::from(left.overflowing_mul(right).1)
+                    }
+                    BinaryOp::MultiplyHighSigned => {
+                        ((i128::from(a) * i128::from(b)) >> bits) as $unsigned as u128
+                    }
+                    BinaryOp::MultiplyHighUnsigned => {
+                        ((u128::from(left) * u128::from(right)) >> bits) as $unsigned as u128
+                    }
+                    _ => return None,
+                };
+                Some(value)
+            }
+        };
+    }
+
+    reference_binary!(reference_8, i8, u8);
+    reference_binary!(reference_16, i16, u16);
+    reference_binary!(reference_32, i32, u32);
+    reference_binary!(reference_64, i64, u64);
+
+    fn integer_module(ty: &str) -> Module {
+        let mut body = String::new();
+        for op in BinaryOp::ALL.iter().filter(|op| !op.is_float()) {
+            let result = if op.yields_bool() { "bool" } else { ty };
+            body.push_str(&format!(
+                "function @{name}({ty}, {ty}) -> {result} export {{\nblock0(%a: {ty}, %b: {ty}):\n    %c: {result} = {name} %a, %b\n    return %c\n}}\n",
+                name = op.name()
+            ));
+        }
+        for op in UnaryOp::ALL.iter().filter(|op| !op.is_float()) {
+            body.push_str(&format!(
+                "function @{name}({ty}) -> {ty} export {{\nblock0(%a: {ty}):\n    %c: {ty} = {name} %a\n    return %c\n}}\n",
+                name = op.name()
+            ));
+        }
+        module(&body)
+    }
+
+    #[test]
+    fn integer_arithmetic_agrees_with_an_independent_implementation_at_every_width() {
+        let mut random = Shuffle(0x1234_5678_9ABC_DEF1);
+        type Reference = fn(BinaryOp, u128, u128) -> Option<u128>;
+        let widths: [(&str, u32, Reference); 4] = [
+            ("i8", 8, |op, a, b| reference_8(op, a as u8, b as u8)),
+            ("i16", 16, |op, a, b| reference_16(op, a as u16, b as u16)),
+            ("i32", 32, |op, a, b| reference_32(op, a as u32, b as u32)),
+            ("i64", 64, |op, a, b| reference_64(op, a as u64, b as u64)),
+        ];
+        for (name, bits, reference) in widths {
+            let ops = integer_module(name);
+            let mut host = StandardHost;
+            let mut interpreter =
+                Interpreter::new(&ops, &mut host, Limits::default()).expect("verifies");
+            let all = if bits == 128 {
+                u128::MAX
+            } else {
+                (1u128 << bits) - 1
+            };
+            let top = 1u128 << (bits - 1);
+            let mut values = vec![
+                0,
+                1,
+                2,
+                all,
+                all - 1,
+                top,
+                top - 1,
+                top + 1,
+                u128::from(bits),
+                u128::from(bits - 1),
+                u128::from(bits + 3),
+            ];
+            for _ in 0..40 {
+                values.push(u128::from(random.next()) & all);
+            }
+            for op in BinaryOp::ALL.iter().filter(|op| !op.is_float()) {
+                let id = ops.function_named(op.name()).expect("generated");
+                for left in &values {
+                    for right in values.iter().step_by(3) {
+                        let outcome = interpreter
+                            .call(id, vec![Datum::Integer(*left), Datum::Integer(*right)]);
+                        match reference(*op, *left, *right) {
+                            Some(expected) => assert_eq!(
+                                outcome,
+                                Ok(Finish::Returned(Some(Datum::Integer(expected)))),
+                                "{name} {} {left:#x} {right:#x}",
+                                op.name()
+                            ),
+                            None => {
+                                let error = outcome.expect_err("division by zero traps");
+                                assert!(
+                                    error
+                                        .context
+                                        .contains(&"Reason: division-by-zero".to_string()),
+                                    "{error:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            for op in UnaryOp::ALL.iter().filter(|op| !op.is_float()) {
+                let id = ops.function_named(op.name()).expect("generated");
+                for value in &values {
+                    let narrow = |wide: u128| wide & all;
+                    let shifted = 128 - bits;
+                    let signed = ((value << shifted) as i128) >> shifted;
+                    let expected = match op {
+                        UnaryOp::Negate => narrow(value.wrapping_neg()),
+                        UnaryOp::Not => narrow(!value),
+                        UnaryOp::PopulationCount => u128::from(value.count_ones()),
+                        UnaryOp::LeadingZeros => u128::from(value.leading_zeros() - shifted),
+                        UnaryOp::TrailingZeros => u128::from(value.trailing_zeros().min(bits)),
+                        UnaryOp::ByteSwap => narrow(value.swap_bytes() >> shifted),
+                        UnaryOp::BitReverse => narrow(value.reverse_bits() >> shifted),
+                        UnaryOp::AbsoluteSigned => narrow(signed.unsigned_abs()),
+                        _ => unreachable!("only integer operations are generated"),
+                    };
+                    assert_eq!(
+                        interpreter.call(id, vec![Datum::Integer(*value)]),
+                        Ok(Finish::Returned(Some(Datum::Integer(expected)))),
+                        "{name} {} {value:#x}",
+                        op.name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_hundred_twenty_eight_bit_arithmetic_keeps_every_bit() {
+        let ops = integer_module("i128");
+        let call = |op: &str, left: i128, right: i128| -> Datum {
+            returned(
+                &ops,
+                op,
+                vec![int(Type::I128, left), int(Type::I128, right)],
+            )
+        };
+        let max = i128::MAX;
+        let min = i128::MIN;
+        assert_eq!(call("umulh", -1, -1), Datum::Integer(u128::MAX - 1));
+        assert_eq!(call("smulh", -1, -1), Datum::Integer(0));
+        assert_eq!(call("smulh", min, min), Datum::Integer(1u128 << 126));
+        assert_eq!(call("smulh", min, -1), Datum::Integer(0));
+        assert_eq!(call("smulh", max, 2), Datum::Integer(0));
+        assert_eq!(call("smulh", min, 2), Datum::Integer(u128::MAX));
+        assert_eq!(call("umulh", 1i128 << 64, 1i128 << 64), Datum::Integer(1));
+        assert_eq!(call("sdiv", min, -1), int(Type::I128, min));
+        assert_eq!(call("srem", min, -1), Datum::Integer(0));
+        assert_eq!(call("sadd_sat", max, 1), int(Type::I128, max));
+        assert_eq!(call("ssub_sat", min, 1), int(Type::I128, min));
+        assert_eq!(call("uadd_sat", -1, 5), Datum::Integer(u128::MAX));
+        assert_eq!(call("sadd_overflows", max, 1), Datum::Integer(1));
+        assert_eq!(
+            call("umul_overflows", 1i128 << 64, 1i128 << 64),
+            Datum::Integer(1)
+        );
+        assert_eq!(call("smul_overflows", 1i128 << 62, 2), Datum::Integer(0));
+        assert_eq!(call("shl", 1, 130), Datum::Integer(4));
+        assert_eq!(call("rotr", 1, 1), Datum::Integer(1u128 << 127));
+        assert_eq!(call("ashr", min, 127), Datum::Integer(u128::MAX));
+        assert_eq!(
+            returned(&ops, "clz", vec![Datum::Integer(1)]),
+            Datum::Integer(127)
+        );
+        assert_eq!(
+            returned(&ops, "bswap", vec![Datum::Integer(0x0102)]),
+            Datum::Integer(0x0201u128 << 112)
+        );
+    }
+
+    #[test]
+    fn floating_point_follows_ieee_and_writes_one_quiet_nan() {
+        let body = "function @op(f64, f64) -> f64 export {\nblock0(%a: f64, %b: f64):\n    %c: f64 = OP %a, %b\n    return %c\n}\n";
+        let float = |op: &str, left: f64, right: f64| -> u64 {
+            let ops = module(&body.replace("OP", op));
+            match returned(&ops, "op", vec![Datum::f64(left), Datum::f64(right)]) {
+                Datum::Float(bits) => bits,
+                other => panic!("{other:?}"),
+            }
+        };
+        let nan = 0x7ff8_0000_0000_0000u64;
+        assert_eq!(float("fadd", 0.1, 0.2), (0.1f64 + 0.2).to_bits());
+        assert_eq!(float("fdiv", 1.0, 3.0), (1.0f64 / 3.0).to_bits());
+        assert_eq!(float("fsub", f64::INFINITY, f64::INFINITY), nan);
+        assert_eq!(
+            float("fmul", f64::from_bits(0x7ff4_0000_0000_0001), 1.0),
+            nan
+        );
+        assert_eq!(float("frem", 7.5, 2.0), 1.5f64.to_bits());
+        assert_eq!(float("fmin", 0.0, -0.0), (-0.0f64).to_bits());
+        assert_eq!(float("fmax", -0.0, 0.0), 0.0f64.to_bits());
+        assert_eq!(float("fmin", f64::NAN, 1.0), nan);
+        assert_eq!(float("fminnum", f64::NAN, 1.0), 1.0f64.to_bits());
+        assert_eq!(float("fmaxnum", 2.0, f64::NAN), 2.0f64.to_bits());
+        assert_eq!(float("fminnum", -0.0, 0.0), (-0.0f64).to_bits());
+        assert_eq!(float("copysign", 3.0, -0.0), (-3.0f64).to_bits());
+        let unary = "function @op(f32) -> f32 export {\nblock0(%a: f32):\n    %c: f32 = OP %a\n    return %c\n}\n";
+        let single = |op: &str, value: f32| -> u32 {
+            let ops = module(&unary.replace("OP", op));
+            match returned(&ops, "op", vec![Datum::f32(value)]) {
+                Datum::Float(bits) => bits as u32,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(single("nearest", 2.5), 2.0f32.to_bits());
+        assert_eq!(single("nearest", 3.5), 4.0f32.to_bits());
+        assert_eq!(single("ftrunc", -2.7), (-2.0f32).to_bits());
+        assert_eq!(single("floor", -2.5), (-3.0f32).to_bits());
+        assert_eq!(single("ceil", -2.5), (-2.0f32).to_bits());
+        assert_eq!(single("sqrt", -1.0), 0x7fc0_0000);
+        assert_eq!(single("fneg", f32::from_bits(0x7fc0_0001)), 0xffc0_0001);
+        assert_eq!(single("fabs", -0.0), 0);
+        let compare = "function @op(f64, f64) -> bool export {\nblock0(%a: f64, %b: f64):\n    %c: bool = fcmp OP %a, %b\n    return %c\n}\n";
+        for (name, left, right, holds) in [
+            ("oeq", f64::NAN, f64::NAN, 0),
+            ("une", f64::NAN, f64::NAN, 1),
+            ("uno", 1.0, f64::NAN, 1),
+            ("ord", 1.0, 2.0, 1),
+            ("olt", -0.0, 0.0, 0),
+            ("ule", 1.0, f64::NAN, 1),
+            ("ogt", 2.0, 1.0, 1),
+        ] {
+            let ops = module(&compare.replace("OP", name));
+            assert_eq!(
+                returned(&ops, "op", vec![Datum::f64(left), Datum::f64(right)]),
+                Datum::Integer(holds),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn conversions_trap_out_of_range_unless_they_saturate() {
+        let convert = |op: &str, from: &str, to: &str| {
+            module(&format!(
+                "function @op({from}) -> {to} export {{\nblock0(%a: {from}):\n    %c: {to} = {op} %a\n    return %c\n}}\n"
+            ))
+        };
+        let to_i32 = convert("fptosi", "f64", "i32");
+        assert_eq!(
+            returned(&to_i32, "op", vec![Datum::f64(-2.9)]),
+            int(Type::I32, -2)
+        );
+        assert_eq!(
+            trap_reason(&to_i32, "op", vec![Datum::f64(3e9)]),
+            "conversion-range"
+        );
+        assert_eq!(
+            trap_reason(&to_i32, "op", vec![Datum::f64(f64::NAN)]),
+            "conversion-range"
+        );
+        let saturating = convert("fptosi_sat", "f64", "i32");
+        assert_eq!(
+            returned(&saturating, "op", vec![Datum::f64(3e9)]),
+            int(Type::I32, i128::from(i32::MAX))
+        );
+        assert_eq!(
+            returned(&saturating, "op", vec![Datum::f64(-3e9)]),
+            int(Type::I32, i128::from(i32::MIN))
+        );
+        assert_eq!(
+            returned(&saturating, "op", vec![Datum::f64(f64::NAN)]),
+            int(Type::I32, 0)
+        );
+        let unsigned = convert("fptoui", "f64", "i8");
+        assert_eq!(
+            returned(&unsigned, "op", vec![Datum::f64(-0.5)]),
+            int(Type::I8, 0)
+        );
+        assert_eq!(
+            returned(&unsigned, "op", vec![Datum::f64(255.9)]),
+            int(Type::I8, 255)
+        );
+        assert_eq!(
+            trap_reason(&unsigned, "op", vec![Datum::f64(256.0)]),
+            "conversion-range"
+        );
+        let unsigned_saturating = convert("fptoui_sat", "f32", "i64");
+        assert_eq!(
+            returned(&unsigned_saturating, "op", vec![Datum::f32(-7.0)]),
+            int(Type::I64, 0)
+        );
+        assert_eq!(
+            returned(&unsigned_saturating, "op", vec![Datum::f32(f32::INFINITY)]),
+            Datum::Integer(u128::from(u64::MAX))
+        );
+        let wide = convert("sitofp", "i64", "f64");
+        assert_eq!(
+            returned(&wide, "op", vec![int(Type::I64, i128::from(i64::MIN))]),
+            Datum::f64(i64::MIN as f64)
+        );
+        let truth = convert("sitofp", "bool", "f32");
+        assert_eq!(
+            returned(&truth, "op", vec![Datum::Integer(1)]),
+            Datum::f32(-1.0)
+        );
+        let unsigned_float = convert("uitofp", "i64", "f32");
+        assert_eq!(
+            returned(&unsigned_float, "op", vec![int(Type::I64, -1)]),
+            Datum::f32(1.8446744e19)
+        );
+        let narrow = convert("fptrunc", "f64", "f32");
+        assert_eq!(
+            returned(
+                &narrow,
+                "op",
+                vec![Datum::f64(f64::from_bits(0x7ff0_0000_0000_0001))]
+            ),
+            Datum::Float(0x7fc0_0000)
+        );
+        let sign = convert("sext", "i8", "i64");
+        assert_eq!(
+            returned(&sign, "op", vec![int(Type::I8, -3)]),
+            int(Type::I64, -3)
+        );
+        let zero = convert("zext", "i8", "i64");
+        assert_eq!(
+            returned(&zero, "op", vec![int(Type::I8, -3)]),
+            int(Type::I64, 253)
+        );
+        let cut = convert("trunc", "i64", "i8");
+        assert_eq!(
+            returned(&cut, "op", vec![int(Type::I64, 0x1_2345)]),
+            int(Type::I8, 0x45)
+        );
+        let bits = convert("bitcast", "f64", "i64");
+        assert_eq!(
+            returned(&bits, "op", vec![Datum::f64(1.0)]),
+            Datum::Integer(0x3ff0_0000_0000_0000)
+        );
+    }
+
+    const PROGRAMS: &str = r#"
+string "from a string constant"
+class %Error { fields [i32] methods [] }
+class %Animal abstract { fields [] methods [-] }
+class %Dog : %Animal { fields [] methods [@Dog.sound] }
+class %Cat : %Animal { fields [] methods [@Cat.sound] }
+class %Greeter interface { fields [] methods [-, @Greeter.twice] }
+class %Robot { fields [] methods [] implements %Greeter [@Robot.greet, -] }
+global @greeting size 6 align 1 internal bytes "68656c6c6f00"
+global @scratch size 8 align 8 mutable internal zero
+global @handlers size 16 align 8 internal bytes "00000000000000000000000000000000" relocate 0 function @add 0 relocate 8 function @subtract 0
+function @malloc(i64) -> ptr import
+function @free(ptr) import
+function @puts(ptr) -> i32 import
+function @putchar(i32) -> i32 import
+function @exit(i32) import
+function @abort() import
+function @missing() -> i32 import
+function @omni.print_line(ref) import
+function @Dog.sound(ref) -> i32 internal {
+block0(%self: ref):
+    %v: i32 = const 1
+    return %v
+}
+function @Cat.sound(ref) -> i32 internal {
+block0(%self: ref):
+    %v: i32 = const 2
+    return %v
+}
+function @Greeter.twice(ref) -> i32 internal {
+block0(%self: ref):
+    %v: i32 = const 22
+    return %v
+}
+function @Robot.greet(ref) -> i32 internal {
+block0(%self: ref):
+    %v: i32 = const 11
+    return %v
+}
+function @add(i32, i32) -> i32 internal {
+block0(%a: i32, %b: i32):
+    %c: i32 = add %a, %b
+    return %c
+}
+function @subtract(i32, i32) -> i32 internal {
+block0(%a: i32, %b: i32):
+    %c: i32 = sub %a, %b
+    return %c
+}
+function @factorial(i64) -> i64 export {
+block0(%n: i64):
+    %one: i64 = const 1
+    %small: bool = icmp sle %n, %one
+    branch %small, block1, block2
+block1:
+    return %one
+block2:
+    %m: i64 = sub %n, %one
+    %r: i64 = call @factorial(%m)
+    %p: i64 = mul %n, %r
+    return %p
+}
+function @sum(i32) -> i32 export {
+block0(%n: i32):
+    %zero: i32 = const 0
+    jump block1(%zero, %zero)
+block1(%i: i32, %acc: i32):
+    %done: bool = icmp sgt %i, %n
+    branch %done, block3, block2
+block2:
+    %next_acc: i32 = add %acc, %i
+    %one: i32 = const 1
+    %next_i: i32 = add %i, %one
+    jump block1(%next_i, %next_acc)
+block3:
+    return %acc
+}
+function @fail(i32) -> i32 export {
+block0(%code: i32):
+    %e: ref = allocate %Error
+    store_field %Error 0 %e, %code
+    throw %e
+}
+function @middle(i32) -> i32 export {
+block0(%x: i32):
+    %r: i32 = call @fail(%x)
+    return %r
+}
+function @catcher(i32) -> i32 export {
+block0(%x: i32):
+    %r: i32 = invoke call @middle(%x) to block1(%r) unwind block2
+block1(%v: i32):
+    return %v
+block2(%e: ref):
+    %code: i32 = load_field %Error 0 %e
+    %k: i32 = const 100
+    %sum: i32 = add %code, %k
+    return %sum
+}
+function @speak(bool) -> i32 export {
+block0(%dog: bool):
+    branch %dog, block1, block2
+block1:
+    %d: ref = allocate %Dog
+    jump block3(%d)
+block2:
+    %c: ref = allocate %Cat
+    jump block3(%c)
+block3(%animal: ref):
+    %m: ptr = virtual_method %Animal 0 %animal
+    %r: i32 = call_indirect (ref) -> i32 %m(%animal)
+    return %r
+}
+function @greet(i32) -> i32 export {
+block0(%slot: i32):
+    %robot: ref = allocate %Robot
+    %is: bool = instance_of %Greeter %robot
+    %not: bool = instance_of %Dog %robot
+    switch %slot, [0: block1, 1: block2], default block3
+block1:
+    %m: ptr = interface_method %Greeter 0 %robot
+    %r: i32 = call_indirect (ref) -> i32 %m(%robot)
+    return %r
+block2:
+    %n: ptr = interface_method %Greeter 1 %robot
+    %s: i32 = call_indirect (ref) -> i32 %n(%robot)
+    return %s
+block3:
+    %a: i32 = zext %is
+    %b: i32 = zext %not
+    %ten: i32 = const 10
+    %t: i32 = mul %a, %ten
+    %u: i32 = add %t, %b
+    return %u
+}
+function @arrays(i32, i32) -> i64 export {
+block0(%n: i32, %at: i32):
+    %arr: ref = allocate_array i64 %n
+    %zero: i32 = const 0
+    jump block1(%zero)
+block1(%i: i32):
+    %len: i32 = array_length %arr
+    %more: bool = icmp slt %i, %len
+    branch %more, block2, block3
+block2:
+    %wide: i64 = sext %i
+    %square: i64 = mul %wide, %wide
+    store_element i64 %arr, %i, %square
+    %one: i32 = const 1
+    %next: i32 = add %i, %one
+    jump block1(%next)
+block3:
+    %v: i64 = load_element i64 %arr, %at
+    return %v
+}
+function @null_field() -> i32 export {
+block0:
+    %n: ref = null
+    %v: i32 = load_field %Error 0 %n
+    return %v
+}
+function @confused() -> i32 export {
+block0:
+    %d: ref = allocate %Dog
+    %v: i32 = load_field %Error 0 %d
+    return %v
+}
+function @memory(i64) -> i64 export {
+block0(%step: i64):
+    %slot: ptr = stack_slot size 16 align 8
+    %v: i64 = const 42
+    store align 8 %v, %slot
+    %eight: i64 = const 8
+    %second: ptr = offset %slot, %eight
+    %w: i64 = const 58
+    store align 8 %w, %second
+    %a: i64 = load align 8 %slot
+    %there: ptr = offset %slot, %step
+    %b: i64 = load align 8 %there
+    %s: i64 = add %a, %b
+    return %s
+}
+function @dangling() -> ptr internal {
+block0:
+    %slot: ptr = stack_slot size 8 align 8
+    return %slot
+}
+function @use_dangling() -> i64 export {
+block0:
+    %p: ptr = call @dangling()
+    %v: i64 = load align 8 %p
+    return %v
+}
+function @heap(bool) -> i64 export {
+block0(%release: bool):
+    %size: i64 = const 16
+    %p: ptr = call @malloc(%size)
+    %v: i64 = const 7
+    store align 8 %v, %p
+    branch %release, block1, block2
+block1:
+    call @free(%p)
+    jump block2
+block2:
+    %r: i64 = load align 8 %p
+    return %r
+}
+function @double_free() export {
+block0:
+    %size: i64 = const 16
+    %p: ptr = call @malloc(%size)
+    call @free(%p)
+    call @free(%p)
+    return
+}
+function @hello() -> i32 export {
+block0:
+    %g: ptr = global_address @greeting
+    %r: i32 = call @puts(%g)
+    %bang: i32 = const 33
+    %s: i32 = call @putchar(%bang)
+    %t: ref = string 0
+    call @omni.print_line(%t)
+    return %r
+}
+function @write_constant() export {
+block0:
+    %g: ptr = global_address @greeting
+    %v: i8 = const 0
+    store align 1 %v, %g
+    return
+}
+function @dispatch(i64, i32, i32) -> i32 export {
+block0(%which: i64, %a: i32, %b: i32):
+    %table: ptr = global_address @handlers
+    %slot: ptr = element_address ptr %table, %which
+    %f: ptr = load align 8 %slot
+    %r: i32 = call_indirect (i32, i32) -> i32 %f(%a, %b)
+    return %r
+}
+function @wrong_signature() -> i64 export {
+block0:
+    %f: ptr = function_address @add
+    %x: i64 = const 1
+    %r: i64 = call_indirect (i64) -> i64 %f(%x)
+    return %r
+}
+function @wild_pointer() -> i32 export {
+block0:
+    %n: i64 = const 12345
+    %f: ptr = inttoptr %n
+    %r: i32 = call_indirect () -> i32 %f()
+    return %r
+}
+function @boxed(bool) -> bool export {
+block0(%forge: bool):
+    %slot: ptr = stack_slot size 8 align 8
+    %o: ref = allocate %Dog
+    store align 8 %o, %slot
+    branch %forge, block1, block2
+block1:
+    %bits: i64 = const 1
+    store align 8 %bits, %slot
+    jump block2
+block2:
+    %back: ref = load align 8 %slot
+    %same: bool = same_object %o, %back
+    return %same
+}
+function @copy_reference() -> bool export {
+block0:
+    %from: ptr = stack_slot size 8 align 8
+    %to: ptr = stack_slot size 8 align 8
+    %o: ref = allocate %Dog
+    store align 8 %o, %from
+    %eight: i64 = const 8
+    memory_copy %to, %from, %eight
+    %back: ref = load align 8 %to
+    %same: bool = same_object %o, %back
+    return %same
+}
+function @overlap() export {
+block0:
+    %slot: ptr = stack_slot size 16 align 8
+    %one: i64 = const 1
+    %later: ptr = offset %slot, %one
+    %eight: i64 = const 8
+    memory_move %later, %slot, %eight
+    memory_copy %later, %slot, %eight
+    return
+}
+function @atomics() -> i32 export {
+block0:
+    %slot: ptr = stack_slot size 4 align 4
+    %five: i32 = const 5
+    store atomic seq_cst align 4 %five, %slot
+    %three: i32 = const 3
+    %old: i32 = atomic_update add seq_cst %slot, %three
+    %eight: i32 = const 8
+    %ten: i32 = const 10
+    %seen: i32 = compare_exchange acq_rel acquire %slot, %eight, %ten
+    %missed: i32 = compare_exchange seq_cst relaxed %slot, %eight, %five
+    %now: i32 = load atomic acquire align 4 %slot
+    fence seq_cst
+    %hundred: i32 = const 100
+    %a: i32 = mul %old, %hundred
+    %b: i32 = add %a, %seen
+    %c: i32 = mul %b, %hundred
+    %d: i32 = add %c, %missed
+    %e: i32 = mul %d, %hundred
+    %f: i32 = add %e, %now
+    return %f
+}
+function @vectors() -> i32 export {
+block0:
+    %one: i32 = const 1
+    %v: <4 x i32> = splat %one
+    %ten: i32 = const 10
+    %w: <4 x i32> = insert_lane 2 %v, %ten
+    %sum: <4 x i32> = add %v, %w
+    %lane: i32 = extract_lane 2 %sum
+    %bits: i128 = bitcast %sum
+    %low: i32 = trunc %bits
+    %r: i32 = add %lane, %low
+    return %r
+}
+function @misaligned() -> i64 export {
+block0:
+    %slot: ptr = stack_slot size 16 align 8
+    %one: i64 = const 1
+    %odd: ptr = offset %slot, %one
+    %v: i64 = load align 8 %odd
+    return %v
+}
+function @forever() export {
+block0:
+    jump block1
+block1:
+    jump block1
+}
+function @deep(i64) -> i64 export {
+block0(%n: i64):
+    %r: i64 = call @deep(%n)
+    return %r
+}
+function @call_missing() -> i32 export {
+block0:
+    %r: i32 = call @missing()
+    return %r
+}
+function @leave(i32) export {
+block0(%code: i32):
+    call @exit(%code)
+    unreachable
+}
+function @poisoned() -> i32 export {
+block0:
+    %p: bool = poison
+    branch %p, block1, block2
+block1:
+    %a: i32 = const 1
+    return %a
+block2:
+    %b: i32 = const 2
+    return %b
+}
+function @poison_flows() -> i32 export {
+block0:
+    %p: i32 = poison
+    %one: i32 = const 1
+    %q: i32 = add %p, %one
+    %truth: bool = const 1
+    %r: i32 = select %truth, %one, %q
+    return %r
+}
+function @stop(i32) -> i32 export {
+block0(%x: i32):
+    %zero: i32 = const 0
+    %is_zero: bool = icmp eq %x, %zero
+    branch %is_zero, block1, block2
+block1:
+    trap 7
+    unreachable
+block2:
+    unreachable
+}
+function @negative_array() -> ref export {
+block0:
+    %n: i32 = const -1
+    %a: ref = allocate_array i8 %n
+    return %a
+}
+function @uncaught() -> i32 export {
+block0:
+    %seven: i32 = const 7
+    %r: i32 = call @fail(%seven)
+    return %r
+}
+function @aborting() export {
+block0:
+    call @abort()
+    return
+}
+"#;
+
+    fn programs() -> Module {
+        module(PROGRAMS)
+    }
+
+    #[test]
+    fn programs_compute_what_they_should() {
+        let programs = programs();
+        assert_eq!(programs.violations(), Vec::new());
+        round_trips(&programs);
+        assert_eq!(
+            returned(&programs, "factorial", vec![int(Type::I64, 20)]),
+            int(Type::I64, 2_432_902_008_176_640_000)
+        );
+        assert_eq!(
+            returned(&programs, "sum", vec![int(Type::I32, 100)]),
+            int(Type::I32, 5050)
+        );
+        assert_eq!(
+            returned(&programs, "catcher", vec![int(Type::I32, 5)]),
+            int(Type::I32, 105)
+        );
+        assert_eq!(
+            returned(&programs, "speak", vec![Datum::Integer(1)]),
+            int(Type::I32, 1)
+        );
+        assert_eq!(
+            returned(&programs, "speak", vec![Datum::Integer(0)]),
+            int(Type::I32, 2)
+        );
+        assert_eq!(
+            returned(&programs, "greet", vec![int(Type::I32, 0)]),
+            int(Type::I32, 11)
+        );
+        assert_eq!(
+            returned(&programs, "greet", vec![int(Type::I32, 1)]),
+            int(Type::I32, 22)
+        );
+        assert_eq!(
+            returned(&programs, "greet", vec![int(Type::I32, 2)]),
+            int(Type::I32, 10)
+        );
+        assert_eq!(
+            returned(
+                &programs,
+                "arrays",
+                vec![int(Type::I32, 10), int(Type::I32, 9)]
+            ),
+            int(Type::I64, 81)
+        );
+        assert_eq!(
+            returned(&programs, "memory", vec![int(Type::I64, 8)]),
+            int(Type::I64, 100)
+        );
+        assert_eq!(
+            returned(&programs, "heap", vec![Datum::Integer(0)]),
+            int(Type::I64, 7)
+        );
+        assert_eq!(
+            returned(
+                &programs,
+                "dispatch",
+                vec![int(Type::I64, 0), int(Type::I32, 7), int(Type::I32, 5)]
+            ),
+            int(Type::I32, 12)
+        );
+        assert_eq!(
+            returned(
+                &programs,
+                "dispatch",
+                vec![int(Type::I64, 1), int(Type::I32, 7), int(Type::I32, 5)]
+            ),
+            int(Type::I32, 2)
+        );
+        assert_eq!(
+            returned(&programs, "boxed", vec![Datum::Integer(0)]),
+            Datum::Integer(1)
+        );
+        assert_eq!(
+            returned(&programs, "copy_reference", Vec::new()),
+            Datum::Integer(1)
+        );
+        assert_eq!(
+            returned(&programs, "atomics", Vec::new()),
+            int(Type::I32, 5_081_010)
+        );
+        assert_eq!(
+            returned(&programs, "vectors", Vec::new()),
+            int(Type::I32, 13)
+        );
+        assert_eq!(
+            returned(&programs, "poison_flows", Vec::new()),
+            int(Type::I32, 1)
+        );
+        let (outcome, output) = execute(&programs, "hello", Vec::new(), Limits::default());
+        assert_eq!(outcome, Ok(Finish::Returned(Some(int(Type::I32, 1)))));
+        assert_eq!(output, b"hello\n!from a string constant\n");
+        let (outcome, _) = execute(
+            &programs,
+            "leave",
+            vec![int(Type::I32, 3)],
+            Limits::default(),
+        );
+        assert_eq!(outcome, Ok(Finish::Exited(3)));
+    }
+
+    #[test]
+    fn every_misstep_stops_at_a_named_trap() {
+        let programs = programs();
+        let cases: Vec<(&str, Vec<Datum>, &str)> = vec![
+            (
+                "arrays",
+                vec![int(Type::I32, 3), int(Type::I32, 3)],
+                "index-out-of-bounds",
+            ),
+            (
+                "arrays",
+                vec![int(Type::I32, 3), int(Type::I32, -1)],
+                "index-out-of-bounds",
+            ),
+            ("null_field", Vec::new(), "null-reference"),
+            ("confused", Vec::new(), "type-confusion"),
+            ("memory", vec![int(Type::I64, 16)], "out-of-bounds"),
+            ("memory", vec![int(Type::I64, -8)], "out-of-bounds"),
+            ("use_dangling", Vec::new(), "use-after-free"),
+            ("heap", vec![Datum::Integer(1)], "use-after-free"),
+            ("double_free", Vec::new(), "invalid-free"),
+            ("write_constant", Vec::new(), "read-only"),
+            ("wrong_signature", Vec::new(), "signature-mismatch"),
+            ("wild_pointer", Vec::new(), "bad-function-pointer"),
+            ("boxed", vec![Datum::Integer(1)], "forged-reference"),
+            ("overlap", Vec::new(), "overlapping-copy"),
+            ("misaligned", Vec::new(), "misaligned"),
+            ("poisoned", Vec::new(), "poison-observed"),
+            ("stop", vec![int(Type::I32, 0)], "explicit"),
+            ("stop", vec![int(Type::I32, 1)], "unreachable"),
+            ("negative_array", Vec::new(), "negative-length"),
+            ("aborting", Vec::new(), "abort"),
+            (
+                "dispatch",
+                vec![int(Type::I64, 2), int(Type::I32, 0), int(Type::I32, 0)],
+                "out-of-bounds",
+            ),
+            ("sum", vec![Datum::f64(1.0)], "signature-mismatch"),
+        ];
+        let mut seen = BTreeSet::new();
+        for (function, arguments, reason) in cases {
+            assert_eq!(
+                trap_reason(&programs, function, arguments),
+                reason,
+                "{function}"
+            );
+            seen.insert(reason.to_string());
+        }
+        let explicit = stopped(&programs, "stop", vec![int(Type::I32, 0)]);
+        assert_eq!(explicit.message, "The program stopped at a trap.");
+        assert_eq!(
+            explicit.context,
+            vec!["Reason: explicit", "Name: @stop", "Value: 7"]
+        );
+        let null_access = module(
+            "function @f() -> i32 export {\nblock0:\n    %p: ptr = null\n    %v: i32 = load align 4 %p\n    return %v\n}\n",
+        );
+        assert_eq!(trap_reason(&null_access, "f", Vec::new()), "null-access");
+        seen.insert("null-access".to_string());
+        let division = module(
+            "function @f(i32) -> i32 export {\nblock0(%a: i32):\n    %z: i32 = const 0\n    %v: i32 = sdiv %a, %z\n    return %v\n}\n",
+        );
+        assert_eq!(
+            trap_reason(&division, "f", vec![int(Type::I32, 1)]),
+            "division-by-zero"
+        );
+        seen.insert("division-by-zero".to_string());
+        let conversion = module(
+            "function @f(f32) -> i8 export {\nblock0(%a: f32):\n    %v: i8 = fptosi %a\n    return %v\n}\n",
+        );
+        assert_eq!(
+            trap_reason(&conversion, "f", vec![Datum::f32(1000.0)]),
+            "conversion-range"
+        );
+        seen.insert("conversion-range".to_string());
+        let abstract_call = module(
+            "class %A abstract { fields [] methods [-] }\nclass %B abstract : %A { fields [] methods [-] }\nclass %C : %B { fields [] methods [@C.m] }\nfunction @C.m(ref) internal {\nblock0(%s: ref):\n    return\n}\nfunction @f() -> ptr export {\nblock0:\n    %c: ref = allocate %C\n    %m: ptr = virtual_method %A 0 %c\n    return %m\n}\n",
+        );
+        assert!(matches!(
+            returned(&abstract_call, "f", Vec::new()),
+            Datum::Pointer(_)
+        ));
+        let missing = module(
+            "class %I interface { fields [] methods [-] }\nclass %C { fields [] methods [] }\nfunction @f() -> ptr export {\nblock0:\n    %c: ref = allocate %C\n    %m: ptr = interface_method %I 0 %c\n    return %m\n}\n",
+        );
+        assert_eq!(
+            trap_reason(&missing, "f", Vec::new()),
+            "missing-implementation"
+        );
+        seen.insert("missing-implementation".to_string());
+        let open_slot = module(
+            "class %I interface { fields [] methods [-] }\nclass %A abstract { fields [] methods [] implements %I [-] }\nclass %C : %A { fields [] methods [] }\n",
+        );
+        assert!(open_slot
+            .violations()
+            .iter()
+            .any(|violation| violation.rule == Rule::VirtualTable));
+        let memory_bound = module(
+            "function @malloc(i64) -> ptr import\nfunction @f() -> ptr export {\nblock0:\n    %n: i32 = const 100000000\n    %a: ref = allocate_array i64 %n\n    %p: ptr = null\n    return %p\n}\n",
+        );
+        let limits = Limits {
+            memory: 1 << 20,
+            ..Limits::default()
+        };
+        let (outcome, _) = execute(&memory_bound, "f", Vec::new(), limits);
+        let error = outcome.expect_err("too large");
+        assert!(
+            error
+                .context
+                .contains(&"Reason: memory-exhausted".to_string()),
+            "{error:?}"
+        );
+        seen.insert("memory-exhausted".to_string());
+        let trap_names: BTreeSet<String> = Trap::ALL
+            .iter()
+            .map(|trap| trap.name().to_string())
+            .collect();
+        let missed: Vec<&String> = trap_names.difference(&seen).collect();
+        assert_eq!(
+            missed,
+            vec!["abstract-method"],
+            "these traps were never reached"
+        );
+    }
+
+    #[test]
+    fn limits_end_runaway_programs_with_their_own_codes() {
+        let programs = programs();
+        let limits = Limits {
+            fuel: 10_000,
+            depth: 200,
+            ..Limits::default()
+        };
+        let (outcome, _) = execute(&programs, "forever", Vec::new(), limits);
+        let error = outcome.expect_err("fuel runs out");
+        assert_eq!(error.code, "EI005");
+        assert_eq!(error.context, vec!["Limit: 10000"]);
+        let (outcome, _) = execute(&programs, "deep", vec![int(Type::I64, 1)], limits);
+        let error = outcome.expect_err("the stack runs out");
+        assert_eq!(error.code, "EI008");
+        assert_eq!(error.context, vec!["Limit: 200"]);
+        let error = stopped(&programs, "call_missing", Vec::new());
+        assert_eq!(error.code, "EI007");
+        assert_eq!(error.context, vec!["Name: @missing"]);
+        let error = stopped(&programs, "uncaught", Vec::new());
+        assert_eq!(error.code, "EI006");
+        assert_eq!(error.context, vec!["Class: %Error"]);
+        let imported = module("global @outside size 8 align 8 import zero\nfunction @f() export {\nblock0:\n    return\n}\n");
+        let mut host = StandardHost;
+        let error = Interpreter::new(&imported, &mut host, Limits::default())
+            .err()
+            .expect("the host has no such global");
+        assert_eq!(error.code, "EI007");
+        assert_eq!(error.context, vec!["Name: @outside"]);
+        let broken = module("function @f() -> i32 export {\nblock0:\n    return\n}\n");
+        let error = Interpreter::new(&broken, &mut host, Limits::default())
+            .err()
+            .expect("a broken module is refused");
+        assert_eq!(error.code, "EI003");
+    }
+
+    #[test]
+    fn running_twice_gives_the_same_answer_the_same_output_and_the_same_fuel() {
+        let programs = programs();
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            let mut host = StandardHost;
+            let mut interpreter =
+                Interpreter::new(&programs, &mut host, Limits::default()).expect("verifies");
+            let mut answers = Vec::new();
+            for name in ["factorial", "hello", "catcher", "atomics"] {
+                let id = programs.function_named(name).expect("present");
+                let arguments = match name {
+                    "factorial" => vec![int(Type::I64, 12)],
+                    "catcher" => vec![int(Type::I32, 1)],
+                    _ => Vec::new(),
+                };
+                answers.push(format!("{:?}", interpreter.call(id, arguments)));
+            }
+            runs.push((
+                answers,
+                interpreter.machine().stdout().to_vec(),
+                interpreter.fuel_used(),
+            ));
+        }
+        assert_eq!(runs[0], runs[1]);
+    }
+
+    #[test]
+    fn a_thirty_two_bit_layout_keeps_pointers_in_four_bytes() {
+        let narrow = parse(
+            "omni 1\nmodule \"narrow\"\nlayout ilp32\n\
+             global @slot size 4 align 4 internal bytes \"00000000\" relocate 0 function @seven 0\n\
+             function @seven() -> i32 internal {\nblock0:\n    %v: i32 = const 7\n    return %v\n}\n\
+             function @f() -> i32 export {\nblock0:\n    %g: ptr = global_address @slot\n    %p: ptr = load align 4 %g\n    %r: i32 = call_indirect () -> i32 %p()\n    %w: i32 = ptrtoint %g\n    %s: ptr = stack_slot size 8 align 4\n    %v: i64 = ptrtoint %s\n    %high: i64 = const 32\n    %top: i64 = lshr %v, %high\n    %t: i32 = trunc %top\n    %sum: i32 = add %r, %t\n    return %sum\n}\n",
+        );
+        assert_eq!(narrow.violations(), Vec::new());
+        round_trips(&narrow);
+        assert_eq!(returned(&narrow, "f", Vec::new()), int(Type::I32, 7));
+        let wide = parse(&narrow.to_text().replace("layout ilp32", "layout lp64"));
+        assert!(wide
+            .violations()
+            .iter()
+            .any(|violation| violation.rule == Rule::RelocationRange));
+    }
+
+    #[test]
+    fn the_builder_places_block_parameters_only_where_values_meet() {
+        let mut function = Function::new(
+            "diamond",
+            Signature::new(vec![Type::BOOL, Type::I32], Some(Type::I32)),
+            Linkage::Export,
+        );
+        let mut builder = FunctionBuilder::new(&mut function);
+        let entry = builder.create_block();
+        let left = builder.create_block();
+        let right = builder.create_block();
+        let join = builder.create_block();
+        let parameters = builder.entry_parameters(entry);
+        builder.switch_to(entry);
+        let x = builder.declare_variable(Type::I32);
+        let y = builder.declare_variable(Type::I32);
+        builder.define(x, parameters[1]);
+        builder.define(y, parameters[1]);
+        builder.branch(parameters[0], left, right);
+        builder.seal(left);
+        builder.seal(right);
+        builder.switch_to(left);
+        let one = builder.integer(Type::I32, 1);
+        builder.define(x, one);
+        builder.jump(join, Vec::new());
+        builder.switch_to(right);
+        builder.jump(join, Vec::new());
+        builder.seal(join);
+        builder.switch_to(join);
+        let merged = builder.read(x);
+        let same = builder.read(y);
+        let sum = builder.binary(BinaryOp::Add, merged, same);
+        builder.ret(Some(sum));
+        builder.finish().expect("every block is closed");
+        assert_eq!(
+            function.blocks[3].parameters.len(),
+            1,
+            "only x differs on the two paths"
+        );
+        let mut module = Module::new("built");
+        module.add_function(function);
+        assert_eq!(module.violations(), Vec::new());
+        assert_eq!(
+            returned(
+                &module,
+                "diamond",
+                vec![Datum::Integer(1), int(Type::I32, 5)]
+            ),
+            int(Type::I32, 6)
+        );
+        assert_eq!(
+            returned(
+                &module,
+                "diamond",
+                vec![Datum::Integer(0), int(Type::I32, 5)]
+            ),
+            int(Type::I32, 10)
+        );
+        round_trips(&module);
+    }
+
+    #[test]
+    fn the_builder_closes_loops_and_drops_parameters_that_carry_one_value() {
+        let mut function = Function::new(
+            "triangle",
+            Signature::new(vec![Type::I32], Some(Type::I32)),
+            Linkage::Export,
+        );
+        let mut builder = FunctionBuilder::new(&mut function);
+        let entry = builder.create_block();
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let exit = builder.create_block();
+        let parameters = builder.entry_parameters(entry);
+        builder.switch_to(entry);
+        let i = builder.declare_variable(Type::I32);
+        let total = builder.declare_variable(Type::I32);
+        let limit = builder.declare_variable(Type::I32);
+        let zero = builder.integer(Type::I32, 0);
+        builder.define(i, zero);
+        builder.define(total, zero);
+        builder.define(limit, parameters[0]);
+        builder.jump(header, Vec::new());
+        builder.switch_to(header);
+        let counter = builder.read(i);
+        let bound = builder.read(limit);
+        let done = builder.compare(Comparison::GreaterSigned, counter, bound);
+        builder.branch(done, exit, body);
+        builder.switch_to(body);
+        let counter = builder.read(i);
+        let running = builder.read(total);
+        let added = builder.binary(BinaryOp::Add, running, counter);
+        let one = builder.integer(Type::I32, 1);
+        let stepped = builder.binary(BinaryOp::Add, counter, one);
+        builder.define(i, stepped);
+        builder.define(total, added);
+        builder.jump(header, Vec::new());
+        builder.seal(header);
+        builder.seal(body);
+        builder.seal(exit);
+        builder.switch_to(exit);
+        let answer = builder.read(total);
+        builder.ret(Some(answer));
+        builder.finish().expect("every block is closed");
+        assert_eq!(
+            function.blocks[1].parameters.len(),
+            2,
+            "i and total change around the loop, the limit does not"
+        );
+        assert!(function.blocks[2].parameters.is_empty());
+        assert!(function.blocks[3].parameters.is_empty());
+        let mut module = Module::new("built");
+        module.add_function(function);
+        assert_eq!(module.violations(), Vec::new());
+        assert_eq!(
+            returned(&module, "triangle", vec![int(Type::I32, 10)]),
+            int(Type::I32, 55)
+        );
+        assert_eq!(
+            returned(&module, "triangle", vec![int(Type::I32, -1)]),
+            int(Type::I32, 0)
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    enum Expression {
+        Variable(usize),
+        Constant(i64),
+        Binary(BinaryOp, Box<Expression>, Box<Expression>),
+    }
+
+    #[derive(Clone, Debug)]
+    enum Statement {
+        Assign(usize, Expression),
+        When(
+            Comparison,
+            Expression,
+            Expression,
+            Vec<Statement>,
+            Vec<Statement>,
+        ),
+        Repeat(i64, Vec<Statement>),
+    }
+
+    const RANDOM_OPERATIONS: [BinaryOp; 25] = [
+        BinaryOp::Add,
+        BinaryOp::Subtract,
+        BinaryOp::Multiply,
+        BinaryOp::DivideSigned,
+        BinaryOp::DivideUnsigned,
+        BinaryOp::RemainderSigned,
+        BinaryOp::RemainderUnsigned,
+        BinaryOp::And,
+        BinaryOp::Or,
+        BinaryOp::Xor,
+        BinaryOp::ShiftLeft,
+        BinaryOp::ShiftRightLogical,
+        BinaryOp::ShiftRightArithmetic,
+        BinaryOp::RotateLeft,
+        BinaryOp::RotateRight,
+        BinaryOp::MinimumSigned,
+        BinaryOp::MaximumSigned,
+        BinaryOp::MinimumUnsigned,
+        BinaryOp::MaximumUnsigned,
+        BinaryOp::AddSaturatingSigned,
+        BinaryOp::AddSaturatingUnsigned,
+        BinaryOp::SubtractSaturatingSigned,
+        BinaryOp::SubtractSaturatingUnsigned,
+        BinaryOp::MultiplyHighSigned,
+        BinaryOp::MultiplyHighUnsigned,
+    ];
+
+    const VARIABLES: usize = 4;
+
+    fn random_expression(random: &mut Shuffle, depth: u32) -> Expression {
+        match random.below(if depth == 0 { 2 } else { 4 }) {
+            0 => Expression::Variable(random.below(VARIABLES as u64) as usize),
+            1 => Expression::Constant(match random.below(4) {
+                0 => random.below(9) as i64 - 4,
+                1 => i64::MIN,
+                2 => i64::MAX,
+                _ => random.next() as i64,
+            }),
+            _ => Expression::Binary(
+                RANDOM_OPERATIONS[random.below(RANDOM_OPERATIONS.len() as u64) as usize],
+                Box::new(random_expression(random, depth - 1)),
+                Box::new(random_expression(random, depth - 1)),
+            ),
+        }
+    }
+
+    fn random_statements(random: &mut Shuffle, depth: u32) -> Vec<Statement> {
+        let count = random.below(4) + 1;
+        (0..count)
+            .map(|_| match random.below(if depth == 0 { 1 } else { 4 }) {
+                0 | 1 => Statement::Assign(
+                    random.below(VARIABLES as u64) as usize,
+                    random_expression(random, 2),
+                ),
+                2 => Statement::When(
+                    Comparison::ALL[random.below(Comparison::ALL.len() as u64) as usize],
+                    random_expression(random, 1),
+                    random_expression(random, 1),
+                    random_statements(random, depth - 1),
+                    random_statements(random, depth - 1),
+                ),
+                _ => {
+                    Statement::Repeat(random.below(5) as i64, random_statements(random, depth - 1))
+                }
+            })
+            .collect()
+    }
+
+    fn evaluate(expression: &Expression, variables: &[i64]) -> Option<i64> {
+        Some(match expression {
+            Expression::Variable(at) => variables[*at],
+            Expression::Constant(value) => *value,
+            Expression::Binary(op, left, right) => {
+                let (left, right) = (evaluate(left, variables)?, evaluate(right, variables)?);
+                reference_64(*op, left as u64, right as u64)? as u64 as i64
+            }
+        })
+    }
+
+    fn holds(comparison: Comparison, left: i64, right: i64) -> bool {
+        let (a, b) = (left as u64, right as u64);
+        match comparison {
+            Comparison::Equal => left == right,
+            Comparison::NotEqual => left != right,
+            Comparison::LessSigned => left < right,
+            Comparison::LessEqualSigned => left <= right,
+            Comparison::GreaterSigned => left > right,
+            Comparison::GreaterEqualSigned => left >= right,
+            Comparison::LessUnsigned => a < b,
+            Comparison::LessEqualUnsigned => a <= b,
+            Comparison::GreaterUnsigned => a > b,
+            Comparison::GreaterEqualUnsigned => a >= b,
+        }
+    }
+
+    fn execute_statements(statements: &[Statement], variables: &mut [i64]) -> Option<()> {
+        for statement in statements {
+            match statement {
+                Statement::Assign(at, expression) => {
+                    variables[*at] = evaluate(expression, variables)?
+                }
+                Statement::When(comparison, left, right, taken, otherwise) => {
+                    let (left, right) = (evaluate(left, variables)?, evaluate(right, variables)?);
+                    let chosen = if holds(*comparison, left, right) {
+                        taken
+                    } else {
+                        otherwise
+                    };
+                    execute_statements(chosen, variables)?;
+                }
+                Statement::Repeat(count, body) => {
+                    for _ in 0..*count {
+                        execute_statements(body, variables)?;
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+
+    struct Lowering<'b, 'f> {
+        builder: &'b mut FunctionBuilder<'f>,
+        variables: Vec<Variable>,
+    }
+
+    impl Lowering<'_, '_> {
+        fn expression(&mut self, expression: &Expression) -> Value {
+            match expression {
+                Expression::Variable(at) => self.builder.read(self.variables[*at]),
+                Expression::Constant(value) => self.builder.integer(Type::I64, i128::from(*value)),
+                Expression::Binary(op, left, right) => {
+                    let left = self.expression(left);
+                    let right = self.expression(right);
+                    self.builder.binary(*op, left, right)
+                }
+            }
+        }
+
+        fn statements(&mut self, statements: &[Statement]) {
+            for statement in statements {
+                match statement {
+                    Statement::Assign(at, expression) => {
+                        let value = self.expression(expression);
+                        self.builder.define(self.variables[*at], value);
+                    }
+                    Statement::When(comparison, left, right, taken, otherwise) => {
+                        let left = self.expression(left);
+                        let right = self.expression(right);
+                        let condition = self.builder.compare(*comparison, left, right);
+                        let yes = self.builder.create_block();
+                        let no = self.builder.create_block();
+                        let join = self.builder.create_block();
+                        self.builder.branch(condition, yes, no);
+                        self.builder.seal(yes);
+                        self.builder.seal(no);
+                        self.builder.switch_to(yes);
+                        self.statements(taken);
+                        self.builder.jump(join, Vec::new());
+                        self.builder.switch_to(no);
+                        self.statements(otherwise);
+                        self.builder.jump(join, Vec::new());
+                        self.builder.seal(join);
+                        self.builder.switch_to(join);
+                    }
+                    Statement::Repeat(count, body) => {
+                        let counter = self.builder.declare_variable(Type::I64);
+                        let zero = self.builder.integer(Type::I64, 0);
+                        self.builder.define(counter, zero);
+                        let header = self.builder.create_block();
+                        let inside = self.builder.create_block();
+                        let after = self.builder.create_block();
+                        self.builder.jump(header, Vec::new());
+                        self.builder.switch_to(header);
+                        let current = self.builder.read(counter);
+                        let limit = self.builder.integer(Type::I64, i128::from(*count));
+                        let more = self.builder.compare(Comparison::LessSigned, current, limit);
+                        self.builder.branch(more, inside, after);
+                        self.builder.seal(inside);
+                        self.builder.switch_to(inside);
+                        self.statements(body);
+                        let current = self.builder.read(counter);
+                        let one = self.builder.integer(Type::I64, 1);
+                        let next = self.builder.binary(BinaryOp::Add, current, one);
+                        self.builder.define(counter, next);
+                        self.builder.jump(header, Vec::new());
+                        self.builder.seal(header);
+                        self.builder.seal(after);
+                        self.builder.switch_to(after);
+                    }
+                }
+            }
+        }
+    }
+
+    fn lowered(statements: &[Statement]) -> Module {
+        let mut function = Function::new(
+            "random",
+            Signature::new(vec![Type::I64; VARIABLES], Some(Type::I64)),
+            Linkage::Export,
+        );
+        let mut builder = FunctionBuilder::new(&mut function);
+        let entry = builder.create_block();
+        let parameters = builder.entry_parameters(entry);
+        builder.switch_to(entry);
+        let variables: Vec<Variable> = parameters
+            .iter()
+            .map(|parameter| {
+                let variable = builder.declare_variable(Type::I64);
+                builder.define(variable, *parameter);
+                variable
+            })
+            .collect();
+        let mut lowering = Lowering {
+            builder: &mut builder,
+            variables,
+        };
+        lowering.statements(statements);
+        let mut result = lowering.builder.read(lowering.variables[0]);
+        for at in 1..VARIABLES {
+            let next = lowering.builder.read(lowering.variables[at]);
+            result = lowering.builder.binary(BinaryOp::Xor, result, next);
+        }
+        lowering.builder.ret(Some(result));
+        builder.finish().expect("every block is closed");
+        let mut module = Module::new("random");
+        module.add_function(function);
+        module
+    }
+
+    #[test]
+    fn random_programs_built_through_ssa_agree_with_direct_evaluation() {
+        let mut random = Shuffle(0xC0FF_EE15_600D_F00D);
+        let mut agreed = 0usize;
+        let mut trapped = 0usize;
+        for _ in 0..300 {
+            let program = random_statements(&mut random, 3);
+            let module = lowered(&program);
+            assert_eq!(
+                module.violations(),
+                Vec::new(),
+                "{program:?}\n{}",
+                module.to_text()
+            );
+            round_trips(&module);
+            let through_binary = Module::from_binary(&module.to_binary()).expect("reads back");
+            for _ in 0..3 {
+                let inputs: Vec<i64> = (0..VARIABLES)
+                    .map(|_| match random.below(3) {
+                        0 => random.below(11) as i64 - 5,
+                        _ => random.next() as i64,
+                    })
+                    .collect();
+                let arguments: Vec<Datum> = inputs
+                    .iter()
+                    .map(|value| int(Type::I64, i128::from(*value)))
+                    .collect();
+                let mut variables = inputs.clone();
+                let expected = execute_statements(&program, &mut variables)
+                    .map(|()| variables.iter().fold(0i64, |held, value| held ^ value));
+                for candidate in [&module, &through_binary] {
+                    let (outcome, _) =
+                        execute(candidate, "random", arguments.clone(), Limits::default());
+                    match expected {
+                        Some(value) => {
+                            assert_eq!(
+                                outcome,
+                                Ok(Finish::Returned(Some(int(Type::I64, i128::from(value))))),
+                                "{program:?} {inputs:?}"
+                            );
+                        }
+                        None => {
+                            let error = outcome.expect_err("the program divides by zero");
+                            assert!(
+                                error
+                                    .context
+                                    .contains(&"Reason: division-by-zero".to_string()),
+                                "{error:?}"
+                            );
+                        }
+                    }
+                }
+                if expected.is_some() {
+                    agreed += 1;
+                } else {
+                    trapped += 1;
+                }
+            }
+        }
+        assert!(agreed > 300, "only {agreed} runs finished");
+        assert!(
+            trapped > 0,
+            "no run divided by zero, so traps went unexercised"
+        );
+    }
+
+    #[test]
+    fn the_catalogue_explains_every_code_this_infrastructure_raises() {
+        let mut seen: Vec<&str> = catalogue::CATALOGUE.iter().map(|(code, _)| *code).collect();
+        let ordered = seen.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen, ordered,
+            "the catalogue is sorted and holds every code once"
+        );
+        let source =
+            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs");
+        let mut raised = BTreeSet::new();
+        for (at, _) in source.match_indices("\"EI") {
+            let code = &source[at + 1..at + 6];
+            if !code[2..].chars().all(|digit| digit.is_ascii_digit())
+                || !source[at + 6..].starts_with('"')
+            {
+                continue;
+            }
+            let rest = source[at + 7..].trim_start();
+            let rest = rest
+                .strip_prefix(',')
+                .expect("a sentence follows the code")
+                .trim_start();
+            let rest = rest.strip_prefix('"').expect("the sentence is quoted");
+            let sentence = &rest[..rest.find('"').expect("the sentence is closed")];
+            assert_eq!(catalogue::english_of(code), Some(sentence), "{code}");
+            raised.insert(code.to_string());
+        }
+        assert_eq!(
+            raised.len(),
+            catalogue::CATALOGUE.len(),
+            "every catalogued code is raised somewhere"
+        );
+        assert!(catalogue::known("EI004"));
+        assert!(!catalogue::known("EI999"));
+        let _turn = crate::progress::one_at_a_time();
+        crate::speech::choose("tr");
+        let turkish = catalogue::explain("EI003").expect("catalogued");
+        let localized =
+            fail("EI003", "The intermediate form broke one of its rules.").localized_message();
+        crate::speech::choose("en");
+        assert_ne!(turkish, "The intermediate form broke one of its rules.");
+        assert_eq!(localized, turkish);
+    }
+
+    #[test]
+    fn the_infrastructure_stands_alone() {
+        let source =
+            include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs");
+        let mut reached = BTreeSet::new();
+        for (at, _) in source.match_indices("crate::") {
+            let rest = &source[at + 7..];
+            let end = rest
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(rest.len());
+            reached.insert(&rest[..end]);
+        }
+        let allowed: BTreeSet<&str> = ["diag", "FailureClass"].into_iter().collect();
+        assert!(
+            reached.is_subset(&allowed),
+            "the infrastructure reaches into {reached:?}"
+        );
+        assert!(
+            !source.contains("std::collections::Hash"),
+            "iteration order must not depend on hashing"
+        );
+    }
+
+    #[test]
+    fn rule_and_trap_names_are_unique_lowercase_words() {
+        let mut names = BTreeSet::new();
+        for name in Rule::ALL
+            .iter()
+            .map(|rule| rule.name())
+            .chain(Trap::ALL.iter().map(|trap| trap.name()))
+        {
+            assert!(
+                name.chars()
+                    .all(|character| character.is_ascii_lowercase() || character == '-'),
+                "{name}"
+            );
+            assert!(!name.starts_with('-') && !name.ends_with('-'));
+            assert!(
+                names.insert((name, Rule::named(name).is_some())),
+                "{name} twice"
+            );
+        }
+    }
+}

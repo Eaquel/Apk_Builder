@@ -46,6 +46,7 @@ KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
 COMPILERS = ROOT / "Compilers"
+INFRASTRUCTURE = COMPILERS / "Compiler_Infrastructure"
 ANDROID = ROOT / "Android.rs"
 
 CONFORMANCE = {
@@ -171,6 +172,18 @@ def check_layout() -> str:
     if kotlin != wanted_kotlin:
         raise AssertionError(f"Compilers/Kotlin holds {kotlin}, expected {wanted_kotlin}")
 
+    infrastructure = sorted(path.name for path in INFRASTRUCTURE.iterdir())
+    wanted_infrastructure = ["Compiler_Infrastructure.rs", "Compiler_Infrastructure_Diagnostic.rs"]
+    if infrastructure != wanted_infrastructure:
+        raise AssertionError(
+            f"Compilers/Compiler_Infrastructure holds {infrastructure}, expected {wanted_infrastructure}"
+        )
+
+    folders = sorted(path.name for path in COMPILERS.iterdir() if path.is_dir())
+    wanted_folders = ["Compiler_Infrastructure", "Java", "Kotlin"]
+    if folders != wanted_folders:
+        raise AssertionError(f"Compilers holds the folders {folders}, expected {wanted_folders}")
+
     if (ROOT / "Examples").exists():
         raise AssertionError("Examples is gone from this tree")
 
@@ -195,6 +208,7 @@ def check_layout() -> str:
     sources += sorted(COMPILERS.glob("*.rs"))
     sources += sorted((COMPILERS / "Java").glob("*.rs"))
     sources += sorted((COMPILERS / "Kotlin").glob("*.rs"))
+    sources += sorted(INFRASTRUCTURE.glob("*.rs"))
     carried = [
         str(path.relative_to(ROOT))
         for path in sources
@@ -232,6 +246,7 @@ def check_comments() -> str:
     watched += sorted(COMPILERS.glob("*.rs"))
     watched += sorted((COMPILERS / "Java").glob("*.rs"))
     watched += sorted((COMPILERS / "Kotlin").glob("*.rs"))
+    watched += sorted(INFRASTRUCTURE.glob("*.rs"))
     watched += [ANDROID]
 
     found: list[str] = []
@@ -637,6 +652,7 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
         + sorted(COMPILERS.glob("*.rs"))
         + sorted((COMPILERS / "Java").glob("*.rs"))
         + sorted((COMPILERS / "Kotlin").glob("*.rs"))
+        + sorted(INFRASTRUCTURE.glob("*.rs"))
     ):
         text = path.read_text(encoding="utf-8")
         text = text.split("\n#[cfg(test)]\n", 1)[0]
@@ -717,7 +733,7 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
         for said in re.finditer(r'"((?:[^"\\]|\\.)*)"\s*,', fixer[opened + 36:closed]):
             lines.add(plain(said.group(1)))
 
-    for folder, prefix in (("Java", "EJ"), ("Kotlin", "EK")):
+    for folder, prefix in (("Java", "EJ"), ("Kotlin", "EK"), ("Compiler_Infrastructure", "EI")):
         catalogue = (COMPILERS / folder / f"{folder}_Diagnostic.rs").read_text(encoding="utf-8")
         opened = catalogue.index("pub const CATALOGUE: &[(&str, &str)] = &[")
         closed = catalogue.index("\n];", opened)
@@ -807,6 +823,37 @@ def check_speech() -> str:
         f"{len(lines)} sentences and {len(words)} labels "
         f"in each of {len(spoken) // 2} languages spoken"
     )
+
+def check_independence() -> str:
+    """The compiler infrastructure stands on its own.
+
+    Every front end lowers into it and every back end reads out of it, so it
+    may not reach back into any of them, nor into the Android build, the
+    terminal or the assistant. It may use the diagnostic type, the failure
+    classes and the standard library, and nothing else; and nothing in it may
+    iterate in an order that depends on hashing, or the same module could be
+    written two different ways.
+    """
+    allowed = {"diag", "FailureClass"}
+    found: list[str] = []
+    reached: set[str] = set()
+    for path in sorted(INFRASTRUCTURE.glob("*.rs")):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"\bcrate::([A-Za-z_][A-Za-z_0-9]*)", text):
+            reached.add(match.group(1))
+            if path.name == "Compiler_Infrastructure.rs" and match.group(1) not in allowed:
+                line = text.count("\n", 0, match.start()) + 1
+                found.append(f"{path.relative_to(ROOT)}:{line} reaches crate::{match.group(1)}")
+        for match in re.finditer(r"\b(HashMap|HashSet|RandomState|extern crate|use std::env)\b", text):
+            line = text.count("\n", 0, match.start()) + 1
+            found.append(f"{path.relative_to(ROOT)}:{line} uses {match.group(1)}")
+    catalogue = (INFRASTRUCTURE / "Compiler_Infrastructure_Diagnostic.rs").read_text(encoding="utf-8")
+    for match in re.finditer(r"\bcrate::([A-Za-z_][A-Za-z_0-9]*)", catalogue):
+        if match.group(1) != "speech":
+            found.append(f"the catalogue reaches crate::{match.group(1)}")
+    if found:
+        raise AssertionError("the infrastructure is not independent:\n  " + "\n  ".join(found[:20]))
+    return f"it reaches only {', '.join(sorted(reached))}"
 
 SUITE_LINE = re.compile(
     r"SUITE (\S+) passed=(\d+) failed=(\d+) out_of_scope=(\d+) total=(\d+) digest=([0-9a-f]+)$",
@@ -920,6 +967,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "dependencies": ("no third-party dependency", check_dependencies),
     "strings": ("every language, every string", check_strings),
     "speech": ("every refusal in the reader's language", check_speech),
+    "independence": ("the compiler infrastructure stands alone", check_independence),
     "release": ("the package and the bundle", check_release_apk),
     "bridge": ("the native bridge", check_bridge),
     "installable": ("what Android would accept", check_installable),
@@ -931,6 +979,7 @@ CHECKS: dict[str, tuple[str, object]] = {
 
 DEFAULT = [
     "layout", "comments", "templates", "format", "lint", "dependencies", "strings", "speech",
+    "independence",
     "release", "core", "bridge", "installable",
 ]
 
