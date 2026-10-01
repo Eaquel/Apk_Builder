@@ -129,6 +129,9 @@ pub struct Options {
     pub export_dynamic_symbols: Vec<String>,
     pub dynamic_list: Vec<String>,
     pub pack_relative_relocations: bool,
+    pub apply_dynamic_relocations: bool,
+    pub arm_target1_relative: bool,
+    pub arm_target2: String,
     pub android_page_size_16_kilobytes: bool,
     pub threads: Option<usize>,
     pub error_limit: Option<usize>,
@@ -193,6 +196,9 @@ impl Default for Options {
             export_dynamic_symbols: Vec::new(),
             dynamic_list: Vec::new(),
             pack_relative_relocations: false,
+            apply_dynamic_relocations: false,
+            arm_target1_relative: false,
+            arm_target2: "got-rel".to_string(),
             android_page_size_16_kilobytes: false,
             threads: None,
             error_limit: None,
@@ -683,6 +689,13 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.section_start.insert(section.to_string(), address);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--target2"])? {
+            if !matches!(value.as_str(), "rel" | "abs" | "got-rel") {
+                return Err(invalid_value("--target2", &value));
+            }
+            options.arm_target2 = value;
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--export-dynamic-symbol"])? {
             options.export_dynamic_symbols.push(value);
             continue;
@@ -749,6 +762,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--relax" => options.relax = true,
             "--no-relax" => options.relax = false,
             "--no-dynamic-linker" => options.no_dynamic_linker = true,
+            "--apply-dynamic-relocs" => options.apply_dynamic_relocations = true,
+            "--target1-rel" => options.arm_target1_relative = true,
+            "--target1-abs" => options.arm_target1_relative = false,
+            "--no-apply-dynamic-relocs" => options.apply_dynamic_relocations = false,
             "--enable-new-dtags" => options.enable_new_dynamic_tags = true,
             "--disable-new-dtags" => options.enable_new_dynamic_tags = false,
             "--Bsymbolic" => options.symbolic = true,
@@ -1052,6 +1069,16 @@ impl Target {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArmFeatures {
+    pub has_exchange: bool,
+    pub j1_j2_branch_encoding: bool,
+    pub has_move_wide: bool,
+    pub has_arm_instruction_set: bool,
+    pub has_thumb2_instruction_set: bool,
+    pub floating_point_arguments: Option<u64>,
+}
+
 pub type FileIndex = usize;
 pub type SectionIndex = usize;
 pub type SymbolIndex = usize;
@@ -1314,6 +1341,7 @@ pub enum Synthetic {
     Merge,
     Common,
     ArmAttributes,
+    Thunks,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1665,7 +1693,7 @@ pub struct Context<'s> {
     pub relative_relocations: Vec<DynamicRelocation>,
     pub plt_relocations: Vec<DynamicRelocation>,
     pub got_entries: Vec<SymbolIndex>,
-    pub got_constants: Vec<(u64, Expression, u32, i64, SymbolIndex)>,
+    pub dummy: Option<SymbolIndex>,
     pub got_plt_entries: Vec<SymbolIndex>,
     pub indirect_got_plt_entries: Vec<SymbolIndex>,
     pub plt_entries: Vec<SymbolIndex>,
@@ -1705,6 +1733,9 @@ pub struct Context<'s> {
     pub section_names: StringTable,
     pub synthesized: Vec<SymbolIndex>,
     pub relocation_read_only_segment: Option<usize>,
+    pub arm_features: ArmFeatures,
+    pub thunk_state: ThunkState,
+    pub synthetic_file_symbol: Option<SymbolIndex>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -1743,7 +1774,7 @@ impl<'s> Context<'s> {
             relative_relocations: Vec::new(),
             plt_relocations: Vec::new(),
             got_entries: Vec::new(),
-            got_constants: Vec::new(),
+            dummy: None,
             got_plt_entries: Vec::new(),
             indirect_got_plt_entries: Vec::new(),
             plt_entries: Vec::new(),
@@ -1783,6 +1814,9 @@ impl<'s> Context<'s> {
             section_names: StringTable::new(),
             synthesized: Vec::new(),
             relocation_read_only_segment: None,
+            arm_features: ArmFeatures::default(),
+            thunk_state: ThunkState::default(),
+            synthetic_file_symbol: None,
         }
     }
 
@@ -2911,6 +2945,76 @@ pub fn xxh3_64(input: &[u8]) -> u64 {
     xxh3_avalanche(result)
 }
 
+fn read_unsigned_leb(data: &[u8], at: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0;
+    loop {
+        let byte = *data.get(*at)?;
+        *at += 1;
+        if shift < 64 {
+            value |= u64::from(byte & 0x7f) << shift;
+        }
+        shift += 7;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+}
+
+pub fn parse_arm_attributes(data: &[u8], encoding: Encoding) -> Option<BTreeMap<u64, u64>> {
+    if data.first() != Some(&b'A') {
+        return None;
+    }
+    let mut values = BTreeMap::new();
+    let mut at = 1usize;
+    while at < data.len() {
+        let length = encoding.read_u32(data, at)? as usize;
+        if length < 4 || at + length > data.len() {
+            return None;
+        }
+        let end = at + length;
+        let mut cursor = at + 4;
+        let name_end = data[cursor..end].iter().position(|&byte| byte == 0)? + cursor;
+        let vendor = &data[cursor..name_end];
+        cursor = name_end + 1;
+        if vendor == b"aeabi" {
+            while cursor < end {
+                let tag = read_unsigned_leb(data, &mut cursor)?;
+                let size = encoding.read_u32(data, cursor)? as usize;
+                let sub_end = (cursor - 1 + size).min(end);
+                cursor += 4;
+                if tag != 1 {
+                    cursor = sub_end;
+                    continue;
+                }
+                while cursor < sub_end {
+                    let attribute = read_unsigned_leb(data, &mut cursor)?;
+                    let is_string = matches!(attribute, 4 | 5 | 65 | 67)
+                        || (attribute > 32
+                            && attribute % 2 == 1
+                            && attribute != 65
+                            && attribute != 67);
+                    if attribute == 32 {
+                        let flag = read_unsigned_leb(data, &mut cursor)?;
+                        let _ = flag;
+                        let stop = data[cursor..sub_end].iter().position(|&byte| byte == 0)?;
+                        cursor += stop + 1;
+                    } else if is_string {
+                        let stop = data[cursor..sub_end].iter().position(|&byte| byte == 0)?;
+                        cursor += stop + 1;
+                    } else {
+                        let value = read_unsigned_leb(data, &mut cursor)?;
+                        values.insert(attribute, value);
+                    }
+                }
+                cursor = sub_end;
+            }
+        }
+        at = end;
+    }
+    Some(values)
+}
+
 pub fn is_debug_section(name: &str) -> bool {
     name.starts_with(".debug") || name.starts_with(".zdebug")
 }
@@ -2954,12 +3058,9 @@ impl<'s> Context<'s> {
             if header.kind == section_type::ARM_ATTRIBUTES
                 && self.target.architecture == Architecture::Arm
             {
-                let already = self.synthetic.contains_key(".ARM.attributes");
-                if already || relocatable {
+                self.read_arm_attributes(index, &header.data);
+                if self.synthetic.contains_key(".ARM.attributes") {
                     self.files[index].discarded[position] = true;
-                    if relocatable && !already {
-                        continue;
-                    }
                     continue;
                 }
             }
@@ -3137,6 +3238,54 @@ impl<'s> Context<'s> {
                 self.files[index].symbols.resize(position + 1, usize::MAX);
             }
             self.files[index].symbols[position] = id;
+        }
+    }
+
+    fn read_arm_attributes(&mut self, index: FileIndex, data: &[u8]) {
+        let Some(attributes) = parse_arm_attributes(data, self.encoding()) else {
+            let display = self.file_name(Some(index));
+            self.warn(
+                caution("EI254", "The ARM attributes of an input could not be read.")
+                    .with_context(format!("File: {display}")),
+            );
+            return;
+        };
+        if let Some(architecture) = attributes.get(&6).copied() {
+            match architecture {
+                0..=2 => {}
+                3..=7 | 9 => self.arm_features.has_exchange = true,
+                _ => {
+                    self.arm_features.has_exchange = true;
+                    self.arm_features.j1_j2_branch_encoding = true;
+                    if architecture != 11 && architecture != 12 {
+                        self.arm_features.has_move_wide = true;
+                    }
+                }
+            }
+        }
+        if attributes.get(&8).is_some_and(|value| *value >= 1) {
+            self.arm_features.has_arm_instruction_set = true;
+        }
+        if attributes.get(&9).is_some_and(|value| *value >= 2) {
+            self.arm_features.has_thumb2_instruction_set = true;
+        }
+        if let Some(arguments) = attributes.get(&28).copied() {
+            if arguments != 3 {
+                match self.arm_features.floating_point_arguments {
+                    None => self.arm_features.floating_point_arguments = Some(arguments),
+                    Some(held) if held != arguments => {
+                        let display = self.file_name(Some(index));
+                        self.error(
+                            problem(
+                                "EI236",
+                                "Inputs disagree on how floating point arguments are passed.",
+                            )
+                            .with_context(format!("File: {display}")),
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -4909,7 +5058,13 @@ impl<'s> Context<'s> {
                 _ => sign_extend(read32(), 32),
             },
             Architecture::X86 => x86_implicit_addend(kind, data, at, encoding),
-            Architecture::Arm => arm_implicit_addend(kind, data, at, encoding),
+            Architecture::Arm => arm_implicit_addend(
+                kind,
+                data,
+                at,
+                encoding,
+                self.arm_features.j1_j2_branch_encoding,
+            ),
             Architecture::Aarch64 => match kind {
                 257 | 260 | 1027 | 1032 | 1030 | 1025 | 1026 => read64() as i64,
                 258 | 261 => sign_extend(read32(), 32),
@@ -5001,6 +5156,51 @@ impl<'s> Context<'s> {
         }
     }
 
+    pub fn dummy_symbol(&mut self) -> SymbolIndex {
+        if let Some(dummy) = self.dummy {
+            return dummy;
+        }
+        let mut data = SymbolData::new("");
+        data.is_local = true;
+        data.binding = symbol_binding::LOCAL;
+        data.state = SymbolState::Undefined;
+        data.file = Some(INTERNAL);
+        let id = self.symbols.len();
+        self.symbols.push(data);
+        self.dummy = Some(id);
+        id
+    }
+
+    pub fn writes_addends(&self) -> bool {
+        !self.target.uses_addends || self.options.apply_dynamic_relocations
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_dynamic_relocation(
+        &mut self,
+        against_symbol: bool,
+        dynamic_kind: u32,
+        section: SectionIndex,
+        offset: u64,
+        symbol: SymbolIndex,
+        addend: i64,
+        expression: Expression,
+        addend_kind: u32,
+    ) {
+        if self.writes_addends() && (expression != Expression::Addend || addend != 0) {
+            self.add_relocation(section, expression, addend_kind, offset, addend, symbol);
+        }
+        self.dynamic_relocations.push(DynamicRelocation {
+            kind: dynamic_kind,
+            section,
+            offset,
+            symbol: Some(symbol),
+            use_symbol_value: against_symbol,
+            addend,
+            expression,
+        });
+    }
+
     pub fn add_relative_relocation(
         &mut self,
         section: SectionIndex,
@@ -5010,26 +5210,26 @@ impl<'s> Context<'s> {
         expression: Expression,
         kind: u32,
     ) {
-        let relocation = DynamicRelocation {
-            kind: self.target.relative_relocation,
-            section,
-            offset,
-            symbol: Some(symbol),
-            use_symbol_value: false,
-            addend,
-            expression,
-        };
         if self.options.pack_relative_relocations
             && self.sections[section].alignment >= 2
             && offset.is_multiple_of(2)
         {
-            self.relative_relocations.push(relocation);
+            self.relative_relocations.push(DynamicRelocation {
+                kind: self.target.relative_relocation,
+                section,
+                offset,
+                symbol: Some(symbol),
+                use_symbol_value: false,
+                addend,
+                expression,
+            });
+            self.add_relocation(section, expression, kind, offset, addend, symbol);
             return;
         }
-        self.dynamic_relocations.push(relocation);
-        if !self.target.uses_addends {
-            self.add_relocation(section, expression, kind, offset, addend, symbol);
-        }
+        let relative = self.target.relative_relocation;
+        self.add_dynamic_relocation(
+            false, relative, section, offset, symbol, addend, expression, kind,
+        );
     }
 
     pub fn add_symbol_relocation(
@@ -5041,18 +5241,16 @@ impl<'s> Context<'s> {
         addend: i64,
         kind: u32,
     ) {
-        self.dynamic_relocations.push(DynamicRelocation {
-            kind: dynamic_kind,
+        self.add_dynamic_relocation(
+            true,
+            dynamic_kind,
             section,
             offset,
-            symbol: Some(symbol),
-            use_symbol_value: true,
+            symbol,
             addend,
-            expression: Expression::Addend,
-        });
-        if !self.target.uses_addends {
-            self.add_relocation(section, Expression::Addend, kind, offset, addend, symbol);
-        }
+            Expression::Addend,
+            kind,
+        );
     }
 
     pub fn is_static_link_time_constant(
@@ -5400,15 +5598,10 @@ impl<'s> Context<'s> {
             self.symbols[symbol].needs |= needs::TLS_INITIAL_EXECUTABLE;
             if expression == Expression::Got && self.is_pic() && !self.uses_only_low_page_bits(kind)
             {
-                self.dynamic_relocations.push(DynamicRelocation {
-                    kind: self.target.relative_relocation,
-                    section,
-                    offset,
-                    symbol: Some(symbol),
-                    use_symbol_value: false,
-                    addend,
-                    expression,
-                });
+                let relative = self.target.relative_relocation;
+                self.add_dynamic_relocation(
+                    false, relative, section, offset, symbol, addend, expression, kind,
+                );
             } else {
                 self.add_relocation(section, expression, kind, offset, addend, symbol);
             }
@@ -5788,13 +5981,87 @@ fn x86_implicit_addend(kind: u32, data: &[u8], at: usize, encoding: Encoding) ->
     }
 }
 
-fn arm_implicit_addend(kind: u32, data: &[u8], at: usize, encoding: Encoding) -> i64 {
+fn arm_implicit_addend(kind: u32, data: &[u8], at: usize, encoding: Encoding, j1_j2: bool) -> i64 {
     let word = u64::from(encoding.read_u32(data, at).unwrap_or(0));
+    let high = u64::from(encoding.read_u16(data, at).unwrap_or(0));
+    let low = u64::from(encoding.read_u16(data, at + 2).unwrap_or(0));
     match kind {
-        2 | 3 | 9 | 13 | 17 | 18 | 19 | 21 | 22 | 23 | 24 | 25 | 26 | 38 | 41 | 55 | 56 | 96
-        | 104 | 105 | 106 | 107 | 108 | 160 | 31 => sign_extend(word, 32),
+        2 | 25 | 21 | 24 | 26 | 96 | 160 | 3 | 23 | 9 | 38 | 41 | 17 | 18 | 104 | 107 | 105
+        | 108 | 106 | 19 => sign_extend(word, 32),
         42 => sign_extend(word, 31),
-        1 | 27 | 28 | 29 => sign_extend((word & 0x00ff_ffff) << 2, 26),
+        28 | 29 | 1 | 27 => sign_extend((word << 2) & 0xffff_ffff, 26),
+        103 => sign_extend(high << 1, 9),
+        102 => sign_extend(high << 1, 12),
+        51 => sign_extend(
+            ((high & 0x0400) << 10)
+                | ((low & 0x0800) << 8)
+                | ((low & 0x2000) << 5)
+                | ((high & 0x003f) << 12)
+                | ((low & 0x07ff) << 1),
+            20,
+        ),
+        10 if !j1_j2 => sign_extend(((high & 0x7ff) << 12) | ((low & 0x7ff) << 1), 22),
+        10 | 30 => sign_extend(
+            ((high & 0x0400) << 14)
+                | (!((low ^ (high << 3)) << 10) & 0x0080_0000)
+                | (!((low ^ (high << 1)) << 11) & 0x0040_0000)
+                | ((high & 0x003ff) << 12)
+                | ((low & 0x007ff) << 1),
+            24,
+        ),
+        43 | 44 | 45 | 46 | 84 | 85 => {
+            let value = word & 0x000f_0fff;
+            sign_extend(((value & 0x000f_0000) >> 4) | (value & 0x00fff), 16)
+        }
+        47 | 48 | 49 | 50 | 87 | 88 => sign_extend(
+            ((high & 0x000f) << 12)
+                | ((high & 0x0400) << 1)
+                | ((low & 0x7000) >> 4)
+                | (low & 0x00ff),
+            16,
+        ),
+        132..=135 => (high & 0xff) as i64,
+        57..=61 => {
+            let value = ((word & 0xff) as u32).rotate_right((((word & 0xf00) >> 8) * 2) as u32);
+            if word & 0x0040_0000 != 0 {
+                -i64::from(value)
+            } else {
+                i64::from(value)
+            }
+        }
+        4 | 62 | 63 => {
+            let immediate = (word & 0xfff) as i64;
+            if word & 0x0080_0000 != 0 {
+                immediate
+            } else {
+                -immediate
+            }
+        }
+        64..=66 => {
+            let immediate = ((word & 0xf00) >> 4 | (word & 0xf)) as i64;
+            if word & 0x0080_0000 != 0 {
+                immediate
+            } else {
+                -immediate
+            }
+        }
+        53 => {
+            let immediate = ((high & 0x0400) << 1 | (low & 0x7000) >> 4 | (low & 0x00ff)) as i64;
+            if high & 0x00f0 != 0 {
+                -immediate
+            } else {
+                immediate
+            }
+        }
+        11 => ((((high & 0xff) << 2) + 4) & 0x3ff) as i64 - 4,
+        54 => {
+            let immediate = (low & 0x0fff) as i64;
+            if high & 0x0080 != 0 {
+                immediate
+            } else {
+                -immediate
+            }
+        }
         _ => 0,
     }
 }
@@ -5828,13 +6095,18 @@ impl<'s> Context<'s> {
                     expression: Expression::Addend,
                 });
             } else {
-                self.got_constants.push((
-                    offset,
-                    Expression::Addend,
-                    self.target.symbolic_relocation,
-                    1,
-                    usize::MAX,
-                ));
+                {
+                    let got_section = self.synthetic_section(".got").unwrap_or(0);
+                    let symbol_for_got = self.dummy_symbol();
+                    self.add_relocation(
+                        got_section,
+                        Expression::Addend,
+                        self.target.symbolic_relocation,
+                        offset,
+                        1,
+                        symbol_for_got,
+                    );
+                }
             }
         }
         for id in order {
@@ -5877,7 +6149,7 @@ impl<'s> Context<'s> {
                 self.got_size += 2 * self.target.got_entry_size;
                 let offset = entries * self.target.got_entry_size;
                 let kind = self.target.tls_descriptor_relocation;
-                self.add_addend_only_if_non_preemptible(kind, got, offset, id);
+                self.add_addend_only_if_non_preemptible(kind, got, offset, id, kind);
             }
             if flags & needs::TLS_GENERAL_DYNAMIC != 0 {
                 let entries = self.got_size / self.target.got_entry_size;
@@ -5901,48 +6173,69 @@ impl<'s> Context<'s> {
                             expression: Expression::Addend,
                         });
                     } else {
-                        self.got_constants.push((
-                            offset,
-                            Expression::Addend,
-                            self.target.symbolic_relocation,
-                            1,
-                            id,
-                        ));
+                        {
+                            let got_section = self.synthetic_section(".got").unwrap_or(0);
+                            let symbol_for_got = id;
+                            self.add_relocation(
+                                got_section,
+                                Expression::Addend,
+                                self.target.symbolic_relocation,
+                                offset,
+                                1,
+                                symbol_for_got,
+                            );
+                        }
                     }
-                    self.got_constants.push((
-                        offset + word,
-                        Expression::Absolute,
-                        self.target.offset_relocation,
-                        0,
-                        id,
-                    ));
+                    {
+                        let got_section = self.synthetic_section(".got").unwrap_or(0);
+                        let symbol_for_got = id;
+                        self.add_relocation(
+                            got_section,
+                            Expression::Absolute,
+                            self.target.offset_relocation,
+                            offset + word,
+                            0,
+                            symbol_for_got,
+                        );
+                    }
                 }
             }
             if flags & needs::GOT_DYNAMIC_OFFSET != 0 {
                 self.allocate_got_slot(id);
                 let offset = self.symbols[id].got_index.unwrap_or(0) * self.target.got_entry_size;
-                self.got_constants.push((
-                    offset,
-                    Expression::Absolute,
-                    self.target.offset_relocation,
-                    0,
-                    id,
-                ));
+                {
+                    let got_section = self.synthetic_section(".got").unwrap_or(0);
+                    let symbol_for_got = id;
+                    self.add_relocation(
+                        got_section,
+                        Expression::Absolute,
+                        self.target.offset_relocation,
+                        offset,
+                        0,
+                        symbol_for_got,
+                    );
+                }
             }
             if flags & needs::TLS_INITIAL_EXECUTABLE != 0 {
                 self.allocate_got_slot(id);
                 let offset = self.symbols[id].got_index.unwrap_or(0) * self.target.got_entry_size;
                 if !self.symbols[id].preemptible && !self.is_shared() {
-                    self.got_constants.push((
-                        offset,
-                        Expression::ThreadPointerRelative,
-                        self.target.symbolic_relocation,
-                        0,
-                        id,
-                    ));
+                    {
+                        let got_section = self.synthetic_section(".got").unwrap_or(0);
+                        let symbol_for_got = id;
+                        self.add_relocation(
+                            got_section,
+                            Expression::ThreadPointerRelative,
+                            self.target.symbolic_relocation,
+                            offset,
+                            0,
+                            symbol_for_got,
+                        );
+                    }
                 } else {
                     let kind = self.target.tls_got_relocation;
-                    self.add_addend_only_if_non_preemptible(kind, got, offset, id);
+                    let symbolic = self.target.symbolic_relocation;
+                    self.add_addend_only_if_non_preemptible(kind, got, offset, id, symbolic);
                 }
             }
         }
@@ -5972,19 +6265,21 @@ impl<'s> Context<'s> {
         section: SectionIndex,
         offset: u64,
         id: SymbolIndex,
+        addend_kind: u32,
     ) {
         if self.symbols[id].preemptible {
             self.add_symbol_relocation_plain(kind, section, offset, id);
         } else {
-            self.dynamic_relocations.push(DynamicRelocation {
+            self.add_dynamic_relocation(
+                false,
                 kind,
                 section,
                 offset,
-                symbol: Some(id),
-                use_symbol_value: false,
-                addend: 0,
-                expression: Expression::Absolute,
-            });
+                id,
+                0,
+                Expression::Absolute,
+                addend_kind,
+            );
         }
     }
 
@@ -6008,13 +6303,18 @@ impl<'s> Context<'s> {
             return;
         }
         if !self.is_pic() || self.is_absolute(id) {
-            self.got_constants.push((
-                offset,
-                Expression::Absolute,
-                self.target.symbolic_relocation,
-                0,
-                id,
-            ));
+            {
+                let got_section = self.synthetic_section(".got").unwrap_or(0);
+                let symbol_for_got = id;
+                self.add_relocation(
+                    got_section,
+                    Expression::Absolute,
+                    self.target.symbolic_relocation,
+                    offset,
+                    0,
+                    symbol_for_got,
+                );
+            }
         } else {
             let kind = self.target.symbolic_relocation;
             self.add_relative_relocation(got, offset, id, 0, Expression::Absolute, kind);
@@ -6286,11 +6586,14 @@ impl<'s> Context<'s> {
                 let id = self.symbols.len();
                 self.symbols.push(data);
                 self.add_to_symbol_table(id);
-                self.sort_symbol_table(Some(id));
-                return;
+                self.synthetic_file_symbol = Some(id);
             }
         }
-        self.sort_symbol_table(None);
+    }
+
+    pub fn finalize_symbol_table(&mut self) {
+        let synthetic = self.synthetic_file_symbol;
+        self.sort_symbol_table(synthetic);
     }
 
     fn sort_symbol_table(&mut self, synthetic_file: Option<SymbolIndex>) {
@@ -6983,10 +7286,10 @@ impl<'s> Context<'s> {
                 self.sections[member].offset_in_output = dot - start;
                 dot += self.sections[member].size;
             }
-            if Some(output) == padding {
-                dot = align_to(dot, common);
-            }
             self.outputs[output].size = dot - start;
+            if Some(output) == padding {
+                self.outputs[output].size += align_to(dot, common) - dot;
+            }
             if flags & section_flag::ALLOCATE == 0 {
                 dot = saved;
             } else if is_thread_bss {
@@ -7861,6 +8164,21 @@ fn x86_64_relax_got(buffer: &mut [u8], at: usize, relocation: &Relocation, value
     buffer[at - 1..at + 3].copy_from_slice(&(value.wrapping_add(1) as u32).to_le_bytes());
 }
 
+fn aarch64_encode_page(out: &mut [u8], at: usize, value: u64) {
+    let immediate = value >> 12;
+    let low = ((immediate & 0x3) << 29) as u32;
+    let high = ((immediate & 0x1f_fffc) << 3) as u32;
+    let mask = (0x3u32 << 29) | (0x1f_fffcu32 << 3);
+    let word = u32::from_le_bytes(out[at..at + 4].try_into().unwrap_or([0; 4]));
+    out[at..at + 4].copy_from_slice(&((word & !mask) | low | high).to_le_bytes());
+}
+
+fn aarch64_encode_low12(out: &mut [u8], at: usize, value: u64) {
+    let word = u32::from_le_bytes(out[at..at + 4].try_into().unwrap_or([0; 4]));
+    let updated = (word & !(0xfff << 10)) | (((value & 0xfff) as u32) << 10);
+    out[at..at + 4].copy_from_slice(&updated.to_le_bytes());
+}
+
 pub fn aarch64_page(value: u64) -> u64 {
     value & !0xfff
 }
@@ -7888,14 +8206,373 @@ fn arm_undefined_weak_destination(kind: u32, addend: i64, place: u64) -> u64 {
 }
 
 impl<'s> Context<'s> {
+    fn next_symbol(
+        &mut self,
+        section: SectionIndex,
+        relocation: &RawRelocation,
+        undefined: &mut Vec<UndefinedReference>,
+    ) -> Option<SymbolIndex> {
+        let Some(symbol) = self.symbol_of(section, relocation.symbol) else {
+            self.error(
+                problem("EI230", "A relocation names a symbol that does not exist.").with_context(
+                    format!(
+                        "Location: {}",
+                        self.error_location(section, relocation.offset)
+                    ),
+                ),
+            );
+            return None;
+        };
+        if self.symbols[symbol].is_undefined()
+            && relocation.symbol != 0
+            && self.maybe_report_undefined(symbol, section, relocation.offset, undefined)
+        {
+            return None;
+        }
+        Some(symbol)
+    }
+
     fn scan_x86(
         &mut self,
         section: SectionIndex,
         relocations: &[RawRelocation],
         undefined: &mut Vec<UndefinedReference>,
     ) {
-        let _ = (section, relocations, undefined);
-        self.error(not_supported("i386 relocations"));
+        let mut position = 0;
+        while position < relocations.len() {
+            let relocation = relocations[position];
+            position += 1;
+            let Some(symbol) = self.next_symbol(section, &relocation, undefined) else {
+                continue;
+            };
+            let kind = relocation.kind;
+            let offset = relocation.offset;
+            let addend = relocation.addend;
+            let expression = match kind {
+                0 => continue,
+                22 | 20 | 1 => Expression::Absolute,
+                23 | 21 | 2 => {
+                    self.process_program_counter(section, kind, offset, addend, symbol);
+                    continue;
+                }
+                4 => {
+                    self.process_plt_program_counter(section, kind, offset, addend, symbol);
+                    continue;
+                }
+                10 => {
+                    self.has_got_plt_offset_relocation = true;
+                    Expression::GotPltOnlyProgramCounter
+                }
+                9 => {
+                    self.has_got_plt_offset_relocation = true;
+                    Expression::GotPltRelative
+                }
+                3 | 43 => {
+                    let at = offset as usize;
+                    let data = &self.sections[section].data;
+                    let expression =
+                        if offset != 0 && at <= data.len() && (data[at - 1] & 0xc7) == 0x5 {
+                            Expression::Got
+                        } else {
+                            Expression::GotPlt
+                        };
+                    if expression == Expression::GotPlt {
+                        self.has_got_plt_offset_relocation = true;
+                    }
+                    expression
+                }
+                17 => {
+                    if self.check_tls_local_executable(section, offset, symbol, kind) {
+                        continue;
+                    }
+                    Expression::ThreadPointerRelative
+                }
+                34 => {
+                    if self.check_tls_local_executable(section, offset, symbol, kind) {
+                        continue;
+                    }
+                    Expression::ThreadPointerRelativeNegative
+                }
+                15 => {
+                    self.handle_tls_initial_executable(
+                        section,
+                        Expression::Got,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                        true,
+                    );
+                    continue;
+                }
+                16 => {
+                    self.has_got_plt_offset_relocation = true;
+                    self.handle_tls_initial_executable(
+                        section,
+                        Expression::GotPlt,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                        true,
+                    );
+                    continue;
+                }
+                18 => {
+                    self.has_got_plt_offset_relocation = true;
+                    if self.handle_tls_general_dynamic(
+                        section,
+                        Expression::TlsGeneralDynamicGotPlt,
+                        Expression::GotPlt,
+                        Expression::ThreadPointerRelativeNegative,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    ) {
+                        position += 1;
+                    }
+                    continue;
+                }
+                19 => {
+                    self.has_got_plt_offset_relocation = true;
+                    if self.handle_tls_local_dynamic(
+                        section,
+                        Expression::TlsLocalDynamicGotPlt,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    ) {
+                        position += 1;
+                    }
+                    continue;
+                }
+                32 => {
+                    let expression = if self.is_shared() {
+                        Expression::DynamicThreadRelative
+                    } else {
+                        Expression::ThreadPointerRelative
+                    };
+                    self.add_relocation(section, expression, kind, offset, addend, symbol);
+                    continue;
+                }
+                39 => {
+                    self.has_got_plt_offset_relocation = true;
+                    self.handle_tls_descriptor(
+                        section,
+                        Expression::TlsDescriptorGotPlt,
+                        Expression::GotPlt,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    );
+                    continue;
+                }
+                40 => {
+                    if !self.is_shared() {
+                        self.add_relocation(
+                            section,
+                            Expression::ThreadPointerRelative,
+                            kind,
+                            offset,
+                            addend,
+                            symbol,
+                        );
+                    }
+                    continue;
+                }
+                _ => {
+                    self.reject_unknown_relocation(section, offset, kind, symbol);
+                    continue;
+                }
+            };
+            self.process(section, expression, kind, offset, symbol, addend);
+        }
+    }
+
+    pub fn relocate_x86(
+        &mut self,
+        buffer: &mut [u8],
+        at: usize,
+        relocation: &Relocation,
+        value: u64,
+        location: &str,
+    ) {
+        let value = sign_extend(value, 32) as u64;
+        let little = Encoding::LITTLE_32;
+        match relocation.kind {
+            18 | 39 | 40 => {
+                if matches!(
+                    relocation.expression,
+                    Expression::ThreadPointerRelative | Expression::ThreadPointerRelativeNegative
+                ) {
+                    self.x86_relax_general_dynamic_to_local(
+                        buffer, at, relocation, value, location,
+                    );
+                } else if relocation.expression == Expression::GotPlt {
+                    self.x86_relax_general_dynamic_to_initial(
+                        buffer, at, relocation, value, location,
+                    );
+                } else {
+                    self.relocate_x86_plain(buffer, at, relocation, value, location);
+                }
+            }
+            19 | 32 => {
+                if relocation.expression == Expression::ThreadPointerRelative {
+                    if relocation.kind == 32 {
+                        little.write_u32(buffer, at, value as u32);
+                        return;
+                    }
+                    let code: &[u8] = if buffer.get(at + 4) == Some(&0xe8) {
+                        &[0x65, 0xa1, 0, 0, 0, 0, 0x90, 0x8d, 0x74, 0x26, 0x00]
+                    } else {
+                        &[0x65, 0xa1, 0, 0, 0, 0, 0x8d, 0xb6, 0, 0, 0, 0]
+                    };
+                    if at >= 2 && at - 2 + code.len() <= buffer.len() {
+                        buffer[at - 2..at - 2 + code.len()].copy_from_slice(code);
+                    }
+                    return;
+                }
+                self.relocate_x86_plain(buffer, at, relocation, value, location);
+            }
+            15 | 16 => {
+                if relocation.expression == Expression::ThreadPointerRelative && at >= 2 {
+                    let register = (buffer[at - 1] >> 3) & 7;
+                    if relocation.kind == 15 {
+                        if buffer[at - 1] == 0xa1 {
+                            buffer[at - 1] = 0xb8;
+                        } else if buffer[at - 2] == 0x8b {
+                            buffer[at - 2] = 0xc7;
+                            buffer[at - 1] = 0xc0 | register;
+                        } else {
+                            buffer[at - 2] = 0x81;
+                            buffer[at - 1] = 0xc0 | register;
+                        }
+                    } else if buffer[at - 2] == 0x8b {
+                        buffer[at - 2] = 0xc7;
+                        buffer[at - 1] = 0xc0 | register;
+                    } else {
+                        buffer[at - 2] = 0x8d;
+                        buffer[at - 1] = 0x80 | (register << 3) | register;
+                    }
+                    little.write_u32(buffer, at, value as u32);
+                    return;
+                }
+                self.relocate_x86_plain(buffer, at, relocation, value, location);
+            }
+            _ => self.relocate_x86_plain(buffer, at, relocation, value, location),
+        }
+    }
+
+    fn relocate_x86_plain(
+        &mut self,
+        buffer: &mut [u8],
+        at: usize,
+        relocation: &Relocation,
+        value: u64,
+        location: &str,
+    ) {
+        let little = Encoding::LITTLE_32;
+        match relocation.kind {
+            22 => {
+                self.check_either(location, relocation, value, 8);
+                buffer[at] = value as u8;
+            }
+            23 => {
+                self.check_signed(location, relocation, value, 8);
+                buffer[at] = value as u8;
+            }
+            20 => {
+                self.check_either(location, relocation, value, 16);
+                little.write_u16(buffer, at, value as u16);
+            }
+            21 => {
+                self.check_signed(location, relocation, value, 17);
+                little.write_u16(buffer, at, value as u16);
+            }
+            1 | 3 | 43 | 9 | 10 | 2 | 4 | 8 | 39 | 40 | 35 | 36 | 18 | 16 | 15 | 19 | 32 | 17
+            | 34 | 14 | 37 => {
+                self.check_signed(location, relocation, value, 32);
+                little.write_u32(buffer, at, value as u32);
+            }
+            41 => little.write_u32(buffer, at + 4, value as u32),
+            _ => {}
+        }
+    }
+
+    fn x86_relax_general_dynamic_to_local(
+        &mut self,
+        buffer: &mut [u8],
+        at: usize,
+        relocation: &Relocation,
+        value: u64,
+        location: &str,
+    ) {
+        let little = Encoding::LITTLE_32;
+        match relocation.kind {
+            18 => {
+                let start = if at >= 2 && buffer[at - 2] == 0x04 {
+                    at - 3
+                } else {
+                    at.saturating_sub(2)
+                };
+                let code = [0x65, 0xa1, 0, 0, 0, 0, 0x81, 0xe8, 0, 0, 0, 0];
+                if start + code.len() <= buffer.len() {
+                    buffer[start..start + code.len()].copy_from_slice(&code);
+                    little.write_u32(buffer, start + 8, value as u32);
+                }
+            }
+            39 => {
+                if at < 2 || buffer[at - 2..at] != [0x8d, 0x83] {
+                    self.error(
+                        problem("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit.")
+                            .with_context(format!("Location: {location}")),
+                    );
+                    return;
+                }
+                buffer[at - 1] = 0x05;
+                little.write_u32(buffer, at, value as u32);
+            }
+            _ => {
+                buffer[at] = 0x66;
+                buffer[at + 1] = 0x90;
+            }
+        }
+    }
+
+    fn x86_relax_general_dynamic_to_initial(
+        &mut self,
+        buffer: &mut [u8],
+        at: usize,
+        relocation: &Relocation,
+        value: u64,
+        location: &str,
+    ) {
+        let little = Encoding::LITTLE_32;
+        if relocation.kind == 18 {
+            let start = if at >= 2 && buffer[at - 2] == 0x04 {
+                at - 3
+            } else {
+                at.saturating_sub(2)
+            };
+            let code = [0x65, 0xa1, 0, 0, 0, 0, 0x03, 0x83, 0, 0, 0, 0];
+            if start + code.len() <= buffer.len() {
+                buffer[start..start + code.len()].copy_from_slice(&code);
+                little.write_u32(buffer, start + 8, value as u32);
+            }
+        } else if relocation.kind == 39 {
+            if at < 2 || buffer[at - 2..at] != [0x8d, 0x83] {
+                self.error(
+                    problem("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit.")
+                        .with_context(format!("Location: {location}")),
+                );
+                return;
+            }
+            buffer[at - 2] = 0x8b;
+            little.write_u32(buffer, at, value as u32);
+        }
     }
 
     fn scan_aarch64(
@@ -7904,8 +8581,561 @@ impl<'s> Context<'s> {
         relocations: &[RawRelocation],
         undefined: &mut Vec<UndefinedReference>,
     ) {
-        let _ = (section, relocations, undefined);
-        self.error(not_supported("AArch64 relocations"));
+        for relocation in relocations {
+            let Some(symbol) = self.next_symbol(section, relocation, undefined) else {
+                continue;
+            };
+            let kind = relocation.kind;
+            let offset = relocation.offset;
+            let addend = relocation.addend;
+            let expression = match kind {
+                0 => continue,
+                259 | 258 | 257 | 277 | 299 | 284 | 285 | 286 | 278 | 270 | 271 | 272 | 263
+                | 264 | 265 | 266 | 267 | 268 | 269 => Expression::Absolute,
+                262 | 261 | 260 | 274 | 273 | 287 | 288 | 289 | 290 | 291 | 292 | 293 => {
+                    self.process_program_counter(section, kind, offset, addend, symbol);
+                    continue;
+                }
+                275 | 276 => Expression::Aarch64PageProgramCounter,
+                314 | 283 | 280 | 282 | 279 => {
+                    self.process_plt_program_counter(section, kind, offset, addend, symbol);
+                    continue;
+                }
+                311 => Expression::Aarch64GotPageProgramCounter,
+                312 => Expression::Got,
+                313 => Expression::Aarch64GotPage,
+                315 | 309 => Expression::GotProgramCounter,
+                549 | 551 | 553 | 555 | 557 | 559 | 571 | 547 | 548 | 545 | 546 | 544 => {
+                    if self.check_tls_local_executable(section, offset, symbol, kind) {
+                        continue;
+                    }
+                    Expression::ThreadPointerRelative
+                }
+                541 => {
+                    self.handle_tls_initial_executable(
+                        section,
+                        Expression::Aarch64GotPageProgramCounter,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                        true,
+                    );
+                    continue;
+                }
+                542 => {
+                    self.handle_tls_initial_executable(
+                        section,
+                        Expression::Got,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                        true,
+                    );
+                    continue;
+                }
+                562 => {
+                    self.handle_tls_descriptor(
+                        section,
+                        Expression::Aarch64TlsDescriptorPage,
+                        Expression::Aarch64GotPageProgramCounter,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    );
+                    continue;
+                }
+                563 | 564 => {
+                    self.handle_tls_descriptor(
+                        section,
+                        Expression::TlsDescriptor,
+                        Expression::Got,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    );
+                    continue;
+                }
+                569 => {
+                    if !self.is_shared() {
+                        self.add_relocation(
+                            section,
+                            Expression::ThreadPointerRelative,
+                            kind,
+                            offset,
+                            addend,
+                            symbol,
+                        );
+                    }
+                    continue;
+                }
+                _ => {
+                    self.reject_unknown_relocation(section, offset, kind, symbol);
+                    continue;
+                }
+            };
+            self.process(section, expression, kind, offset, symbol, addend);
+        }
+    }
+
+    pub fn relocate_aarch64(
+        &mut self,
+        buffer: &mut [u8],
+        at: usize,
+        relocation: &Relocation,
+        value: u64,
+        location: &str,
+    ) {
+        let encoding = self.encoding();
+        let instruction =
+            |buffer: &[u8]| u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4]));
+        let store =
+            |buffer: &mut [u8], word: u32| buffer[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        let masked = |buffer: &mut [u8], bits: u32, mask: u32| {
+            let word = u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4]));
+            buffer[at..at + 4].copy_from_slice(&((word & !mask) | bits).to_le_bytes());
+        };
+        let address = |buffer: &mut [u8], immediate: u64| {
+            let low = ((immediate & 0x3) << 29) as u32;
+            let high = ((immediate & 0x1f_fffc) << 3) as u32;
+            let mask = (0x3u32 << 29) | (0x1f_fffcu32 << 3);
+            let word = u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4]));
+            buffer[at..at + 4].copy_from_slice(&((word & !mask) | low | high).to_le_bytes());
+        };
+        let immediate12 = |buffer: &mut [u8], immediate: u64| {
+            let word = u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4]));
+            buffer[at..at + 4].copy_from_slice(
+                &((word & !(0xfff << 10)) | (((immediate & 0xfff) as u32) << 10)).to_le_bytes(),
+            );
+        };
+        let signed_move = |buffer: &mut [u8], mut immediate: u32| {
+            let mut word = u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4]));
+            if word & (1 << 29) == 0 {
+                if immediate & 0x10000 != 0 {
+                    immediate ^= 0xffff;
+                    word &= !(1 << 30);
+                } else {
+                    word |= 1 << 30;
+                }
+            }
+            buffer[at..at + 4].copy_from_slice(&(word | ((immediate & 0xffff) << 5)).to_le_bytes());
+        };
+        let bits =
+            |value: u64, start: u32, end: u32| (value >> start) & ((1u64 << (end + 1 - start)) - 1);
+        match relocation.kind {
+            259 => {
+                self.check_either(location, relocation, value, 16);
+                encoding.write_u16(buffer, at, value as u16);
+            }
+            262 => {
+                self.check_signed(location, relocation, value, 16);
+                encoding.write_u16(buffer, at, value as u16);
+            }
+            258 => {
+                self.check_either(location, relocation, value, 32);
+                encoding.write_u32(buffer, at, value as u32);
+            }
+            261 | 314 | 315 => {
+                self.check_signed(location, relocation, value, 32);
+                encoding.write_u32(buffer, at, value as u32);
+            }
+            257 | 260 | 1029 => encoding.write_u64(buffer, at, value),
+            277 => immediate12(buffer, value),
+            311 | 275 | 541 | 562 => {
+                self.check_signed(location, relocation, value, 33);
+                address(buffer, value >> 12);
+            }
+            276 => address(buffer, value >> 12),
+            274 => {
+                self.check_signed(location, relocation, value, 21);
+                address(buffer, value);
+            }
+            282 | 283 => {
+                if relocation.kind == 282 {
+                    store(buffer, 0x1400_0000);
+                }
+                self.check_signed(location, relocation, value, 28);
+                masked(
+                    buffer,
+                    ((value & 0x0fff_fffc) >> 2) as u32,
+                    0x0fff_fffc >> 2,
+                );
+            }
+            280 | 273 | 309 => {
+                self.check_alignment(location, relocation, value, 4);
+                self.check_signed(location, relocation, value, 21);
+                masked(buffer, ((value & 0x1f_fffc) << 3) as u32, 0x1f_fffc << 3);
+            }
+            278 | 553 => immediate12(buffer, bits(value, 0, 11)),
+            284 | 555 => {
+                self.check_alignment(location, relocation, value, 2);
+                immediate12(buffer, bits(value, 1, 11));
+            }
+            285 | 557 => {
+                self.check_alignment(location, relocation, value, 4);
+                immediate12(buffer, bits(value, 2, 11));
+            }
+            286 | 312 | 542 | 559 | 563 => {
+                self.check_alignment(location, relocation, value, 8);
+                immediate12(buffer, bits(value, 3, 11));
+            }
+            299 | 571 => {
+                self.check_alignment(location, relocation, value, 16);
+                immediate12(buffer, bits(value, 4, 11));
+            }
+            313 => {
+                self.check_alignment(location, relocation, value, 8);
+                immediate12(buffer, bits(value, 3, 14));
+            }
+            263 | 264 => {
+                if relocation.kind == 263 {
+                    self.check_unsigned(location, relocation, value, 16);
+                }
+                masked(buffer, ((value & 0xffff) << 5) as u32, 0xffff << 5);
+            }
+            265 | 266 => {
+                if relocation.kind == 265 {
+                    self.check_unsigned(location, relocation, value, 32);
+                }
+                masked(
+                    buffer,
+                    ((value & 0xffff_0000) >> 11) as u32,
+                    0xffff_0000u32 >> 11,
+                );
+            }
+            267 | 268 => {
+                if relocation.kind == 267 {
+                    self.check_unsigned(location, relocation, value, 48);
+                }
+                masked(
+                    buffer,
+                    ((value & 0xffff_0000_0000) >> 27) as u32,
+                    (0xffff_0000_0000u64 >> 27) as u32,
+                );
+            }
+            269 => masked(
+                buffer,
+                ((value & 0xffff_0000_0000_0000) >> 43) as u32,
+                (0xffff_0000_0000_0000u64 >> 43) as u32,
+            ),
+            287 | 270 | 547 | 288 | 548 => {
+                if matches!(relocation.kind, 287 | 270 | 547) {
+                    self.check_signed(location, relocation, value, 17);
+                }
+                signed_move(buffer, value as u32);
+            }
+            289 | 271 | 545 | 290 | 546 => {
+                if matches!(relocation.kind, 289 | 271 | 545) {
+                    self.check_signed(location, relocation, value, 33);
+                }
+                signed_move(buffer, (value >> 16) as u32);
+            }
+            291 | 272 | 544 | 292 => {
+                if matches!(relocation.kind, 291 | 272 | 544) {
+                    self.check_signed(location, relocation, value, 49);
+                }
+                signed_move(buffer, (value >> 32) as u32);
+            }
+            293 => signed_move(buffer, (value >> 48) as u32),
+            279 => {
+                self.check_signed(location, relocation, value, 16);
+                masked(buffer, ((value & 0xfffc) << 3) as u32, 0xfffc << 3);
+            }
+            549 => {
+                self.check_unsigned(location, relocation, value, 24);
+                if self.options.relax && (value >> 12) == 0 {
+                    let word = instruction(buffer);
+                    if word & (1 << 31) != 0 && (word & 0x1f) == ((word >> 5) & 0x1f) {
+                        store(buffer, 0xd503_201f);
+                        return;
+                    }
+                }
+                immediate12(buffer, value >> 12);
+            }
+            551 | 564 => immediate12(buffer, value),
+            1031 => encoding.write_u64(buffer, at + 8, value),
+            _ => {}
+        }
+    }
+
+    pub fn check_alignment(
+        &mut self,
+        location: &str,
+        relocation: &Relocation,
+        value: u64,
+        alignment: u64,
+    ) {
+        if value & (alignment - 1) != 0 {
+            let name = relocation_name(self.target.architecture, relocation.kind);
+            self.error(
+                problem(
+                    "EI234",
+                    "A relocation value is not aligned the way its field needs.",
+                )
+                .with_context(format!("Location: {location}"))
+                .with_context(format!("Relocation: {name}"))
+                .with_context(format!("Value: 0x{value:x}"))
+                .with_context(format!("Alignment: {alignment}")),
+            );
+        }
+    }
+
+    fn aarch64_relocate_section(&mut self, section: SectionIndex, buffer: &mut [u8]) {
+        let relocations = std::mem::take(&mut self.sections[section].relocations);
+        let base = self.section_address(section, 0);
+        let mut unsafe_symbols: BTreeSet<SymbolIndex> = BTreeSet::new();
+        if self.options.relax {
+            let mut index = 0;
+            while index < relocations.len() {
+                let relocation = &relocations[index];
+                if relocation.kind == 311 {
+                    if index + 1 < relocations.len()
+                        && relocations[index + 1].kind == 312
+                        && !unsafe_symbols.contains(&relocation.symbol)
+                        && self.aarch64_legal_page_load(
+                            relocation,
+                            &relocations[index + 1],
+                            base,
+                            buffer,
+                        )
+                    {
+                        index += 2;
+                        continue;
+                    }
+                    unsafe_symbols.insert(relocation.symbol);
+                } else if relocation.kind == 312 {
+                    unsafe_symbols.insert(relocation.symbol);
+                }
+                index += 1;
+            }
+        }
+        let mut index = 0;
+        while index < relocations.len() {
+            let relocation = relocations[index].clone();
+            index += 1;
+            if relocation.expression == Expression::None {
+                continue;
+            }
+            let at = relocation.offset as usize;
+            if at + 4 > buffer.len() && !matches!(relocation.kind, 257..=262) {
+                continue;
+            }
+            let place = base.wrapping_add(relocation.offset);
+            let value = self.evaluate(&relocation, place);
+            let location = self.error_location(section, relocation.offset);
+            match relocation.kind {
+                311 => {
+                    if index < relocations.len()
+                        && self.options.relax
+                        && relocations[index].kind == 312
+                        && !unsafe_symbols.contains(&relocation.symbol)
+                    {
+                        let next = relocations[index].clone();
+                        self.aarch64_relax_page_load(&relocation, &next, base, buffer, &location);
+                        index += 1;
+                        continue;
+                    }
+                }
+                275 => {
+                    if index < relocations.len() {
+                        let next = relocations[index].clone();
+                        if self.aarch64_relax_page_add(&relocation, &next, base, buffer, &location)
+                        {
+                            index += 1;
+                            continue;
+                        }
+                    }
+                }
+                562 | 563 | 564 | 569 => {
+                    if relocation.expression == Expression::ThreadPointerRelative {
+                        self.check_unsigned(&location, &relocation, value, 32);
+                        let word: u32 = match relocation.kind {
+                            564 | 569 => 0xd503_201f,
+                            562 => 0xd2a0_0000 | ((((value >> 16) & 0xffff) as u32) << 5),
+                            _ => 0xf280_0000 | (((value & 0xffff) as u32) << 5),
+                        };
+                        buffer[at..at + 4].copy_from_slice(&word.to_le_bytes());
+                        continue;
+                    }
+                    if matches!(
+                        relocation.expression,
+                        Expression::Aarch64GotPageProgramCounter | Expression::Got
+                    ) {
+                        match relocation.kind {
+                            564 | 569 => {
+                                buffer[at..at + 4].copy_from_slice(&0xd503_201fu32.to_le_bytes())
+                            }
+                            562 => {
+                                buffer[at..at + 4].copy_from_slice(&0x9000_0000u32.to_le_bytes());
+                                let relaxed = Relocation {
+                                    kind: 541,
+                                    ..relocation.clone()
+                                };
+                                self.relocate_aarch64(buffer, at, &relaxed, value, &location);
+                            }
+                            _ => {
+                                buffer[at..at + 4].copy_from_slice(&0xf940_0000u32.to_le_bytes());
+                                let relaxed = Relocation {
+                                    kind: 542,
+                                    ..relocation.clone()
+                                };
+                                self.relocate_aarch64(buffer, at, &relaxed, value, &location);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                541 | 542 if relocation.expression == Expression::ThreadPointerRelative => {
+                    self.check_unsigned(&location, &relocation, value, 32);
+                    let register =
+                        u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4])) & 0x1f;
+                    let word = if relocation.kind == 541 {
+                        (0xd2a0_0000 | register) | ((((value >> 16) & 0xffff) as u32) << 5)
+                    } else {
+                        (0xf280_0000 | register) | (((value & 0xffff) as u32) << 5)
+                    };
+                    buffer[at..at + 4].copy_from_slice(&word.to_le_bytes());
+                    continue;
+                }
+                _ => {}
+            }
+            self.relocate_aarch64(buffer, at, &relocation, value, &location);
+        }
+        self.sections[section].relocations = relocations;
+    }
+
+    fn read_le32(buffer: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(
+            buffer
+                .get(at..at + 4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .unwrap_or([0; 4]),
+        )
+    }
+
+    fn aarch64_legal_page_load(
+        &self,
+        page: &Relocation,
+        load: &Relocation,
+        base: u64,
+        buffer: &[u8],
+    ) -> bool {
+        if page.offset + 4 != load.offset || page.symbol != load.symbol {
+            return false;
+        }
+        let symbol = &self.symbols[page.symbol];
+        if !symbol.is_defined() || symbol.preemptible || symbol.is_indirect_function() {
+            return false;
+        }
+        if page.addend != 0 || load.addend != 0 {
+            return false;
+        }
+        let page_word = Self::read_le32(buffer, page.offset as usize);
+        let load_word = Self::read_le32(buffer, load.offset as usize);
+        if (page_word & 0x9f00_0000) != 0x9000_0000 || (load_word & 0x3b00_0000) != 0x3900_0000 {
+            return false;
+        }
+        if load_word >> 31 == 0 {
+            return false;
+        }
+        let destination = page_word & 0x1f;
+        if destination != load_word & 0x1f || destination != (load_word >> 5) & 0x1f {
+            return false;
+        }
+        if self.is_pic() && self.is_absolute(page.symbol) {
+            return false;
+        }
+        let value = aarch64_page(self.symbol_address(page.symbol, 0))
+            .wrapping_sub(aarch64_page(base.wrapping_add(page.offset))) as i64;
+        value == sign_extend(value as u64, 33)
+    }
+
+    fn aarch64_relax_page_load(
+        &mut self,
+        page: &Relocation,
+        load: &Relocation,
+        base: u64,
+        buffer: &mut [u8],
+        location: &str,
+    ) {
+        let page_at = page.offset as usize;
+        let load_at = load.offset as usize;
+        let register = Self::read_le32(buffer, page_at) & 0x1f;
+        let symbol = page.symbol;
+        let page_relocation = Relocation {
+            expression: Expression::Aarch64PageProgramCounter,
+            kind: 275,
+            offset: page.offset,
+            addend: 0,
+            symbol,
+        };
+        let add_relocation = Relocation {
+            expression: Expression::Absolute,
+            kind: 277,
+            offset: load.offset,
+            addend: 0,
+            symbol,
+        };
+        buffer[page_at..page_at + 4].copy_from_slice(&(0x9000_0000 | register).to_le_bytes());
+        buffer[load_at..load_at + 4]
+            .copy_from_slice(&(0x9100_0000 | register | (register << 5)).to_le_bytes());
+        let address = self.symbol_address(symbol, 0);
+        let page_value =
+            aarch64_page(address).wrapping_sub(aarch64_page(base.wrapping_add(page.offset)));
+        self.relocate_aarch64(buffer, page_at, &page_relocation, page_value, location);
+        self.relocate_aarch64(buffer, load_at, &add_relocation, address, location);
+        self.aarch64_relax_page_add(&page_relocation, &add_relocation, base, buffer, location);
+    }
+
+    fn aarch64_relax_page_add(
+        &mut self,
+        page: &Relocation,
+        add: &Relocation,
+        base: u64,
+        buffer: &mut [u8],
+        location: &str,
+    ) -> bool {
+        if !self.options.relax || add.kind != 277 {
+            return false;
+        }
+        if page.offset + 4 != add.offset
+            || page.symbol != add.symbol
+            || page.addend != 0
+            || add.addend != 0
+        {
+            return false;
+        }
+        let page_word = Self::read_le32(buffer, page.offset as usize);
+        let add_word = Self::read_le32(buffer, add.offset as usize);
+        if (page_word & 0x9f00_0000) != 0x9000_0000 || (add_word & 0xffc0_0000) != 0x9100_0000 {
+            return false;
+        }
+        let destination = page_word & 0x1f;
+        if destination != add_word & 0x1f || destination != (add_word >> 5) & 0x1f {
+            return false;
+        }
+        let value = self
+            .symbol_address(page.symbol, 0)
+            .wrapping_sub(base.wrapping_add(add.offset)) as i64;
+        if !(-1024 * 1024..1024 * 1024).contains(&value) {
+            return false;
+        }
+        let page_at = page.offset as usize;
+        let add_at = add.offset as usize;
+        buffer[page_at..page_at + 4].copy_from_slice(&0xd503_201fu32.to_le_bytes());
+        buffer[add_at..add_at + 4].copy_from_slice(&(0x1000_0000 | destination).to_le_bytes());
+        let relocation = Relocation {
+            expression: Expression::Absolute,
+            kind: 274,
+            offset: add.offset,
+            addend: 0,
+            symbol: page.symbol,
+        };
+        self.relocate_aarch64(buffer, add_at, &relocation, value as u64, location);
+        true
     }
 
     fn scan_arm(
@@ -7914,8 +9144,474 @@ impl<'s> Context<'s> {
         relocations: &[RawRelocation],
         undefined: &mut Vec<UndefinedReference>,
     ) {
-        let _ = (section, relocations, undefined);
-        self.error(not_supported("ARM relocations"));
+        for relocation in relocations {
+            if relocation.kind == 0 {
+                continue;
+            }
+            let Some(symbol) = self.next_symbol(section, relocation, undefined) else {
+                continue;
+            };
+            let kind = relocation.kind;
+            let offset = relocation.offset;
+            let addend = relocation.addend;
+            let expression = match kind {
+                40 => continue,
+                2 | 43 | 44 | 47 | 48 | 132 | 133 | 134 | 135 => Expression::Absolute,
+                103 | 102 | 45 | 46 | 3 | 49 | 50 => {
+                    self.process_program_counter(section, kind, offset, addend, symbol);
+                    continue;
+                }
+                58 | 57 | 60 | 59 | 61 | 4 | 62 | 63 | 64 | 65 | 66 | 53 | 11 | 54 => {
+                    Expression::ArmProgramCounterAligned
+                }
+                28 | 29 | 1 | 27 | 42 | 51 | 30 | 10 => {
+                    self.process_plt_program_counter(section, kind, offset, addend, symbol);
+                    continue;
+                }
+                26 => Expression::GotOffset,
+                96 => Expression::GotProgramCounter,
+                24 => {
+                    self.has_got_offset_relocation = true;
+                    Expression::GotRelative
+                }
+                25 => {
+                    self.has_got_offset_relocation = true;
+                    Expression::GotOnlyProgramCounter
+                }
+                9 | 84 | 86 | 85 | 87 | 89 | 88 => Expression::ArmStaticBaseRelative,
+                38 => {
+                    if self.options.arm_target1_relative {
+                        Expression::ProgramCounter
+                    } else {
+                        Expression::Absolute
+                    }
+                }
+                41 => match self.options.arm_target2.as_str() {
+                    "rel" => Expression::ProgramCounter,
+                    "abs" => Expression::Absolute,
+                    _ => Expression::GotProgramCounter,
+                },
+                108 => {
+                    if self.check_tls_local_executable(section, offset, symbol, kind) {
+                        continue;
+                    }
+                    Expression::ThreadPointerRelative
+                }
+                107 => {
+                    self.handle_tls_initial_executable(
+                        section,
+                        Expression::GotProgramCounter,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                        false,
+                    );
+                    continue;
+                }
+                104 => {
+                    self.handle_tls_general_dynamic(
+                        section,
+                        Expression::TlsGeneralDynamicProgramCounter,
+                        Expression::None,
+                        Expression::None,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    );
+                    continue;
+                }
+                105 => {
+                    self.needs_tls_local_dynamic = true;
+                    self.add_relocation(
+                        section,
+                        Expression::TlsLocalDynamicProgramCounter,
+                        kind,
+                        offset,
+                        addend,
+                        symbol,
+                    );
+                    continue;
+                }
+                106 => Expression::DynamicThreadRelative,
+                _ => {
+                    self.reject_unknown_relocation(section, offset, kind, symbol);
+                    continue;
+                }
+            };
+            self.process(section, expression, kind, offset, symbol, addend);
+        }
+    }
+
+    fn arm_read16(&self, buffer: &[u8], at: usize) -> u32 {
+        u32::from(self.encoding().read_u16(buffer, at).unwrap_or(0))
+    }
+
+    fn arm_write16(&self, buffer: &mut [u8], at: usize, value: u32) {
+        self.encoding().write_u16(buffer, at, value as u16);
+    }
+
+    fn arm_read32(&self, buffer: &[u8], at: usize) -> u32 {
+        self.encoding().read_u32(buffer, at).unwrap_or(0)
+    }
+
+    fn arm_write32(&self, buffer: &mut [u8], at: usize, value: u32) {
+        self.encoding().write_u32(buffer, at, value);
+    }
+
+    fn arm_state_change_warning(&mut self, location: &str, relocation: &Relocation) {
+        let symbol = &self.symbols[relocation.symbol];
+        let name = relocation_name(Architecture::Arm, relocation.kind);
+        let mut diagnostic = caution(
+            "EI253",
+            "A branch and link relocation does not switch between ARM and Thumb state.",
+        )
+        .with_context(format!("Location: {location}"))
+        .with_context(format!("Relocation: {name}"));
+        if symbol.is_section() {
+            if let Some(section) = symbol.section {
+                diagnostic =
+                    diagnostic.with_context(format!("Section: {}", self.sections[section].name));
+            }
+        } else {
+            diagnostic = diagnostic.with_context(format!("Symbol: {}", symbol.name));
+        }
+        self.warn(diagnostic);
+    }
+
+    fn arm_group_remainder(group: u32, mut value: u32) -> (u32, u32) {
+        let mut remainder;
+        let mut leading;
+        let mut remaining = group as i64;
+        loop {
+            leading = value.leading_zeros() & !1;
+            remainder = value;
+            if leading == 32 {
+                break;
+            }
+            value &= 0x00ff_ffff >> leading;
+            if remaining == 0 {
+                break;
+            }
+            remaining -= 1;
+        }
+        (remainder, leading)
+    }
+
+    pub fn relocate_arm(
+        &mut self,
+        buffer: &mut [u8],
+        at: usize,
+        relocation: &Relocation,
+        value: u64,
+        location: &str,
+    ) {
+        let symbol_is_function = self.symbols[relocation.symbol].is_function();
+        let in_plt = self.symbols[relocation.symbol].plt_index.is_some();
+        match relocation.kind {
+            2 | 25 | 24 | 26 | 96 | 3 | 23 | 9 | 38 | 41 | 104 | 107 | 105 | 106 | 108 | 19
+            | 18 => self.arm_write32(buffer, at, value as u32),
+            42 => {
+                self.check_signed(location, relocation, value, 31);
+                let word = self.arm_read32(buffer, at);
+                self.arm_write32(
+                    buffer,
+                    at,
+                    (word & 0x8000_0000) | (value as u32 & !0x8000_0000),
+                );
+            }
+            28 | 29 | 1 | 27 => {
+                if relocation.kind == 28 {
+                    let thumb_target = value & 1 != 0;
+                    let is_exchange = (self.arm_read32(buffer, at) & 0xfe00_0000) == 0xfa00_0000;
+                    if !symbol_is_function && is_exchange != thumb_target {
+                        self.arm_state_change_warning(location, relocation);
+                    }
+                    if if symbol_is_function {
+                        thumb_target
+                    } else {
+                        is_exchange
+                    } {
+                        self.check_signed(location, relocation, value, 26);
+                        let word = 0xfa00_0000
+                            | (((value & 2) as u32) << 23)
+                            | ((value >> 2) as u32 & 0x00ff_ffff);
+                        self.arm_write32(buffer, at, word);
+                        return;
+                    }
+                    let word = self.arm_read32(buffer, at);
+                    self.arm_write32(buffer, at, 0xeb00_0000 | (word & 0x00ff_ffff));
+                }
+                self.check_signed(location, relocation, value, 26);
+                let word = self.arm_read32(buffer, at);
+                self.arm_write32(
+                    buffer,
+                    at,
+                    (word & !0x00ff_ffff) | ((value >> 2) as u32 & 0x00ff_ffff),
+                );
+            }
+            103 => {
+                self.check_signed(location, relocation, value, 9);
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(buffer, at, (half & 0xff00) | ((value >> 1) as u32 & 0x00ff));
+            }
+            102 => {
+                self.check_signed(location, relocation, value, 12);
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(buffer, at, (half & 0xf800) | ((value >> 1) as u32 & 0x07ff));
+            }
+            51 => {
+                self.check_signed(location, relocation, value, 21);
+                let v = value as u32;
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(
+                    buffer,
+                    at,
+                    (half & 0xfbc0) | ((v >> 10) & 0x0400) | ((v >> 12) & 0x003f),
+                );
+                self.arm_write16(
+                    buffer,
+                    at + 2,
+                    0x8000 | ((v >> 8) & 0x0800) | ((v >> 5) & 0x2000) | ((v >> 1) & 0x07ff),
+                );
+            }
+            10 | 30 => {
+                let mut value = value;
+                if relocation.kind == 10 {
+                    let thumb_target = value & 1 != 0;
+                    let use_thumb = thumb_target || self.use_thumb_plt();
+                    let is_exchange = (self.arm_read16(buffer, at + 2) & 0x1000) == 0;
+                    if !symbol_is_function && !in_plt && is_exchange == use_thumb {
+                        self.arm_state_change_warning(location, relocation);
+                    }
+                    let low = self.arm_read16(buffer, at + 2);
+                    if if symbol_is_function || in_plt {
+                        !use_thumb
+                    } else {
+                        is_exchange
+                    } {
+                        value = align_to(value, 4);
+                        self.arm_write16(buffer, at + 2, low & !0x1000);
+                    } else {
+                        self.arm_write16(buffer, at + 2, (low & !0x1000) | (1 << 12));
+                    }
+                    if !self.arm_features.j1_j2_branch_encoding {
+                        self.check_signed(location, relocation, value, 23);
+                        let v = value as u32;
+                        self.arm_write16(buffer, at, 0xf000 | ((v >> 12) & 0x07ff));
+                        let low = self.arm_read16(buffer, at + 2);
+                        self.arm_write16(
+                            buffer,
+                            at + 2,
+                            (low & 0xd000) | 0x2800 | ((v >> 1) & 0x07ff),
+                        );
+                        return;
+                    }
+                }
+                self.check_signed(location, relocation, value, 25);
+                let v = value as u32;
+                self.arm_write16(
+                    buffer,
+                    at,
+                    0xf000 | ((v >> 14) & 0x0400) | ((v >> 12) & 0x03ff),
+                );
+                let low = self.arm_read16(buffer, at + 2);
+                self.arm_write16(
+                    buffer,
+                    at + 2,
+                    (low & 0xd000)
+                        | (((!(v >> 10)) ^ (v >> 11)) & 0x2000)
+                        | (((!(v >> 11)) ^ (v >> 13)) & 0x0800)
+                        | ((v >> 1) & 0x07ff),
+                );
+            }
+            43 | 45 | 84 => {
+                let word = self.arm_read32(buffer, at);
+                let v = value as u32;
+                self.arm_write32(
+                    buffer,
+                    at,
+                    (word & !0x000f_0fff) | ((v & 0xf000) << 4) | (v & 0x0fff),
+                );
+            }
+            44 | 46 | 85 => {
+                let word = self.arm_read32(buffer, at);
+                let v = value as u32;
+                self.arm_write32(
+                    buffer,
+                    at,
+                    (word & !0x000f_0fff) | (((v >> 16) & 0xf000) << 4) | ((v >> 16) & 0xfff),
+                );
+            }
+            48 | 50 | 88 => {
+                let v = value as u32;
+                self.arm_write16(
+                    buffer,
+                    at,
+                    0xf2c0 | ((v >> 17) & 0x0400) | ((v >> 28) & 0x000f),
+                );
+                let low = self.arm_read16(buffer, at + 2);
+                self.arm_write16(
+                    buffer,
+                    at + 2,
+                    (low & 0x8f00) | ((v >> 12) & 0x7000) | ((v >> 16) & 0x00ff),
+                );
+            }
+            47 | 49 | 87 => {
+                let v = value as u32;
+                self.arm_write16(
+                    buffer,
+                    at,
+                    0xf240 | ((v >> 1) & 0x0400) | ((v >> 12) & 0x000f),
+                );
+                let low = self.arm_read16(buffer, at + 2);
+                self.arm_write16(
+                    buffer,
+                    at + 2,
+                    (low & 0x8f00) | ((v << 4) & 0x7000) | (v & 0x00ff),
+                );
+            }
+            132..=135 => {
+                let shift = match relocation.kind {
+                    135 => 24,
+                    134 => 16,
+                    133 => 8,
+                    _ => 0,
+                };
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(
+                    buffer,
+                    at,
+                    (half & !0x00ff) | ((value >> shift) as u32 & 0x00ff),
+                );
+            }
+            57..=61 => {
+                let (group, check) = match relocation.kind {
+                    58 => (0, true),
+                    57 => (0, false),
+                    60 => (1, true),
+                    59 => (1, false),
+                    _ => (2, true),
+                };
+                let mut value = value;
+                let mut operation = 0x0080_0000u32;
+                if value >> 63 != 0 {
+                    operation = 0x0040_0000;
+                    value = value.wrapping_neg();
+                }
+                let (mut immediate, leading) = Self::arm_group_remainder(group, value as u32);
+                let mut rotation = 0u32;
+                if leading < 24 {
+                    immediate = immediate.rotate_right(24 - leading);
+                    rotation = (leading + 8) << 7;
+                }
+                if check && immediate > 0xff {
+                    let name = relocation_name(Architecture::Arm, relocation.kind);
+                    self.error(
+                        problem(
+                            "EI235",
+                            "A relocation value cannot be encoded as an immediate.",
+                        )
+                        .with_context(format!("Location: {location}"))
+                        .with_context(format!("Value: {value}"))
+                        .with_context(format!("Relocation: {name}")),
+                    );
+                }
+                let word = self.arm_read32(buffer, at);
+                self.arm_write32(
+                    buffer,
+                    at,
+                    (word & 0xff3f_f000) | operation | rotation | (immediate & 0xff),
+                );
+            }
+            4 | 62 | 63 | 64 | 65 | 66 => {
+                let group = match relocation.kind {
+                    4 | 64 => 0,
+                    62 | 65 => 1,
+                    _ => 2,
+                };
+                let mut value = value;
+                if symbol_is_function {
+                    value &= !1;
+                }
+                let mut operation = 0x0080_0000u32;
+                if value >> 63 != 0 {
+                    operation = 0;
+                    value = value.wrapping_neg();
+                }
+                let immediate = Self::arm_group_remainder(group, value as u32).0;
+                let word = self.arm_read32(buffer, at);
+                if matches!(relocation.kind, 4 | 62 | 63) {
+                    self.check_unsigned(location, relocation, u64::from(immediate), 12);
+                    self.arm_write32(buffer, at, (word & 0xff7f_f000) | operation | immediate);
+                } else {
+                    self.check_unsigned(location, relocation, u64::from(immediate), 8);
+                    self.arm_write32(
+                        buffer,
+                        at,
+                        (word & 0xff7f_f0f0)
+                            | operation
+                            | ((immediate & 0xf0) << 4)
+                            | (immediate & 0xf),
+                    );
+                }
+            }
+            53 => {
+                let mut immediate = value as i64;
+                let mut subtract = 0u32;
+                if immediate < 0 {
+                    immediate = -immediate;
+                    subtract = 0x00a0;
+                }
+                self.check_unsigned(location, relocation, immediate as u64, 12);
+                let immediate = immediate as u32;
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(
+                    buffer,
+                    at,
+                    (half & 0xfb0f) | subtract | ((immediate & 0x800) >> 1),
+                );
+                let low = self.arm_read16(buffer, at + 2);
+                self.arm_write16(
+                    buffer,
+                    at + 2,
+                    (low & 0x8f00) | ((immediate & 0x700) << 4) | (immediate & 0xff),
+                );
+            }
+            11 => {
+                let mut value = value;
+                if symbol_is_function {
+                    value &= !1;
+                }
+                self.check_unsigned(location, relocation, value, 10);
+                self.check_alignment(location, relocation, value, 4);
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(buffer, at, (half & 0xff00) | ((value as u32 & 0x3fc) >> 2));
+            }
+            54 => {
+                let mut value = value;
+                if symbol_is_function {
+                    value &= !1;
+                }
+                let mut immediate = value as i64;
+                let mut up = 0x0080u32;
+                if immediate < 0 {
+                    immediate = -immediate;
+                    up = 0;
+                }
+                self.check_unsigned(location, relocation, immediate as u64, 12);
+                let half = self.arm_read16(buffer, at);
+                self.arm_write16(buffer, at, half | up);
+                let low = self.arm_read16(buffer, at + 2);
+                self.arm_write16(buffer, at + 2, (low & 0xf000) | immediate as u32);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn use_thumb_plt(&self) -> bool {
+        self.arm_features.has_thumb2_instruction_set && !self.arm_features.has_arm_instruction_set
     }
 
     fn relocate(
@@ -7926,12 +9622,19 @@ impl<'s> Context<'s> {
         value: u64,
         location: &str,
     ) {
-        if self.target.architecture == Architecture::X86_64 {
-            self.relocate_x86_64(buffer, at, relocation, value, location);
+        match self.target.architecture {
+            Architecture::X86_64 => self.relocate_x86_64(buffer, at, relocation, value, location),
+            Architecture::X86 => self.relocate_x86(buffer, at, relocation, value, location),
+            Architecture::Aarch64 => self.relocate_aarch64(buffer, at, relocation, value, location),
+            Architecture::Arm => self.relocate_arm(buffer, at, relocation, value, location),
         }
     }
 
     fn apply_relocations(&mut self, section: SectionIndex, buffer: &mut [u8]) {
+        if self.target.architecture == Architecture::Aarch64 {
+            self.aarch64_relocate_section(section, buffer);
+            return;
+        }
         let relocations = std::mem::take(&mut self.sections[section].relocations);
         let base = self.section_address(section, 0);
         for relocation in &relocations {
@@ -8025,33 +9728,12 @@ impl<'s> Context<'s> {
         }
     }
 
-    fn write_got(&mut self, section: SectionIndex, buffer: &mut [u8]) {
-        let constants = self.got_constants.clone();
-        for (offset, expression, kind, addend, symbol) in constants {
-            let relocation = Relocation {
-                expression,
-                kind,
-                offset,
-                addend,
-                symbol: if symbol == usize::MAX { 0 } else { symbol },
-            };
-            let place = self.section_address(section, offset);
-            let value = if symbol == usize::MAX {
-                addend as u64
-            } else {
-                self.evaluate(&relocation, place)
-            };
-            if (offset as usize) < buffer.len() {
-                self.write_word(buffer, offset as usize, value);
-            }
-        }
-    }
-
     fn write_got_plt(&self, buffer: &mut [u8]) {
         let entry = self.target.got_entry_size as usize;
-        if self.target.architecture == Architecture::X86_64
-            || self.target.architecture == Architecture::X86
-        {
+        if matches!(
+            self.target.architecture,
+            Architecture::X86_64 | Architecture::X86
+        ) {
             let dynamic = self
                 .synthetic_section(".dynamic")
                 .filter(|section| {
@@ -8063,11 +9745,12 @@ impl<'s> Context<'s> {
                 self.write_word(buffer, 0, dynamic);
             }
         }
+        let plt = self.synthetic_address(".plt");
         for (position, id) in self.got_plt_entries.iter().enumerate() {
             let at = (position + self.target.got_plt_header_entries as usize) * entry;
             let value = match self.target.architecture {
                 Architecture::X86_64 | Architecture::X86 => self.plt_address(*id) + 6,
-                _ => self.synthetic_address(".plt"),
+                _ => plt,
             };
             if at + entry <= buffer.len() {
                 self.write_word(buffer, at, value);
@@ -8075,93 +9758,260 @@ impl<'s> Context<'s> {
         }
     }
 
-    fn write_plt(&self, buffer: &mut [u8]) {
-        if self.target.architecture != Architecture::X86_64 {
+    fn write_indirect_got_plt(&self, buffer: &mut [u8]) {
+        let entry = self.target.got_entry_size as usize;
+        let writes = match self.target.architecture {
+            Architecture::X86 | Architecture::Arm => true,
+            _ => self.writes_addends(),
+        };
+        if !writes {
             return;
         }
+        for (position, id) in self.indirect_got_plt_entries.iter().enumerate() {
+            let at = position * entry;
+            if at + entry <= buffer.len() {
+                self.write_word(buffer, at, self.symbol_address(*id, 0));
+            }
+        }
+    }
+
+    fn write_plt(&mut self, buffer: &mut [u8]) {
         let plt = self.synthetic_address(".plt");
         let got_plt = self.synthetic_address(".got.plt");
-        if buffer.len() >= 16 {
-            buffer[..16].copy_from_slice(&[
-                0xff, 0x35, 0, 0, 0, 0, 0xff, 0x25, 0, 0, 0, 0, 0x0f, 0x1f, 0x40, 0x00,
-            ]);
-            buffer[2..6].copy_from_slice(
-                &((got_plt.wrapping_sub(plt).wrapping_add(2)) as u32).to_le_bytes(),
-            );
-            buffer[8..12].copy_from_slice(
-                &((got_plt.wrapping_sub(plt).wrapping_add(4)) as u32).to_le_bytes(),
-            );
+        let header = self.target.plt_header_size as usize;
+        let size = self.target.plt_entry_size as usize;
+        if buffer.len() >= header {
+            self.write_plt_header(&mut buffer[..header], plt, got_plt);
         }
-        for (position, id) in self.plt_entries.iter().enumerate() {
-            let at = 16 + position * 16;
+        for (position, id) in self.plt_entries.clone().into_iter().enumerate() {
+            let at = header + position * size;
             let entry_address = plt + at as u64;
-            self.write_x86_64_plt_entry(
-                &mut buffer[at..at + 16],
-                *id,
+            self.write_plt_entry(
+                &mut buffer[at..at + size],
+                id,
                 entry_address,
                 position as u64,
             );
         }
     }
 
-    fn write_x86_64_plt_entry(
-        &self,
-        out: &mut [u8],
-        id: SymbolIndex,
-        entry_address: u64,
-        index: u64,
-    ) {
-        out.copy_from_slice(&[0xff, 0x25, 0, 0, 0, 0, 0x68, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0]);
-        let got_plt = self.got_plt_address(id);
-        out[2..6].copy_from_slice(
-            &((got_plt.wrapping_sub(entry_address).wrapping_sub(6)) as u32).to_le_bytes(),
-        );
-        out[7..11].copy_from_slice(&(index as u32).to_le_bytes());
-        let plt = self.synthetic_address(".plt");
-        out[12..16].copy_from_slice(
-            &((plt.wrapping_sub(entry_address).wrapping_sub(16)) as u32).to_le_bytes(),
-        );
-    }
-
-    fn write_indirect_plt(&self, buffer: &mut [u8]) {
-        if self.target.architecture != Architecture::X86_64 {
-            return;
-        }
-        let iplt = self.synthetic_address(".iplt");
-        for (position, id) in self.indirect_plt_entries.iter().enumerate() {
-            let at = position * 16;
-            let entry_address = iplt + at as u64;
-            self.write_x86_64_plt_entry(
-                &mut buffer[at..at + 16],
-                *id,
-                entry_address,
-                position as u64,
-            );
-        }
-    }
-
-    fn encode_dynamic_relocations(&self, entries: &[DynamicRelocation]) -> Vec<u8> {
+    fn write_plt_header(&self, out: &mut [u8], plt: u64, got_plt: u64) {
         let encoding = self.encoding();
-        let rela = self.target.uses_addends;
-        let mut out = Vec::new();
-        for entry in entries {
+        match self.target.architecture {
+            Architecture::X86_64 => {
+                out.copy_from_slice(&[
+                    0xff, 0x35, 0, 0, 0, 0, 0xff, 0x25, 0, 0, 0, 0, 0x0f, 0x1f, 0x40, 0x00,
+                ]);
+                out[2..6].copy_from_slice(
+                    &((got_plt.wrapping_sub(plt).wrapping_add(2)) as u32).to_le_bytes(),
+                );
+                out[8..12].copy_from_slice(
+                    &((got_plt.wrapping_sub(plt).wrapping_add(4)) as u32).to_le_bytes(),
+                );
+            }
+            Architecture::X86 => {
+                if self.is_pic() {
+                    out.copy_from_slice(&[
+                        0xff, 0xb3, 0x04, 0, 0, 0, 0xff, 0xa3, 0x08, 0, 0, 0, 0x90, 0x90, 0x90,
+                        0x90,
+                    ]);
+                } else {
+                    out.copy_from_slice(&[
+                        0xff, 0x35, 0, 0, 0, 0, 0xff, 0x25, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90,
+                    ]);
+                    out[2..6].copy_from_slice(&((got_plt + 4) as u32).to_le_bytes());
+                    out[8..12].copy_from_slice(&((got_plt + 8) as u32).to_le_bytes());
+                }
+            }
+            Architecture::Aarch64 => {
+                let words: [u32; 8] = [
+                    0xa9bf_7bf0,
+                    0x9000_0010,
+                    0xf940_0211,
+                    0x9100_0210,
+                    0xd61f_0220,
+                    0xd503_201f,
+                    0xd503_201f,
+                    0xd503_201f,
+                ];
+                for (index, word) in words.iter().enumerate() {
+                    out[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                }
+                let target = got_plt + 16;
+                aarch64_encode_page(
+                    out,
+                    4,
+                    aarch64_page(target).wrapping_sub(aarch64_page(plt + 4)),
+                );
+                aarch64_encode_low12(out, 8, (target >> 3) & 0x1ff);
+                aarch64_encode_low12(out, 12, target & 0xfff);
+            }
+            Architecture::Arm => {
+                let offset = got_plt.wrapping_sub(plt).wrapping_sub(4);
+                let trap = u32::from_le_bytes(self.target.trap);
+                if offset >= (1 << 27) {
+                    let words = [0xe52d_e004u32, 0xe59f_e004, 0xe08f_e00e, 0xe5be_f008];
+                    for (index, word) in words.iter().enumerate() {
+                        encoding.write_u32(out, index * 4, *word);
+                    }
+                    encoding.write_u32(
+                        out,
+                        16,
+                        got_plt.wrapping_sub(plt + 8).wrapping_sub(8) as u32,
+                    );
+                } else {
+                    encoding.write_u32(out, 0, 0xe52d_e004);
+                    encoding.write_u32(out, 4, 0xe28f_e600 | ((offset >> 20) & 0xff) as u32);
+                    encoding.write_u32(out, 8, 0xe28e_ea00 | ((offset >> 12) & 0xff) as u32);
+                    encoding.write_u32(out, 12, 0xe5be_f000 | (offset & 0xfff) as u32);
+                    encoding.write_u32(out, 16, trap);
+                }
+                for at in [20, 24, 28] {
+                    encoding.write_u32(out, at, trap);
+                }
+            }
+        }
+    }
+
+    fn write_plt_entry(&self, out: &mut [u8], id: SymbolIndex, entry_address: u64, index: u64) {
+        let encoding = self.encoding();
+        let got_plt_entry = self.got_plt_address(id);
+        let plt = self.synthetic_address(".plt");
+        match self.target.architecture {
+            Architecture::X86_64 => {
+                out.copy_from_slice(&[0xff, 0x25, 0, 0, 0, 0, 0x68, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0]);
+                out[2..6].copy_from_slice(
+                    &((got_plt_entry.wrapping_sub(entry_address).wrapping_sub(6)) as u32)
+                        .to_le_bytes(),
+                );
+                out[7..11].copy_from_slice(&(index as u32).to_le_bytes());
+                out[12..16].copy_from_slice(
+                    &((plt.wrapping_sub(entry_address).wrapping_sub(16)) as u32).to_le_bytes(),
+                );
+            }
+            Architecture::X86 => {
+                if self.is_pic() {
+                    out.copy_from_slice(&[
+                        0xff, 0xa3, 0, 0, 0, 0, 0x68, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0,
+                    ]);
+                    let got_plt = self.synthetic_address(".got.plt");
+                    out[2..6].copy_from_slice(
+                        &(got_plt_entry.wrapping_sub(got_plt) as u32).to_le_bytes(),
+                    );
+                } else {
+                    out.copy_from_slice(&[
+                        0xff, 0x25, 0, 0, 0, 0, 0x68, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0,
+                    ]);
+                    out[2..6].copy_from_slice(&(got_plt_entry as u32).to_le_bytes());
+                }
+                out[7..11].copy_from_slice(&((8 * index) as u32).to_le_bytes());
+                out[12..16].copy_from_slice(
+                    &((plt.wrapping_sub(entry_address).wrapping_sub(16)) as u32).to_le_bytes(),
+                );
+            }
+            Architecture::Aarch64 => {
+                let words: [u32; 4] = [0x9000_0010, 0xf940_0211, 0x9100_0210, 0xd61f_0220];
+                for (position, word) in words.iter().enumerate() {
+                    out[position * 4..position * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                }
+                aarch64_encode_page(
+                    out,
+                    0,
+                    aarch64_page(got_plt_entry).wrapping_sub(aarch64_page(entry_address)),
+                );
+                aarch64_encode_low12(out, 4, (got_plt_entry >> 3) & 0x1ff);
+                aarch64_encode_low12(out, 8, got_plt_entry & 0xfff);
+            }
+            Architecture::Arm => {
+                let offset = got_plt_entry.wrapping_sub(entry_address).wrapping_sub(8);
+                if offset >= (1 << 27) {
+                    encoding.write_u32(out, 0, 0xe59f_c004);
+                    encoding.write_u32(out, 4, 0xe08c_c00f);
+                    encoding.write_u32(out, 8, 0xe59c_f000);
+                    encoding.write_u32(
+                        out,
+                        12,
+                        got_plt_entry
+                            .wrapping_sub(entry_address + 4)
+                            .wrapping_sub(8) as u32,
+                    );
+                } else {
+                    encoding.write_u32(out, 0, 0xe28f_c600 | ((offset >> 20) & 0xff) as u32);
+                    encoding.write_u32(out, 4, 0xe28c_ca00 | ((offset >> 12) & 0xff) as u32);
+                    encoding.write_u32(out, 8, 0xe5bc_f000 | (offset & 0xfff) as u32);
+                    encoding.write_u32(out, 12, u32::from_le_bytes(self.target.trap));
+                }
+            }
+        }
+    }
+
+    fn write_indirect_plt(&mut self, buffer: &mut [u8]) {
+        let iplt = self.synthetic_address(".iplt");
+        let size = self.target.indirect_plt_entry_size as usize;
+        for (position, id) in self.indirect_plt_entries.clone().into_iter().enumerate() {
+            let at = position * size;
+            let entry_address = iplt + at as u64;
+            self.write_plt_entry(
+                &mut buffer[at..at + size],
+                id,
+                entry_address,
+                position as u64,
+            );
+        }
+    }
+
+    pub fn finalized_dynamic_relocations(
+        &self,
+        entries: &[DynamicRelocation],
+        combine: bool,
+    ) -> Vec<elf::Relocation> {
+        let relative_kind = self.target.relative_relocation;
+        let indirect_kind = self.target.indirect_relative_relocation;
+        let finalize = |entry: &DynamicRelocation| {
             let offset = self.section_address(entry.section, entry.offset);
             let symbol_index = match (entry.use_symbol_value, entry.symbol) {
                 (true, Some(id)) => self.symbols[id].dynamic_symbol_index as u32,
                 _ => 0,
             };
-            let addend = self.dynamic_addend(entry);
-            elf::encode_relocation(
-                encoding,
-                &elf::Relocation {
-                    offset,
-                    kind: entry.kind,
-                    symbol: symbol_index,
-                    addend: addend as i64,
-                },
-                rela,
-                &mut out,
-            );
+            let mut addend = self.dynamic_addend(entry);
+            if !self.encoding().is_64() {
+                addend = sign_extend(addend, 32) as u64;
+            }
+            elf::Relocation {
+                offset,
+                kind: entry.kind,
+                symbol: symbol_index,
+                addend: addend as i64,
+            }
+        };
+        let mut relative: Vec<elf::Relocation> = Vec::new();
+        let mut others: Vec<elf::Relocation> = Vec::new();
+        for entry in entries {
+            let finalized = finalize(entry);
+            if entry.kind == relative_kind {
+                relative.push(finalized);
+            } else {
+                others.push(finalized);
+            }
+        }
+        relative.sort_by_key(|entry| entry.offset);
+        let (mut plain, indirect): (Vec<_>, Vec<_>) = others
+            .into_iter()
+            .partition(|entry| entry.kind != indirect_kind);
+        if combine {
+            plain.sort_by_key(|entry| (entry.symbol, entry.offset));
+        }
+        relative.extend(plain);
+        relative.extend(indirect);
+        relative
+    }
+
+    fn encode_dynamic_relocations(&self, entries: &[DynamicRelocation], combine: bool) -> Vec<u8> {
+        let encoding = self.encoding();
+        let rela = self.target.uses_addends;
+        let mut out = Vec::new();
+        for relocation in self.finalized_dynamic_relocations(entries, combine) {
+            elf::encode_relocation(encoding, &relocation, rela, &mut out);
         }
         out
     }
@@ -8276,17 +10126,18 @@ impl<'s> Context<'s> {
                 let data = &self.sections[section].data;
                 buffer[..data.len().min(size)].copy_from_slice(&data[..data.len().min(size)]);
             }
-            Synthetic::Got => self.write_got(section, &mut buffer),
             Synthetic::GotPlt => self.write_got_plt(&mut buffer),
+            Synthetic::IndirectGotPlt => self.write_indirect_got_plt(&mut buffer),
             Synthetic::Plt => self.write_plt(&mut buffer),
             Synthetic::IndirectPlt => self.write_indirect_plt(&mut buffer),
+            Synthetic::Thunks => self.write_thunks(section, &mut buffer),
             Synthetic::DynamicRelocations => {
                 let entries = self.dynamic_relocations.clone();
-                buffer = self.encode_dynamic_relocations(&entries);
+                buffer = self.encode_dynamic_relocations(&entries, true);
             }
             Synthetic::PltRelocations => {
                 let entries = self.plt_relocations.clone();
-                buffer = self.encode_dynamic_relocations(&entries);
+                buffer = self.encode_dynamic_relocations(&entries, false);
             }
             Synthetic::SymbolTable => buffer = self.encode_symbol_table(),
             Synthetic::StringTable => buffer = self.string_table.clone(),
@@ -8305,6 +10156,9 @@ impl<'s> Context<'s> {
             _ => {}
         }
         buffer.resize(size, 0);
+        if !self.sections[section].relocations.is_empty() {
+            self.apply_relocations(section, &mut buffer);
+        }
         buffer
     }
 
@@ -8444,7 +10298,14 @@ impl<'s> Context<'s> {
 
     pub fn header_flags(&self) -> u32 {
         match self.target.architecture {
-            Architecture::Arm => 0x0500_0000,
+            Architecture::Arm => {
+                let float = match self.arm_features.floating_point_arguments {
+                    Some(1) => 0x400,
+                    Some(0) | None => 0x200,
+                    _ => 0,
+                };
+                0x0500_0000 | float
+            }
             _ => 0,
         }
     }
@@ -8619,6 +10480,26 @@ impl<'s> Context<'s> {
         self.finalize_synthetic_sizes();
         self.fix_section_alignments();
         self.assign_addresses();
+        let mut pass = 0u32;
+        loop {
+            let mut changed = if self.needs_thunks() {
+                self.create_thunks(pass)
+            } else {
+                false
+            };
+            pass += 1;
+            if changed && pass >= 30 {
+                self.error(problem("EI237", "Address assignment did not settle."));
+                break;
+            }
+            self.finalize_synthetic_sizes();
+            changed |= self.assign_addresses();
+            if !changed {
+                break;
+            }
+        }
+        self.finalize_symbol_table();
+        self.finalize_synthetic_sizes();
         self.assign_addresses();
         self.finalize_output_headers();
         if self.failed() {
@@ -8657,4 +10538,1046 @@ pub fn link(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>) -> L
         outcome.outputs.push((output, bytes));
     }
     outcome
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThunkKind {
+    Aarch64AbsoluteLong,
+    Aarch64PagedLong,
+    ArmV7AbsoluteLong,
+    ArmV7PositionIndependentLong,
+    ThumbV7AbsoluteLong,
+    ThumbV7PositionIndependentLong,
+    ThumbV6MAbsoluteLong,
+    ThumbV6MPositionIndependentLong,
+    ArmV5LongLoadProgramCounter,
+    ArmV4AbsoluteLongExchange,
+    ArmV4PositionIndependentLongExchange,
+    ArmV4PositionIndependentLong,
+    ThumbV4AbsoluteLongExchange,
+    ThumbV4AbsoluteLong,
+    ThumbV4PositionIndependentLongExchange,
+    ThumbV4PositionIndependentLong,
+}
+
+impl ThunkKind {
+    fn is_thumb(self) -> bool {
+        matches!(
+            self,
+            ThunkKind::ThumbV7AbsoluteLong
+                | ThunkKind::ThumbV7PositionIndependentLong
+                | ThunkKind::ThumbV6MAbsoluteLong
+                | ThunkKind::ThumbV6MPositionIndependentLong
+                | ThunkKind::ThumbV4AbsoluteLongExchange
+                | ThunkKind::ThumbV4AbsoluteLong
+                | ThunkKind::ThumbV4PositionIndependentLongExchange
+                | ThunkKind::ThumbV4PositionIndependentLong
+        )
+    }
+
+    fn is_aarch64(self) -> bool {
+        matches!(
+            self,
+            ThunkKind::Aarch64AbsoluteLong | ThunkKind::Aarch64PagedLong
+        )
+    }
+
+    fn long_size(self) -> u64 {
+        match self {
+            ThunkKind::Aarch64AbsoluteLong => 16,
+            ThunkKind::Aarch64PagedLong => 12,
+            ThunkKind::ArmV7AbsoluteLong => 12,
+            ThunkKind::ArmV7PositionIndependentLong => 16,
+            ThunkKind::ThumbV7AbsoluteLong => 10,
+            ThunkKind::ThumbV7PositionIndependentLong => 12,
+            ThunkKind::ThumbV6MAbsoluteLong => 12,
+            ThunkKind::ThumbV6MPositionIndependentLong => 16,
+            ThunkKind::ArmV5LongLoadProgramCounter => 8,
+            ThunkKind::ArmV4AbsoluteLongExchange => 12,
+            ThunkKind::ArmV4PositionIndependentLongExchange => 16,
+            ThunkKind::ArmV4PositionIndependentLong => 12,
+            ThunkKind::ThumbV4AbsoluteLongExchange => 12,
+            ThunkKind::ThumbV4AbsoluteLong => 16,
+            ThunkKind::ThumbV4PositionIndependentLongExchange => 16,
+            ThunkKind::ThumbV4PositionIndependentLong => 20,
+        }
+    }
+
+    fn name_prefix(self) -> &'static str {
+        match self {
+            ThunkKind::Aarch64AbsoluteLong => "__AArch64AbsLongThunk_",
+            ThunkKind::Aarch64PagedLong => "__AArch64ADRPThunk_",
+            ThunkKind::ArmV7AbsoluteLong => "__ARMv7ABSLongThunk_",
+            ThunkKind::ArmV7PositionIndependentLong => "__ARMV7PILongThunk_",
+            ThunkKind::ThumbV7AbsoluteLong => "__Thumbv7ABSLongThunk_",
+            ThunkKind::ThumbV7PositionIndependentLong => "__ThumbV7PILongThunk_",
+            ThunkKind::ThumbV6MAbsoluteLong => "__Thumbv6MABSLongThunk_",
+            ThunkKind::ThumbV6MPositionIndependentLong => "__Thumbv6MPILongThunk_",
+            ThunkKind::ArmV5LongLoadProgramCounter => "__ARMv5LongLdrPcThunk_",
+            ThunkKind::ArmV4AbsoluteLongExchange => "__ARMv4ABSLongBXThunk_",
+            ThunkKind::ArmV4PositionIndependentLongExchange => "__ARMv4PILongBXThunk_",
+            ThunkKind::ArmV4PositionIndependentLong => "__ARMv4PILongThunk_",
+            ThunkKind::ThumbV4AbsoluteLongExchange => "__Thumbv4ABSLongBXThunk_",
+            ThunkKind::ThumbV4AbsoluteLong => "__Thumbv4ABSLongThunk_",
+            ThunkKind::ThumbV4PositionIndependentLongExchange => "__Thumbv4PILongBXThunk_",
+            ThunkKind::ThumbV4PositionIndependentLong => "__Thumbv4PILongThunk_",
+        }
+    }
+
+    fn long_mapping_symbols(self) -> &'static [(&'static str, u64)] {
+        match self {
+            ThunkKind::Aarch64AbsoluteLong => &[("$d", 8)],
+            ThunkKind::ThumbV6MAbsoluteLong => &[("$d", 8)],
+            ThunkKind::ThumbV6MPositionIndependentLong => &[("$d", 12)],
+            ThunkKind::ArmV5LongLoadProgramCounter => &[("$d", 4)],
+            ThunkKind::ArmV4AbsoluteLongExchange => &[("$d", 8)],
+            ThunkKind::ThumbV4AbsoluteLongExchange => &[("$a", 4), ("$d", 8)],
+            ThunkKind::ThumbV4AbsoluteLong => &[("$a", 4), ("$d", 12)],
+            ThunkKind::ArmV4PositionIndependentLongExchange => &[("$d", 12)],
+            ThunkKind::ArmV4PositionIndependentLong => &[("$d", 8)],
+            ThunkKind::ThumbV4PositionIndependentLongExchange => &[("$a", 4), ("$d", 12)],
+            ThunkKind::ThumbV4PositionIndependentLong => &[("$a", 4), ("$d", 16)],
+            _ => &[],
+        }
+    }
+
+    fn checks_short_when_created(self) -> bool {
+        !matches!(
+            self,
+            ThunkKind::Aarch64PagedLong
+                | ThunkKind::ArmV7AbsoluteLong
+                | ThunkKind::ArmV7PositionIndependentLong
+                | ThunkKind::ThumbV7AbsoluteLong
+                | ThunkKind::ThumbV7PositionIndependentLong
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Thunk {
+    pub kind: ThunkKind,
+    pub destination: SymbolIndex,
+    pub addend: i64,
+    pub offset: u64,
+    pub alignment: u64,
+    pub symbols: Vec<SymbolIndex>,
+    pub may_use_short: bool,
+    pub section: SectionIndex,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ThunkState {
+    pub thunks: Vec<Thunk>,
+    pub sections: BTreeMap<OutputIndex, Vec<(SectionIndex, u32)>>,
+    pub by_place: BTreeMap<(SectionIndex, u64, i64), Vec<usize>>,
+    pub by_symbol: BTreeMap<(SymbolIndex, i64), Vec<usize>>,
+    pub by_target: BTreeMap<SymbolIndex, usize>,
+    pub thunk_of_section: BTreeMap<SectionIndex, Vec<usize>>,
+}
+
+impl<'s> Context<'s> {
+    pub fn needs_thunks(&self) -> bool {
+        matches!(
+            self.target.architecture,
+            Architecture::Arm | Architecture::Aarch64
+        )
+    }
+
+    fn thunk_spacing(&self) -> u64 {
+        match self.target.architecture {
+            Architecture::Aarch64 => 128 * 1024 * 1024 - 0x30000,
+            Architecture::Arm => {
+                if self.arm_features.j1_j2_branch_encoding {
+                    0x100_0000 - 0x30000
+                } else {
+                    0x40_0000 - 0x7500
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    fn program_counter_bias(&self, kind: u32) -> i64 {
+        if self.target.architecture != Architecture::Arm {
+            return 0;
+        }
+        match kind {
+            51 | 30 | 10 => 4,
+            _ => 8,
+        }
+    }
+
+    pub fn in_branch_range(&self, kind: u32, source: u64, destination: u64) -> bool {
+        match self.target.architecture {
+            Architecture::Aarch64 => {
+                if kind != 283 && kind != 282 && kind != 314 {
+                    return true;
+                }
+                let mut range: u64 = if kind == 314 {
+                    1 << 31
+                } else {
+                    128 * 1024 * 1024
+                };
+                if destination > source {
+                    range -= 4;
+                    return destination - source <= range;
+                }
+                source - destination <= range
+            }
+            Architecture::Arm => {
+                let (mut source, mut destination) = (source, destination);
+                if destination & 1 == 0 {
+                    source &= !3;
+                } else {
+                    destination &= !1;
+                }
+                let offset = sign_extend(destination.wrapping_sub(source), 32);
+                let fits =
+                    |bits: u32| offset >= -(1i64 << (bits - 1)) && offset < (1i64 << (bits - 1));
+                match kind {
+                    1 | 27 | 29 | 28 => fits(26),
+                    51 => fits(21),
+                    30 | 10 => {
+                        if self.arm_features.j1_j2_branch_encoding {
+                            fits(25)
+                        } else {
+                            fits(23)
+                        }
+                    }
+                    _ => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+    fn arm_destination(&self, symbol: SymbolIndex) -> u64 {
+        let value = if self.symbols[symbol].plt_index.is_some() {
+            self.plt_address(symbol)
+        } else {
+            self.symbol_address(symbol, 0)
+        };
+        sign_extend(value, 32) as u64
+    }
+
+    fn needs_thunk(&self, relocation: &Relocation, source: u64) -> bool {
+        let symbol = &self.symbols[relocation.symbol];
+        let in_plt = symbol.plt_index.is_some();
+        if symbol.is_undefined() && !in_plt {
+            return false;
+        }
+        let destination = if relocation.expression == Expression::PltProgramCounter {
+            self.plt_address(relocation.symbol)
+        } else {
+            self.symbol_address(relocation.symbol, 0)
+        };
+        match self.target.architecture {
+            Architecture::Aarch64 => {
+                if !matches!(relocation.kind, 283 | 282 | 314) {
+                    return false;
+                }
+                let destination = if relocation.expression == Expression::PltProgramCounter {
+                    destination
+                } else {
+                    self.symbol_address(relocation.symbol, relocation.addend)
+                };
+                !self.in_branch_range(relocation.kind, source, destination)
+            }
+            Architecture::Arm => {
+                let address = self.symbol_address(relocation.symbol, 0);
+                match relocation.kind {
+                    1 | 27 | 29 | 28 => {
+                        if relocation.kind != 28
+                            && symbol.is_function()
+                            && relocation.expression == Expression::ProgramCounter
+                            && address & 1 != 0
+                        {
+                            return true;
+                        }
+                        !self.in_branch_range(
+                            relocation.kind,
+                            source,
+                            destination.wrapping_add(relocation.addend as u64),
+                        ) || (!self.arm_features.has_exchange && address & 1 != 0)
+                    }
+                    51 | 30 | 10 => {
+                        if relocation.kind != 10
+                            && ((relocation.expression == Expression::PltProgramCounter
+                                && !self.use_thumb_plt())
+                                || (symbol.is_function() && address & 1 == 0))
+                        {
+                            return true;
+                        }
+                        !self.in_branch_range(
+                            relocation.kind,
+                            source,
+                            destination.wrapping_add(relocation.addend as u64),
+                        ) || (!self.arm_features.has_exchange && address & 1 == 0)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn thunk_supported(&self, kind: u32) -> bool {
+        if self.target.architecture != Architecture::Arm || self.arm_features.has_move_wide {
+            return true;
+        }
+        if self.arm_features.j1_j2_branch_encoding {
+            return matches!(kind, 51 | 30 | 10);
+        }
+        matches!(kind, 1 | 27 | 29 | 28 | 10)
+    }
+
+    fn choose_thunk(
+        &self,
+        kind: u32,
+        symbol: SymbolIndex,
+        addend: i64,
+        section: SectionIndex,
+    ) -> ThunkKind {
+        let position_independent = self.is_pic();
+        if self.target.architecture == Architecture::Aarch64 {
+            return if position_independent {
+                ThunkKind::Aarch64PagedLong
+            } else {
+                ThunkKind::Aarch64AbsoluteLong
+            };
+        }
+        let _ = section;
+        let features = self.arm_features;
+        let arm_branch = matches!(kind, 1 | 27 | 29 | 28);
+        if !features.has_move_wide {
+            if features.j1_j2_branch_encoding {
+                return if position_independent {
+                    ThunkKind::ThumbV6MPositionIndependentLong
+                } else {
+                    ThunkKind::ThumbV6MAbsoluteLong
+                };
+            }
+            if features.has_exchange {
+                return if position_independent {
+                    ThunkKind::ArmV4PositionIndependentLongExchange
+                } else {
+                    ThunkKind::ArmV5LongLoadProgramCounter
+                };
+            }
+            let thumb_target = self.symbol_address(symbol, addend) & 1 != 0;
+            if arm_branch {
+                return match (position_independent, thumb_target) {
+                    (true, true) => ThunkKind::ArmV4PositionIndependentLongExchange,
+                    (true, false) => ThunkKind::ArmV4PositionIndependentLong,
+                    (false, true) => ThunkKind::ArmV4AbsoluteLongExchange,
+                    (false, false) => ThunkKind::ArmV5LongLoadProgramCounter,
+                };
+            }
+            return match (position_independent, thumb_target) {
+                (true, true) => ThunkKind::ThumbV4PositionIndependentLong,
+                (true, false) => ThunkKind::ThumbV4PositionIndependentLongExchange,
+                (false, true) => ThunkKind::ThumbV4AbsoluteLong,
+                (false, false) => ThunkKind::ThumbV4AbsoluteLongExchange,
+            };
+        }
+        if arm_branch {
+            if position_independent {
+                ThunkKind::ArmV7PositionIndependentLong
+            } else {
+                ThunkKind::ArmV7AbsoluteLong
+            }
+        } else if position_independent {
+            ThunkKind::ThumbV7PositionIndependentLong
+        } else {
+            ThunkKind::ThumbV7AbsoluteLong
+        }
+    }
+
+    fn thunk_compatible(&self, thunk: &Thunk, kind: u32) -> bool {
+        if thunk.kind.is_aarch64() {
+            return true;
+        }
+        if thunk.kind.is_thumb() {
+            if !self.arm_features.has_exchange && kind == 28 {
+                return false;
+            }
+            return !matches!(kind, 29 | 1 | 27);
+        }
+        if !self.arm_features.has_exchange && kind == 10 {
+            return false;
+        }
+        !matches!(kind, 51 | 30)
+    }
+
+    fn thunk_target_address(&self, thunk: usize) -> u64 {
+        self.symbol_address(self.thunk_state.thunks[thunk].symbols[0], 0)
+    }
+
+    fn thunk_destination(&self, thunk: usize) -> u64 {
+        let data = &self.thunk_state.thunks[thunk];
+        if self.symbols[data.destination].plt_index.is_some() {
+            self.plt_address(data.destination)
+        } else {
+            self.symbol_address(data.destination, data.addend)
+        }
+    }
+
+    fn add_thunk_local(&mut self, thunk: usize, name: &str, kind: u8, value: u64) {
+        let section = self.thunk_state.thunks[thunk].section;
+        let offset = self.thunk_state.thunks[thunk].offset;
+        let mut data = SymbolData::new(name);
+        data.state = SymbolState::Defined;
+        data.is_local = true;
+        data.binding = symbol_binding::LOCAL;
+        data.kind = kind;
+        data.file = Some(INTERNAL);
+        data.section = Some(section);
+        data.value = value + offset;
+        data.used_in_regular_object = true;
+        let id = self.symbols.len();
+        self.symbols.push(data);
+        self.thunk_state.thunks[thunk].symbols.push(id);
+        if self.options.strip != Strip::All {
+            self.add_to_symbol_table(id);
+        }
+    }
+
+    fn may_use_short_thunk(&mut self, thunk: usize) -> bool {
+        if !self.thunk_state.thunks[thunk].may_use_short {
+            return false;
+        }
+        let kind = self.thunk_state.thunks[thunk].kind;
+        let destination_symbol = self.thunk_state.thunks[thunk].destination;
+        let short = if kind.is_aarch64() {
+            let destination = self.thunk_destination(thunk);
+            let place = self.thunk_target_address(thunk);
+            let offset = destination.wrapping_sub(place) as i64;
+            (-(1i64 << 27)..(1i64 << 27)).contains(&offset)
+        } else if kind.is_thumb() {
+            let destination = self.arm_destination(destination_symbol);
+            if destination & 1 == 0
+                || !self.arm_features.j1_j2_branch_encoding
+                || !self.arm_features.has_move_wide
+            {
+                false
+            } else {
+                let place = self.thunk_target_address(thunk) & !1;
+                let offset = destination.wrapping_sub(place).wrapping_sub(4) as i64;
+                (-(1i64 << 24)..(1i64 << 24)).contains(&offset)
+            }
+        } else {
+            let destination = self.arm_destination(destination_symbol);
+            if destination & 1 != 0 {
+                false
+            } else {
+                let place = self.thunk_target_address(thunk);
+                let offset = destination.wrapping_sub(place).wrapping_sub(8) as i64;
+                (-(1i64 << 25)..(1i64 << 25)).contains(&offset)
+            }
+        };
+        if !short {
+            self.thunk_state.thunks[thunk].may_use_short = false;
+            for (name, value) in kind.long_mapping_symbols() {
+                self.add_thunk_local(thunk, name, symbol_type::NO_TYPE, *value);
+            }
+            if kind == ThunkKind::Aarch64AbsoluteLong {
+                self.thunk_state.thunks[thunk].alignment = 8;
+            }
+        }
+        short
+    }
+
+    fn thunk_size(&mut self, thunk: usize) -> u64 {
+        if self.may_use_short_thunk(thunk) {
+            4
+        } else {
+            self.thunk_state.thunks[thunk].kind.long_size()
+        }
+    }
+
+    fn add_thunk_section(&mut self, output: OutputIndex, offset: u64, pass: u32) -> SectionIndex {
+        let mut section = InputSection::synthetic(
+            ".text.thunk",
+            section_type::PROGRAM_BITS,
+            section_flag::ALLOCATE | section_flag::EXECUTE,
+            4,
+            Synthetic::Thunks,
+        );
+        section.output = Some(output);
+        section.offset_in_output = offset;
+        let index = self.sections.len();
+        self.sections.push(section);
+        self.thunk_state
+            .sections
+            .entry(output)
+            .or_default()
+            .push((index, pass));
+        self.thunk_state.thunk_of_section.insert(index, Vec::new());
+        index
+    }
+
+    fn create_initial_thunk_sections(&mut self) {
+        let spacing = self.thunk_spacing();
+        for output in self.order.clone() {
+            let flags = self.outputs[output].flags;
+            if flags & section_flag::ALLOCATE == 0 || flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            let members = self.outputs[output].members.clone();
+            let (Some(first), Some(last)) = (members.first(), members.last()) else {
+                continue;
+            };
+            let begin = self.sections[*first].offset_in_output;
+            let end = self.sections[*last].offset_in_output + self.sections[*last].size;
+            let mut last_lower_bound = u64::from(u32::MAX);
+            if end - begin > spacing * 2 {
+                last_lower_bound = end - spacing;
+            }
+            let mut limit = begin;
+            let mut previous_limit = begin;
+            let mut upper_bound = begin + spacing;
+            for member in &members {
+                limit = self.sections[*member].offset_in_output + self.sections[*member].size;
+                if limit > upper_bound {
+                    self.add_thunk_section(output, previous_limit, 0);
+                    upper_bound = previous_limit + spacing;
+                }
+                if limit > last_lower_bound {
+                    break;
+                }
+                previous_limit = limit;
+            }
+            self.add_thunk_section(output, limit, 0);
+        }
+    }
+
+    fn thunk_section_for(
+        &mut self,
+        output: OutputIndex,
+        section: SectionIndex,
+        relocation: &Relocation,
+        source: u64,
+        pass: u32,
+    ) -> SectionIndex {
+        let bias = self.program_counter_bias(relocation.kind);
+        let base_address = self.outputs[output].address;
+        let candidates = self
+            .thunk_state
+            .sections
+            .get(&output)
+            .cloned()
+            .unwrap_or_default();
+        for (thunk_section, _) in candidates {
+            let base = (base_address + self.sections[thunk_section].offset_in_output)
+                .wrapping_sub(bias as u64);
+            let limit = base + self.sections[thunk_section].size;
+            let probe = if source > limit { base } else { limit };
+            if self.in_branch_range(relocation.kind, source, probe) {
+                return thunk_section;
+            }
+        }
+        let mut offset = self.sections[section].offset_in_output;
+        if !self.in_branch_range(
+            relocation.kind,
+            source,
+            (base_address + offset).wrapping_add(relocation.addend as u64),
+        ) {
+            offset += self.sections[section].size;
+        }
+        self.add_thunk_section(output, offset, pass)
+    }
+
+    pub fn assign_thunk_offsets(&mut self, thunk_section: SectionIndex) -> bool {
+        let thunks = self
+            .thunk_state
+            .thunk_of_section
+            .get(&thunk_section)
+            .cloned()
+            .unwrap_or_default();
+        let mut offset = 0u64;
+        let mut changed = false;
+        for thunk in thunks {
+            let alignment = self.thunk_state.thunks[thunk].alignment;
+            if alignment > self.sections[thunk_section].alignment {
+                self.sections[thunk_section].alignment = alignment;
+                changed = true;
+            }
+            offset = align_to(offset, alignment);
+            let previous = self.thunk_state.thunks[thunk].offset;
+            for symbol in self.thunk_state.thunks[thunk].symbols.clone() {
+                self.symbols[symbol].value = self.symbols[symbol].value - previous + offset;
+            }
+            self.thunk_state.thunks[thunk].offset = offset;
+            let size = self.thunk_size(thunk);
+            let target = self.thunk_state.thunks[thunk].symbols[0];
+            self.symbols[target].size = size;
+            offset += size;
+        }
+        if offset != self.sections[thunk_section].size {
+            changed = true;
+        }
+        self.sections[thunk_section].size = offset;
+        changed
+    }
+
+    fn sort_thunks_by_destination(&mut self, thunk_section: SectionIndex) {
+        let base = self.section_address(thunk_section, 0);
+        let thunks = self
+            .thunk_state
+            .thunk_of_section
+            .get(&thunk_section)
+            .cloned()
+            .unwrap_or_default();
+        let keyed: Vec<(u64, usize)> = thunks
+            .iter()
+            .map(|thunk| (self.thunk_destination(*thunk), *thunk))
+            .collect();
+        let (mut backward, mut forward): (Vec<_>, Vec<_>) =
+            keyed.into_iter().partition(|entry| entry.0 <= base);
+        forward.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        backward.extend(forward);
+        self.thunk_state.thunk_of_section.insert(
+            thunk_section,
+            backward.into_iter().map(|entry| entry.1).collect(),
+        );
+    }
+
+    pub fn create_thunks(&mut self, pass: u32) -> bool {
+        let mut changed = false;
+        if pass == 0 && self.thunk_spacing() != 0 {
+            self.create_initial_thunk_sections();
+        }
+        for output in self.order.clone() {
+            let flags = self.outputs[output].flags;
+            if flags & section_flag::ALLOCATE == 0 || flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            for member in self.outputs[output].members.clone() {
+                let count = self.sections[member].relocations.len();
+                for position in 0..count {
+                    let relocation = self.sections[member].relocations[position].clone();
+                    if relocation.expression == Expression::None {
+                        continue;
+                    }
+                    let source = self.section_address(member, relocation.offset);
+                    if pass > 0 {
+                        if let Some(thunk) =
+                            self.thunk_state.by_target.get(&relocation.symbol).copied()
+                        {
+                            if self.in_branch_range(
+                                relocation.kind,
+                                source,
+                                self.symbol_address(relocation.symbol, relocation.addend),
+                            ) {
+                                continue;
+                            }
+                            let destination = self.thunk_state.thunks[thunk].destination;
+                            let entry = &mut self.sections[member].relocations[position];
+                            entry.symbol = destination;
+                            entry.addend = self.thunk_state.thunks[thunk].addend;
+                            if self.symbols[destination].plt_index.is_some() {
+                                entry.expression = match entry.expression {
+                                    Expression::ProgramCounter => Expression::PltProgramCounter,
+                                    Expression::Absolute => Expression::Plt,
+                                    other => other,
+                                };
+                            }
+                        }
+                    }
+                    let relocation = self.sections[member].relocations[position].clone();
+                    if !self.needs_thunk(&relocation, source) {
+                        continue;
+                    }
+                    if !self.thunk_supported(relocation.kind) {
+                        let name = relocation_name(Architecture::Arm, relocation.kind);
+                        let symbol = self.symbols[relocation.symbol].name.clone();
+                        self.error(
+                            problem("EI238", "This branch cannot reach its target on the architecture the inputs describe.")
+                                .with_context(format!("Relocation: {name}"))
+                                .with_context(format!("Symbol: {symbol}")),
+                        );
+                        self.sections[member].relocations[position].expression = Expression::None;
+                        continue;
+                    }
+                    let bias = self.program_counter_bias(relocation.kind);
+                    let key_addend = relocation.addend + bias;
+                    let symbol = &self.symbols[relocation.symbol];
+                    let place_key = if symbol.is_defined() && symbol.plt_index.is_none() {
+                        symbol
+                            .section
+                            .map(|section| (section, symbol.value, key_addend))
+                    } else {
+                        None
+                    };
+                    let existing = match place_key {
+                        Some(key) => self
+                            .thunk_state
+                            .by_place
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_default(),
+                        None => self
+                            .thunk_state
+                            .by_symbol
+                            .get(&(relocation.symbol, key_addend))
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
+                    let mut chosen = None;
+                    for thunk in existing {
+                        if self.thunk_compatible(&self.thunk_state.thunks[thunk], relocation.kind)
+                            && self.in_branch_range(
+                                relocation.kind,
+                                source,
+                                self.symbol_address(
+                                    self.thunk_state.thunks[thunk].symbols[0],
+                                    -bias,
+                                ),
+                            )
+                        {
+                            chosen = Some(thunk);
+                            break;
+                        }
+                    }
+                    let thunk = match chosen {
+                        Some(thunk) => thunk,
+                        None => {
+                            let kind = self.choose_thunk(
+                                relocation.kind,
+                                relocation.symbol,
+                                relocation.addend,
+                                member,
+                            );
+                            let thunk = self.thunk_state.thunks.len();
+                            let thunk_section =
+                                self.thunk_section_for(output, member, &relocation, source, pass);
+                            self.thunk_state.thunks.push(Thunk {
+                                kind,
+                                destination: relocation.symbol,
+                                addend: relocation.addend,
+                                offset: 0,
+                                alignment: if kind.is_thumb() { 2 } else { 4 },
+                                symbols: Vec::new(),
+                                may_use_short: true,
+                                section: thunk_section,
+                            });
+                            match place_key {
+                                Some(key) => self
+                                    .thunk_state
+                                    .by_place
+                                    .entry(key)
+                                    .or_default()
+                                    .push(thunk),
+                                None => self
+                                    .thunk_state
+                                    .by_symbol
+                                    .entry((relocation.symbol, key_addend))
+                                    .or_default()
+                                    .push(thunk),
+                            }
+                            self.thunk_state
+                                .thunk_of_section
+                                .entry(thunk_section)
+                                .or_default()
+                                .push(thunk);
+                            let name = format!(
+                                "{}{}",
+                                kind.name_prefix(),
+                                self.symbols[relocation.symbol].name
+                            );
+                            let start = if kind.is_thumb() { 1 } else { 0 };
+                            self.add_thunk_local(thunk, &name, symbol_type::FUNCTION, start);
+                            let mapping = if kind.is_aarch64() {
+                                "$x"
+                            } else if kind.is_thumb() {
+                                "$t"
+                            } else {
+                                "$a"
+                            };
+                            self.add_thunk_local(thunk, mapping, symbol_type::NO_TYPE, 0);
+                            if kind.checks_short_when_created() {
+                                self.may_use_short_thunk(thunk);
+                            }
+                            let target = self.thunk_state.thunks[thunk].symbols[0];
+                            self.thunk_state.by_target.insert(target, thunk);
+                            thunk
+                        }
+                    };
+                    let target = self.thunk_state.thunks[thunk].symbols[0];
+                    let entry = &mut self.sections[member].relocations[position];
+                    entry.symbol = target;
+                    entry.expression = from_plt(entry.expression);
+                    entry.addend = -bias;
+                }
+            }
+            let thunk_sections = self
+                .thunk_state
+                .sections
+                .get(&output)
+                .cloned()
+                .unwrap_or_default();
+            for (thunk_section, _) in thunk_sections {
+                if pass == 0 {
+                    self.sort_thunks_by_destination(thunk_section);
+                }
+                changed |= self.assign_thunk_offsets(thunk_section);
+            }
+        }
+        self.merge_thunks(pass);
+        changed
+    }
+
+    fn merge_thunks(&mut self, pass: u32) {
+        for output in self.order.clone() {
+            let Some(list) = self.thunk_state.sections.get_mut(&output) else {
+                continue;
+            };
+            let sections = &self.sections;
+            list.retain(|(section, _)| sections[*section].size != 0);
+            let mut fresh: Vec<SectionIndex> = list
+                .iter()
+                .filter(|(_, created)| *created == pass)
+                .map(|(section, _)| *section)
+                .collect();
+            fresh.sort_by_key(|section| self.sections[*section].offset_in_output);
+            if fresh.is_empty() {
+                continue;
+            }
+            let members = std::mem::take(&mut self.outputs[output].members);
+            let mut merged = Vec::with_capacity(members.len() + fresh.len());
+            let mut left = members.into_iter().peekable();
+            let mut right = fresh.into_iter().peekable();
+            loop {
+                match (left.peek(), right.peek()) {
+                    (Some(member), Some(thunk)) => {
+                        let thunk_offset = self.sections[*thunk].offset_in_output;
+                        let member_offset = self.sections[*member].offset_in_output;
+                        if thunk_offset < member_offset {
+                            merged.push(right.next().unwrap_or(0));
+                        } else {
+                            merged.push(left.next().unwrap_or(0));
+                        }
+                    }
+                    (Some(_), None) => merged.push(left.next().unwrap_or(0)),
+                    (None, Some(_)) => merged.push(right.next().unwrap_or(0)),
+                    (None, None) => break,
+                }
+            }
+            self.outputs[output].members = merged;
+        }
+    }
+
+    fn write_thunks(&mut self, section: SectionIndex, buffer: &mut [u8]) {
+        let thunks = self
+            .thunk_state
+            .thunk_of_section
+            .get(&section)
+            .cloned()
+            .unwrap_or_default();
+        for thunk in thunks {
+            let at = self.thunk_state.thunks[thunk].offset as usize;
+            let size = self.thunk_size(thunk) as usize;
+            if at + size > buffer.len() {
+                continue;
+            }
+            let short = self.thunk_state.thunks[thunk].may_use_short;
+            let mut piece = vec![0u8; size];
+            self.write_thunk(thunk, short, &mut piece);
+            buffer[at..at + size].copy_from_slice(&piece);
+        }
+    }
+
+    fn encode_no_symbol(&mut self, out: &mut [u8], at: usize, kind: u32, value: u64) {
+        let relocation = Relocation {
+            expression: Expression::Absolute,
+            kind,
+            offset: 0,
+            addend: 0,
+            symbol: self.dummy_symbol(),
+        };
+        let location = String::new();
+        match self.target.architecture {
+            Architecture::Aarch64 => self.relocate_aarch64(out, at, &relocation, value, &location),
+            _ => self.relocate_arm(out, at, &relocation, value, &location),
+        }
+    }
+
+    fn write_thunk(&mut self, thunk: usize, short: bool, out: &mut [u8]) {
+        let data = self.thunk_state.thunks[thunk].clone();
+        let place = self.thunk_target_address(thunk);
+        let encoding = self.encoding();
+        if data.kind.is_aarch64() {
+            let destination = self.thunk_destination(thunk);
+            if short {
+                out[0..4].copy_from_slice(&0x1400_0000u32.to_le_bytes());
+                self.encode_no_symbol(out, 0, 283, destination.wrapping_sub(place));
+                return;
+            }
+            match data.kind {
+                ThunkKind::Aarch64AbsoluteLong => {
+                    out[0..8].copy_from_slice(&[0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6]);
+                    self.encode_no_symbol(out, 8, 257, destination);
+                }
+                _ => {
+                    out[0..12].copy_from_slice(&[
+                        0x10, 0, 0, 0x90, 0x10, 0x02, 0x00, 0x91, 0x00, 0x02, 0x1f, 0xd6,
+                    ]);
+                    self.encode_no_symbol(
+                        out,
+                        0,
+                        275,
+                        aarch64_page(destination).wrapping_sub(aarch64_page(place)),
+                    );
+                    self.encode_no_symbol(out, 4, 277, destination);
+                }
+            }
+            return;
+        }
+        let destination = self.arm_destination(data.destination);
+        let half =
+            |out: &mut [u8], at: usize, value: u32| encoding.write_u16(out, at, value as u16);
+        let word = |out: &mut [u8], at: usize, value: u32| encoding.write_u32(out, at, value);
+        if short {
+            if data.kind.is_thumb() {
+                half(out, 0, 0xf000);
+                half(out, 2, 0xb000);
+                self.encode_no_symbol(out, 0, 30, destination.wrapping_sub(place).wrapping_sub(4));
+            } else {
+                word(out, 0, 0xea00_0000);
+                self.encode_no_symbol(out, 0, 29, destination.wrapping_sub(place).wrapping_sub(8));
+            }
+            return;
+        }
+        let aligned_place = place & !1;
+        match data.kind {
+            ThunkKind::ArmV7AbsoluteLong => {
+                word(out, 0, 0xe300_c000);
+                word(out, 4, 0xe340_c000);
+                word(out, 8, 0xe12f_ff1c);
+                self.encode_no_symbol(out, 0, 43, destination);
+                self.encode_no_symbol(out, 4, 44, destination);
+            }
+            ThunkKind::ThumbV7AbsoluteLong => {
+                half(out, 0, 0xf240);
+                half(out, 2, 0x0c00);
+                half(out, 4, 0xf2c0);
+                half(out, 6, 0x0c00);
+                half(out, 8, 0x4760);
+                self.encode_no_symbol(out, 0, 47, destination);
+                self.encode_no_symbol(out, 4, 48, destination);
+            }
+            ThunkKind::ArmV7PositionIndependentLong => {
+                word(out, 0, 0xe30f_cff0);
+                word(out, 4, 0xe340_c000);
+                word(out, 8, 0xe08c_c00f);
+                word(out, 12, 0xe12f_ff1c);
+                let offset = destination.wrapping_sub(place).wrapping_sub(16);
+                self.encode_no_symbol(out, 0, 45, offset);
+                self.encode_no_symbol(out, 4, 46, offset);
+            }
+            ThunkKind::ThumbV7PositionIndependentLong => {
+                for (at, value) in [
+                    (0, 0xf64f),
+                    (2, 0x7cf4),
+                    (4, 0xf2c0),
+                    (6, 0x0c00),
+                    (8, 0x44fc),
+                    (10, 0x4760),
+                ] {
+                    half(out, at, value);
+                }
+                let offset = destination.wrapping_sub(aligned_place).wrapping_sub(12);
+                self.encode_no_symbol(out, 0, 49, offset);
+                self.encode_no_symbol(out, 4, 50, offset);
+            }
+            ThunkKind::ThumbV6MAbsoluteLong => {
+                for (at, value) in [(0, 0xb403), (2, 0x4801), (4, 0x9001), (6, 0xbd01)] {
+                    half(out, at, value);
+                }
+                word(out, 8, destination as u32);
+            }
+            ThunkKind::ThumbV6MPositionIndependentLong => {
+                for (at, value) in [
+                    (0, 0xb401),
+                    (2, 0x4802),
+                    (4, 0x4684),
+                    (6, 0xbc01),
+                    (8, 0x44e7),
+                    (10, 0x46c0),
+                ] {
+                    half(out, at, value);
+                }
+                word(
+                    out,
+                    12,
+                    destination.wrapping_sub(aligned_place).wrapping_sub(12) as u32,
+                );
+            }
+            ThunkKind::ArmV5LongLoadProgramCounter => {
+                word(out, 0, 0xe51f_f004);
+                word(out, 4, destination as u32);
+            }
+            ThunkKind::ArmV4AbsoluteLongExchange => {
+                word(out, 0, 0xe59f_c000);
+                word(out, 4, 0xe12f_ff1c);
+                word(out, 8, destination as u32);
+            }
+            ThunkKind::ThumbV4AbsoluteLongExchange => {
+                half(out, 0, 0x4778);
+                half(out, 2, 0xe7fd);
+                word(out, 4, 0xe51f_f004);
+                word(out, 8, destination as u32);
+            }
+            ThunkKind::ThumbV4AbsoluteLong => {
+                half(out, 0, 0x4778);
+                half(out, 2, 0xe7fd);
+                word(out, 4, 0xe59f_c000);
+                word(out, 8, 0xe12f_ff1c);
+                word(out, 12, destination as u32);
+            }
+            ThunkKind::ArmV4PositionIndependentLongExchange => {
+                word(out, 0, 0xe59f_c004);
+                word(out, 4, 0xe08f_c00c);
+                word(out, 8, 0xe12f_ff1c);
+                word(
+                    out,
+                    12,
+                    destination.wrapping_sub(aligned_place).wrapping_sub(12) as u32,
+                );
+            }
+            ThunkKind::ArmV4PositionIndependentLong => {
+                word(out, 0, 0xe59f_c000);
+                word(out, 4, 0xe08f_f00c);
+                word(
+                    out,
+                    8,
+                    destination.wrapping_sub(aligned_place).wrapping_sub(12) as u32,
+                );
+            }
+            ThunkKind::ThumbV4PositionIndependentLongExchange => {
+                half(out, 0, 0x4778);
+                half(out, 2, 0xe7fd);
+                word(out, 4, 0xe59f_c000);
+                word(out, 8, 0xe08c_f00f);
+                word(
+                    out,
+                    12,
+                    destination.wrapping_sub(aligned_place).wrapping_sub(16) as u32,
+                );
+            }
+            ThunkKind::ThumbV4PositionIndependentLong => {
+                half(out, 0, 0x4778);
+                half(out, 2, 0xe7fd);
+                word(out, 4, 0xe59f_c004);
+                word(out, 8, 0xe08f_c00c);
+                word(out, 12, 0xe12f_ff1c);
+                word(
+                    out,
+                    16,
+                    destination.wrapping_sub(aligned_place).wrapping_sub(16) as u32,
+                );
+            }
+            ThunkKind::Aarch64AbsoluteLong | ThunkKind::Aarch64PagedLong => {}
+        }
+    }
 }

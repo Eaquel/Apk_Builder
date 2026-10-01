@@ -66828,6 +66828,12 @@ mod linker_conformance {
     use std::path::Path;
     use std::process::Command;
 
+    pub(super) fn finish(folder: &Path) {
+        if std::env::var_os("APK_BUILDER_KEEP_LINKER_WORK").is_none() {
+            std::fs::remove_dir_all(folder).ok();
+        }
+    }
+
     pub(super) fn link_on_disk(arguments: &[String]) -> LinkOutcome {
         let outcome = link(arguments, &|path: &str| std::fs::read(path).ok());
         for (path, bytes) in &outcome.outputs {
@@ -66856,6 +66862,15 @@ mod linker_conformance {
     }
 
     pub(super) fn structure(path: &Path) -> String {
+        let stripped = path.with_extension("structure");
+        let removed = Command::new("llvm-objcopy")
+            .args(["--remove-section=.comment"])
+            .arg(path)
+            .arg(&stripped)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let inspected = if removed { stripped.as_path() } else { path };
         let done = Command::new("llvm-readelf")
             .args([
                 "--file-header",
@@ -66866,7 +66881,7 @@ mod linker_conformance {
                 "--dynamic",
                 "--wide",
             ])
-            .arg(path)
+            .arg(inspected)
             .output()
             .expect("llvm-readelf runs");
         String::from_utf8_lossy(&done.stdout)
@@ -66999,7 +67014,312 @@ counter:
             section_bytes(Path::new(&ours), ".rodata"),
             section_bytes(Path::new(&theirs), ".rodata")
         );
-        std::fs::remove_dir_all(&folder).ok();
+        finish(&folder);
+    }
+
+    pub(super) fn allocated_bytes(path: &Path) -> Vec<(String, Vec<u8>)> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        parsed
+            .sections
+            .iter()
+            .filter(|section| {
+                section.flags & crate::compilers::elf::section_flag::ALLOCATE != 0
+                    && section.kind != crate::compilers::elf::section_type::NO_BITS
+            })
+            .map(|section| (section.name.clone(), section.data.clone()))
+            .collect()
+    }
+
+    pub(super) fn compare_with_lld(folder: &Path, objects: &[String], extra: &[&str], label: &str) {
+        let ours = folder
+            .join(format!("{label}-ours"))
+            .to_string_lossy()
+            .to_string();
+        let theirs = folder
+            .join(format!("{label}-theirs"))
+            .to_string_lossy()
+            .to_string();
+        let mut arguments: Vec<String> = objects.to_vec();
+        arguments.extend(extra.iter().map(|argument| argument.to_string()));
+        let mut ours_arguments = arguments.clone();
+        ours_arguments.extend(["-o".to_string(), ours.clone()]);
+        let mut theirs_arguments = arguments.clone();
+        theirs_arguments.extend(["-o".to_string(), theirs.clone()]);
+        let outcome = link_on_disk(&ours_arguments);
+        assert!(outcome.succeeded(), "{label}: {}", describe(&outcome));
+        assert!(reference_link(&theirs_arguments), "{label}: ld.lld refused");
+        let difference =
+            first_difference(&structure(Path::new(&ours)), &structure(Path::new(&theirs)));
+        assert!(
+            difference.is_none(),
+            "{label}: {}",
+            difference.unwrap_or_default()
+        );
+        let left = allocated_bytes(Path::new(&ours));
+        let right = allocated_bytes(Path::new(&theirs));
+        assert_eq!(left.len(), right.len(), "{label}");
+        for ((name, ours_bytes), (_, theirs_bytes)) in left.iter().zip(&right) {
+            assert!(
+                ours_bytes == theirs_bytes,
+                "{label}: section {name} differs"
+            );
+        }
+    }
+
+    const I386_SOURCE: &str = r#"
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        call helper
+        movl $value, %eax
+        movl value, %ebx
+        movl value@GOTOFF(%ebx), %ecx
+        addl $_GLOBAL_OFFSET_TABLE_, %ebx
+        movl %gs:counter@ntpoff, %edx
+        movl %gs:0, %eax
+        leal counter@ntpoff(%eax), %eax
+        jmp helper
+        .type helper,@function
+helper:
+        ret
+        .data
+value:
+        .long _start
+        .long helper - .
+        .short small
+        .byte tiny
+        .globl small
+        .set small, 0x1234
+        .set tiny, 0x12
+        .section .tbss,"awT",@nobits
+counter:
+        .zero 4
+"#;
+
+    const AARCH64_SOURCE: &str = r#"
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        adrp x0, value
+        add x0, x0, :lo12:value
+        adrp x1, far
+        ldr x1, [x1, :lo12:far]
+        ldrb w2, [x0, :lo12:value]
+        ldrh w2, [x0, :lo12:half]
+        ldr w2, [x0, :lo12:word]
+        ldr q3, [x0, :lo12:wide]
+        adrp x4, :got:value
+        ldr x4, [x4, :got_lo12:value]
+        bl helper
+        b helper
+        b.eq helper
+        tbz x0, #3, helper
+        cbz x0, helper
+        movz x5, #:abs_g3:value
+        movk x5, #:abs_g2_nc:value
+        movk x5, #:abs_g1_nc:value
+        movk x5, #:abs_g0_nc:value
+        ldr x6, literal
+        adr x7, helper
+        mrs x8, tpidr_el0
+        add x8, x8, #:tprel_lo12_nc:counter
+        movz x9, #:tprel_g1:counter
+        movk x9, #:tprel_g0_nc:counter
+        .type helper,%function
+helper:
+        ret
+literal:
+        .xword 42
+        .data
+        .p2align 4
+value:
+        .xword _start
+        .word helper - .
+        .xword helper - .
+        .hword 9
+half:
+        .hword 1
+word:
+        .p2align 2
+        .word value
+        .p2align 4
+wide:
+        .xword 1, 2
+far:
+        .xword 3
+        .section .tbss,"awT",@nobits
+        .p2align 3
+counter:
+        .zero 8
+"#;
+
+    const ARM_SOURCE: &str = r#"
+        .syntax unified
+        .arm
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        bl helper
+        bl thumb_helper
+        blx thumb_helper
+        b helper
+        movw r0, #:lower16:value
+        movt r0, #:upper16:value
+        movw r1, #:lower16:value - .
+        movt r1, #:upper16:value - .
+        ldr r2, =value
+        .type helper,%function
+helper:
+        bx lr
+        .ltorg
+        .thumb
+        .type thumb_helper,%function
+thumb_helper:
+        bl thumb_other
+        blx helper
+        b.w thumb_other
+        movw r0, #:lower16:value
+        movt r0, #:upper16:value
+        beq.w thumb_other
+        .type thumb_other,%function
+thumb_other:
+        bx lr
+        .data
+value:
+        .long _start
+        .long helper - .
+        .long thumb_helper
+"#;
+
+    const AARCH64_FAR: &str = r#"
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        bl far_function
+        b far_function
+        bl near_function
+        .type near_function,%function
+near_function:
+        ret
+        .section .far,"ax",%progbits
+        .globl far_function
+        .type far_function,%function
+far_function:
+        bl _start
+        ret
+"#;
+
+    const ARM_V7_FAR: &str = r#"
+        .syntax unified
+        .eabi_attribute Tag_CPU_arch, 10
+        .eabi_attribute Tag_ARM_ISA_use, 1
+        .eabi_attribute Tag_THUMB_ISA_use, 2
+        .eabi_attribute Tag_ABI_VFP_args, 1
+        .arm
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        bl far_function
+        b far_function
+        .thumb
+        .type thumb_caller,%function
+thumb_caller:
+        bl far_thumb
+        b.w far_thumb
+        .section .far,"ax",%progbits
+        .thumb
+        .type far_thumb,%function
+far_thumb:
+        bl thumb_caller
+        bx lr
+        .arm
+        .globl far_function
+        .type far_function,%function
+far_function:
+        bx lr
+"#;
+
+    #[test]
+    fn branches_out_of_range_go_through_the_thunks_lld_makes() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("thunks");
+        for (label, triple, source, extra) in [
+            (
+                "aarch64-far",
+                "aarch64-linux-gnu",
+                AARCH64_FAR,
+                &["--section-start=.far=0x10000000", "-Ttext=0x210000"][..],
+            ),
+            (
+                "aarch64-near",
+                "aarch64-linux-gnu",
+                AARCH64_FAR,
+                &["--section-start=.far=0x1000000"][..],
+            ),
+            (
+                "arm-far",
+                "armv7a-linux-gnueabihf",
+                ARM_V7_FAR,
+                &["--section-start=.far=0x3000000", "-Ttext=0x210000"][..],
+            ),
+            ("arm-near", "armv7a-linux-gnueabihf", ARM_V7_FAR, &[][..]),
+            (
+                "arm-big-far",
+                "armebv7a-linux-gnueabi",
+                ARM_V7_FAR,
+                &["--section-start=.far=0x3000000", "-Ttext=0x210000"][..],
+            ),
+        ] {
+            assemble(&folder, label, triple, source);
+            let object = folder
+                .join(format!("{label}.o"))
+                .to_string_lossy()
+                .to_string();
+            compare_with_lld(&folder, &[object], extra, label);
+        }
+        finish(&folder);
+    }
+
+    #[test]
+    fn every_target_relocates_the_way_lld_does() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("targets");
+        for (label, triple, source, extra) in [
+            ("i386", "i386-linux-gnu", I386_SOURCE, &[][..]),
+            ("aarch64", "aarch64-linux-gnu", AARCH64_SOURCE, &[][..]),
+            (
+                "aarch64-big",
+                "aarch64_be-linux-gnu",
+                AARCH64_SOURCE,
+                &[][..],
+            ),
+            ("arm", "armv7a-linux-gnueabihf", ARM_SOURCE, &[][..]),
+            ("arm-big", "armebv7a-linux-gnueabi", ARM_SOURCE, &[][..]),
+            (
+                "x86-64",
+                "x86_64-linux-gnu",
+                STATIC_START,
+                &["-z", "max-page-size=16384"][..],
+            ),
+        ] {
+            assemble(&folder, label, triple, source);
+            let object = folder
+                .join(format!("{label}.o"))
+                .to_string_lossy()
+                .to_string();
+            compare_with_lld(&folder, &[object], extra, label);
+        }
+        finish(&folder);
     }
 
     #[test]
@@ -67025,7 +67345,7 @@ counter:
         assert_eq!(run.stdout, b"hello from omni\n");
         assert_eq!(run.stdout, reference.stdout);
         if std::env::var_os("APK_BUILDER_KEEP_LINKER_WORK").is_none() {
-            std::fs::remove_dir_all(&folder).ok();
+            finish(&folder);
         }
     }
 }

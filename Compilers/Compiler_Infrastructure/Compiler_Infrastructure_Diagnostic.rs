@@ -5,14 +5,8 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI004", "The program stopped at a trap."),
     ("EI005", "The program ran longer than it was allowed to."),
     ("EI006", "The program threw an exception nothing caught."),
-    (
-        "EI007",
-        "The program called a function the host does not provide.",
-    ),
-    (
-        "EI008",
-        "The program used more stack than it was allowed to.",
-    ),
+    ("EI007", "The program called a function the host does not provide."),
+    ("EI008", "The program used more stack than it was allowed to."),
     ("EI200", "The object file could not be read."),
     ("EI201", "The archive could not be read."),
     ("EI202", "The linker does not recognize this option."),
@@ -46,8 +40,15 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit."),
     ("EI232", "An initial executable thread-local relocation is used with an instruction it does not fit."),
     ("EI233", "A local dynamic thread-local relocation is not followed by the call it needs."),
+    ("EI234", "A relocation value is not aligned the way its field needs."),
+    ("EI235", "A relocation value cannot be encoded as an immediate."),
+    ("EI236", "Inputs disagree on how floating point arguments are passed."),
+    ("EI237", "Address assignment did not settle."),
+    ("EI238", "This branch cannot reach its target on the architecture the inputs describe."),
     ("EI251", "A common symbol is overridden."),
     ("EI252", "A common symbol is declared more than once."),
+    ("EI253", "A branch and link relocation does not switch between ARM and Thumb state."),
+    ("EI254", "The ARM attributes of an input could not be read."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
