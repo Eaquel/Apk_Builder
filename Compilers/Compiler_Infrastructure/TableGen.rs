@@ -5369,7 +5369,7 @@ impl RecordKeeper {
         self.type_name(field.field_type)
     }
 
-    fn write_field(&self, field: &RecordField, out: &mut String) {
+    pub fn write_field(&self, field: &RecordField, out: &mut String) {
         if field.kind == FieldKind::NonconcreteAllowed {
             out.push_str("field ");
         }
@@ -5548,6 +5548,14 @@ impl<'a> Parser<'a> {
 
     fn token(&self) -> Token {
         self.lexer.token
+    }
+
+    fn soft<T>(&mut self, outcome: Flow<T>) -> Flow<Option<T>> {
+        match outcome {
+            Ok(found) => Ok(Some(found)),
+            Err(stop) if self.keeper.stopped => Err(stop),
+            Err(_) => Ok(None),
+        }
     }
 
     fn recover(&mut self, outcome: Flow<()>) -> Flow<()> {
@@ -6513,10 +6521,13 @@ impl<'a> Parser<'a> {
 
     fn parse_range_piece(&mut self, ranges: &mut Vec<u32>, first: Option<Value>) -> Flow<()> {
         let value = match first {
-            Some(value) => value,
-            None => self.parse_value(None, None, NameMode::Value)?,
+            Some(value) => Some(value),
+            None => {
+                let parsed = self.parse_value(None, None, NameMode::Value);
+                self.soft(parsed)?
+            }
         };
-        let Some(start) = self.keeper.integer_of(value) else {
+        let Some(start) = value.and_then(|value| self.keeper.integer_of(value)) else {
             return self.token_error("expected integer or bitrange");
         };
         if start < 0 {
@@ -6526,8 +6537,9 @@ impl<'a> Parser<'a> {
         match self.token() {
             Token::Ellipsis | Token::Minus => {
                 self.lex();
-                let last = self.parse_value(None, None, NameMode::Value)?;
-                let Some(last) = self.keeper.integer_of(last) else {
+                let parsed = self.parse_value(None, None, NameMode::Value);
+                let last = self.soft(parsed)?;
+                let Some(last) = last.and_then(|last| self.keeper.integer_of(last)) else {
                     return self.token_error("expected integer value as end of range");
                 };
                 end = last;
@@ -8552,7 +8564,8 @@ impl<'a> Parser<'a> {
         let mut ranges = Vec::new();
         if self.token() == Token::LeftBrace {
             self.lex();
-            ranges = self.parse_range_list()?;
+            let parsed = self.parse_range_list();
+            ranges = self.soft(parsed)?.unwrap_or_default();
             if !self.consume(Token::RightBrace) {
                 return self.token_error("expected '}' at end of bit range list");
             }
@@ -8924,7 +8937,8 @@ impl<'a> Parser<'a> {
     fn parse_foreach(&mut self, multiclass: Option<usize>) -> Flow<()> {
         let location = self.location();
         self.lex();
-        let Some((iterator, list)) = self.parse_foreach_declaration()? else {
+        let declared = self.parse_foreach_declaration();
+        let Some((iterator, list)) = self.soft(declared)?.flatten() else {
             return self.token_error("expected declaration in for");
         };
         if !self.consume(Token::In) {
@@ -9400,6 +9414,7 @@ pub struct Reading<'a> {
     pub sources: SourceManager<'a>,
     pub keeper: RecordKeeper,
     pub dependencies: BTreeSet<String>,
+    pub parsed: bool,
     pub succeeded: bool,
 }
 
@@ -9409,6 +9424,118 @@ impl Reading<'_> {
         for message in &self.keeper.messages {
             out.push_str(&self.sources.render(message));
         }
+        out
+    }
+
+    fn short_location(&self, location: Location) -> String {
+        let (line, _) = self.sources.line_and_column(location);
+        let name = self
+            .sources
+            .buffers
+            .get(location.buffer as usize)
+            .map(|buffer| buffer.name.rsplit('/').next().unwrap_or("").to_string())
+            .unwrap_or_default();
+        format!("{name}:{line}")
+    }
+
+    fn detailed_record(&self, index: RecordIndex, class: bool, out: &mut String) {
+        let keeper = &self.keeper;
+        let record = keeper.record(index);
+        let name = keeper.record_name_text(index);
+        let shown = if name.is_empty() {
+            "\"\"".to_string()
+        } else {
+            name
+        };
+        let first = record.locations.first().copied().unwrap_or_default();
+        out.push_str(&format!("\n{shown}  |{}|\n", self.short_location(first)));
+        if class {
+            if record.template_arguments.is_empty() {
+                out.push_str("  Template args: (none)\n");
+            } else {
+                out.push_str("  Template args:\n");
+                for argument in &record.template_arguments {
+                    if let Some(at) = record.field(*argument) {
+                        out.push_str("    ");
+                        keeper.write_field(&record.fields[at], out);
+                        out.push_str(&format!(
+                            "  |{}|\n",
+                            self.short_location(record.fields[at].location)
+                        ));
+                    }
+                }
+            }
+        } else if record.locations.len() >= 2 {
+            out.push_str("  Defm sequence:");
+            for location in record.locations.iter().rev() {
+                out.push_str(&format!(" |{}|", self.short_location(*location)));
+            }
+            out.push('\n');
+        }
+        let superclasses = keeper.superclass_list(index);
+        if superclasses.is_empty() {
+            out.push_str("  Superclasses: (none)\n");
+        } else {
+            out.push_str("  Superclasses:");
+            for class in superclasses {
+                let class_name = keeper.record_name_text(class);
+                if record
+                    .superclasses
+                    .iter()
+                    .any(|(direct, _)| *direct == class)
+                {
+                    out.push_str(&format!(" {class_name}"));
+                } else {
+                    out.push_str(&format!(" ({class_name})"));
+                }
+            }
+            out.push('\n');
+        }
+        if record.fields.is_empty() {
+            out.push_str("  Fields: (none)\n");
+            return;
+        }
+        out.push_str("  Fields:\n");
+        for field in &record.fields {
+            if record.is_template_argument(field.name) {
+                continue;
+            }
+            out.push_str("    ");
+            keeper.write_field(field, out);
+            out.push_str(&format!("  |{}|\n", self.short_location(field.location)));
+        }
+    }
+
+    pub fn print_detailed_records(&self, input: &str) -> String {
+        let keeper = &self.keeper;
+        let mut out = format!("DETAILED RECORDS for file {input}\n");
+        let rule = "--------------------";
+        out.push_str(&format!(
+            "\n{rule} Global Variables ({}) {rule}\n\n",
+            keeper.globals.len()
+        ));
+        for (name, value) in &keeper.globals {
+            out.push_str(&format!("{name} = {}\n", keeper.text_of(*value)));
+        }
+        out.push_str(&format!(
+            "\n{rule} Classes ({}) {rule}\n",
+            keeper.classes.len()
+        ));
+        for class in keeper.classes.values() {
+            self.detailed_record(*class, true, &mut out);
+        }
+        out.push_str(&format!(
+            "\n{rule} Records ({}) {rule}\n",
+            keeper.definitions.len()
+        ));
+        for definition in keeper.definitions.values() {
+            self.detailed_record(*definition, false, &mut out);
+        }
+        out.push_str(&format!("\n{rule} Memory Allocation Stats {rule}\n"));
+        out.push_str(&format!(
+            "Number of records instantiated = {}\nNumber of anonymous records = {}\n",
+            keeper.record_counter, keeper.anonymous_counter
+        ));
         out
     }
 
@@ -9459,6 +9586,7 @@ pub fn read_records<'a>(
             },
             keeper,
             dependencies: BTreeSet::new(),
+            parsed: false,
             succeeded: false,
         };
     };
@@ -9493,12 +9621,14 @@ pub fn read_records<'a>(
         Err(Stop)
     };
     parser.absorb();
-    let succeeded = outcome.is_ok() && parser.keeper.errors == 0;
+    let parsed = outcome.is_ok();
+    let succeeded = parsed && parser.keeper.errors == 0;
     let Parser { lexer, keeper, .. } = parser;
     Reading {
         sources: lexer.sources,
         keeper,
         dependencies: lexer.dependencies,
+        parsed,
         succeeded,
     }
 }

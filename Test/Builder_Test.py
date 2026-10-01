@@ -39,8 +39,9 @@ VIBE_CODING = ROOT / "Vibe_Coding.rs"
 CORE_TESTS = TEST / "Builder_Test.rs"
 TEST_DRIVER = TEST / "Builder_Test.py"
 BASELINE = TEST / "Builder_Test_Baseline.json"
-REFERENCE_SUITES = ["bundles", "filecheck"]
-ORACLE_SUITES = ["regex-oracle"]
+REFERENCE_SUITES = ["bundles", "filecheck", "tablegen-lit"]
+ORACLE_SUITES = ["regex-oracle", "tablegen-oracle"]
+SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
 KOTLIN_SUITES = ["kotlin-omni"]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
@@ -891,7 +892,10 @@ def bundles_present() -> bool:
 def run_suites(names: list[str], threads: int | None = None) -> dict[str, dict]:
     """Every named suite, run once, read back from the lines it prints."""
     env = {"APK_BUILDER_SUITE_THREADS": str(threads)} if threads else {}
-    tests = [f"tests::reference_checks::suite_{name.replace('-', '_')}" for name in names]
+    tests = [
+        f"tests::{SUITE_HOMES.get(name, 'reference_checks')}::suite_{name.replace('-', '_')}"
+        for name in names
+    ]
     done = run(
         ["cargo", "test", "--locked", "--lib", "--", "--ignored", "--exact", *tests,
          "--nocapture", "--test-threads=1"],
@@ -964,6 +968,10 @@ def check_differential() -> str:
         raise Skip("cargo is not on this machine")
     if shutil.which("grep") is None or shutil.which("timeout") is None:
         raise Skip("grep or timeout is not on this machine")
+    if shutil.which("llvm-tblgen") is None:
+        raise Skip("llvm-tblgen is not on this machine")
+    if not bundles_present():
+        raise Skip("the reference bundles are not in this checkout")
     return hold_ground(run_suites(ORACLE_SUITES))
 
 def kotlin_standard_library() -> Path | None:
