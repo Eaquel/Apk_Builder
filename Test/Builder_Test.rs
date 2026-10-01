@@ -66460,6 +66460,7 @@ block0:
         let source = [
             include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs"),
             include_str!("../Compilers/Compiler_Infrastructure/Elf.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/Linker.rs"),
         ]
         .concat();
         let mut raised = BTreeSet::new();
@@ -66817,6 +66818,214 @@ value:
         }
         if checked == 0 {
             eprintln!("object file conformance: no system library is readable here");
+        }
+    }
+}
+
+mod linker_conformance {
+    use super::object_files::{assemble, tool_missing, work_folder};
+    use crate::compilers::linker::{link, LinkOutcome};
+    use std::path::Path;
+    use std::process::Command;
+
+    pub(super) fn link_on_disk(arguments: &[String]) -> LinkOutcome {
+        let outcome = link(arguments, &|path: &str| std::fs::read(path).ok());
+        for (path, bytes) in &outcome.outputs {
+            std::fs::write(path, bytes).expect("the output is written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        outcome
+    }
+
+    pub(super) fn describe(outcome: &LinkOutcome) -> String {
+        outcome
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                format!(
+                    "{} {} {:?}",
+                    diagnostic.code, diagnostic.message, diagnostic.context
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(super) fn structure(path: &Path) -> String {
+        let done = Command::new("llvm-readelf")
+            .args([
+                "--file-header",
+                "--sections",
+                "--program-headers",
+                "--symbols",
+                "--relocations",
+                "--dynamic",
+                "--wide",
+            ])
+            .arg(path)
+            .output()
+            .expect("llvm-readelf runs");
+        String::from_utf8_lossy(&done.stdout)
+            .lines()
+            .filter(|line| !line.contains("File:") && !line.trim_start().starts_with("ELF Header"))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(super) fn reference_link(arguments: &[String]) -> bool {
+        Command::new("ld.lld")
+            .args(arguments)
+            .output()
+            .map(|done| done.status.success())
+            .unwrap_or(false)
+    }
+
+    pub(super) fn first_difference(ours: &str, theirs: &str) -> Option<String> {
+        let ours: Vec<&str> = ours.lines().collect();
+        let theirs: Vec<&str> = theirs.lines().collect();
+        for index in 0..ours.len().max(theirs.len()) {
+            let left = ours.get(index).copied().unwrap_or("<missing>");
+            let right = theirs.get(index).copied().unwrap_or("<missing>");
+            if left != right && !(left.contains(".comment") && right.contains(".comment")) {
+                return Some(format!("line {index}\nours:   {left}\nld.lld: {right}"));
+            }
+        }
+        None
+    }
+
+    const STATIC_START: &str = r#"
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        movq $1, %rax
+        movq $1, %rdi
+        leaq message(%rip), %rsi
+        movq length(%rip), %rdx
+        syscall
+        call finish
+        .size _start, .-_start
+        .section .text.finish,"ax",@progbits
+        .type finish,@function
+finish:
+        movq $60, %rax
+        movq counter(%rip), %rdi
+        addq $35, %rdi
+        syscall
+        .size finish, .-finish
+        .section .rodata.str1.1,"aMS",@progbits,1
+message:
+        .asciz "hello from omni\n"
+        .data
+        .p2align 3
+length:
+        .quad 16
+        .bss
+        .p2align 3
+counter:
+        .quad 0
+"#;
+
+    pub(super) fn section_bytes(path: &Path, name: &str) -> Vec<u8> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        parsed
+            .section_named(name)
+            .map(|index| parsed.sections[index].data.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn merged_strings_and_constants_land_where_lld_puts_them() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("merge");
+        let mut source = String::from(".globl _start\n_start:\n ret\n");
+        for (file, offset) in [("first", 0usize), ("second", 7usize)] {
+            let mut text = source.clone();
+            if file == "second" {
+                text = String::new();
+            }
+            text.push_str(".section .rodata.str1.1,\"aMS\",@progbits,1\n");
+            for length in (0..300).step_by(3) {
+                let body: String = (0..length)
+                    .map(|position| {
+                        char::from(b'a' + ((position * 7 + length + offset) % 26) as u8)
+                    })
+                    .collect();
+                text.push_str(&format!(".asciz \"{body}\"\n"));
+            }
+            text.push_str(".section .rodata.cst8,\"aM\",@progbits,8\n");
+            for value in 0..40u64 {
+                text.push_str(&format!(".quad {}\n", value * 0x0101_0101 + offset as u64));
+            }
+            text.push_str(".section .rodata.str2.2,\"aMS\",@progbits,2\n.p2align 1\n");
+            for length in 0..12 {
+                let body: String = (0..length)
+                    .map(|position| format!("\\{:o}\\0", 65 + position))
+                    .collect();
+                text.push_str(&format!(".ascii \"{body}\\0\\0\"\n"));
+            }
+            assemble(&folder, file, "x86_64-linux-gnu", &text);
+        }
+        source.clear();
+        let first = folder.join("first.o").to_string_lossy().to_string();
+        let second = folder.join("second.o").to_string_lossy().to_string();
+        let ours = folder.join("ours").to_string_lossy().to_string();
+        let theirs = folder.join("theirs").to_string_lossy().to_string();
+        let outcome = link_on_disk(&[
+            first.clone(),
+            second.clone(),
+            "-o".to_string(),
+            ours.clone(),
+        ]);
+        assert!(outcome.succeeded(), "{}", describe(&outcome));
+        assert!(reference_link(&[
+            first,
+            second,
+            "-o".to_string(),
+            theirs.clone()
+        ]));
+        let difference =
+            first_difference(&structure(Path::new(&ours)), &structure(Path::new(&theirs)));
+        assert!(difference.is_none(), "{}", difference.unwrap_or_default());
+        assert_eq!(
+            section_bytes(Path::new(&ours), ".rodata"),
+            section_bytes(Path::new(&theirs), ".rodata")
+        );
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn a_static_program_without_libc_links_runs_and_matches_lld() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("static-start");
+        assemble(&folder, "start", "x86_64-linux-gnu", STATIC_START);
+        let object = folder.join("start.o").to_string_lossy().to_string();
+        let ours = folder.join("ours").to_string_lossy().to_string();
+        let theirs = folder.join("theirs").to_string_lossy().to_string();
+        let outcome = link_on_disk(&[object.clone(), "-o".to_string(), ours.clone()]);
+        assert!(outcome.succeeded(), "{}", describe(&outcome));
+        assert!(reference_link(&[object, "-o".to_string(), theirs.clone()]));
+        let difference =
+            first_difference(&structure(Path::new(&ours)), &structure(Path::new(&theirs)));
+        assert!(difference.is_none(), "{}", difference.unwrap_or_default());
+        let run = Command::new(&ours).output().expect("the program runs");
+        let reference = Command::new(&theirs).output().expect("the reference runs");
+        assert_eq!(run.status.code(), Some(35));
+        assert_eq!(run.status.code(), reference.status.code());
+        assert_eq!(run.stdout, b"hello from omni\n");
+        assert_eq!(run.stdout, reference.stdout);
+        if std::env::var_os("APK_BUILDER_KEEP_LINKER_WORK").is_none() {
+            std::fs::remove_dir_all(&folder).ok();
         }
     }
 }

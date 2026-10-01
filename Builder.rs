@@ -27,6 +27,8 @@ pub mod compilers {
     pub mod kotlin_diagnostic;
     #[path = "Compilers/Kotlin/Kotlin_Fixer.rs"]
     pub mod kotlin_fixer;
+    #[path = "Compilers/Compiler_Infrastructure/Linker.rs"]
+    pub mod linker;
     #[path = "Compilers/Rust.rs"]
     pub mod rust;
 }
