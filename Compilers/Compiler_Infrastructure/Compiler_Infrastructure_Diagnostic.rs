@@ -52,10 +52,20 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI243", "A symbol names a version that is not defined."),
     ("EI244", "A version script assigns a symbol to a second version."),
     ("EI245", "The wildcard pattern * is used more than once in the version script."),
+    ("EI246", "The module definition file could not be read."),
+    ("EI247", "The linker ignores an option it does not recognize."),
+    ("EI248", "A relocation points outside its section or at a discarded section."),
+    ("EI249", "The subsystem cannot be inferred and must be given."),
     ("EI251", "A common symbol is overridden."),
     ("EI252", "A common symbol is declared more than once."),
     ("EI253", "A branch and link relocation does not switch between ARM and Thumb state."),
     ("EI254", "The ARM attributes of an input could not be read."),
+    ("EI255", "Two exports use the same ordinal."),
+    ("EI256", "A symbol is exported more than once."),
+    ("EI257", "Literal .edata sections override the exports."),
+    ("EI258", "The target machine was not given, so x64 is assumed."),
+    ("EI259", "A locally defined symbol is imported."),
+    ("EI260", "An input is not compatible with safe exception handlers."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

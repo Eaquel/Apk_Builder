@@ -68367,4 +68367,314 @@ table:
         assert!(parse_module_definition("BOGUS\n", machine::AMD64, false, false).is_err());
         assert_eq!(image_check_sum(&[1, 0, 2, 0, 3]), 6 + 5);
     }
+
+    const LINK_PROGRAM: &str = r#"
+        .text
+        .globl main
+main:
+        call weak_function
+        call alternate
+        call shared_function
+        call *__imp_ExitProcess(%rip)
+        leaq associated_data(%rip), %rax
+        movq table(%rip), %rcx
+        movl common_value(%rip), %edx
+        ret
+        .weak weak_function
+        .set weak_function, default_weak
+        .globl default_weak
+default_weak:
+        ret
+        .section .text$shared,"xr",discard,shared_function
+        .globl shared_function
+shared_function:
+        ret
+        .section .data$associated,"dw",associative,shared_function
+associated_data:
+        .quad 1
+        .data
+table:
+        .quad main
+        .quad message
+        .section .rdata,"dr"
+message:
+        .asciz "message"
+        .comm common_value, 4, 2
+        .section .other,"dw"
+        .quad 42
+        .section .drectve,"yn"
+        .ascii " /alternatename:alternate=default_weak /include:forced"
+"#;
+
+    const LINK_LIBRARY_MEMBER: &str = r#"
+        .section .text$shared,"xr",discard,shared_function
+        .globl shared_function
+shared_function:
+        nop
+        ret
+        .section .data$associated,"dw",associative,shared_function
+        .quad 2
+        .text
+        .globl forced
+forced:
+        ret
+        .globl weak_function
+weak_function:
+        nop
+        nop
+        ret
+        .globl unused_function
+unused_function:
+        ret
+"#;
+
+    const LINK_SYSTEM_LIBRARY: &str = r#"
+        .text
+        .globl ExitProcess
+ExitProcess:
+        ret
+"#;
+
+    const LINK_THREAD_LOCAL: &str = r#"
+        .data
+        .globl _tls_index
+_tls_index:
+        .long 0
+        .section .tls,"dw"
+        .globl _tls_start
+_tls_start:
+        .byte 0
+        .section .tls$value,"dw"
+        .p2align 4
+        .globl thread_value
+thread_value:
+        .long 7
+        .section .tls$ZZZ,"dw"
+        .globl _tls_end
+_tls_end:
+        .byte 0
+        .section .rdata$T,"dr"
+        .p2align 3
+        .globl _tls_used
+_tls_used:
+        .quad _tls_start
+        .quad _tls_end
+        .quad _tls_index
+        .quad 0
+        .long 0
+        .long 0
+"#;
+
+    fn assemble(folder: &std::path::Path, name: &str, triple: &str, text: &str) {
+        let source = folder.join(format!("{name}.s"));
+        std::fs::write(&source, text).expect("the source is written");
+        let done = Command::new("llvm-mc")
+            .args(["-filetype=obj", "-triple", triple])
+            .arg(&source)
+            .arg("-o")
+            .arg(folder.join(format!("{name}.obj")))
+            .status()
+            .expect("llvm-mc runs");
+        assert!(done.success(), "{name} assembles");
+    }
+
+    fn run_in(folder: &std::path::Path, tool: &str, arguments: &[&str]) -> bool {
+        Command::new(tool)
+            .current_dir(folder)
+            .args(arguments)
+            .output()
+            .expect("the tool runs")
+            .status
+            .success()
+    }
+
+    fn link_both(folder: &std::path::Path, label: &str, extension: &str, arguments: &[&str]) {
+        use crate::compilers::linker::link_coff;
+        let reference = format!("/out:reference/{label}.{extension}");
+        let mut lld_arguments: Vec<&str> = vec![reference.as_str(), "/timestamp:0"];
+        lld_arguments.extend_from_slice(arguments);
+        let lld_succeeded = run_in(folder, "lld-link", &lld_arguments);
+        let mut ours: Vec<String> = vec![
+            format!("/out:ours/{label}.{extension}"),
+            "/timestamp:0".to_string(),
+        ];
+        ours.extend(arguments.iter().map(|argument| argument.to_string()));
+        let outcome = link_coff(&ours, &|path: &str| std::fs::read(folder.join(path)).ok());
+        assert_eq!(
+            outcome.succeeded(),
+            lld_succeeded,
+            "{label}: lld-link and our linker agree on success: {:?}",
+            outcome.diagnostics
+        );
+        if !lld_succeeded {
+            return;
+        }
+        let expected = std::fs::read(folder.join(format!("reference/{label}.{extension}")))
+            .expect("lld-link wrote the image");
+        let produced = outcome
+            .outputs
+            .iter()
+            .find(|(path, _)| path == &format!("ours/{label}.{extension}"))
+            .map(|(_, bytes)| bytes.clone())
+            .expect("our linker wrote the image");
+        assert!(
+            expected == produced,
+            "{label}: the image differs from the one lld-link writes"
+        );
+        let parsed = crate::compilers::pe::PeImage::parse(&produced).expect("the image parses");
+        assert!(!parsed.sections.is_empty());
+    }
+
+    #[test]
+    fn coff_programs_and_libraries_link_byte_for_byte_like_lld_link() {
+        if tool_missing("llvm-mc") || tool_missing("lld-link") || tool_missing("llvm-lib") {
+            return;
+        }
+        let folder = work_folder("coff-link");
+        std::fs::create_dir_all(folder.join("reference")).expect("the reference folder");
+        let triple = "x86_64-windows-msvc";
+        assemble(&folder, "program", triple, LINK_PROGRAM);
+        assemble(&folder, "member", triple, LINK_LIBRARY_MEMBER);
+        assemble(&folder, "system", triple, LINK_SYSTEM_LIBRARY);
+        assemble(&folder, "thread", triple, LINK_THREAD_LOCAL);
+        assert!(run_in(
+            &folder,
+            "llvm-lib",
+            &["/out:member.lib", "member.obj"]
+        ));
+        std::fs::write(
+            folder.join("kernel32.def"),
+            "LIBRARY kernel32.dll\nEXPORTS\n  ExitProcess\n",
+        )
+        .expect("the definition is written");
+        assert!(run_in(
+            &folder,
+            "lld-link",
+            &[
+                "/dll",
+                "/noentry",
+                "/def:kernel32.def",
+                "system.obj",
+                "/out:kernel32.dll",
+                "/implib:kernel32.lib"
+            ]
+        ));
+        let console = ["/entry:main", "/subsystem:console"];
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            (
+                "archive",
+                "exe",
+                vec!["program.obj", "member.lib", "kernel32.lib"],
+            ),
+            (
+                "objects",
+                "exe",
+                vec!["program.obj", "member.obj", "thread.obj", "kernel32.lib"],
+            ),
+            (
+                "reversed",
+                "exe",
+                vec!["member.obj", "program.obj", "kernel32.lib", "/opt:noref"],
+            ),
+            (
+                "no-folding",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.obj",
+                    "kernel32.lib",
+                    "/opt:noref,noicf",
+                ],
+            ),
+            (
+                "merged",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/merge:.other=.text",
+                    "/merge:.absent=.text",
+                ],
+            ),
+            (
+                "sections",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/section:.other,RW",
+                    "/align:0x2000",
+                    "/filealign:0x400",
+                ],
+            ),
+            (
+                "fixed",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/fixed",
+                    "/dynamicbase:no",
+                ],
+            ),
+            (
+                "reproducible",
+                "exe",
+                vec!["program.obj", "member.lib", "kernel32.lib", "/Brepro"],
+            ),
+            (
+                "headers",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/stack:0x200000,0x2000",
+                    "/heap:0x300000",
+                    "/version:3.4",
+                    "/highentropyva:no",
+                    "/nxcompat:no",
+                    "/tsaware:no",
+                    "/osversion:10.0",
+                    "/release",
+                ],
+            ),
+            ("undefined", "exe", vec!["program.obj", "kernel32.lib"]),
+        ];
+        for (label, extension, inputs) in &cases {
+            let mut arguments: Vec<&str> = console.to_vec();
+            arguments.extend(inputs.iter().copied());
+            link_both(&folder, label, extension, &arguments);
+        }
+        link_both(
+            &folder,
+            "library",
+            "dll",
+            &[
+                "/dll",
+                "/noentry",
+                "/noimplib",
+                "member.obj",
+                "/export:forced",
+                "/export:weak_function,@5,NONAME",
+                "/export:forward=other.dll.function",
+                "/export:shared_function,PRIVATE",
+            ],
+        );
+        link_both(
+            &folder,
+            "subsystem",
+            "exe",
+            &[
+                "/entry:main",
+                "/subsystem:efi_application",
+                "program.obj",
+                "member.lib",
+                "kernel32.lib",
+            ],
+        );
+    }
 }

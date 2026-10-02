@@ -431,12 +431,15 @@ impl CoffSymbol {
     }
 
     pub fn is_section_definition(&self) -> bool {
-        self.storage_class == storage_class::STATIC && self.auxiliary_count > 0 && self.value == 0
+        let appdomain_global = self.storage_class == storage_class::EXTERNAL
+            && self.section_number == section_number::ABSOLUTE;
+        self.auxiliary_count > 0
+            && (appdomain_global || self.storage_class == storage_class::STATIC)
     }
 
     pub fn section_definition(&self, big: bool) -> Option<SectionDefinition> {
         let aux = &self.auxiliary;
-        if aux.len() < 18 {
+        if aux.len() < 18 || self.storage_class != storage_class::STATIC {
             return None;
         }
         let low = read_u16(aux, 12)?;
