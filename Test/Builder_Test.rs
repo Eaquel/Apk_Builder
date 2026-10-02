@@ -67348,4 +67348,521 @@ far_function:
             finish(&folder);
         }
     }
+
+    const LIBRARY_SOURCE: &str = r#"
+        .text
+        .globl greet
+        .type greet,@function
+greet:
+        movq shared_counter@GOTPCREL(%rip), %rax
+        movq (%rax), %rax
+        addq $7, %rax
+        call twice@PLT
+        ret
+        .size greet, .-greet
+        .globl twice
+        .type twice,@function
+twice:
+        leaq (%rax,%rax), %rax
+        ret
+        .size twice, .-twice
+        .data
+        .globl shared_counter
+        .type shared_counter,@object
+        .p2align 3
+shared_counter:
+        .quad 7
+        .size shared_counter, 8
+        .globl table
+        .type table,@object
+table:
+        .quad greet
+        .quad twice
+        .quad shared_counter + 8
+        .size table, 24
+"#;
+
+    const PROGRAM_SOURCE: &str = r#"
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        call greet@PLT
+        movq shared_counter@GOTPCREL(%rip), %rdi
+        addq (%rdi), %rax
+        movq %rax, %rdi
+        leaq pointers(%rip), %rsi
+        movq $60, %rax
+        syscall
+        .size _start, .-_start
+        .data
+        .p2align 3
+pointers:
+        .quad greet
+        .quad table
+"#;
+
+    #[test]
+    fn shared_objects_and_position_independent_programs_match_lld() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("dynamic");
+        assemble(&folder, "library", "x86_64-linux-gnu", LIBRARY_SOURCE);
+        assemble(&folder, "program", "x86_64-linux-gnu", PROGRAM_SOURCE);
+        let library = folder.join("library.o").to_string_lossy().to_string();
+        let program = folder.join("program.o").to_string_lossy().to_string();
+        compare_with_lld(
+            &folder,
+            std::slice::from_ref(&library),
+            &["-shared", "-soname", "libomni.so"],
+            "shared",
+        );
+        let shared = folder.join("libomni.so").to_string_lossy().to_string();
+        assert!(reference_link(&[
+            library,
+            "-shared".to_string(),
+            "-soname".to_string(),
+            "libomni.so".to_string(),
+            "-o".to_string(),
+            shared.clone(),
+        ]));
+        compare_with_lld(
+            &folder,
+            &[program.clone(), shared.clone()],
+            &["-pie"],
+            "pie",
+        );
+        compare_with_lld(&folder, &[program, shared], &[], "executable");
+        finish(&folder);
+    }
+
+    #[test]
+    fn build_identifiers_hash_the_output_the_way_lld_does() {
+        use crate::compilers::linker::{blake3, chunked_hash, xxh3_64};
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("build-id");
+        let mut source = String::from(".globl _start\n_start:\n ret\n.data\n");
+        for value in 0..300_000u32 {
+            source.push_str(&format!(".long {}\n", value.wrapping_mul(2_654_435_761)));
+        }
+        assemble(&folder, "start", "x86_64-linux-gnu", &source);
+        let object = folder.join("start.o").to_string_lossy().to_string();
+        let identifier_of = |path: &Path| -> (Vec<u8>, usize) {
+            let bytes = std::fs::read(path).expect("the output is read");
+            let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+            let index = parsed
+                .section_named(".note.gnu.build-id")
+                .expect("a build identifier note exists");
+            let at = parsed.sections[index].offset as usize + 16;
+            let length = parsed.sections[index].size as usize - 16;
+            (bytes[at..at + length].to_vec(), at)
+        };
+        for (style, size) in [("fast", 8usize), ("md5", 16), ("sha1", 20)] {
+            let recompute = |bytes: &[u8]| -> Vec<u8> {
+                match style {
+                    "fast" => chunked_hash(bytes, size, &|chunk: &[u8]| {
+                        xxh3_64(chunk).to_le_bytes().to_vec()
+                    }),
+                    _ => chunked_hash(bytes, size, &|chunk: &[u8]| blake3(chunk)[..size].to_vec()),
+                }
+            };
+            for linker in ["ours", "theirs"] {
+                let output = folder.join(format!("{style}-{linker}"));
+                let arguments = vec![
+                    object.clone(),
+                    format!("--build-id={style}"),
+                    "-o".to_string(),
+                    output.to_string_lossy().to_string(),
+                ];
+                if linker == "ours" {
+                    let outcome = link_on_disk(&arguments);
+                    assert!(outcome.succeeded(), "{}", describe(&outcome));
+                } else {
+                    assert!(reference_link(&arguments));
+                }
+                let (identifier, at) = identifier_of(&output);
+                let mut bytes = std::fs::read(&output).expect("the output is read");
+                bytes[at..at + identifier.len()].fill(0);
+                assert_eq!(recompute(&bytes), identifier, "{style} {linker}");
+            }
+        }
+        finish(&folder);
+    }
+
+    const LLD_18_DIVERGENCES: &[&str] = &[
+        "lld main adds a nameless STT_FILE symbol in front of localized symbols",
+        "lld main writes version index 0 for undefined symbols in .gnu.version",
+        "lld main marks a needed version weak when every reference to it is weak",
+    ];
+
+    fn host_file(name: &str) -> Option<String> {
+        let done = Command::new("gcc")
+            .arg(format!("-print-file-name={name}"))
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&done.stdout).trim().to_string();
+        if path.contains('/') && Path::new(&path).exists() {
+            std::fs::canonicalize(&path)
+                .ok()
+                .map(|path| path.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn allocated_layout(path: &Path) -> Vec<String> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        parsed
+            .sections
+            .iter()
+            .filter(|section| section.flags & crate::compilers::elf::section_flag::ALLOCATE != 0)
+            .map(|section| {
+                format!(
+                    "{} {} {:x} {:x} {:x} {:x} {} {} {} {}",
+                    section.name,
+                    section.kind,
+                    section.flags,
+                    section.address,
+                    section.offset,
+                    section.size,
+                    section.link,
+                    section.info,
+                    section.alignment,
+                    section.entry_size
+                )
+            })
+            .collect()
+    }
+
+    fn symbol_multiset(path: &Path) -> Vec<String> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        let Some(table) = parsed.symbol_table() else {
+            return Vec::new();
+        };
+        let mut symbols: Vec<String> = parsed
+            .symbols(table)
+            .expect("the symbols parse")
+            .into_iter()
+            .skip(1)
+            .filter(|symbol| {
+                !(symbol.kind == crate::compilers::elf::symbol_type::FILE && symbol.name.is_empty())
+            })
+            .map(|symbol| {
+                format!(
+                    "{} {:x} {} {} {} {} {}",
+                    symbol.name,
+                    symbol.value,
+                    symbol.size,
+                    symbol.binding,
+                    symbol.kind,
+                    symbol.other,
+                    symbol.section
+                )
+            })
+            .collect();
+        symbols.sort();
+        symbols
+    }
+
+    fn compare_dynamic_with_lld_18(ours: &Path, theirs: &Path, label: &str) {
+        let view = |path: &Path| -> String {
+            let done = Command::new("llvm-readelf")
+                .args([
+                    "--program-headers",
+                    "--dynamic",
+                    "--relocations",
+                    "--dyn-syms",
+                    "--wide",
+                ])
+                .arg(path)
+                .output()
+                .expect("llvm-readelf runs");
+            String::from_utf8_lossy(&done.stdout)
+                .lines()
+                .filter(|line| !line.contains("File:"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let difference = first_difference(&view(ours), &view(theirs));
+        assert!(
+            difference.is_none(),
+            "{label}: {}",
+            difference.unwrap_or_default()
+        );
+        assert_eq!(allocated_layout(ours), allocated_layout(theirs), "{label}");
+        assert_eq!(
+            symbol_multiset(ours),
+            symbol_multiset(theirs),
+            "{label}: {}",
+            LLD_18_DIVERGENCES[0]
+        );
+        let left = allocated_bytes(ours);
+        let right = allocated_bytes(theirs);
+        for ((name, ours_bytes), (_, theirs_bytes)) in left.iter().zip(&right) {
+            match name.as_str() {
+                ".note.gnu.build-id" => assert_eq!(ours_bytes.len(), theirs_bytes.len()),
+                ".gnu.version" => {
+                    for (position, (left, right)) in
+                        ours_bytes.chunks(2).zip(theirs_bytes.chunks(2)).enumerate()
+                    {
+                        assert!(
+                            left == right || (left == [0, 0] && right == [1, 0]),
+                            "{label}: entry {position}: {}",
+                            LLD_18_DIVERGENCES[1]
+                        );
+                    }
+                }
+                ".gnu.version_r" => {
+                    let needs = |path: &Path| {
+                        let bytes = std::fs::read(path).expect("the output is read");
+                        let parsed = crate::compilers::elf::ElfFile::parse(&bytes)
+                            .expect("the output parses");
+                        let mut needs = parsed.version_needs().expect("the needs parse");
+                        for need in &mut needs {
+                            for entry in &mut need.entries {
+                                entry.flags &= !crate::compilers::elf::version_flag::WEAK;
+                            }
+                        }
+                        needs
+                    };
+                    assert_eq!(
+                        needs(ours),
+                        needs(theirs),
+                        "{label}: {}",
+                        LLD_18_DIVERGENCES[2]
+                    );
+                }
+                _ => assert!(
+                    ours_bytes == theirs_bytes,
+                    "{label}: section {name} differs"
+                ),
+            }
+        }
+    }
+
+    const HELLO_SOURCE: &str = "#include <stdio.h>\nint main(int count, char **values) { printf(\"hello %d %s\\n\", count, values[0] ? \"there\" : \"nobody\"); return 3; }\n";
+
+    const SHARED_SOURCE: &str = "int counter = 5;\n__thread int local_tls = 3;\nstatic int hidden_helper(int value) { return value * 3; }\nint shared_add(int value) { counter += value; local_tls += 1; return hidden_helper(counter) + local_tls; }\nconst char *shared_name(void) { return \"omni-library\"; }\n";
+
+    const USER_SOURCE: &str = "#include <stdio.h>\nextern int counter;\nint shared_add(int);\nconst char *shared_name(void);\nint main(void) { int result = shared_add(2); printf(\"%s %d %d\\n\", shared_name(), result, counter); return result & 0xff; }\n";
+
+    #[test]
+    fn glibc_programs_and_shared_libraries_run_like_lld_ones() {
+        if !cfg!(all(target_arch = "x86_64", target_os = "linux"))
+            || tool_missing("clang")
+            || tool_missing("gcc")
+            || tool_missing("ld.lld")
+            || tool_missing("llvm-readelf")
+        {
+            return;
+        }
+        let files: Vec<Option<String>> = [
+            "Scrt1.o",
+            "crt1.o",
+            "crti.o",
+            "crtn.o",
+            "crtbeginS.o",
+            "crtendS.o",
+            "crtbegin.o",
+            "crtend.o",
+            "libc.so",
+        ]
+        .iter()
+        .map(|name| host_file(name))
+        .collect();
+        if files.iter().any(Option::is_none) {
+            if std::env::var_os("APK_BUILDER_REQUIRE_LINKER_CONFORMANCE").is_some() {
+                panic!("the glibc start files are missing");
+            }
+            return;
+        }
+        let files: Vec<String> = files.into_iter().flatten().collect();
+        let [start_pie, start, initial, final_part, begin_shared, end_shared, begin, end, libc] =
+            &files[..]
+        else {
+            return;
+        };
+        let folder_of = |path: &str| {
+            Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+        let folder = work_folder("glibc");
+        let compile = |name: &str, source: &str, flags: &[&str]| -> String {
+            let source_path = folder.join(format!("{name}.c"));
+            std::fs::write(&source_path, source).expect("the source is written");
+            let object = folder.join(format!("{name}.o"));
+            let done = Command::new("clang")
+                .args(["-c", "-O1"])
+                .args(flags)
+                .arg(&source_path)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .expect("clang runs");
+            assert!(done.success());
+            object.to_string_lossy().to_string()
+        };
+        let hello = compile("hello", HELLO_SOURCE, &["-fPIE"]);
+        let shared = compile("shared", SHARED_SOURCE, &["-fPIC"]);
+        let user_pie = compile("user-pie", USER_SOURCE, &["-fPIE"]);
+        let user_fixed = compile("user-fixed", USER_SOURCE, &["-fno-pic"]);
+        let mut common: Vec<String> = [
+            "-z",
+            "relro",
+            "--hash-style=gnu",
+            "--eh-frame-hdr",
+            "-m",
+            "elf_x86_64",
+        ]
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+        let mut folders = vec![
+            folder_of(begin_shared),
+            folder_of(start_pie),
+            folder_of(libc),
+        ];
+        folders.dedup();
+        for path in folders {
+            common.push(format!("-L{path}"));
+        }
+        let libraries: Vec<String> = [
+            "-lgcc",
+            "--as-needed",
+            "-lgcc_s",
+            "--no-as-needed",
+            "-lc",
+            "-lgcc",
+            "--as-needed",
+            "-lgcc_s",
+            "--no-as-needed",
+        ]
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+        let program = |start_file: &str,
+                       begin_file: &str,
+                       end_file: &str,
+                       pie: bool,
+                       inputs: &[String]|
+         -> Vec<String> {
+            let mut arguments = common.clone();
+            if pie {
+                arguments.push("-pie".to_string());
+            }
+            arguments.extend([
+                "-dynamic-linker".to_string(),
+                "/lib64/ld-linux-x86-64.so.2".to_string(),
+                start_file.to_string(),
+                initial.clone(),
+                begin_file.to_string(),
+            ]);
+            arguments.extend(inputs.iter().cloned());
+            arguments.extend(libraries.iter().cloned());
+            arguments.extend([end_file.to_string(), final_part.clone()]);
+            arguments
+        };
+        let run_pair =
+            |label: &str, arguments: &[String], library_folder: Option<(&Path, &Path)>| {
+                let ours = folder.join(format!("{label}-ours"));
+                let theirs = folder.join(format!("{label}-theirs"));
+                let mut ours_arguments = arguments.to_vec();
+                ours_arguments.extend(["-o".to_string(), ours.to_string_lossy().to_string()]);
+                let mut theirs_arguments = arguments.to_vec();
+                theirs_arguments.extend(["-o".to_string(), theirs.to_string_lossy().to_string()]);
+                let outcome = link_on_disk(&ours_arguments);
+                assert!(outcome.succeeded(), "{label}: {}", describe(&outcome));
+                assert!(reference_link(&theirs_arguments), "{label}: ld.lld refused");
+                compare_dynamic_with_lld_18(&ours, &theirs, label);
+                if let Some((ours_libraries, theirs_libraries)) = library_folder {
+                    let run = Command::new(&ours)
+                        .env("LD_LIBRARY_PATH", ours_libraries)
+                        .output()
+                        .expect("the program runs");
+                    let reference = Command::new(&theirs)
+                        .env("LD_LIBRARY_PATH", theirs_libraries)
+                        .output()
+                        .expect("the reference runs");
+                    assert_eq!(run.status.code(), reference.status.code(), "{label}");
+                    assert_eq!(run.stdout, reference.stdout, "{label}");
+                    (run.status.code(), run.stdout)
+                } else {
+                    (None, Vec::new())
+                }
+            };
+        let empty = folder.join("none");
+        let hello_arguments = program(start_pie, begin_shared, end_shared, true, &[hello]);
+        let (code, output) = run_pair("hello", &hello_arguments, Some((&empty, &empty)));
+        assert_eq!(code, Some(3));
+        assert!(String::from_utf8_lossy(&output).starts_with("hello 1 there"));
+        let ours_libraries = folder.join("ours-libraries");
+        let theirs_libraries = folder.join("theirs-libraries");
+        std::fs::create_dir_all(&ours_libraries).expect("the folder is made");
+        std::fs::create_dir_all(&theirs_libraries).expect("the folder is made");
+        let mut library_arguments = common.clone();
+        library_arguments.extend([
+            "-shared".to_string(),
+            "-soname".to_string(),
+            "libomni.so".to_string(),
+            initial.clone(),
+            begin_shared.clone(),
+            shared,
+        ]);
+        library_arguments.extend(libraries.iter().cloned());
+        library_arguments.extend([end_shared.clone(), final_part.clone()]);
+        run_pair("library", &library_arguments, None);
+        std::fs::copy(
+            folder.join("library-ours"),
+            ours_libraries.join("libomni.so"),
+        )
+        .expect("the library is placed");
+        std::fs::copy(
+            folder.join("library-theirs"),
+            theirs_libraries.join("libomni.so"),
+        )
+        .expect("the library is placed");
+        let ours_library = ours_libraries
+            .join("libomni.so")
+            .to_string_lossy()
+            .to_string();
+        for (label, start_file, begin_file, end_file, pie, object) in [
+            (
+                "user-pie",
+                start_pie,
+                begin_shared,
+                end_shared,
+                true,
+                &user_pie,
+            ),
+            ("user-fixed", start, begin, end, false, &user_fixed),
+        ] {
+            let arguments = program(
+                start_file,
+                begin_file,
+                end_file,
+                pie,
+                &[object.clone(), ours_library.clone()],
+            );
+            let (code, output) = run_pair(
+                label,
+                &arguments,
+                Some((&ours_libraries, &theirs_libraries)),
+            );
+            assert_eq!(code, Some(25), "{label}");
+            assert_eq!(
+                String::from_utf8_lossy(&output),
+                "omni-library 25 7\n",
+                "{label}"
+            );
+        }
+        finish(&folder);
+    }
 }

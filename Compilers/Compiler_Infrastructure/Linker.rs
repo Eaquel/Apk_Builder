@@ -123,6 +123,13 @@ pub struct Options {
     pub copy_relocations: bool,
     pub origin: bool,
     pub no_delete: bool,
+    pub load_globally: bool,
+    pub initialize_first: bool,
+    pub interpose: bool,
+    pub no_default_library: bool,
+    pub no_dynamic_open: bool,
+    pub read_only_dynamic: bool,
+    pub combine_relocations: bool,
     pub initializer: Option<String>,
     pub finalizer: Option<String>,
     pub version_script: Vec<String>,
@@ -190,6 +197,13 @@ impl Default for Options {
             copy_relocations: true,
             origin: false,
             no_delete: false,
+            load_globally: false,
+            initialize_first: false,
+            interpose: false,
+            no_default_library: false,
+            no_dynamic_open: false,
+            read_only_dynamic: false,
+            combine_relocations: true,
             initializer: None,
             finalizer: None,
             version_script: Vec::new(),
@@ -238,6 +252,83 @@ pub fn not_supported(feature: &str) -> Diagnostic {
         "The linker does not support what this input asks for yet.",
     )
     .with_context(format!("Feature: {feature}"))
+}
+
+pub fn script_tokens(text: &str) -> Result<Vec<String>, &'static str> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut at = 0usize;
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || b"_.$/\\~=+[]*?-!^:".contains(&byte);
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if byte.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        if bytes[at..].starts_with(b"/*") {
+            match text[at + 2..].find("*/") {
+                Some(end) => at += end + 4,
+                None => return Err("unclosed comment in a linker script"),
+            }
+            continue;
+        }
+        if byte == b'#' {
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            match text[at + 1..].find('"') {
+                Some(end) => {
+                    tokens.push(text[at..at + end + 2].to_string());
+                    at += end + 2;
+                }
+                None => return Err("unclosed quote"),
+            }
+            continue;
+        }
+        let mut end = at;
+        while end < bytes.len() && word(bytes[end]) {
+            end += 1;
+        }
+        if end == at {
+            end = at + 1;
+        }
+        tokens.push(text[at..end].to_string());
+        at = end;
+    }
+    Ok(tokens)
+}
+
+fn unquote(token: &str) -> String {
+    if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
+        token[1..token.len() - 1].to_string()
+    } else {
+        token.to_string()
+    }
+}
+
+fn skip_parenthesized(tokens: &[String], at: usize) -> usize {
+    if tokens.get(at).map(String::as_str) != Some("(") {
+        return at;
+    }
+    let mut depth = 0usize;
+    let mut position = at;
+    while position < tokens.len() {
+        match tokens[position].as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return position + 1;
+                }
+            }
+            _ => {}
+        }
+        position += 1;
+    }
+    position
 }
 
 pub fn parse_number(text: &str) -> Option<u64> {
@@ -622,12 +713,15 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             }
             continue;
         }
-        if let Some(value) = option_value(&mut cursor, argument, &["--build-id"])? {
-            options.build_identifier = parse_build_identifier(&value)?;
+        if argument == "--build-id" || argument == "-build-id" {
+            options.build_identifier = BuildIdentifier::Fast;
             continue;
         }
-        if argument == "--build-id" {
-            options.build_identifier = BuildIdentifier::Fast;
+        if let Some(value) = argument
+            .strip_prefix("--build-id=")
+            .or_else(|| argument.strip_prefix("-build-id="))
+        {
+            options.build_identifier = parse_build_identifier(value)?;
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--dynamic-linker", "-I"])? {
@@ -875,6 +969,14 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "nocopyreloc" => options.copy_relocations = false,
         "origin" => options.origin = true,
         "nodelete" => options.no_delete = true,
+        "global" => options.load_globally = true,
+        "initfirst" => options.initialize_first = true,
+        "interpose" => options.interpose = true,
+        "nodefaultlib" => options.no_default_library = true,
+        "nodlopen" => options.no_dynamic_open = true,
+        "rodynamic" => options.read_only_dynamic = true,
+        "combreloc" => options.combine_relocations = true,
+        "nocombreloc" => options.combine_relocations = false,
         "defs" => options.no_undefined = true,
         "undefs" => options.no_undefined = false,
         "nognustack" | "noexecstack-ignored" => {}
@@ -1444,9 +1546,33 @@ pub struct InputFile {
     pub as_needed: bool,
     pub needed_libraries: Vec<String>,
     pub version_names: Vec<String>,
+    pub version_definitions: Vec<Option<(String, u32)>>,
+    pub version_need_information: Vec<(u16, bool)>,
     pub elf_symbols: Vec<elf::Symbol>,
     pub executable_stack_requested: bool,
     pub and_features: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct FramePiece {
+    pub input_offset: u64,
+    pub size: u64,
+    pub is_common_information: bool,
+    pub first_relocation: Option<usize>,
+    pub output_offset: Option<u64>,
+    pub record: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FrameRecord {
+    pub common_information: (SectionIndex, usize),
+    pub descriptions: Vec<(SectionIndex, usize)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VersionNeedOutput {
+    pub file_name: u32,
+    pub entries: Vec<(u32, u16, bool, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1707,6 +1833,15 @@ pub struct Context<'s> {
     pub symbol_table: Vec<SymbolIndex>,
     pub symbol_table_first_global: usize,
     pub dynamic_symbols: Vec<SymbolIndex>,
+    pub dynamic_symbol_name_offsets: Vec<u32>,
+    pub dynamic_strings: Vec<u8>,
+    pub dynamic_string_offsets: BTreeMap<String, u32>,
+    pub gnu_hash_bucket_count: usize,
+    pub gnu_hash_symbol_count: usize,
+    pub version_auxiliary_count: usize,
+    pub version_needs: Vec<VersionNeedOutput>,
+    pub dynamic_entry_count: usize,
+    pub has_tls_initial_executable: bool,
     pub internal_file: FileIndex,
     pub has_dynamic_symbols: bool,
     pub maximum_page_size: u64,
@@ -1722,9 +1857,14 @@ pub struct Context<'s> {
     pub archives_seen: BTreeSet<String>,
     pub shared_names_seen: BTreeSet<String>,
     pub dynamic_string_table: StringTable,
-    pub gnu_hash_bucket_count: usize,
     pub input_order: Vec<SectionIndex>,
     pub exception_frame_inputs: Vec<SectionIndex>,
+    pub frame_pieces: BTreeMap<SectionIndex, Vec<FramePiece>>,
+    pub frame_relocations: BTreeMap<SectionIndex, Vec<RawRelocation>>,
+    pub frame_records: Vec<FrameRecord>,
+    pub frame_header_entries: Vec<(i64, i64)>,
+    pub frame_header_large: bool,
+    pub frame_header_size: u64,
     pub and_features: u32,
     pub elf_header_output: OutputIndex,
     pub program_header_output: OutputIndex,
@@ -1788,6 +1928,15 @@ impl<'s> Context<'s> {
             symbol_table: Vec::new(),
             symbol_table_first_global: 0,
             dynamic_symbols: Vec::new(),
+            dynamic_symbol_name_offsets: Vec::new(),
+            dynamic_strings: vec![0],
+            dynamic_string_offsets: BTreeMap::from([(String::new(), 0)]),
+            gnu_hash_bucket_count: 0,
+            gnu_hash_symbol_count: 0,
+            version_auxiliary_count: 0,
+            version_needs: Vec::new(),
+            dynamic_entry_count: 0,
+            has_tls_initial_executable: false,
             internal_file: usize::MAX,
             has_dynamic_symbols: false,
             maximum_page_size: 4096,
@@ -1803,9 +1952,14 @@ impl<'s> Context<'s> {
             archives_seen: BTreeSet::new(),
             shared_names_seen: BTreeSet::new(),
             dynamic_string_table: StringTable::new(),
-            gnu_hash_bucket_count: 1,
             input_order: Vec::new(),
             exception_frame_inputs: Vec::new(),
+            frame_pieces: BTreeMap::new(),
+            frame_relocations: BTreeMap::new(),
+            frame_records: Vec::new(),
+            frame_header_entries: Vec::new(),
+            frame_header_large: false,
+            frame_header_size: 0,
             and_features: 0,
             elf_header_output: usize::MAX,
             program_header_output: usize::MAX,
@@ -2395,7 +2549,178 @@ impl<'s> Context<'s> {
             );
             return;
         }
-        self.error(not_supported("linker script").with_context(format!("File: {display}")));
+        self.read_input_script(display, path, &bytes, state, group, target_reference);
+    }
+
+    fn read_input_script(
+        &mut self,
+        display: &str,
+        path: &str,
+        bytes: &[u8],
+        state: LoadState,
+        group: usize,
+        target_reference: &mut Option<String>,
+    ) {
+        let text = String::from_utf8_lossy(bytes).to_string();
+        let tokens = match script_tokens(&text) {
+            Ok(tokens) => tokens,
+            Err(reason) => {
+                self.error(
+                    problem("EI239", "The linker script could not be read.")
+                        .with_context(format!("File: {display}"))
+                        .with_context(format!("Reason: {reason}")),
+                );
+                return;
+            }
+        };
+        let mut at = 0usize;
+        while at < tokens.len() {
+            let command = tokens[at].clone();
+            at += 1;
+            match command.as_str() {
+                ";" => {}
+                "GROUP" | "INPUT" => {
+                    if tokens.get(at).map(String::as_str) != Some("(") {
+                        self.script_error(display, "expected (");
+                        return;
+                    }
+                    at += 1;
+                    let mut inner = state;
+                    let mut as_needed_depth = 0usize;
+                    while at < tokens.len() {
+                        let token = tokens[at].clone();
+                        at += 1;
+                        match token.as_str() {
+                            ")" if as_needed_depth > 0 => {
+                                as_needed_depth -= 1;
+                                inner.as_needed = state.as_needed;
+                            }
+                            ")" => break,
+                            "," => {}
+                            "AS_NEEDED" => {
+                                if tokens.get(at).map(String::as_str) == Some("(") {
+                                    at += 1;
+                                }
+                                as_needed_depth += 1;
+                                inner.as_needed = true;
+                            }
+                            _ => {
+                                let name = unquote(&token);
+                                self.add_script_file(&name, path, inner, group, target_reference);
+                            }
+                        }
+                    }
+                }
+                "OUTPUT_FORMAT" | "OUTPUT_ARCH" | "TARGET" => {
+                    at = skip_parenthesized(&tokens, at);
+                }
+                "SEARCH_DIR" => {
+                    if tokens.get(at).map(String::as_str) == Some("(") {
+                        if let Some(folder) = tokens.get(at + 1) {
+                            self.options.library_paths.push(unquote(folder));
+                        }
+                    }
+                    at = skip_parenthesized(&tokens, at);
+                }
+                "ENTRY" => {
+                    if tokens.get(at).map(String::as_str) == Some("(") {
+                        if let Some(name) = tokens.get(at + 1) {
+                            if self.options.entry.is_none() {
+                                self.options.entry = Some(unquote(name));
+                            }
+                        }
+                    }
+                    at = skip_parenthesized(&tokens, at);
+                }
+                "EXTERN" => {
+                    let start = at + 1;
+                    at = skip_parenthesized(&tokens, at);
+                    for token in tokens.iter().take(at.saturating_sub(1)).skip(start) {
+                        if token != "," {
+                            let id = self.add_unused_undefined(&unquote(token));
+                            self.symbols[id].referenced = true;
+                            self.options.undefined.push(unquote(token));
+                        }
+                    }
+                }
+                other => {
+                    self.error(
+                        not_supported("linker script command")
+                            .with_context(format!("Command: {other}"))
+                            .with_context(format!("File: {display}")),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    fn script_error(&mut self, display: &str, reason: &str) {
+        self.error(
+            problem("EI239", "The linker script could not be read.")
+                .with_context(format!("File: {display}"))
+                .with_context(format!("Reason: {reason}")),
+        );
+    }
+
+    fn add_script_file(
+        &mut self,
+        name: &str,
+        script: &str,
+        state: LoadState,
+        group: usize,
+        target_reference: &mut Option<String>,
+    ) {
+        if let Some(library) = name.strip_prefix("-l") {
+            match self.find_library(library, state.is_static) {
+                Some((path, bytes)) => {
+                    self.add_file(&path, &path, bytes, state, group, true, target_reference)
+                }
+                None => self.error(
+                    problem("EI205", "An input file could not be found.")
+                        .with_context(format!("Library: -l{library}")),
+                ),
+            }
+            return;
+        }
+        let mut candidates: Vec<(String, bool)> = Vec::new();
+        if let Some(root) = self.options.sysroot.clone() {
+            if script.starts_with(&root) && name.starts_with('/') {
+                candidates.push((format!("{root}{name}"), false));
+            }
+        }
+        if name.starts_with('/') {
+            candidates.push((name.to_string(), false));
+        } else if let Some(rest) = name.strip_prefix('=') {
+            match &self.options.sysroot {
+                Some(root) => candidates.push((format!("{root}/{rest}"), false)),
+                None => candidates.push((rest.to_string(), false)),
+            }
+        } else {
+            if let Some((folder, _)) = script.rsplit_once('/') {
+                candidates.push((format!("{folder}/{name}"), false));
+            }
+            candidates.push((name.to_string(), false));
+            for folder in self.options.library_paths.clone() {
+                let folder = self.resolve_path(&folder);
+                candidates.push((format!("{folder}/{name}"), true));
+            }
+        }
+        for (candidate, from_library) in candidates {
+            if let Some(bytes) = (self.source)(&candidate) {
+                self.add_file(
+                    &candidate,
+                    &candidate,
+                    bytes,
+                    state,
+                    group,
+                    from_library,
+                    target_reference,
+                );
+                return;
+            }
+        }
+        self.error(file_missing(name));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2485,6 +2810,8 @@ impl<'s> Context<'s> {
             as_needed: state.as_needed,
             needed_libraries: Vec::new(),
             version_names: Vec::new(),
+            version_definitions: Vec::new(),
+            version_need_information: Vec::new(),
             elf_symbols: Vec::new(),
             executable_stack_requested: false,
             and_features: 0,
@@ -2664,6 +2991,12 @@ impl<'s> Context<'s> {
         for definition in &definitions {
             if let Some(name) = definition.names.first() {
                 definition_names.insert(definition.index, name.clone());
+                let slot = definition.index as usize;
+                let table = &mut self.files[index].version_definitions;
+                if table.len() <= slot {
+                    table.resize(slot + 1, None);
+                }
+                table[slot] = Some((name.clone(), definition.hash));
             }
         }
         let mut need_names: BTreeMap<u16, String> = BTreeMap::new();
@@ -2943,6 +3276,357 @@ pub fn xxh3_64(input: &[u8]) -> u64 {
         ));
     }
     xxh3_avalanche(result)
+}
+
+pub fn chunked_hash(data: &[u8], size: usize, hash: &dyn Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    let mut hashes = Vec::new();
+    for chunk in data.chunks(1024 * 1024) {
+        let mut value = hash(chunk);
+        value.resize(size, 0);
+        hashes.extend_from_slice(&value);
+    }
+    let mut value = hash(&hashes);
+    value.resize(size, 0);
+    value
+}
+
+const BLAKE3_INITIAL: [u32; 8] = [
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
+];
+
+const BLAKE3_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+fn blake3_compress(
+    chaining: &[u32; 8],
+    block: &[u32; 16],
+    counter: u64,
+    length: u32,
+    flags: u32,
+) -> [u32; 16] {
+    let mut state = [
+        chaining[0],
+        chaining[1],
+        chaining[2],
+        chaining[3],
+        chaining[4],
+        chaining[5],
+        chaining[6],
+        chaining[7],
+        BLAKE3_INITIAL[0],
+        BLAKE3_INITIAL[1],
+        BLAKE3_INITIAL[2],
+        BLAKE3_INITIAL[3],
+        counter as u32,
+        (counter >> 32) as u32,
+        length,
+        flags,
+    ];
+    let mut message = *block;
+    let mix = |state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32| {
+        state[a] = state[a].wrapping_add(state[b]).wrapping_add(x);
+        state[d] = (state[d] ^ state[a]).rotate_right(16);
+        state[c] = state[c].wrapping_add(state[d]);
+        state[b] = (state[b] ^ state[c]).rotate_right(12);
+        state[a] = state[a].wrapping_add(state[b]).wrapping_add(y);
+        state[d] = (state[d] ^ state[a]).rotate_right(8);
+        state[c] = state[c].wrapping_add(state[d]);
+        state[b] = (state[b] ^ state[c]).rotate_right(7);
+    };
+    for round in 0..7 {
+        mix(&mut state, 0, 4, 8, 12, message[0], message[1]);
+        mix(&mut state, 1, 5, 9, 13, message[2], message[3]);
+        mix(&mut state, 2, 6, 10, 14, message[4], message[5]);
+        mix(&mut state, 3, 7, 11, 15, message[6], message[7]);
+        mix(&mut state, 0, 5, 10, 15, message[8], message[9]);
+        mix(&mut state, 1, 6, 11, 12, message[10], message[11]);
+        mix(&mut state, 2, 7, 8, 13, message[12], message[13]);
+        mix(&mut state, 3, 4, 9, 14, message[14], message[15]);
+        if round < 6 {
+            let previous = message;
+            for (index, source) in BLAKE3_PERMUTATION.iter().enumerate() {
+                message[index] = previous[*source];
+            }
+        }
+    }
+    for index in 0..8 {
+        state[index] ^= state[index + 8];
+        state[index + 8] ^= chaining[index];
+    }
+    state
+}
+
+fn blake3_words(bytes: &[u8]) -> [u32; 16] {
+    let mut padded = [0u8; 64];
+    padded[..bytes.len()].copy_from_slice(bytes);
+    let mut words = [0u32; 16];
+    for (index, word) in words.iter_mut().enumerate() {
+        *word = u32::from_le_bytes([
+            padded[4 * index],
+            padded[4 * index + 1],
+            padded[4 * index + 2],
+            padded[4 * index + 3],
+        ]);
+    }
+    words
+}
+
+pub fn blake3(data: &[u8]) -> [u8; 32] {
+    const CHUNK_START: u32 = 1;
+    const CHUNK_END: u32 = 2;
+    const PARENT: u32 = 4;
+    const ROOT: u32 = 8;
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        vec![data]
+    } else {
+        data.chunks(1024).collect()
+    };
+    let mut stack: Vec<[u32; 8]> = Vec::new();
+    let mut last_output: ([u32; 8], [u32; 16], u64, u32, u32) =
+        (BLAKE3_INITIAL, [0; 16], 0, 0, CHUNK_START | CHUNK_END);
+    for (counter, chunk) in chunks.iter().enumerate() {
+        let blocks: Vec<&[u8]> = if chunk.is_empty() {
+            vec![*chunk]
+        } else {
+            chunk.chunks(64).collect()
+        };
+        let mut chaining = BLAKE3_INITIAL;
+        for (index, block) in blocks.iter().enumerate() {
+            let mut flags = 0;
+            if index == 0 {
+                flags |= CHUNK_START;
+            }
+            if index + 1 == blocks.len() {
+                flags |= CHUNK_END;
+                last_output = (
+                    chaining,
+                    blake3_words(block),
+                    counter as u64,
+                    block.len() as u32,
+                    flags,
+                );
+            } else {
+                let words = blake3_words(block);
+                let state = blake3_compress(&chaining, &words, counter as u64, 64, flags);
+                chaining.copy_from_slice(&state[..8]);
+            }
+        }
+        if counter + 1 < chunks.len() {
+            let (input, words, count, length, flags) = last_output;
+            let state = blake3_compress(&input, &words, count, length, flags);
+            let mut value = [0u32; 8];
+            value.copy_from_slice(&state[..8]);
+            let mut total = counter as u64 + 1;
+            while total & 1 == 0 {
+                let Some(left) = stack.pop() else {
+                    break;
+                };
+                let mut block = [0u32; 16];
+                block[..8].copy_from_slice(&left);
+                block[8..].copy_from_slice(&value);
+                let state = blake3_compress(&BLAKE3_INITIAL, &block, 0, 64, PARENT);
+                value.copy_from_slice(&state[..8]);
+                total >>= 1;
+            }
+            stack.push(value);
+        }
+    }
+    while let Some(left) = stack.pop() {
+        let (input, words, count, length, flags) = last_output;
+        let state = blake3_compress(&input, &words, count, length, flags);
+        let mut right = [0u32; 8];
+        right.copy_from_slice(&state[..8]);
+        let mut block = [0u32; 16];
+        block[..8].copy_from_slice(&left);
+        block[8..].copy_from_slice(&right);
+        last_output = (BLAKE3_INITIAL, block, 0, 64, PARENT);
+    }
+    let (input, words, _, length, flags) = last_output;
+    let state = blake3_compress(&input, &words, 0, length, flags | ROOT);
+    let mut out = [0u8; 32];
+    for index in 0..8 {
+        out[4 * index..4 * index + 4].copy_from_slice(&state[index].to_le_bytes());
+    }
+    out
+}
+
+pub fn message_digest_5(data: &[u8]) -> [u8; 16] {
+    const SHIFTS: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const CONSTANTS: [u32; 64] = [
+        0xd76a_a478,
+        0xe8c7_b756,
+        0x2420_70db,
+        0xc1bd_ceee,
+        0xf57c_0faf,
+        0x4787_c62a,
+        0xa830_4613,
+        0xfd46_9501,
+        0x6980_98d8,
+        0x8b44_f7af,
+        0xffff_5bb1,
+        0x895c_d7be,
+        0x6b90_1122,
+        0xfd98_7193,
+        0xa679_438e,
+        0x49b4_0821,
+        0xf61e_2562,
+        0xc040_b340,
+        0x265e_5a51,
+        0xe9b6_c7aa,
+        0xd62f_105d,
+        0x0244_1453,
+        0xd8a1_e681,
+        0xe7d3_fbc8,
+        0x21e1_cde6,
+        0xc337_07d6,
+        0xf4d5_0d87,
+        0x455a_14ed,
+        0xa9e3_e905,
+        0xfcef_a3f8,
+        0x676f_02d9,
+        0x8d2a_4c8a,
+        0xfffa_3942,
+        0x8771_f681,
+        0x6d9d_6122,
+        0xfde5_380c,
+        0xa4be_ea44,
+        0x4bde_cfa9,
+        0xf6bb_4b60,
+        0xbebf_bc70,
+        0x289b_7ec6,
+        0xeaa1_27fa,
+        0xd4ef_3085,
+        0x0488_1d05,
+        0xd9d4_d039,
+        0xe6db_99e5,
+        0x1fa2_7cf8,
+        0xc4ac_5665,
+        0xf429_2244,
+        0x432a_ff97,
+        0xab94_23a7,
+        0xfc93_a039,
+        0x655b_59c3,
+        0x8f0c_cc92,
+        0xffef_f47d,
+        0x8584_5dd1,
+        0x6fa8_7e4f,
+        0xfe2c_e6e0,
+        0xa301_4314,
+        0x4e08_11a1,
+        0xf753_7e82,
+        0xbd3a_f235,
+        0x2ad7_d2bb,
+        0xeb86_d391,
+    ];
+    let mut message = data.to_vec();
+    let bits = (data.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bits.to_le_bytes());
+    let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+    for block in message.chunks(64) {
+        let words: Vec<u32> = block
+            .chunks(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+        let [mut a, mut b, mut c, mut d] = state;
+        for index in 0..64 {
+            let (mixed, word) = match index / 16 {
+                0 => ((b & c) | (!b & d), index),
+                1 => ((d & b) | (!d & c), (5 * index + 1) % 16),
+                2 => (b ^ c ^ d, (3 * index + 5) % 16),
+                _ => (c ^ (b | !d), (7 * index) % 16),
+            };
+            let rotated = a
+                .wrapping_add(mixed)
+                .wrapping_add(CONSTANTS[index])
+                .wrapping_add(words[word])
+                .rotate_left(SHIFTS[index]);
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(rotated);
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+    }
+    let mut out = [0u8; 16];
+    for (index, word) in state.iter().enumerate() {
+        out[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
+pub fn secure_hash_1(data: &[u8]) -> [u8; 20] {
+    let mut message = data.to_vec();
+    let bits = (data.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bits.to_be_bytes());
+    let mut state: [u32; 5] = [
+        0x6745_2301,
+        0xefcd_ab89,
+        0x98ba_dcfe,
+        0x1032_5476,
+        0xc3d2_e1f0,
+    ];
+    for block in message.chunks(64) {
+        let mut words = [0u32; 80];
+        for (index, word) in block.chunks(4).enumerate() {
+            words[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for index in 16..80 {
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = state;
+        for (index, word) in words.iter().enumerate() {
+            let (mixed, constant) = match index / 20 {
+                0 => ((b & c) | (!b & d), 0x5a82_7999),
+                1 => (b ^ c ^ d, 0x6ed9_eba1),
+                2 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                _ => (b ^ c ^ d, 0xca62_c1d6u32),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(mixed)
+                .wrapping_add(e)
+                .wrapping_add(constant)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = next;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+    }
+    let mut out = [0u8; 20];
+    for (index, word) in state.iter().enumerate() {
+        out[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
 }
 
 fn read_unsigned_leb(data: &[u8], at: &mut usize) -> Option<u64> {
@@ -3689,7 +4373,7 @@ impl<'s> Context<'s> {
                     ".gnu.version_r",
                     section_type::GNU_VERSION_NEEDS,
                     section_flag::ALLOCATE,
-                    word,
+                    4,
                     Synthetic::VersionNeeds,
                 );
                 let _ = index;
@@ -3762,13 +4446,9 @@ impl<'s> Context<'s> {
             }
             self.add_synthetic(
                 ".eh_frame",
-                if self.target.architecture == Architecture::X86_64 {
-                    section_type::X86_64_UNWIND
-                } else {
-                    section_type::PROGRAM_BITS
-                },
+                section_type::PROGRAM_BITS,
                 section_flag::ALLOCATE,
-                word,
+                1,
                 Synthetic::ExceptionFrame,
             );
             if self.target.architecture == Architecture::Arm {
@@ -3951,17 +4631,525 @@ impl<'s> Context<'s> {
             Synthetic::PltRelocations => !self.plt_relocations.is_empty(),
             Synthetic::DynamicRelocations => !self.dynamic_relocations.is_empty(),
             Synthetic::RelativeRelocations => !self.relative_relocations.is_empty(),
-            Synthetic::ExceptionFrame => !self.exception_frame_inputs.is_empty(),
-            Synthetic::ExceptionFrameHeader => !self.exception_frame_inputs.is_empty(),
+            Synthetic::ExceptionFrame => !self.frame_pieces.is_empty(),
+            Synthetic::ExceptionFrameHeader => !self.frame_pieces.is_empty(),
             Synthetic::VersionNeeds => self.version_need_count() > 0,
             Synthetic::VersionSymbols => self.version_need_count() > 0,
+            Synthetic::DynamicSymbolTable
+            | Synthetic::DynamicStringTable
+            | Synthetic::GnuHash
+            | Synthetic::SystemFiveHash
+            | Synthetic::Dynamic => self.has_dynamic_symbols,
             Synthetic::ArmExceptionIndex => false,
             _ => true,
         }
     }
 
     pub fn version_need_count(&self) -> usize {
-        0
+        self.version_auxiliary_count
+    }
+
+    pub fn version_definition_count(&self) -> usize {
+        1
+    }
+
+    fn is_shared_file(&self, file: Option<FileIndex>) -> bool {
+        file.is_some_and(|file| file < self.files.len() && self.shared_files.contains(&file))
+    }
+
+    pub fn dynamic_symbol_name(&self, id: SymbolIndex) -> String {
+        let symbol = &self.symbols[id];
+        if symbol.version == elf::version_index::LOCAL {
+            return symbol.name.clone();
+        }
+        match symbol.name.find('@') {
+            Some(at) => symbol.name[..at].to_string(),
+            None => symbol.name.clone(),
+        }
+    }
+
+    fn add_dynamic_symbol(&mut self, id: SymbolIndex) {
+        let name = self.dynamic_symbol_name(id);
+        let offset = self.dynamic_strings.len() as u32;
+        if !name.is_empty() {
+            self.dynamic_strings.extend_from_slice(name.as_bytes());
+            self.dynamic_strings.push(0);
+        }
+        self.dynamic_symbols.push(id);
+        self.dynamic_symbol_name_offsets
+            .push(if name.is_empty() { 0 } else { offset });
+        let file = self.symbols[id].file;
+        if self.is_shared_file(file) && !self.symbols[id].is_undefined() {
+            let file = file.unwrap_or(0);
+            if self.files[file].needed {
+                self.add_version_need(id, file);
+            }
+        }
+    }
+
+    fn add_version_need(&mut self, id: SymbolIndex, file: FileIndex) {
+        let version = self.symbols[id].version;
+        if version == elf::version_index::GLOBAL {
+            return;
+        }
+        let slot = version as usize;
+        if self.files[file].version_need_information.is_empty() {
+            let count = self.files[file].version_definitions.len();
+            self.files[file]
+                .version_need_information
+                .resize(count, (0, true));
+        }
+        if slot >= self.files[file].version_need_information.len() {
+            return;
+        }
+        if self.files[file].version_need_information[slot].0 == 0 {
+            self.version_auxiliary_count += 1;
+            let identifier =
+                (self.version_auxiliary_count + self.version_definition_count()) as u16;
+            self.files[file].version_need_information[slot].0 = identifier;
+        }
+        let weak = self.symbols[id].binding == symbol_binding::WEAK;
+        let information = &mut self.files[file].version_need_information[slot];
+        information.1 &= weak;
+        self.symbols[id].version = information.0;
+    }
+
+    pub fn add_dynamic_string(&mut self, text: &str) -> u32 {
+        if let Some(offset) = self.dynamic_string_offsets.get(text) {
+            return *offset;
+        }
+        let offset = self.dynamic_strings.len() as u32;
+        self.dynamic_strings.extend_from_slice(text.as_bytes());
+        self.dynamic_strings.push(0);
+        self.dynamic_string_offsets.insert(text.to_string(), offset);
+        offset
+    }
+
+    pub fn finalize_dynamic_tables(&mut self) {
+        if !self.has_dynamic_symbols {
+            return;
+        }
+        if self.synthetic_section(".gnu.hash").is_some() {
+            let mut undefined = Vec::new();
+            let mut defined = Vec::new();
+            for (id, offset) in self
+                .dynamic_symbols
+                .iter()
+                .copied()
+                .zip(self.dynamic_symbol_name_offsets.iter().copied())
+            {
+                if self.symbols[id].is_defined() {
+                    defined.push((id, offset));
+                } else {
+                    undefined.push((id, offset));
+                }
+            }
+            let buckets = (defined.len() / 4).max(1);
+            self.gnu_hash_bucket_count = buckets;
+            self.gnu_hash_symbol_count = defined.len();
+            let mut hashed: Vec<(u32, u32, SymbolIndex, u32)> = defined
+                .into_iter()
+                .map(|(id, offset)| {
+                    let hash = elf::gnu_hash(self.dynamic_symbol_name(id).as_bytes());
+                    (hash % buckets as u32, offset, id, hash)
+                })
+                .collect();
+            hashed.sort_by_key(|entry| (entry.0, entry.1));
+            self.dynamic_symbols = undefined.iter().map(|entry| entry.0).collect();
+            self.dynamic_symbol_name_offsets = undefined.iter().map(|entry| entry.1).collect();
+            for (_, offset, id, _) in hashed {
+                self.dynamic_symbols.push(id);
+                self.dynamic_symbol_name_offsets.push(offset);
+            }
+        }
+        for (position, id) in self.dynamic_symbols.clone().into_iter().enumerate() {
+            self.symbols[id].dynamic_symbol_index = position + 1;
+        }
+        self.version_needs.clear();
+        for file in self.shared_files.clone() {
+            if self.files[file].version_need_information.is_empty() {
+                continue;
+            }
+            let file_name = self.files[file].shared_object_name.clone();
+            let file_name = self.add_dynamic_string(&file_name);
+            let mut entries = Vec::new();
+            for slot in 0..self.files[file].version_need_information.len() {
+                let (identifier, weak) = self.files[file].version_need_information[slot];
+                if identifier == 0 {
+                    continue;
+                }
+                let (name, hash) = self.files[file].version_definitions[slot]
+                    .clone()
+                    .unwrap_or_default();
+                let name = self.add_dynamic_string(&name);
+                entries.push((hash, identifier, weak, name));
+            }
+            self.version_needs
+                .push(VersionNeedOutput { file_name, entries });
+        }
+        self.dynamic_entry_count = self.dynamic_entries().len();
+    }
+
+    fn dynamic_tables_section_address(&self, name: &str) -> u64 {
+        self.synthetic_section(name)
+            .map(|section| self.section_address(section, 0))
+            .unwrap_or(0)
+    }
+
+    fn live_synthetic(&self, name: &str) -> bool {
+        self.synthetic_section(name).is_some_and(|section| {
+            self.sections[section]
+                .output
+                .is_some_and(|output| self.outputs[output].live)
+        })
+    }
+
+    pub fn dynamic_entries(&mut self) -> Vec<elf::DynamicEntry> {
+        use elf::dynamic_tag as tag;
+        let mut entries: Vec<elf::DynamicEntry> = Vec::new();
+        let mut add = |tag: i64, value: u64| entries.push(elf::DynamicEntry { tag, value });
+        let encoding = self.encoding();
+        let rela = self.target.uses_addends;
+        if !self.options.run_paths.is_empty() {
+            let joined = self.options.run_paths.join(":");
+            let offset = self.add_dynamic_string(&joined);
+            add(
+                if self.options.enable_new_dynamic_tags {
+                    tag::RUN_PATH
+                } else {
+                    tag::RUN_PATH_OLD
+                },
+                u64::from(offset),
+            );
+        }
+        for file in self.shared_files.clone() {
+            if self.files[file].needed {
+                let name = self.files[file].shared_object_name.clone();
+                let offset = self.add_dynamic_string(&name);
+                add(tag::NEEDED, u64::from(offset));
+            }
+        }
+        if let Some(name) = self.options.shared_object_name.clone() {
+            if !name.is_empty() {
+                let offset = self.add_dynamic_string(&name);
+                add(tag::SHARED_OBJECT_NAME, u64::from(offset));
+            }
+        }
+        let mut flags = 0u64;
+        let mut flags_1 = 0u64;
+        if self.options.symbolic {
+            flags |= elf::dynamic_flag::SYMBOLIC;
+        }
+        if self.options.load_globally {
+            flags_1 |= elf::dynamic_flag_1::GLOBAL;
+        }
+        if self.options.initialize_first {
+            flags_1 |= elf::dynamic_flag_1::INITIALIZE_FIRST;
+        }
+        if self.options.interpose {
+            flags_1 |= elf::dynamic_flag_1::INTERPOSE;
+        }
+        if self.options.no_default_library {
+            flags_1 |= elf::dynamic_flag_1::NO_DEFAULT_LIBRARY;
+        }
+        if self.options.no_delete {
+            flags_1 |= elf::dynamic_flag_1::NO_DELETE;
+        }
+        if self.options.no_dynamic_open {
+            flags_1 |= elf::dynamic_flag_1::NO_OPEN;
+        }
+        if self.options.kind == OutputKind::PositionIndependentExecutable {
+            flags_1 |= elf::dynamic_flag_1::PIE;
+        }
+        if self.options.bind_now {
+            flags |= elf::dynamic_flag::BIND_NOW;
+            flags_1 |= elf::dynamic_flag_1::NOW;
+        }
+        if self.options.origin {
+            flags |= elf::dynamic_flag::ORIGIN;
+            flags_1 |= elf::dynamic_flag_1::ORIGIN;
+        }
+        if !self.options.text_relocations_forbidden {
+            flags |= elf::dynamic_flag::TEXT_RELOCATIONS;
+        }
+        if self.has_tls_initial_executable && self.is_shared() {
+            flags |= elf::dynamic_flag::STATIC_THREAD_LOCAL;
+        }
+        if flags != 0 {
+            add(tag::FLAGS, flags);
+        }
+        if flags_1 != 0 {
+            add(tag::FLAGS_1, flags_1);
+        }
+        if !self.is_shared() && !self.options.read_only_dynamic {
+            add(tag::DEBUG, 0);
+        }
+        let dynamic_name = if rela { ".rela.dyn" } else { ".rel.dyn" };
+        if self.live_synthetic(dynamic_name) && !self.dynamic_relocations.is_empty() {
+            add(
+                if rela {
+                    tag::RELOCATIONS_WITH_ADDENDS
+                } else {
+                    tag::RELOCATIONS
+                },
+                self.dynamic_tables_section_address(dynamic_name),
+            );
+            add(
+                if rela {
+                    tag::RELOCATIONS_WITH_ADDENDS_SIZE
+                } else {
+                    tag::RELOCATIONS_SIZE
+                },
+                self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64,
+            );
+            add(
+                if rela {
+                    tag::RELOCATION_WITH_ADDEND_ENTRY
+                } else {
+                    tag::RELOCATION_ENTRY
+                },
+                encoding.relocation_size(rela) as u64,
+            );
+            let relative = self
+                .dynamic_relocations
+                .iter()
+                .filter(|entry| entry.kind == self.target.relative_relocation)
+                .count();
+            if self.options.combine_relocations && relative > 0 {
+                add(
+                    if rela {
+                        tag::RELATIVE_WITH_ADDEND_COUNT
+                    } else {
+                        tag::RELATIVE_COUNT
+                    },
+                    relative as u64,
+                );
+            }
+        }
+        if self.live_synthetic(".relr.dyn") && !self.relative_relocations.is_empty() {
+            let size = self
+                .synthetic_section(".relr.dyn")
+                .and_then(|section| self.sections[section].output)
+                .map(|output| self.outputs[output].size)
+                .unwrap_or(0);
+            add(
+                tag::RELATIVE_RELOCATIONS,
+                self.dynamic_tables_section_address(".relr.dyn"),
+            );
+            add(tag::RELATIVE_RELOCATIONS_SIZE, size);
+            add(tag::RELATIVE_RELOCATION_ENTRY, self.word_size());
+        }
+        let plt_name = if rela { ".rela.plt" } else { ".rel.plt" };
+        if self.live_synthetic(plt_name) && !self.plt_relocations.is_empty() {
+            add(
+                tag::JUMP_RELOCATIONS,
+                self.dynamic_tables_section_address(plt_name),
+            );
+            add(
+                tag::PLT_RELOCATIONS_SIZE,
+                self.plt_relocations.len() as u64 * encoding.relocation_size(rela) as u64,
+            );
+            add(
+                tag::PLT_GOT,
+                self.dynamic_tables_section_address(".got.plt"),
+            );
+            add(
+                tag::PLT_RELOCATION_KIND,
+                if rela {
+                    tag::RELOCATIONS_WITH_ADDENDS as u64
+                } else {
+                    tag::RELOCATIONS as u64
+                },
+            );
+        }
+        add(
+            tag::SYMBOL_TABLE,
+            self.dynamic_tables_section_address(".dynsym"),
+        );
+        add(tag::SYMBOL_ENTRY, encoding.symbol_size() as u64);
+        add(
+            tag::STRING_TABLE,
+            self.dynamic_tables_section_address(".dynstr"),
+        );
+        add(tag::STRING_TABLE_SIZE, self.dynamic_strings.len() as u64);
+        if !self.options.text_relocations_forbidden {
+            add(tag::TEXT_RELOCATIONS, 0);
+        }
+        if self.live_synthetic(".gnu.hash") {
+            add(
+                tag::GNU_HASH,
+                self.dynamic_tables_section_address(".gnu.hash"),
+            );
+        }
+        if self.live_synthetic(".hash") {
+            add(tag::HASH, self.dynamic_tables_section_address(".hash"));
+        }
+        for (name, start, size) in [
+            (
+                ".preinit_array",
+                tag::PREINIT_ARRAY,
+                tag::PREINIT_ARRAY_SIZE,
+            ),
+            (".init_array", tag::INIT_ARRAY, tag::INIT_ARRAY_SIZE),
+            (".fini_array", tag::FINI_ARRAY, tag::FINI_ARRAY_SIZE),
+        ] {
+            if let Some(output) = self.find_output_any(name) {
+                add(start, self.outputs[output].address);
+                add(size, self.outputs[output].size);
+            }
+        }
+        let initializer = self
+            .options
+            .initializer
+            .clone()
+            .unwrap_or_else(|| "_init".to_string());
+        if let Some(id) = self.find(&initializer) {
+            if self.symbols[id].is_defined() {
+                add(tag::INIT, self.symbol_address(id, 0));
+            }
+        }
+        let finalizer = self
+            .options
+            .finalizer
+            .clone()
+            .unwrap_or_else(|| "_fini".to_string());
+        if let Some(id) = self.find(&finalizer) {
+            if self.symbols[id].is_defined() {
+                add(tag::FINI, self.symbol_address(id, 0));
+            }
+        }
+        if self.live_synthetic(".gnu.version") && self.version_need_count() > 0 {
+            add(
+                tag::VERSION_SYMBOLS,
+                self.dynamic_tables_section_address(".gnu.version"),
+            );
+        }
+        if self.live_synthetic(".gnu.version_r") && self.version_need_count() > 0 {
+            add(
+                tag::VERSION_NEEDS,
+                self.dynamic_tables_section_address(".gnu.version_r"),
+            );
+            let count = self
+                .shared_files
+                .iter()
+                .filter(|file| !self.files[**file].version_need_information.is_empty())
+                .count();
+            add(tag::VERSION_NEED_COUNT, count as u64);
+        }
+        add(tag::NULL, 0);
+        entries
+    }
+
+    fn encode_dynamic_symbol_table(&self) -> Vec<u8> {
+        let encoding = self.encoding();
+        let mut out = Vec::new();
+        elf::encode_symbol(encoding, &elf::Symbol::default(), &mut out);
+        for (id, name_offset) in self
+            .dynamic_symbols
+            .iter()
+            .zip(&self.dynamic_symbol_name_offsets)
+        {
+            let symbol = &self.symbols[*id];
+            let section_number = self.output_index_of_symbol(*id);
+            let value = if symbol.is_defined() {
+                self.symbol_address(*id, 0)
+            } else {
+                0
+            };
+            let size = if section_number != section_index::UNDEFINED {
+                symbol.size
+            } else {
+                0
+            };
+            elf::encode_symbol(
+                encoding,
+                &elf::Symbol {
+                    name: String::new(),
+                    name_offset: *name_offset,
+                    value,
+                    size,
+                    binding: symbol.binding,
+                    kind: symbol.kind,
+                    other: symbol.other,
+                    section: section_number,
+                },
+                &mut out,
+            );
+        }
+        out
+    }
+
+    fn encode_gnu_hash(&self) -> Vec<u8> {
+        let start = self.dynamic_symbols.len() - self.gnu_hash_symbol_count;
+        let hashes: Vec<u32> = self.dynamic_symbols[start..]
+            .iter()
+            .map(|id| elf::gnu_hash(self.dynamic_symbol_name(*id).as_bytes()))
+            .collect();
+        elf::gnu_hash_table(
+            self.encoding(),
+            start + 1,
+            &hashes,
+            self.gnu_hash_bucket_count,
+        )
+    }
+
+    fn encode_system_five_hash(&self) -> Vec<u8> {
+        let mut names: Vec<Vec<u8>> = vec![Vec::new()];
+        for id in &self.dynamic_symbols {
+            names.push(self.dynamic_symbol_name(*id).into_bytes());
+        }
+        let references: Vec<&[u8]> = names.iter().map(|name| name.as_slice()).collect();
+        elf::system_five_hash_table(self.encoding(), &references, references.len())
+    }
+
+    fn encode_version_symbols(&self) -> Vec<u8> {
+        let encoding = self.encoding();
+        let mut out = Vec::new();
+        encoding.put_u16(&mut out, 0);
+        for id in &self.dynamic_symbols {
+            let symbol = &self.symbols[*id];
+            encoding.put_u16(
+                &mut out,
+                if symbol.is_undefined() {
+                    0
+                } else {
+                    symbol.version
+                },
+            );
+        }
+        out
+    }
+
+    fn encode_version_needs(&self) -> Vec<u8> {
+        let encoding = self.encoding();
+        let mut out = Vec::new();
+        let needs = self.version_needs.len();
+        let mut auxiliary_at = needs * 16;
+        for (position, need) in self.version_needs.iter().enumerate() {
+            encoding.put_u16(&mut out, 1);
+            encoding.put_u16(&mut out, need.entries.len() as u16);
+            encoding.put_u32(&mut out, need.file_name);
+            encoding.put_u32(&mut out, (auxiliary_at - position * 16) as u32);
+            encoding.put_u32(&mut out, if position + 1 == needs { 0 } else { 16 });
+            auxiliary_at += need.entries.len() * 16;
+        }
+        for need in &self.version_needs {
+            for (position, (hash, identifier, weak, name)) in need.entries.iter().enumerate() {
+                encoding.put_u32(&mut out, *hash);
+                encoding.put_u16(&mut out, if *weak { elf::version_flag::WEAK } else { 0 });
+                encoding.put_u16(&mut out, *identifier);
+                encoding.put_u32(&mut out, *name);
+                encoding.put_u32(
+                    &mut out,
+                    if position + 1 == need.entries.len() {
+                        0
+                    } else {
+                        16
+                    },
+                );
+            }
+        }
+        out
     }
 
     pub fn create_output_sections(&mut self) {
@@ -4333,6 +5521,7 @@ impl<'s> Context<'s> {
             symbol_binding::GLOBAL,
         );
         self.symbols[id].used_in_regular_object = true;
+        self.synthesized.push(id);
         Some(id)
     }
 
@@ -5752,13 +6941,427 @@ impl<'s> Context<'s> {
                 self.scan_section(section, &mut undefined);
             }
         }
-        let frames = self.exception_frame_inputs.clone();
+        let frames: Vec<SectionIndex> = self.frame_pieces.keys().copied().collect();
         for section in frames {
-            if self.sections[section].live {
-                self.scan_section(section, &mut undefined);
+            let relocations: Vec<RawRelocation> = self
+                .frame_relocations
+                .get(&section)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|relocation| {
+                    relocation.kind != 0
+                        && self
+                            .frame_output_offset(section, relocation.offset)
+                            .is_some()
+                })
+                .collect();
+            match self.target.architecture {
+                Architecture::X86_64 => self.scan_x86_64(section, &relocations, &mut undefined),
+                Architecture::X86 => self.scan_x86(section, &relocations, &mut undefined),
+                Architecture::Aarch64 => self.scan_aarch64(section, &relocations, &mut undefined),
+                Architecture::Arm => self.scan_arm(section, &relocations, &mut undefined),
             }
         }
         undefined
+    }
+
+    fn frame_piece_index(&self, section: SectionIndex, offset: u64) -> Option<usize> {
+        let pieces = self.frame_pieces.get(&section)?;
+        let position = pieces.partition_point(|piece| piece.input_offset <= offset);
+        if position == 0 {
+            return None;
+        }
+        let piece = &pieces[position - 1];
+        if piece.input_offset + piece.size <= offset {
+            return None;
+        }
+        Some(position - 1)
+    }
+
+    pub fn frame_output_offset(&self, section: SectionIndex, offset: u64) -> Option<u64> {
+        let index = self.frame_piece_index(section, offset)?;
+        let piece = &self.frame_pieces[&section][index];
+        piece
+            .output_offset
+            .map(|output| output + (offset - piece.input_offset))
+    }
+
+    fn frame_parent_offset(&self, section: SectionIndex, offset: u64) -> u64 {
+        match self.frame_piece_index(section, offset) {
+            Some(index) => {
+                let piece = &self.frame_pieces[&section][index];
+                match piece.output_offset {
+                    Some(output) => output + (offset - piece.input_offset),
+                    None => offset - piece.input_offset,
+                }
+            }
+            None => offset,
+        }
+    }
+
+    pub fn mark_live(&mut self) {
+        for id in self.global_symbols() {
+            let symbol = &self.symbols[id];
+            if symbol.is_shared()
+                && symbol.used_in_regular_object
+                && symbol.binding != symbol_binding::WEAK
+            {
+                if let Some(file) = symbol.file.filter(|file| *file < self.files.len()) {
+                    self.files[file].needed = true;
+                }
+            }
+        }
+    }
+
+    pub fn combine_exception_frames(&mut self) {
+        let Some(synthetic) = self.synthetic_section(".eh_frame") else {
+            return;
+        };
+        let encoding = self.encoding();
+        let mut common_keys: BTreeMap<(Vec<u8>, Option<SymbolIndex>), usize> = BTreeMap::new();
+        for section in self.exception_frame_inputs.clone() {
+            if !self.sections[section].live {
+                continue;
+            }
+            let mut relocations = self.raw_relocations(section);
+            relocations.sort_by_key(|relocation| relocation.offset);
+            let data = self.sections[section].data.clone();
+            let mut pieces: Vec<FramePiece> = Vec::new();
+            let mut at = 0usize;
+            let mut relocation_index = 0usize;
+            let mut problem_reason: Option<&str> = None;
+            while at < data.len() {
+                if data.len() - at < 4 {
+                    problem_reason = Some("CIE/FDE too small");
+                    break;
+                }
+                let length = u64::from(encoding.read_u32(&data, at).unwrap_or(0));
+                if length == 0 {
+                    break;
+                }
+                let size = length + 4;
+                if size > (data.len() - at) as u64 {
+                    problem_reason = Some(if size == u64::from(u32::MAX) + 4 {
+                        "CIE/FDE too large"
+                    } else {
+                        "CIE/FDE ends past the end of the section"
+                    });
+                    break;
+                }
+                let identifier = if data.len() - at >= 8 {
+                    encoding.read_u32(&data, at + 4).unwrap_or(1)
+                } else {
+                    1
+                };
+                while relocation_index < relocations.len()
+                    && relocations[relocation_index].offset < at as u64
+                {
+                    relocation_index += 1;
+                }
+                let first_relocation = (relocation_index < relocations.len()
+                    && relocations[relocation_index].offset < at as u64 + size)
+                    .then_some(relocation_index);
+                pieces.push(FramePiece {
+                    input_offset: at as u64,
+                    size,
+                    is_common_information: identifier == 0,
+                    first_relocation,
+                    output_offset: None,
+                    record: None,
+                });
+                at += size as usize;
+            }
+            if let Some(reason) = problem_reason {
+                let place = self.object_message(section, at as u64);
+                self.error(
+                    problem("EI240", "The exception frame section is malformed.")
+                        .with_context(format!("Reason: {reason}"))
+                        .with_context(format!("Location: {place}")),
+                );
+            }
+            let mut offset_to_record: BTreeMap<u64, usize> = BTreeMap::new();
+            for (index, piece) in pieces.iter().enumerate() {
+                if !piece.is_common_information {
+                    continue;
+                }
+                let personality = piece
+                    .first_relocation
+                    .and_then(|first| self.symbol_of(section, relocations[first].symbol));
+                let start = piece.input_offset as usize;
+                let key = (
+                    data[start..start + piece.size as usize].to_vec(),
+                    personality,
+                );
+                let record = match common_keys.get(&key) {
+                    Some(record) => *record,
+                    None => {
+                        self.frame_records.push(FrameRecord {
+                            common_information: (section, index),
+                            descriptions: Vec::new(),
+                        });
+                        common_keys.insert(key, self.frame_records.len() - 1);
+                        self.frame_records.len() - 1
+                    }
+                };
+                offset_to_record.insert(piece.input_offset, record);
+            }
+            let mut assigned: Vec<Option<usize>> = vec![None; pieces.len()];
+            for (index, piece) in pieces.iter().enumerate() {
+                if piece.is_common_information {
+                    continue;
+                }
+                let identifier = u64::from(
+                    encoding
+                        .read_u32(&data, piece.input_offset as usize + 4)
+                        .unwrap_or(0),
+                );
+                let target = (piece.input_offset + 4).wrapping_sub(identifier);
+                let Some(record) = offset_to_record.get(&target).copied() else {
+                    let place = self.object_message(section, piece.input_offset);
+                    self.error(
+                        problem("EI240", "The exception frame section is malformed.")
+                            .with_context("Reason: invalid CIE reference".to_string())
+                            .with_context(format!("Location: {place}")),
+                    );
+                    continue;
+                };
+                if !self.frame_description_is_live(section, piece, &relocations) {
+                    continue;
+                }
+                self.frame_records[record]
+                    .descriptions
+                    .push((section, index));
+                assigned[index] = Some(record);
+            }
+            for (index, record) in assigned.into_iter().enumerate() {
+                pieces[index].record = record;
+            }
+            self.sections[section].merged_into = Some(synthetic);
+            self.frame_pieces.insert(section, pieces);
+            self.frame_relocations.insert(section, relocations);
+        }
+        let mut offset = 0u64;
+        for record in self.frame_records.clone() {
+            let (section, index) = record.common_information;
+            if let Some(pieces) = self.frame_pieces.get_mut(&section) {
+                pieces[index].output_offset = Some(offset);
+                offset += pieces[index].size;
+            }
+            for (section, index) in record.descriptions {
+                if let Some(pieces) = self.frame_pieces.get_mut(&section) {
+                    pieces[index].output_offset = Some(offset);
+                    offset += pieces[index].size;
+                }
+            }
+        }
+        self.sections[synthetic].size = offset + 4;
+        let descriptions: usize = self
+            .frame_records
+            .iter()
+            .map(|record| record.descriptions.len())
+            .sum();
+        self.frame_header_size = 12 + descriptions as u64 * 8;
+        if let Some(header) = self.synthetic_section(".eh_frame_hdr") {
+            self.sections[header].size = self.frame_header_size;
+        }
+    }
+
+    fn frame_description_is_live(
+        &self,
+        section: SectionIndex,
+        piece: &FramePiece,
+        relocations: &[RawRelocation],
+    ) -> bool {
+        let Some(first) = piece.first_relocation else {
+            return false;
+        };
+        let Some(symbol) = self.symbol_of(section, relocations[first].symbol) else {
+            return false;
+        };
+        let symbol = &self.symbols[symbol];
+        if !symbol.is_defined() {
+            return false;
+        }
+        symbol
+            .section
+            .is_some_and(|target| self.sections[target].live)
+    }
+
+    fn frame_encoding_of(&self, data: &[u8]) -> Option<u8> {
+        let mut at = 8usize;
+        let version = *data.get(at)?;
+        at += 1;
+        if version != 1 && version != 3 {
+            return None;
+        }
+        let end = data[at..].iter().position(|byte| *byte == 0)? + at;
+        let augmentation = data[at..end].to_vec();
+        at = end + 1;
+        let skip_leb = |at: &mut usize| -> Option<()> {
+            loop {
+                let byte = *data.get(*at)?;
+                *at += 1;
+                if byte & 0x80 == 0 {
+                    return Some(());
+                }
+            }
+        };
+        skip_leb(&mut at)?;
+        skip_leb(&mut at)?;
+        if version == 1 {
+            at += 1;
+        } else {
+            skip_leb(&mut at)?;
+        }
+        for character in augmentation {
+            match character {
+                b'R' => return data.get(at).copied(),
+                b'z' => skip_leb(&mut at)?,
+                b'L' => at += 1,
+                b'P' => {
+                    let encoding = *data.get(at)?;
+                    at += 1;
+                    let size = match encoding & 0x0f {
+                        0x00 | 0x08 => self.word_size() as usize,
+                        0x02 | 0x0a => 2,
+                        0x03 | 0x0b => 4,
+                        0x04 | 0x0c => 8,
+                        _ => return None,
+                    };
+                    at += size;
+                }
+                b'B' | b'S' | b'G' => {}
+                _ => return None,
+            }
+        }
+        Some(0)
+    }
+
+    pub fn update_frame_header(&mut self) -> bool {
+        let (Some(header), Some(frame)) = (
+            self.synthetic_section(".eh_frame_hdr"),
+            self.synthetic_section(".eh_frame"),
+        ) else {
+            return false;
+        };
+        if !self.live_synthetic(".eh_frame_hdr") {
+            return false;
+        }
+        let header_address = self.section_address(header, 0);
+        let frame_address = self.section_address(frame, 0);
+        let frame_pointer = frame_address.wrapping_sub(header_address).wrapping_sub(4) as i64;
+        let mut large = frame_pointer != i64::from(frame_pointer as i32);
+        let mut entries: Vec<(i64, i64)> = Vec::new();
+        for record in self.frame_records.clone() {
+            let (cie_section, cie_index) = record.common_information;
+            let cie = self.frame_pieces[&cie_section][cie_index].clone();
+            let start = cie.input_offset as usize;
+            let data = self.sections[cie_section].data[start..start + cie.size as usize].to_vec();
+            let encoding = self.frame_encoding_of(&data).unwrap_or(0);
+            if encoding & 0x70 != 0x00 && encoding & 0x70 != 0x10 {
+                self.error(
+                    problem("EI240", "The exception frame section is malformed.")
+                        .with_context("Reason: unknown FDE size encoding".to_string()),
+                );
+                continue;
+            }
+            for (section, index) in record.descriptions {
+                let piece = self.frame_pieces[&section][index].clone();
+                let Some(first) = piece.first_relocation else {
+                    continue;
+                };
+                let relocation = self.frame_relocations[&section][first];
+                let Some(symbol) = self.symbol_of(section, relocation.symbol) else {
+                    continue;
+                };
+                let program_counter = self
+                    .symbol_address(symbol, relocation.addend)
+                    .wrapping_sub(header_address) as i64;
+                let description = frame_address
+                    .wrapping_add(piece.output_offset.unwrap_or(0))
+                    .wrapping_sub(header_address) as i64;
+                large |= program_counter != i64::from(program_counter as i32)
+                    || description != i64::from(description as i32);
+                entries.push((program_counter, description));
+            }
+        }
+        entries.sort_by_key(|entry| entry.0);
+        entries.dedup_by_key(|entry| entry.0);
+        let entry_size = if large { 16 } else { 8 };
+        let size = 4 + if large { 8 } else { 4 } + 4 + entries.len() as u64 * entry_size;
+        self.frame_header_entries = entries;
+        self.frame_header_large = large;
+        let old = self.frame_header_size;
+        self.frame_header_size = size.max(old);
+        self.sections[header].size = self.frame_header_size;
+        self.frame_header_size != old
+    }
+
+    fn write_exception_frame(&mut self, buffer: &mut [u8]) {
+        let encoding = self.encoding();
+        for section in self.frame_pieces.keys().copied().collect::<Vec<_>>() {
+            let mut data = self.sections[section].data.clone();
+            self.apply_relocations(section, &mut data);
+            let pieces = self.frame_pieces[&section].clone();
+            for piece in pieces {
+                let Some(output) = piece.output_offset else {
+                    continue;
+                };
+                let start = piece.input_offset as usize;
+                let end = start + piece.size as usize;
+                let at = output as usize;
+                buffer[at..at + piece.size as usize].copy_from_slice(&data[start..end]);
+                let mut length = Vec::new();
+                encoding.put_u32(&mut length, (piece.size - 4) as u32);
+                buffer[at..at + 4].copy_from_slice(&length);
+                if let Some(record) = piece.record {
+                    let (cie_section, cie_index) = self.frame_records[record].common_information;
+                    let cie_output = self.frame_pieces[&cie_section][cie_index]
+                        .output_offset
+                        .unwrap_or(0);
+                    let mut pointer = Vec::new();
+                    encoding.put_u32(&mut pointer, (output + 4 - cie_output) as u32);
+                    buffer[at + 4..at + 8].copy_from_slice(&pointer);
+                }
+            }
+        }
+    }
+
+    fn write_frame_header(&self, buffer: &mut [u8]) {
+        let encoding = self.encoding();
+        let (Some(header), Some(frame)) = (
+            self.synthetic_section(".eh_frame_hdr"),
+            self.synthetic_section(".eh_frame"),
+        ) else {
+            return;
+        };
+        let large = self.frame_header_large;
+        let frame_pointer = self
+            .section_address(frame, 0)
+            .wrapping_sub(self.section_address(header, 0))
+            .wrapping_sub(4);
+        let mut out = vec![
+            1u8,
+            0x10 | if large { 0x0c } else { 0x0b },
+            0x03,
+            0x30 | if large { 0x0c } else { 0x0b },
+        ];
+        let field = |out: &mut Vec<u8>, value: u64| {
+            if large {
+                encoding.put_u64(out, value);
+            } else {
+                encoding.put_u32(out, value as u32);
+            }
+        };
+        field(&mut out, frame_pointer);
+        encoding.put_u32(&mut out, self.frame_header_entries.len() as u32);
+        for (program_counter, description) in &self.frame_header_entries {
+            field(&mut out, *program_counter as u64);
+            field(&mut out, *description as u64);
+        }
+        let length = out.len().min(buffer.len());
+        buffer[..length].copy_from_slice(&out[..length]);
     }
 
     pub fn scan_section(&mut self, section: SectionIndex, undefined: &mut Vec<UndefinedReference>) {
@@ -6217,6 +7820,7 @@ impl<'s> Context<'s> {
                 }
             }
             if flags & needs::TLS_INITIAL_EXECUTABLE != 0 {
+                self.has_tls_initial_executable = true;
                 self.allocate_got_slot(id);
                 let offset = self.symbols[id].got_index.unwrap_or(0) * self.target.got_entry_size;
                 if !self.symbols[id].preemptible && !self.is_shared() {
@@ -6406,47 +8010,91 @@ impl<'s> Context<'s> {
         true
     }
 
+    fn shared_symbol_read_only(&self, id: SymbolIndex) -> bool {
+        let symbol = &self.symbols[id];
+        let Some(file) = symbol.file.filter(|file| *file < self.files.len()) else {
+            return false;
+        };
+        self.files[file].elf.program_headers.iter().any(|header| {
+            (header.kind == segment_type::LOAD || header.kind == segment_type::GNU_RELRO)
+                && header.flags & segment_flag::WRITE == 0
+                && symbol.value >= header.virtual_address
+                && symbol.value < header.virtual_address + header.memory_size
+        })
+    }
+
     fn add_copy_relocation(&mut self, id: SymbolIndex) {
         let size = self.symbols[id].size;
-        let alignment = self.symbols[id].shared_alignment.max(1);
-        let read_only = false;
+        let alignment = self.symbols[id].shared_alignment;
+        if size == 0 || alignment == 0 {
+            let name = self.symbols[id].name.clone();
+            self.error(
+                problem("EI241", "A copy relocation cannot be made for this symbol.")
+                    .with_context(format!("Symbol: {name}")),
+            );
+        }
+        let read_only = self.shared_symbol_read_only(id);
         let name = if read_only { ".bss.rel.ro" } else { ".bss" };
-        let Some(section) = self.synthetic_section(name) else {
+        let Some(parent) = self.synthetic_section(name) else {
             return;
         };
-        let offset = align_to(self.sections[section].size, alignment);
-        self.sections[section].size = offset + size;
-        self.sections[section].alignment = self.sections[section].alignment.max(alignment);
+        let Some(output) = self.sections[parent].output else {
+            return;
+        };
+        let section = self.sections.len();
+        let mut data = InputSection::synthetic(
+            name,
+            section_type::NO_BITS,
+            section_flag::ALLOCATE | section_flag::WRITE,
+            alignment.max(1),
+            Synthetic::Bss,
+        );
+        data.size = size;
+        data.output = Some(output);
+        self.sections.push(data);
+        self.outputs[output].members.push(section);
+        self.commit_section(output, section);
         let file = self.symbols[id].file;
         let value = self.symbols[id].value;
-        let aliases: Vec<SymbolIndex> = self
-            .global_symbols()
-            .into_iter()
-            .filter(|other| {
-                let symbol = &self.symbols[*other];
-                symbol.is_shared()
-                    && symbol.file == file
-                    && symbol.value == value
-                    && symbol.is_object()
-            })
-            .collect();
-        let mut targets = aliases;
+        let mut targets: Vec<SymbolIndex> = Vec::new();
+        if let Some(file) = file.filter(|file| *file < self.files.len()) {
+            let first_global = self.files[file].first_global;
+            let candidates: Vec<String> = self.files[file]
+                .elf_symbols
+                .iter()
+                .skip(first_global)
+                .filter(|symbol| {
+                    symbol.section != section_index::UNDEFINED
+                        && symbol.section != section_index::ABSOLUTE
+                        && symbol.kind != symbol_type::THREAD_LOCAL
+                        && symbol.value == value
+                })
+                .map(|symbol| symbol.name.clone())
+                .collect();
+            for name in candidates {
+                if let Some(alias) = self.find(&name) {
+                    if self.symbols[alias].is_shared() && !targets.contains(&alias) {
+                        targets.push(alias);
+                    }
+                }
+            }
+        }
         if !targets.contains(&id) {
             targets.push(id);
         }
+        targets.sort_unstable();
         for target in targets {
             let entry = &mut self.symbols[target];
             entry.state = SymbolState::Defined;
             entry.section = Some(section);
-            entry.value = offset;
+            entry.value = 0;
             entry.used_in_regular_object = true;
-            entry.needs &= !needs::COPY;
-            entry.exported = true;
+            entry.needs &= needs::GOT;
         }
         self.dynamic_relocations.push(DynamicRelocation {
             kind: self.target.copy_relocation,
             section,
-            offset,
+            offset: 0,
             symbol: Some(id),
             use_symbol_value: true,
             addend: 0,
@@ -6566,7 +8214,7 @@ impl<'s> Context<'s> {
                 && symbol.binding != symbol_binding::LOCAL
                 && self.has_dynamic_symbols
             {
-                self.dynamic_symbols.push(id);
+                self.add_dynamic_symbol(id);
             }
         }
         if has_table && !self.is_relocatable() {
@@ -7456,6 +9104,31 @@ impl<'s> Context<'s> {
                 (self.symbol_table.len() as u64 + 1) * encoding.symbol_size() as u64,
             ),
             (".strtab", self.string_table.len() as u64),
+            (
+                ".dynsym",
+                (self.dynamic_symbols.len() as u64 + 1) * encoding.symbol_size() as u64,
+            ),
+            (".dynstr", self.dynamic_strings.len() as u64),
+            (
+                ".gnu.hash",
+                16 + encoding.word_size() as u64
+                    * elf::gnu_hash_mask_words(encoding, self.gnu_hash_symbol_count) as u64
+                    + self.gnu_hash_bucket_count as u64 * 4
+                    + self.gnu_hash_symbol_count as u64 * 4,
+            ),
+            (
+                ".hash",
+                (2 + 2 * (self.dynamic_symbols.len() as u64 + 1)) * 4,
+            ),
+            (".gnu.version", (self.dynamic_symbols.len() as u64 + 1) * 2),
+            (
+                ".gnu.version_r",
+                self.version_needs.len() as u64 * 16 + self.version_auxiliary_count as u64 * 16,
+            ),
+            (
+                ".dynamic",
+                self.dynamic_entry_count as u64 * encoding.dynamic_entry_size() as u64,
+            ),
         ];
         for (name, size) in sizes {
             if let Some(section) = self.synthetic_section(name) {
@@ -7466,6 +9139,13 @@ impl<'s> Context<'s> {
 
     pub fn section_address(&self, section: SectionIndex, offset: u64) -> u64 {
         let data = &self.sections[section];
+        if data.is_exception_frame {
+            if let Some(parent) = data.merged_into {
+                return self
+                    .section_address(parent, 0)
+                    .wrapping_add(self.frame_parent_offset(section, offset));
+            }
+        }
         if let Some(merged) = data.merged_into {
             let piece = self.merge_piece(section, offset);
             let (output_offset, input_offset) = piece
@@ -9631,7 +11311,9 @@ impl<'s> Context<'s> {
     }
 
     fn apply_relocations(&mut self, section: SectionIndex, buffer: &mut [u8]) {
-        if self.target.architecture == Architecture::Aarch64 {
+        if self.target.architecture == Architecture::Aarch64
+            && !self.sections[section].is_exception_frame
+        {
             self.aarch64_relocate_section(section, buffer);
             return;
         }
@@ -9642,7 +11324,11 @@ impl<'s> Context<'s> {
                 continue;
             }
             let at = relocation.offset as usize;
-            let place = base.wrapping_add(relocation.offset);
+            let place = if self.sections[section].is_exception_frame {
+                self.section_address(section, relocation.offset)
+            } else {
+                base.wrapping_add(relocation.offset)
+            };
             let value = self.evaluate(relocation, place);
             if at >= buffer.len() {
                 continue;
@@ -10076,7 +11762,7 @@ impl<'s> Context<'s> {
 
     pub fn output_index_of_symbol(&self, id: SymbolIndex) -> u32 {
         let symbol = &self.symbols[id];
-        if !symbol.is_defined() || symbol.needs & needs::COPY != 0 && !symbol.is_defined() {
+        if !symbol.is_defined() || symbol.needs & needs::COPY != 0 {
             return section_index::UNDEFINED;
         }
         let output = if symbol.header_relative {
@@ -10131,6 +11817,8 @@ impl<'s> Context<'s> {
             Synthetic::Plt => self.write_plt(&mut buffer),
             Synthetic::IndirectPlt => self.write_indirect_plt(&mut buffer),
             Synthetic::Thunks => self.write_thunks(section, &mut buffer),
+            Synthetic::ExceptionFrame => self.write_exception_frame(&mut buffer),
+            Synthetic::ExceptionFrameHeader => self.write_frame_header(&mut buffer),
             Synthetic::DynamicRelocations => {
                 let entries = self.dynamic_relocations.clone();
                 buffer = self.encode_dynamic_relocations(&entries, true);
@@ -10140,6 +11828,17 @@ impl<'s> Context<'s> {
                 buffer = self.encode_dynamic_relocations(&entries, false);
             }
             Synthetic::SymbolTable => buffer = self.encode_symbol_table(),
+            Synthetic::DynamicSymbolTable => buffer = self.encode_dynamic_symbol_table(),
+            Synthetic::DynamicStringTable => buffer = self.dynamic_strings.clone(),
+            Synthetic::GnuHash => buffer = self.encode_gnu_hash(),
+            Synthetic::SystemFiveHash => buffer = self.encode_system_five_hash(),
+            Synthetic::VersionSymbols => buffer = self.encode_version_symbols(),
+            Synthetic::VersionNeeds => buffer = self.encode_version_needs(),
+            Synthetic::Dynamic => {
+                let entries = self.dynamic_entries();
+                buffer.clear();
+                elf::encode_dynamic(self.encoding(), &entries, &mut buffer);
+            }
             Synthetic::StringTable => buffer = self.string_table.clone(),
             Synthetic::SectionNameTable => buffer = self.section_names.bytes().to_vec(),
             Synthetic::BuildIdentifier => {
@@ -10293,7 +11992,37 @@ impl<'s> Context<'s> {
         }
         let at = self.section_header_offset as usize;
         out[at..at + section_headers.len()].copy_from_slice(&section_headers);
+        self.write_build_identifier(&mut out);
         out
+    }
+
+    fn write_build_identifier(&self, out: &mut [u8]) {
+        let Some(section) = self.synthetic_section(".note.gnu.build-id") else {
+            return;
+        };
+        let Some(output) = self.sections[section].output else {
+            return;
+        };
+        let at =
+            (self.outputs[output].offset + self.sections[section].offset_in_output + 16) as usize;
+        let length = (self.sections[section].size as usize).saturating_sub(16);
+        let identifier: Vec<u8> = match &self.options.build_identifier {
+            BuildIdentifier::None => return,
+            BuildIdentifier::Hexadecimal(bytes) => bytes.clone(),
+            BuildIdentifier::Fast => chunked_hash(out, 8, &|chunk: &[u8]| {
+                xxh3_64(chunk).to_le_bytes().to_vec()
+            }),
+            BuildIdentifier::Md5 | BuildIdentifier::Uuid => {
+                chunked_hash(out, 16, &|chunk: &[u8]| blake3(chunk)[..16].to_vec())
+            }
+            BuildIdentifier::Sha1 => {
+                chunked_hash(out, 20, &|chunk: &[u8]| blake3(chunk)[..20].to_vec())
+            }
+        };
+        let length = length.min(identifier.len());
+        if at + length <= out.len() {
+            out[at..at + length].copy_from_slice(&identifier[..length]);
+        }
     }
 
     pub fn header_flags(&self) -> u32 {
@@ -10367,7 +12096,8 @@ impl<'s> Context<'s> {
                     self.outputs[output].link = index_of(".dynsym", self)
                 }
                 Some(Synthetic::VersionNeeds) => {
-                    self.outputs[output].link = index_of(".dynstr", self)
+                    self.outputs[output].link = index_of(".dynstr", self);
+                    self.outputs[output].info = self.version_needs.len() as u32;
                 }
                 _ => {}
             }
@@ -10384,6 +12114,7 @@ impl<'s> Context<'s> {
             return None;
         }
         self.has_dynamic_symbols = !self.shared_files.is_empty() || self.is_pic();
+        self.options.export_dynamic |= self.is_shared();
         self.options.export_dynamic &= self.has_dynamic_symbols;
         self.entry_name = match &self.options.entry {
             Some(entry) => entry.clone(),
@@ -10442,13 +12173,47 @@ impl<'s> Context<'s> {
         });
         self.create_comment_section();
         self.split_merge_sections();
+        self.mark_live();
         self.create_synthetic_sections();
+        if let Some(synthetic) = self.synthetic_section(".eh_frame") {
+            for section in self.exception_frame_inputs.clone() {
+                let alignment = self.sections[synthetic]
+                    .alignment
+                    .max(self.sections[section].alignment);
+                self.sections[synthetic].alignment = alignment;
+            }
+        }
         self.create_output_sections();
         self.finalize_input_sections();
         if self.failed() {
             return None;
         }
         self.add_start_end_symbols();
+        if self.has_dynamic_symbols {
+            if let Some(dynamic) = self.synthetic_section(".dynamic") {
+                let id = self.insert("_DYNAMIC");
+                let state = self.symbols[id].state.clone();
+                if state != SymbolState::Defined {
+                    self.define_synthesized(
+                        id,
+                        SymbolPlace::Section(dynamic),
+                        0,
+                        visibility::HIDDEN,
+                        symbol_type::NO_TYPE,
+                        symbol_binding::WEAK,
+                    );
+                    self.symbols[id].used_in_regular_object = true;
+                }
+            }
+        }
+        if self.options.export_dynamic {
+            for id in self.synthesized.clone() {
+                if self.compute_binding(id) != symbol_binding::LOCAL {
+                    self.symbols[id].exported = true;
+                }
+            }
+        }
+        self.combine_exception_frames();
         self.demote_symbols_and_compute_preemptible();
         let undefined = self.scan_relocations();
         self.report_undefined(undefined);
@@ -10477,6 +12242,7 @@ impl<'s> Context<'s> {
         self.outputs.push(programs);
         self.create_segments();
         self.set_reserved_symbol_sections();
+        self.finalize_dynamic_tables();
         self.finalize_synthetic_sizes();
         self.fix_section_alignments();
         self.assign_addresses();
@@ -10493,6 +12259,7 @@ impl<'s> Context<'s> {
                 break;
             }
             self.finalize_synthetic_sizes();
+            changed |= self.update_frame_header();
             changed |= self.assign_addresses();
             if !changed {
                 break;
