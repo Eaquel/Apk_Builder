@@ -116,6 +116,10 @@ pub struct Options {
     pub enable_new_dynamic_tags: bool,
     pub symbolic: bool,
     pub symbolic_functions: bool,
+    pub symbolic_non_weak: bool,
+    pub symbolic_non_weak_functions: bool,
+    pub undefined_version: bool,
+    pub dynamic_list_files: Vec<String>,
     pub allow_multiple_definition: bool,
     pub warn_common: bool,
     pub optimize: u32,
@@ -130,6 +134,7 @@ pub struct Options {
     pub no_dynamic_open: bool,
     pub read_only_dynamic: bool,
     pub combine_relocations: bool,
+    pub start_stop_garbage_collection: bool,
     pub initializer: Option<String>,
     pub finalizer: Option<String>,
     pub version_script: Vec<String>,
@@ -190,6 +195,10 @@ impl Default for Options {
             enable_new_dynamic_tags: true,
             symbolic: false,
             symbolic_functions: false,
+            symbolic_non_weak: false,
+            symbolic_non_weak_functions: false,
+            undefined_version: false,
+            dynamic_list_files: Vec::new(),
             allow_multiple_definition: false,
             warn_common: false,
             optimize: 1,
@@ -204,6 +213,7 @@ impl Default for Options {
             no_dynamic_open: false,
             read_only_dynamic: false,
             combine_relocations: true,
+            start_stop_garbage_collection: true,
             initializer: None,
             finalizer: None,
             version_script: Vec::new(),
@@ -254,81 +264,12 @@ pub fn not_supported(feature: &str) -> Diagnostic {
     .with_context(format!("Feature: {feature}"))
 }
 
-pub fn script_tokens(text: &str) -> Result<Vec<String>, &'static str> {
-    let bytes = text.as_bytes();
-    let mut tokens = Vec::new();
-    let mut at = 0usize;
-    let word = |byte: u8| byte.is_ascii_alphanumeric() || b"_.$/\\~=+[]*?-!^:".contains(&byte);
-    while at < bytes.len() {
-        let byte = bytes[at];
-        if byte.is_ascii_whitespace() {
-            at += 1;
-            continue;
-        }
-        if bytes[at..].starts_with(b"/*") {
-            match text[at + 2..].find("*/") {
-                Some(end) => at += end + 4,
-                None => return Err("unclosed comment in a linker script"),
-            }
-            continue;
-        }
-        if byte == b'#' {
-            while at < bytes.len() && bytes[at] != b'\n' {
-                at += 1;
-            }
-            continue;
-        }
-        if byte == b'"' {
-            match text[at + 1..].find('"') {
-                Some(end) => {
-                    tokens.push(text[at..at + end + 2].to_string());
-                    at += end + 2;
-                }
-                None => return Err("unclosed quote"),
-            }
-            continue;
-        }
-        let mut end = at;
-        while end < bytes.len() && word(bytes[end]) {
-            end += 1;
-        }
-        if end == at {
-            end = at + 1;
-        }
-        tokens.push(text[at..end].to_string());
-        at = end;
-    }
-    Ok(tokens)
-}
-
 fn unquote(token: &str) -> String {
     if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
         token[1..token.len() - 1].to_string()
     } else {
         token.to_string()
     }
-}
-
-fn skip_parenthesized(tokens: &[String], at: usize) -> usize {
-    if tokens.get(at).map(String::as_str) != Some("(") {
-        return at;
-    }
-    let mut depth = 0usize;
-    let mut position = at;
-    while position < tokens.len() {
-        match tokens[position].as_str() {
-            "(" => depth += 1,
-            ")" => {
-                depth -= 1;
-                if depth == 0 {
-                    return position + 1;
-                }
-            }
-            _ => {}
-        }
-        position += 1;
-    }
-    position
 }
 
 pub fn parse_number(text: &str) -> Option<u64> {
@@ -484,6 +425,14 @@ fn normalize_dashes(argument: &str) -> String {
         "image-base",
         "Bsymbolic",
         "Bsymbolic-functions",
+        "Bsymbolic-non-weak",
+        "Bsymbolic-non-weak-functions",
+        "Bno-symbolic",
+        "undefined-version",
+        "no-undefined-version",
+        "dynamic-list",
+        "export-dynamic-symbol",
+        "export-dynamic-symbol-list",
         "Bstatic",
         "Bdynamic",
         "Bshareable",
@@ -794,6 +743,18 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.export_dynamic_symbols.push(value);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--version-script"])? {
+            options.version_script.push(value);
+            continue;
+        }
+        if let Some(value) = option_value(
+            &mut cursor,
+            argument,
+            &["--dynamic-list", "--export-dynamic-symbol-list"],
+        )? {
+            options.dynamic_list_files.push(value);
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--pack-dyn-relocs"])? {
             match value.as_str() {
                 "none" => {}
@@ -862,8 +823,38 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-apply-dynamic-relocs" => options.apply_dynamic_relocations = false,
             "--enable-new-dtags" => options.enable_new_dynamic_tags = true,
             "--disable-new-dtags" => options.enable_new_dynamic_tags = false,
-            "--Bsymbolic" => options.symbolic = true,
-            "--Bsymbolic-functions" => options.symbolic_functions = true,
+            "--Bsymbolic" => {
+                options.symbolic = true;
+                options.symbolic_functions = false;
+                options.symbolic_non_weak = false;
+                options.symbolic_non_weak_functions = false;
+            }
+            "--Bsymbolic-functions" => {
+                options.symbolic = false;
+                options.symbolic_functions = true;
+                options.symbolic_non_weak = false;
+                options.symbolic_non_weak_functions = false;
+            }
+            "--Bsymbolic-non-weak" => {
+                options.symbolic = false;
+                options.symbolic_functions = false;
+                options.symbolic_non_weak = true;
+                options.symbolic_non_weak_functions = false;
+            }
+            "--Bsymbolic-non-weak-functions" => {
+                options.symbolic = false;
+                options.symbolic_functions = false;
+                options.symbolic_non_weak = false;
+                options.symbolic_non_weak_functions = true;
+            }
+            "--Bno-symbolic" => {
+                options.symbolic = false;
+                options.symbolic_functions = false;
+                options.symbolic_non_weak = false;
+                options.symbolic_non_weak_functions = false;
+            }
+            "--undefined-version" => options.undefined_version = true,
+            "--no-undefined-version" => options.undefined_version = false,
             "--allow-multiple-definition" => options.allow_multiple_definition = true,
             "--no-allow-multiple-definition" => options.allow_multiple_definition = false,
             "--warn-common" => options.warn_common = true,
@@ -977,6 +968,8 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "rodynamic" => options.read_only_dynamic = true,
         "combreloc" => options.combine_relocations = true,
         "nocombreloc" => options.combine_relocations = false,
+        "start-stop-gc" => options.start_stop_garbage_collection = true,
+        "nostart-stop-gc" => options.start_stop_garbage_collection = false,
         "defs" => options.no_undefined = true,
         "undefs" => options.no_undefined = false,
         "nognustack" | "noexecstack-ignored" => {}
@@ -1227,6 +1220,10 @@ pub struct SymbolData {
     pub is_local: bool,
     pub used_in_regular_object: bool,
     pub referenced: bool,
+    pub used: bool,
+    pub version_suffix_at: Option<usize>,
+    pub version_script_assigned: bool,
+    pub in_dynamic_list: bool,
     pub exported: bool,
     pub preemptible: bool,
     pub needs: u32,
@@ -1263,6 +1260,10 @@ impl SymbolData {
             is_local: false,
             used_in_regular_object: false,
             referenced: false,
+            used: false,
+            version_suffix_at: None,
+            version_script_assigned: false,
+            in_dynamic_list: false,
             exported: false,
             preemptible: false,
             needs: 0,
@@ -1480,6 +1481,7 @@ pub struct InputSection {
     pub dependents: Vec<SectionIndex>,
     pub is_merge: bool,
     pub is_exception_frame: bool,
+    pub next_in_group: Option<SectionIndex>,
     pub common_symbol: Option<SymbolIndex>,
     pub merged_members: Vec<SectionIndex>,
 }
@@ -1518,6 +1520,7 @@ impl InputSection {
             is_exception_frame: false,
             common_symbol: None,
             merged_members: Vec::new(),
+            next_in_group: None,
         }
     }
 }
@@ -1551,6 +1554,385 @@ pub struct InputFile {
     pub elf_symbols: Vec<elf::Symbol>,
     pub executable_stack_requested: bool,
     pub and_features: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolPattern {
+    pub name: String,
+    pub extern_cpp: bool,
+    pub wildcard: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct VersionDefinition {
+    pub name: String,
+    pub identifier: u16,
+    pub non_local: Vec<SymbolPattern>,
+    pub local: Vec<SymbolPattern>,
+}
+
+pub fn has_wildcard(text: &str) -> bool {
+    text.contains(['?', '*', '['])
+}
+
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut pattern_at = 0usize;
+    let mut text_at = 0usize;
+    let mut star: Option<(usize, usize)> = None;
+    let class_end = |start: usize| -> Option<usize> {
+        let mut at = start + 1;
+        if at < pattern.len() && (pattern[at] == '!' || pattern[at] == '^') {
+            at += 1;
+        }
+        if at < pattern.len() && pattern[at] == ']' {
+            at += 1;
+        }
+        while at < pattern.len() && pattern[at] != ']' {
+            at += 1;
+        }
+        (at < pattern.len()).then_some(at)
+    };
+    let class_matches = |start: usize, end: usize, character: char| -> bool {
+        let mut at = start + 1;
+        let negated = pattern[at] == '!' || pattern[at] == '^';
+        if negated {
+            at += 1;
+        }
+        let mut found = false;
+        let mut first = true;
+        while at < end {
+            if !first && pattern[at] == ']' {
+                break;
+            }
+            first = false;
+            let low = pattern[at];
+            if at + 2 < end && pattern[at + 1] == '-' {
+                let high = pattern[at + 2];
+                if low <= character && character <= high {
+                    found = true;
+                }
+                at += 3;
+            } else {
+                if low == character {
+                    found = true;
+                }
+                at += 1;
+            }
+        }
+        found != negated
+    };
+    while text_at < text.len() {
+        let mut advanced = false;
+        if pattern_at < pattern.len() {
+            match pattern[pattern_at] {
+                '*' => {
+                    star = Some((pattern_at, text_at));
+                    pattern_at += 1;
+                    continue;
+                }
+                '?' => {
+                    pattern_at += 1;
+                    text_at += 1;
+                    advanced = true;
+                }
+                '[' => {
+                    if let Some(end) = class_end(pattern_at) {
+                        if class_matches(pattern_at, end, text[text_at]) {
+                            pattern_at = end + 1;
+                            text_at += 1;
+                            advanced = true;
+                        }
+                    } else if text[text_at] == '[' {
+                        pattern_at += 1;
+                        text_at += 1;
+                        advanced = true;
+                    }
+                }
+                '\\' if pattern_at + 1 < pattern.len() => {
+                    if pattern[pattern_at + 1] == text[text_at] {
+                        pattern_at += 2;
+                        text_at += 1;
+                        advanced = true;
+                    }
+                }
+                character => {
+                    if character == text[text_at] {
+                        pattern_at += 1;
+                        text_at += 1;
+                        advanced = true;
+                    }
+                }
+            }
+        }
+        if advanced {
+            continue;
+        }
+        match star {
+            Some((star_pattern, star_text)) => {
+                pattern_at = star_pattern + 1;
+                text_at = star_text + 1;
+                star = Some((star_pattern, star_text + 1));
+            }
+            None => return false,
+        }
+    }
+    while pattern_at < pattern.len() && pattern[pattern_at] == '*' {
+        pattern_at += 1;
+    }
+    pattern_at == pattern.len()
+}
+
+pub fn pattern_matches(pattern: &SymbolPattern, name: &str) -> bool {
+    if pattern.wildcard {
+        glob_match(&pattern.name, name)
+    } else {
+        pattern.name == name
+    }
+}
+
+pub struct ScriptLexer<'t> {
+    text: &'t str,
+    at: usize,
+    pub version_mode: bool,
+}
+
+impl<'t> ScriptLexer<'t> {
+    pub fn new(text: &'t str, version_mode: bool) -> ScriptLexer<'t> {
+        ScriptLexer {
+            text,
+            at: 0,
+            version_mode,
+        }
+    }
+
+    fn skip_space(&mut self) -> Result<(), String> {
+        let bytes = self.text.as_bytes();
+        loop {
+            if self.text[self.at..].starts_with("/*") {
+                match self.text[self.at + 2..].find("*/") {
+                    Some(end) => self.at += end + 4,
+                    None => return Err("unclosed comment in a linker script".to_string()),
+                }
+                continue;
+            }
+            if bytes.get(self.at) == Some(&b'#') {
+                while self.at < bytes.len() && bytes[self.at] != b'\n' {
+                    self.at += 1;
+                }
+                continue;
+            }
+            if bytes
+                .get(self.at)
+                .is_some_and(|byte| byte.is_ascii_whitespace())
+            {
+                self.at += 1;
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
+    pub fn next_token(&mut self) -> Result<Option<String>, String> {
+        self.skip_space()?;
+        let bytes = self.text.as_bytes();
+        if self.at >= bytes.len() {
+            return Ok(None);
+        }
+        let start = self.at;
+        if bytes[start] == b'"' {
+            return match self.text[start + 1..].find('"') {
+                Some(end) => {
+                    self.at = start + end + 2;
+                    Ok(Some(self.text[start..self.at].to_string()))
+                }
+                None => Err("unclosed quote".to_string()),
+            };
+        }
+        let word = |byte: u8| byte.is_ascii_alphanumeric() || b"_.$/\\~=+[]*?-!^".contains(&byte);
+        let mut end = start;
+        while end < bytes.len() {
+            let byte = bytes[end];
+            if byte == b':' {
+                if self.version_mode {
+                    if bytes.get(end + 1) == Some(&b':') {
+                        end += 2;
+                        continue;
+                    }
+                    break;
+                }
+                end += 1;
+                continue;
+            }
+            if !word(byte) {
+                break;
+            }
+            end += 1;
+        }
+        if end == start {
+            end = start + 1;
+        }
+        self.at = end;
+        Ok(Some(self.text[start..end].to_string()))
+    }
+
+    pub fn peek(&mut self) -> Result<Option<String>, String> {
+        let saved = self.at;
+        let token = self.next_token();
+        self.at = saved;
+        token
+    }
+
+    pub fn consume(&mut self, expected: &str) -> Result<bool, String> {
+        if self.peek()?.as_deref() == Some(expected) {
+            self.next_token()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn expect(&mut self, expected: &str) -> Result<(), String> {
+        match self.next_token()? {
+            Some(token) if token == expected => Ok(()),
+            Some(token) => Err(format!("{expected} expected, but got {token}")),
+            None => Err("unexpected EOF".to_string()),
+        }
+    }
+
+    pub fn till(&mut self, end: &str) -> Result<Option<String>, String> {
+        match self.next_token()? {
+            Some(token) if token == end => Ok(None),
+            Some(token) => Ok(Some(token)),
+            None => Err("unexpected EOF".to_string()),
+        }
+    }
+}
+
+pub type SymbolPatterns = (Vec<SymbolPattern>, Vec<SymbolPattern>);
+
+fn read_version_symbols(lexer: &mut ScriptLexer) -> Result<SymbolPatterns, String> {
+    let mut locals = Vec::new();
+    let mut globals = Vec::new();
+    let mut into_locals = false;
+    while let Some(token) = lexer.till("}")? {
+        if token == "extern" {
+            let language = lexer.next_token()?.unwrap_or_default();
+            let extern_cpp = language == "\"C++\"";
+            if !extern_cpp && language != "\"C\"" {
+                return Err("Unknown language".to_string());
+            }
+            lexer.expect("{")?;
+            let mut patterns = Vec::new();
+            while let Some(token) = lexer.till("}")? {
+                patterns.push(SymbolPattern {
+                    name: unquote(&token),
+                    extern_cpp,
+                    wildcard: !token.starts_with('"') && has_wildcard(&token),
+                });
+                if lexer.consume("}")? {
+                    break;
+                }
+                lexer.expect(";")?;
+            }
+            if into_locals {
+                locals.extend(patterns);
+            } else {
+                globals.extend(patterns);
+            }
+        } else {
+            if token == "local" && lexer.consume(":")? {
+                into_locals = true;
+                continue;
+            }
+            if token == "global" && lexer.consume(":")? {
+                into_locals = false;
+                continue;
+            }
+            let pattern = SymbolPattern {
+                name: unquote(&token),
+                extern_cpp: false,
+                wildcard: has_wildcard(&token),
+            };
+            if into_locals {
+                locals.push(pattern);
+            } else {
+                globals.push(pattern);
+            }
+        }
+        lexer.expect(";")?;
+    }
+    Ok((locals, globals))
+}
+
+pub fn read_version_command(
+    lexer: &mut ScriptLexer,
+    definitions: &mut Vec<VersionDefinition>,
+) -> Result<(), String> {
+    let saved = lexer.version_mode;
+    lexer.version_mode = true;
+    let result = (|| {
+        if lexer.consume("{")? {
+            let (locals, globals) = read_version_symbols(lexer)?;
+            definitions[0].local.extend(locals);
+            definitions[1].non_local.extend(globals);
+            lexer.expect(";")?;
+            return Ok(());
+        }
+        if lexer.peek()?.is_none() {
+            return Err("unexpected EOF".to_string());
+        }
+        while let Some(token) = lexer.peek()? {
+            if token == "}" {
+                break;
+            }
+            lexer.next_token()?;
+            if token == "{" {
+                return Err("anonymous version definition is used in combination with other version definitions".to_string());
+            }
+            lexer.expect("{")?;
+            let (locals, globals) = read_version_symbols(lexer)?;
+            let identifier = definitions.len() as u16;
+            definitions.push(VersionDefinition {
+                name: token,
+                identifier,
+                non_local: globals,
+                local: locals,
+            });
+            if lexer.next_token()?.as_deref() != Some(";") {
+                lexer.expect(";")?;
+            }
+        }
+        Ok(())
+    })();
+    lexer.version_mode = saved;
+    result
+}
+
+pub fn read_version_script(
+    text: &str,
+    definitions: &mut Vec<VersionDefinition>,
+) -> Result<(), String> {
+    let mut lexer = ScriptLexer::new(text, true);
+    read_version_command(&mut lexer, definitions)?;
+    match lexer.peek()? {
+        Some(token) => Err(format!("EOF expected, but got {token}")),
+        None => Ok(()),
+    }
+}
+
+pub fn read_dynamic_list(text: &str) -> Result<Vec<SymbolPattern>, String> {
+    let mut lexer = ScriptLexer::new(text, true);
+    lexer.expect("{")?;
+    let (locals, globals) = read_version_symbols(&mut lexer)?;
+    lexer.expect(";")?;
+    if let Some(token) = lexer.peek()? {
+        return Err(format!("EOF expected, but got {token}"));
+    }
+    if !locals.is_empty() {
+        return Err("\"local:\" scope not supported in --dynamic-list".to_string());
+    }
+    Ok(globals)
 }
 
 #[derive(Clone, Debug)]
@@ -1860,6 +2242,10 @@ pub struct Context<'s> {
     pub input_order: Vec<SectionIndex>,
     pub exception_frame_inputs: Vec<SectionIndex>,
     pub frame_pieces: BTreeMap<SectionIndex, Vec<FramePiece>>,
+    pub version_definitions: Vec<VersionDefinition>,
+    pub dynamic_list_patterns: Vec<SymbolPattern>,
+    pub version_definition_name: u32,
+    pub version_definition_names: Vec<u32>,
     pub frame_relocations: BTreeMap<SectionIndex, Vec<RawRelocation>>,
     pub frame_records: Vec<FrameRecord>,
     pub frame_header_entries: Vec<(i64, i64)>,
@@ -1955,6 +2341,23 @@ impl<'s> Context<'s> {
             input_order: Vec::new(),
             exception_frame_inputs: Vec::new(),
             frame_pieces: BTreeMap::new(),
+            version_definitions: vec![
+                VersionDefinition {
+                    name: "local".to_string(),
+                    identifier: elf::version_index::LOCAL,
+                    non_local: Vec::new(),
+                    local: Vec::new(),
+                },
+                VersionDefinition {
+                    name: "global".to_string(),
+                    identifier: elf::version_index::GLOBAL,
+                    non_local: Vec::new(),
+                    local: Vec::new(),
+                },
+            ],
+            dynamic_list_patterns: Vec::new(),
+            version_definition_name: 0,
+            version_definition_names: Vec::new(),
             frame_relocations: BTreeMap::new(),
             frame_records: Vec::new(),
             frame_header_entries: Vec::new(),
@@ -2021,12 +2424,19 @@ impl<'s> Context<'s> {
     }
 
     pub fn insert(&mut self, name: &str) -> SymbolIndex {
-        if let Some(found) = self.names.get(name) {
-            return *found;
+        let stem = match name.find('@') {
+            Some(at) if name[at + 1..].starts_with('@') => &name[..at],
+            _ => name,
+        };
+        if let Some(found) = self.names.get(stem).copied() {
+            if stem.len() != name.len() {
+                self.symbols[found].name = name.to_string();
+            }
+            return found;
         }
         let index = self.symbols.len();
         self.symbols.push(SymbolData::new(name));
-        self.names.insert(name.to_string(), index);
+        self.names.insert(stem.to_string(), index);
         index
     }
 
@@ -2562,97 +2972,101 @@ impl<'s> Context<'s> {
         target_reference: &mut Option<String>,
     ) {
         let text = String::from_utf8_lossy(bytes).to_string();
-        let tokens = match script_tokens(&text) {
-            Ok(tokens) => tokens,
-            Err(reason) => {
-                self.error(
-                    problem("EI239", "The linker script could not be read.")
-                        .with_context(format!("File: {display}"))
-                        .with_context(format!("Reason: {reason}")),
-                );
-                return;
+        if let Err(reason) = self.read_input_commands(&text, path, state, group, target_reference) {
+            self.script_error(display, &reason);
+        }
+    }
+
+    fn read_input_commands(
+        &mut self,
+        text: &str,
+        path: &str,
+        state: LoadState,
+        group: usize,
+        target_reference: &mut Option<String>,
+    ) -> Result<(), String> {
+        let mut lexer = ScriptLexer::new(text, false);
+        let parenthesized = |lexer: &mut ScriptLexer| -> Result<Vec<String>, String> {
+            lexer.expect("(")?;
+            let mut values = Vec::new();
+            while let Some(token) = lexer.till(")")? {
+                if token != "," {
+                    values.push(unquote(&token));
+                }
             }
+            Ok(values)
         };
-        let mut at = 0usize;
-        while at < tokens.len() {
-            let command = tokens[at].clone();
-            at += 1;
+        while let Some(command) = lexer.next_token()? {
             match command.as_str() {
                 ";" => {}
                 "GROUP" | "INPUT" => {
-                    if tokens.get(at).map(String::as_str) != Some("(") {
-                        self.script_error(display, "expected (");
-                        return;
-                    }
-                    at += 1;
-                    let mut inner = state;
-                    let mut as_needed_depth = 0usize;
-                    while at < tokens.len() {
-                        let token = tokens[at].clone();
-                        at += 1;
+                    lexer.expect("(")?;
+                    while let Some(token) = lexer.till(")")? {
                         match token.as_str() {
-                            ")" if as_needed_depth > 0 => {
-                                as_needed_depth -= 1;
-                                inner.as_needed = state.as_needed;
-                            }
-                            ")" => break,
                             "," => {}
                             "AS_NEEDED" => {
-                                if tokens.get(at).map(String::as_str) == Some("(") {
-                                    at += 1;
-                                }
-                                as_needed_depth += 1;
+                                let mut inner = state;
                                 inner.as_needed = true;
+                                for name in parenthesized(&mut lexer)? {
+                                    self.add_script_file(
+                                        &name,
+                                        path,
+                                        inner,
+                                        group,
+                                        target_reference,
+                                    );
+                                }
                             }
                             _ => {
                                 let name = unquote(&token);
-                                self.add_script_file(&name, path, inner, group, target_reference);
+                                self.add_script_file(&name, path, state, group, target_reference);
                             }
                         }
                     }
                 }
                 "OUTPUT_FORMAT" | "OUTPUT_ARCH" | "TARGET" => {
-                    at = skip_parenthesized(&tokens, at);
+                    parenthesized(&mut lexer)?;
                 }
                 "SEARCH_DIR" => {
-                    if tokens.get(at).map(String::as_str) == Some("(") {
-                        if let Some(folder) = tokens.get(at + 1) {
-                            self.options.library_paths.push(unquote(folder));
-                        }
+                    if let Some(folder) = parenthesized(&mut lexer)?.first() {
+                        self.options.library_paths.push(folder.clone());
                     }
-                    at = skip_parenthesized(&tokens, at);
                 }
                 "ENTRY" => {
-                    if tokens.get(at).map(String::as_str) == Some("(") {
-                        if let Some(name) = tokens.get(at + 1) {
-                            if self.options.entry.is_none() {
-                                self.options.entry = Some(unquote(name));
-                            }
+                    if let Some(name) = parenthesized(&mut lexer)?.first() {
+                        if self.options.entry.is_none() {
+                            self.options.entry = Some(name.clone());
                         }
                     }
-                    at = skip_parenthesized(&tokens, at);
                 }
                 "EXTERN" => {
-                    let start = at + 1;
-                    at = skip_parenthesized(&tokens, at);
-                    for token in tokens.iter().take(at.saturating_sub(1)).skip(start) {
-                        if token != "," {
-                            let id = self.add_unused_undefined(&unquote(token));
-                            self.symbols[id].referenced = true;
-                            self.options.undefined.push(unquote(token));
-                        }
+                    lexer.expect("(")?;
+                    while let Some(token) = lexer.till(")")? {
+                        let name = unquote(&token);
+                        let id = self.add_unused_undefined(&name);
+                        self.symbols[id].referenced = true;
+                        self.options.undefined.push(name);
                     }
+                }
+                "VERSION" => {
+                    lexer.expect("{")?;
+                    let mut definitions = std::mem::take(&mut self.version_definitions);
+                    let result = read_version_command(&mut lexer, &mut definitions);
+                    self.version_definitions = definitions;
+                    result?;
+                    lexer.expect("}")?;
                 }
                 other => {
                     self.error(
                         not_supported("linker script command")
                             .with_context(format!("Command: {other}"))
-                            .with_context(format!("File: {display}")),
+                            .with_context(format!("File: {path}")),
                     );
-                    return;
+                    return Ok(());
                 }
             }
         }
+        Ok(())
     }
 
     fn script_error(&mut self, display: &str, reason: &str) {
@@ -3786,7 +4200,11 @@ impl<'s> Context<'s> {
                 elf_index: position,
                 name: header.name.clone(),
                 kind: header.kind,
-                flags: header.flags,
+                flags: if relocatable {
+                    header.flags
+                } else {
+                    header.flags & !section_flag::GROUP
+                },
                 alignment: header.alignment.max(1),
                 entry_size: header.entry_size,
                 data: if header.kind == section_type::NO_BITS {
@@ -3811,6 +4229,7 @@ impl<'s> Context<'s> {
                 is_exception_frame,
                 common_symbol: None,
                 merged_members: Vec::new(),
+                next_in_group: None,
             };
             map[position] = Some(self.sections.len());
             if header.kind == section_type::ARM_ATTRIBUTES
@@ -3885,6 +4304,34 @@ impl<'s> Context<'s> {
             }
         }
         self.files[index].sections = map;
+        if !relocatable {
+            for group in self.files[index].kept_groups.clone() {
+                let Ok(group) = self.files[index].elf.group(group) else {
+                    continue;
+                };
+                let members: Vec<SectionIndex> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| {
+                        self.files[index]
+                            .sections
+                            .get(*member as usize)
+                            .copied()
+                            .flatten()
+                    })
+                    .collect();
+                if !members
+                    .iter()
+                    .any(|member| self.sections[*member].flags & section_flag::ALLOCATE != 0)
+                {
+                    continue;
+                }
+                for (position, member) in members.iter().enumerate() {
+                    let next = members[(position + 1) % members.len()];
+                    self.sections[*member].next_in_group = Some(next);
+                }
+            }
+        }
         let symbols = self.files[index].elf_symbols.clone();
         let first_global = self.files[index].first_global;
         for (position, symbol) in symbols.iter().enumerate().take(first_global) {
@@ -4369,6 +4816,15 @@ impl<'s> Context<'s> {
                     Synthetic::VersionSymbols,
                 );
                 self.sections[index].entry_size = 2;
+                if self.has_named_versions() {
+                    self.add_synthetic(
+                        ".gnu.version_d",
+                        section_type::GNU_VERSION_DEFINITIONS,
+                        section_flag::ALLOCATE,
+                        4,
+                        Synthetic::VersionDefinitions,
+                    );
+                }
                 let index = self.add_synthetic(
                     ".gnu.version_r",
                     section_type::GNU_VERSION_NEEDS,
@@ -4634,7 +5090,8 @@ impl<'s> Context<'s> {
             Synthetic::ExceptionFrame => !self.frame_pieces.is_empty(),
             Synthetic::ExceptionFrameHeader => !self.frame_pieces.is_empty(),
             Synthetic::VersionNeeds => self.version_need_count() > 0,
-            Synthetic::VersionSymbols => self.version_need_count() > 0,
+            Synthetic::VersionSymbols => self.version_need_count() > 0 || self.has_named_versions(),
+            Synthetic::VersionDefinitions => self.has_named_versions(),
             Synthetic::DynamicSymbolTable
             | Synthetic::DynamicStringTable
             | Synthetic::GnuHash
@@ -4650,7 +5107,11 @@ impl<'s> Context<'s> {
     }
 
     pub fn version_definition_count(&self) -> usize {
-        1
+        self.version_definitions.len() - 1
+    }
+
+    pub fn has_named_versions(&self) -> bool {
+        self.version_definitions.len() > 2
     }
 
     fn is_shared_file(&self, file: Option<FileIndex>) -> bool {
@@ -4659,10 +5120,7 @@ impl<'s> Context<'s> {
 
     pub fn dynamic_symbol_name(&self, id: SymbolIndex) -> String {
         let symbol = &self.symbols[id];
-        if symbol.version == elf::version_index::LOCAL {
-            return symbol.name.clone();
-        }
-        match symbol.name.find('@') {
+        match symbol.version_suffix_at {
             Some(at) => symbol.name[..at].to_string(),
             None => symbol.name.clone(),
         }
@@ -4764,6 +5222,19 @@ impl<'s> Context<'s> {
         }
         for (position, id) in self.dynamic_symbols.clone().into_iter().enumerate() {
             self.symbols[id].dynamic_symbol_index = position + 1;
+        }
+        if self.has_named_versions() {
+            let file_name = self
+                .options
+                .shared_object_name
+                .clone()
+                .unwrap_or_else(|| self.options.output.clone());
+            self.version_definition_name = self.add_dynamic_string(&file_name);
+            self.version_definition_names.clear();
+            for definition in self.version_definitions.clone().iter().skip(2) {
+                let offset = self.add_dynamic_string(&definition.name);
+                self.version_definition_names.push(offset);
+            }
         }
         self.version_needs.clear();
         for file in self.shared_files.clone() {
@@ -5018,10 +5489,22 @@ impl<'s> Context<'s> {
                 add(tag::FINI, self.symbol_address(id, 0));
             }
         }
-        if self.live_synthetic(".gnu.version") && self.version_need_count() > 0 {
+        if self.live_synthetic(".gnu.version")
+            && (self.version_need_count() > 0 || self.has_named_versions())
+        {
             add(
                 tag::VERSION_SYMBOLS,
                 self.dynamic_tables_section_address(".gnu.version"),
+            );
+        }
+        if self.live_synthetic(".gnu.version_d") {
+            add(
+                tag::VERSION_DEFINITIONS,
+                self.dynamic_tables_section_address(".gnu.version_d"),
+            );
+            add(
+                tag::VERSION_DEFINITION_COUNT,
+                self.version_definition_count() as u64,
             );
         }
         if self.live_synthetic(".gnu.version_r") && self.version_need_count() > 0 {
@@ -5116,6 +5599,46 @@ impl<'s> Context<'s> {
                     symbol.version
                 },
             );
+        }
+        out
+    }
+
+    fn encode_version_definitions(&self) -> Vec<u8> {
+        let encoding = self.encoding();
+        let mut out = Vec::new();
+        let file_name = self
+            .options
+            .shared_object_name
+            .clone()
+            .unwrap_or_else(|| self.options.output.clone());
+        let mut entries: Vec<(u16, String, u32)> =
+            vec![(1, file_name, self.version_definition_name)];
+        for (definition, offset) in self
+            .version_definitions
+            .iter()
+            .skip(2)
+            .zip(&self.version_definition_names)
+        {
+            entries.push((definition.identifier, definition.name.clone(), *offset));
+        }
+        let count = entries.len();
+        for (position, (index, name, offset)) in entries.into_iter().enumerate() {
+            encoding.put_u16(&mut out, 1);
+            encoding.put_u16(
+                &mut out,
+                if index == 1 {
+                    elf::version_flag::BASE
+                } else {
+                    0
+                },
+            );
+            encoding.put_u16(&mut out, index);
+            encoding.put_u16(&mut out, 1);
+            encoding.put_u32(&mut out, elf::system_five_hash(name.as_bytes()));
+            encoding.put_u32(&mut out, 20);
+            encoding.put_u32(&mut out, if position + 1 == count { 0 } else { 28 });
+            encoding.put_u32(&mut out, offset);
+            encoding.put_u32(&mut out, 0);
         }
         out
     }
@@ -5635,8 +6158,15 @@ impl<'s> Context<'s> {
         if !self.is_shared() {
             return false;
         }
-        if self.options.symbolic || (self.options.symbolic_functions && symbol.is_function()) {
-            return false;
+        if self.options.symbolic
+            || !self.options.dynamic_list_files.is_empty()
+            || (self.options.symbolic_non_weak && symbol.binding != symbol_binding::WEAK)
+            || (self.options.symbolic_functions && symbol.is_function())
+            || (self.options.symbolic_non_weak_functions
+                && symbol.is_function()
+                && symbol.binding != symbol_binding::WEAK)
+        {
+            return symbol.in_dynamic_list;
         }
         true
     }
@@ -5650,8 +6180,361 @@ impl<'s> Context<'s> {
             .collect()
     }
 
+    pub fn read_version_inputs(&mut self) {
+        for path in self.options.version_script.clone() {
+            let Some(bytes) = self.read_script_file(&path) else {
+                self.error(file_missing(&path));
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            let mut definitions = std::mem::take(&mut self.version_definitions);
+            let result = read_version_script(&text, &mut definitions);
+            self.version_definitions = definitions;
+            if let Err(reason) = result {
+                self.script_error(&path, &reason);
+            }
+        }
+        for name in self.options.export_dynamic_symbols.clone() {
+            self.dynamic_list_patterns.push(SymbolPattern {
+                wildcard: has_wildcard(&name),
+                name,
+                extern_cpp: false,
+            });
+        }
+        for path in self.options.dynamic_list_files.clone() {
+            let Some(bytes) = self.read_script_file(&path) else {
+                self.error(file_missing(&path));
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            match read_dynamic_list(&text) {
+                Ok(patterns) => self.dynamic_list_patterns.extend(patterns),
+                Err(reason) => self.script_error(&path, &reason),
+            }
+        }
+        let uses_cpp = self
+            .version_definitions
+            .iter()
+            .flat_map(|definition| definition.non_local.iter().chain(&definition.local))
+            .chain(&self.dynamic_list_patterns)
+            .any(|pattern| pattern.extern_cpp);
+        if uses_cpp {
+            self.error(not_supported("extern \"C++\" symbol patterns"));
+        }
+    }
+
+    fn read_script_file(&self, path: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = (self.source)(&self.resolve_path(path)) {
+            return Some(bytes);
+        }
+        for folder in &self.options.library_paths {
+            let folder = self.resolve_path(folder);
+            if let Some(bytes) = (self.source)(&format!("{folder}/{path}")) {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
+    fn can_be_versioned(&self, id: SymbolIndex) -> bool {
+        let symbol = &self.symbols[id];
+        symbol.is_defined() || symbol.is_common() || symbol.is_lazy()
+    }
+
+    fn find_by_version(&self, name: &str) -> Option<SymbolIndex> {
+        self.find(name).filter(|id| self.can_be_versioned(*id))
+    }
+
+    fn version_label(&self, version: u16) -> String {
+        match version {
+            elf::version_index::LOCAL => "VER_NDX_LOCAL".to_string(),
+            elf::version_index::GLOBAL => "VER_NDX_GLOBAL".to_string(),
+            other => format!(
+                "version '{}'",
+                self.version_definitions
+                    .get(other as usize)
+                    .map(|definition| definition.name.as_str())
+                    .unwrap_or("")
+            ),
+        }
+    }
+
+    fn assign_exact_version(&mut self, name: &str, version: u16) -> bool {
+        let Some(id) = self.find_by_version(name) else {
+            return false;
+        };
+        if self.symbols[id].name.contains('@') {
+            return true;
+        }
+        if !self.symbols[id].version_script_assigned {
+            self.symbols[id].version_script_assigned = true;
+            self.symbols[id].version = version;
+        }
+        if self.symbols[id].version != version {
+            let previous = self.version_label(self.symbols[id].version);
+            let requested = self.version_label(version);
+            self.warn(
+                caution(
+                    "EI244",
+                    "A version script assigns a symbol to a second version.",
+                )
+                .with_context(format!("Symbol: {name}"))
+                .with_context(format!("Previous: {previous}"))
+                .with_context(format!("Version: {requested}")),
+            );
+        }
+        true
+    }
+
+    pub fn scan_version_script(&mut self) {
+        let definitions = self.version_definitions.clone();
+        for definition in &definitions {
+            let exact =
+                |context: &mut Context, pattern: &SymbolPattern, version: u16, label: &str| {
+                    let mut found = context.assign_exact_version(&pattern.name, version);
+                    found |= context
+                        .find_by_version(&format!("{}@{}", pattern.name, definition.name))
+                        .is_some();
+                    if !found && !context.options.undefined_version {
+                        context.error(
+                            problem(
+                                "EI242",
+                                "A version script names a symbol that is not defined.",
+                            )
+                            .with_context(format!("Version: {label}"))
+                            .with_context(format!("Symbol: {}", pattern.name)),
+                        );
+                    }
+                };
+            for pattern in definition
+                .non_local
+                .iter()
+                .filter(|pattern| !pattern.wildcard)
+            {
+                exact(self, pattern, definition.identifier, &definition.name);
+            }
+            for pattern in definition.local.iter().filter(|pattern| !pattern.wildcard) {
+                exact(self, pattern, elf::version_index::LOCAL, "local");
+            }
+        }
+        let mut patterns: Vec<(SymbolPattern, u16)> = Vec::new();
+        let mut asterisks: Vec<(SymbolPattern, u16)> = Vec::new();
+        let mut global_asterisk = false;
+        let mut local_asterisk = false;
+        let mut reported = false;
+        for definition in definitions.iter().rev() {
+            for local in [false, true] {
+                let version = if local {
+                    elf::version_index::LOCAL
+                } else {
+                    definition.identifier
+                };
+                let list = if local {
+                    &definition.local
+                } else {
+                    &definition.non_local
+                };
+                for pattern in list.iter().filter(|pattern| pattern.wildcard) {
+                    if pattern.name != "*" {
+                        patterns.push((pattern.clone(), version));
+                        continue;
+                    }
+                    if !reported {
+                        if (local && global_asterisk) || (!local && local_asterisk) {
+                            self.warn(
+                                caution("EI245", "The wildcard pattern * is used more than once in the version script.")
+                                    .with_context("Scope: both local and global".to_string()),
+                            );
+                            reported = true;
+                        } else if !local && global_asterisk {
+                            self.warn(
+                                caution("EI245", "The wildcard pattern * is used more than once in the version script.")
+                                    .with_context("Scope: multiple version definitions".to_string()),
+                            );
+                            reported = true;
+                        } else {
+                            local_asterisk = local;
+                            global_asterisk = !local;
+                        }
+                    }
+                    asterisks.push((pattern.clone(), version));
+                }
+            }
+        }
+        patterns.extend(asterisks);
+        if !patterns.is_empty() {
+            for id in self.global_symbols() {
+                let symbol = &self.symbols[id];
+                if symbol.version_script_assigned
+                    || symbol.name.contains('@')
+                    || !self.can_be_versioned(id)
+                {
+                    continue;
+                }
+                if let Some((_, version)) = patterns
+                    .iter()
+                    .find(|(pattern, _)| pattern_matches(pattern, &symbol.name))
+                {
+                    self.symbols[id].version = *version;
+                }
+            }
+        }
+        let list = self.dynamic_list_patterns.clone();
+        for pattern in list.iter().filter(|pattern| !pattern.wildcard) {
+            if let Some(id) = self.find_by_version(&pattern.name) {
+                self.symbols[id].exported = true;
+                self.symbols[id].in_dynamic_list = true;
+            }
+        }
+        let wildcards: Vec<&SymbolPattern> =
+            list.iter().filter(|pattern| pattern.wildcard).collect();
+        if !wildcards.is_empty() {
+            for id in self.global_symbols() {
+                if !self.can_be_versioned(id) {
+                    continue;
+                }
+                let name = self.symbols[id].name.clone();
+                if wildcards
+                    .iter()
+                    .any(|pattern| pattern_matches(pattern, &name))
+                {
+                    self.symbols[id].exported = true;
+                    self.symbols[id].in_dynamic_list = true;
+                }
+            }
+        }
+    }
+
+    fn parse_symbol_version(&mut self, id: SymbolIndex) {
+        if self.symbols[id].version == elf::version_index::LOCAL {
+            return;
+        }
+        let name = self.symbols[id].name.clone();
+        let Some(at) = name.find('@') else {
+            return;
+        };
+        self.symbols[id].version_suffix_at = Some(at);
+        let mut version = &name[at + 1..];
+        if version.is_empty() || !self.symbols[id].is_defined() {
+            return;
+        }
+        let default = version.starts_with('@');
+        if default {
+            version = &version[1..];
+        }
+        let base = &name[..at];
+        for definition in self.version_definitions.iter().skip(2) {
+            if definition.name != version {
+                continue;
+            }
+            let matches =
+                |list: &[SymbolPattern]| list.iter().any(|pattern| pattern_matches(pattern, base));
+            let identifier = if !matches(&definition.non_local) && matches(&definition.local) {
+                elf::version_index::LOCAL
+            } else if default {
+                definition.identifier
+            } else {
+                definition.identifier | 0x8000
+            };
+            self.symbols[id].version = identifier;
+            return;
+        }
+        if self.is_shared() && self.symbols[id].version != elf::version_index::LOCAL {
+            let file = self.file_name(self.symbols[id].file);
+            self.error(
+                problem("EI243", "A symbol names a version that is not defined.")
+                    .with_context(format!("File: {file}"))
+                    .with_context(format!("Symbol: {name}"))
+                    .with_context(format!("Version: {version}")),
+            );
+        }
+    }
+
+    pub fn combine_versioned_symbols(&mut self) {
+        if !self.has_named_versions() {
+            return;
+        }
+        let mut map: BTreeMap<SymbolIndex, SymbolIndex> = BTreeMap::new();
+        for id in self.global_symbols() {
+            let Some(at) = self.symbols[id].version_suffix_at else {
+                continue;
+            };
+            let name = self.symbols[id].name.clone();
+            let suffix = &name[at..];
+            if suffix.starts_with("@@") {
+                continue;
+            }
+            let Some(other) = self.find(&name[..at]) else {
+                continue;
+            };
+            if other == id || !self.symbols[other].is_defined() {
+                continue;
+            }
+            let other_name = self.symbols[other].name.clone();
+            let other_suffix = self.symbols[other]
+                .version_suffix_at
+                .map(|position| other_name[position..].to_string())
+                .unwrap_or_default();
+            if other_suffix.starts_with("@@") && other_suffix[2..] == suffix[1..] {
+                map.insert(id, other);
+                let symbol = self.symbols[id].clone();
+                if symbol.is_defined() {
+                    if !symbol.is_weak()
+                        && !self.symbols[other].is_weak()
+                        && !self.options.allow_multiple_definition
+                    {
+                        let place = self.definition_place(other);
+                        self.error(
+                            problem("EI206", "A symbol is defined more than once.")
+                                .with_context(format!("Symbol: {other_name}"))
+                                .with_context(format!("Definition: {place}")),
+                        );
+                    }
+                } else if symbol.binding != symbol_binding::WEAK
+                    && self.symbols[other].binding == symbol_binding::WEAK
+                    && !self.symbols[other].is_defined()
+                {
+                    self.symbols[other].binding = symbol.binding;
+                }
+                if symbol.referenced {
+                    self.symbols[other].referenced = true;
+                }
+                self.symbols[id].state = SymbolState::Placeholder;
+                self.symbols[id].used_in_regular_object = false;
+            } else if self.symbols[id].is_defined() {
+                let other_version = self.symbols[other].version;
+                let same = if other_version > elf::version_index::GLOBAL {
+                    self.version_definitions
+                        .get((other_version & 0x7fff) as usize)
+                        .is_some_and(|definition| definition.name == suffix[1..])
+                } else {
+                    self.symbols[id].section == self.symbols[other].section
+                        && self.symbols[id].value == self.symbols[other].value
+                };
+                if same {
+                    map.insert(other, id);
+                    self.symbols[other].state = SymbolState::Placeholder;
+                    self.symbols[other].used_in_regular_object = false;
+                }
+            }
+        }
+        if map.is_empty() {
+            return;
+        }
+        for file in self.object_files.clone() {
+            for handle in self.files[file].symbols.iter_mut() {
+                if let Some(target) = map.get(handle) {
+                    *handle = *target;
+                }
+            }
+        }
+    }
+
     pub fn parse_versions_and_compute_preemptible(&mut self) {
         for id in self.global_symbols() {
+            if self.symbols[id].name.contains('@') {
+                self.parse_symbol_version(id);
+            }
             if self.compute_binding(id) == symbol_binding::LOCAL {
                 self.symbols[id].exported = false;
                 continue;
@@ -5882,6 +6765,18 @@ impl<'s> Context<'s> {
             if places.len() > 3 {
                 diagnostic =
                     diagnostic.with_context(format!("More references: {}", places.len() - 3));
+            }
+            if name.starts_with("_ZTV") {
+                diagnostic = diagnostic
+                    .with_context("Advice: the class may be missing its key function".to_string());
+            }
+            if self.options.gc_sections
+                && self.options.start_stop_garbage_collection
+                && name.starts_with("__start_")
+            {
+                diagnostic = diagnostic.with_context(
+                    "Advice: retain the encapsulated section or use -z nostart-stop-gc".to_string(),
+                );
             }
             if warning {
                 self.warn(diagnostic);
@@ -7001,25 +7896,233 @@ impl<'s> Context<'s> {
     }
 
     pub fn mark_live(&mut self) {
+        self.split_exception_frames();
+        if !self.options.gc_sections {
+            for id in self.global_symbols() {
+                let symbol = &self.symbols[id];
+                if symbol.is_shared()
+                    && symbol.used_in_regular_object
+                    && symbol.binding != symbol_binding::WEAK
+                {
+                    if let Some(file) = symbol.file.filter(|file| *file < self.files.len()) {
+                        self.files[file].needed = true;
+                    }
+                }
+            }
+            return;
+        }
+        let candidates: Vec<SectionIndex> = self
+            .input_order
+            .iter()
+            .copied()
+            .filter(|section| self.sections[*section].live)
+            .collect();
+        for section in &candidates {
+            self.sections[*section].live = false;
+        }
+        let mut queue: Vec<SectionIndex> = Vec::new();
+        let mut named: BTreeMap<String, Vec<SectionIndex>> = BTreeMap::new();
+        for id in self.global_symbols() {
+            if self.symbols[id].exported {
+                self.mark_symbol_live(id, &mut queue);
+            }
+        }
+        let mut roots: Vec<String> = vec![self.entry_name.clone()];
+        roots.push(
+            self.options
+                .initializer
+                .clone()
+                .unwrap_or_else(|| "_init".to_string()),
+        );
+        roots.push(
+            self.options
+                .finalizer
+                .clone()
+                .unwrap_or_else(|| "_fini".to_string()),
+        );
+        roots.extend(self.options.undefined.iter().cloned());
+        for name in roots {
+            if let Some(id) = self.find(&name) {
+                self.mark_symbol_live(id, &mut queue);
+            }
+        }
+        for section in self.frame_pieces.keys().copied().collect::<Vec<_>>() {
+            let pieces = self.frame_pieces[&section].clone();
+            let relocations = self.frame_relocations[&section].clone();
+            for piece in pieces {
+                let Some(first) = piece.first_relocation else {
+                    continue;
+                };
+                if piece.is_common_information {
+                    self.resolve_live_reference(
+                        section,
+                        &relocations[first],
+                        false,
+                        &named,
+                        &mut queue,
+                    );
+                    continue;
+                }
+                let end = piece.input_offset + piece.size;
+                for relocation in relocations[first..]
+                    .iter()
+                    .take_while(|relocation| relocation.offset < end)
+                {
+                    self.resolve_live_reference(section, relocation, true, &named, &mut queue);
+                }
+            }
+        }
+        for section in candidates {
+            let data = &self.sections[section];
+            if data.flags & section_flag::GNU_RETAIN != 0 {
+                self.enqueue_live(section, 0, &mut queue);
+                continue;
+            }
+            if data.flags & section_flag::LINK_ORDER != 0 {
+                continue;
+            }
+            if data.flags & section_flag::ALLOCATE == 0
+                && data.kind != section_type::RELOCATIONS
+                && data.kind != section_type::RELOCATIONS_WITH_ADDENDS
+                && data.next_in_group.is_none()
+            {
+                self.sections[section].live = true;
+                for dependent in self.sections[section].dependents.clone() {
+                    self.sections[dependent].live = true;
+                }
+            }
+            let data = &self.sections[section];
+            let name = data.name.clone();
+            let reserved = match data.kind {
+                section_type::FINI_ARRAY
+                | section_type::INIT_ARRAY
+                | section_type::PREINIT_ARRAY => true,
+                section_type::NOTE => data.next_in_group.is_none(),
+                _ => {
+                    name == ".init"
+                        || name == ".fini"
+                        || name.starts_with(".init_array")
+                        || name == ".jcr"
+                        || name.starts_with(".ctors")
+                        || name.starts_with(".dtors")
+                }
+            };
+            if reserved {
+                self.enqueue_live(section, 0, &mut queue);
+            } else if (!self.options.start_stop_garbage_collection || name.starts_with("__libc_"))
+                && is_c_identifier(&name)
+            {
+                named
+                    .entry(format!("__start_{name}"))
+                    .or_default()
+                    .push(section);
+                named
+                    .entry(format!("__stop_{name}"))
+                    .or_default()
+                    .push(section);
+            }
+        }
+        while let Some(section) = queue.pop() {
+            let relocations = self.raw_relocations(section);
+            for relocation in &relocations {
+                self.resolve_live_reference(section, relocation, false, &named, &mut queue);
+            }
+            for dependent in self.sections[section].dependents.clone() {
+                self.enqueue_live(dependent, 0, &mut queue);
+            }
+            if let Some(next) = self.sections[section].next_in_group {
+                self.enqueue_live(next, 0, &mut queue);
+            }
+        }
         for id in self.global_symbols() {
             let symbol = &self.symbols[id];
-            if symbol.is_shared()
-                && symbol.used_in_regular_object
-                && symbol.binding != symbol_binding::WEAK
-            {
+            if symbol.is_shared() && symbol.used && symbol.binding != symbol_binding::WEAK {
                 if let Some(file) = symbol.file.filter(|file| *file < self.files.len()) {
                     self.files[file].needed = true;
                 }
             }
         }
+        if self.options.print_gc_sections {
+            for section in self.input_order.clone() {
+                if !self.sections[section].live && self.sections[section].file.is_some() {
+                    let place = self.section_place(section);
+                    self.messages
+                        .push(format!("removing unused section {place}"));
+                }
+            }
+        }
     }
 
-    pub fn combine_exception_frames(&mut self) {
-        let Some(synthetic) = self.synthetic_section(".eh_frame") else {
+    fn mark_symbol_live(&mut self, id: SymbolIndex, queue: &mut Vec<SectionIndex>) {
+        let symbol = &self.symbols[id];
+        if !symbol.is_defined() {
+            return;
+        }
+        if let Some(section) = symbol.section {
+            let value = symbol.value;
+            self.enqueue_live(section, value, queue);
+        }
+    }
+
+    fn enqueue_live(&mut self, section: SectionIndex, offset: u64, queue: &mut Vec<SectionIndex>) {
+        if !self.sections[section].pieces.is_empty() {
+            let pieces = &mut self.sections[section].pieces;
+            let position = pieces.partition_point(|piece| piece.input_offset <= offset);
+            if position > 0 {
+                pieces[position - 1].live = true;
+            }
+        }
+        if self.sections[section].live || self.sections[section].is_exception_frame {
+            return;
+        }
+        self.sections[section].live = true;
+        queue.push(section);
+    }
+
+    fn resolve_live_reference(
+        &mut self,
+        section: SectionIndex,
+        relocation: &RawRelocation,
+        from_description: bool,
+        named: &BTreeMap<String, Vec<SectionIndex>>,
+        queue: &mut Vec<SectionIndex>,
+    ) {
+        let Some(id) = self.symbol_of(section, relocation.symbol) else {
             return;
         };
+        self.symbols[id].used = true;
+        let symbol = &self.symbols[id];
+        if symbol.is_defined() {
+            let Some(target) = symbol.section else {
+                return;
+            };
+            let mut offset = symbol.value;
+            if symbol.is_section() {
+                offset = offset.wrapping_add(relocation.addend as u64);
+                if self.sections[target].is_merge
+                    && offset >= self.sections[target].data.len() as u64
+                {
+                    return;
+                }
+            }
+            let target_data = &self.sections[target];
+            if from_description
+                && (target_data.flags & (section_flag::EXECUTE | section_flag::LINK_ORDER) != 0
+                    || target_data.next_in_group.is_some())
+            {
+                return;
+            }
+            self.enqueue_live(target, offset, queue);
+            return;
+        }
+        let name = self.symbols[id].name.clone();
+        for target in named.get(&name).cloned().unwrap_or_default() {
+            self.enqueue_live(target, 0, queue);
+        }
+    }
+
+    pub fn split_exception_frames(&mut self) {
         let encoding = self.encoding();
-        let mut common_keys: BTreeMap<(Vec<u8>, Option<SymbolIndex>), usize> = BTreeMap::new();
         for section in self.exception_frame_inputs.clone() {
             if !self.sections[section].live {
                 continue;
@@ -7080,6 +8183,21 @@ impl<'s> Context<'s> {
                         .with_context(format!("Location: {place}")),
                 );
             }
+            self.frame_pieces.insert(section, pieces);
+            self.frame_relocations.insert(section, relocations);
+        }
+    }
+
+    pub fn combine_exception_frames(&mut self) {
+        let Some(synthetic) = self.synthetic_section(".eh_frame") else {
+            return;
+        };
+        let encoding = self.encoding();
+        let mut common_keys: BTreeMap<(Vec<u8>, Option<SymbolIndex>), usize> = BTreeMap::new();
+        for section in self.frame_pieces.keys().copied().collect::<Vec<_>>() {
+            let mut pieces = self.frame_pieces[&section].clone();
+            let relocations = self.frame_relocations[&section].clone();
+            let data = self.sections[section].data.clone();
             let mut offset_to_record: BTreeMap<u64, usize> = BTreeMap::new();
             for (index, piece) in pieces.iter().enumerate() {
                 if !piece.is_common_information {
@@ -7139,7 +8257,6 @@ impl<'s> Context<'s> {
             }
             self.sections[section].merged_into = Some(synthetic);
             self.frame_pieces.insert(section, pieces);
-            self.frame_relocations.insert(section, relocations);
         }
         let mut offset = 0u64;
         for record in self.frame_records.clone() {
@@ -8118,7 +9235,7 @@ impl<'s> Context<'s> {
             }
             return true;
         }
-        symbol.referenced || !self.options.gc_sections
+        symbol.used || !self.options.gc_sections
     }
 
     fn merge_piece(&self, section: SectionIndex, offset: u64) -> Option<&MergePiece> {
@@ -8159,7 +9276,7 @@ impl<'s> Context<'s> {
     }
 
     fn add_to_symbol_table(&mut self, id: SymbolIndex) {
-        let name = self.symbols[id].name.clone();
+        let name = self.dynamic_symbol_name(id);
         let offset = if name.is_empty() {
             0
         } else {
@@ -9121,6 +10238,10 @@ impl<'s> Context<'s> {
                 (2 + 2 * (self.dynamic_symbols.len() as u64 + 1)) * 4,
             ),
             (".gnu.version", (self.dynamic_symbols.len() as u64 + 1) * 2),
+            (
+                ".gnu.version_d",
+                28 * self.version_definition_count() as u64,
+            ),
             (
                 ".gnu.version_r",
                 self.version_needs.len() as u64 * 16 + self.version_auxiliary_count as u64 * 16,
@@ -11834,6 +12955,7 @@ impl<'s> Context<'s> {
             Synthetic::SystemFiveHash => buffer = self.encode_system_five_hash(),
             Synthetic::VersionSymbols => buffer = self.encode_version_symbols(),
             Synthetic::VersionNeeds => buffer = self.encode_version_needs(),
+            Synthetic::VersionDefinitions => buffer = self.encode_version_definitions(),
             Synthetic::Dynamic => {
                 let entries = self.dynamic_entries();
                 buffer.clear();
@@ -11875,7 +12997,7 @@ impl<'s> Context<'s> {
             2
         });
         header.push(1);
-        header.push(0);
+        header.push(self.operating_system_abi());
         header.push(0);
         header.extend_from_slice(&[0; 7]);
         let kind = if self.is_pic() {
@@ -12025,6 +13147,20 @@ impl<'s> Context<'s> {
         }
     }
 
+    pub fn operating_system_abi(&self) -> u8 {
+        let mut abi = 0;
+        for file in &self.files {
+            if file.archive_name.is_some() {
+                continue;
+            }
+            abi = file.elf.header.operating_system;
+            if abi != 0 {
+                break;
+            }
+        }
+        abi
+    }
+
     pub fn header_flags(&self) -> u32 {
         match self.target.architecture {
             Architecture::Arm => {
@@ -12095,6 +13231,10 @@ impl<'s> Context<'s> {
                 | Some(Synthetic::VersionSymbols) => {
                     self.outputs[output].link = index_of(".dynsym", self)
                 }
+                Some(Synthetic::VersionDefinitions) => {
+                    self.outputs[output].link = index_of(".dynstr", self);
+                    self.outputs[output].info = self.version_definition_count() as u32;
+                }
                 Some(Synthetic::VersionNeeds) => {
                     self.outputs[output].link = index_of(".dynstr", self);
                     self.outputs[output].info = self.version_needs.len() as u32;
@@ -12109,6 +13249,7 @@ impl<'s> Context<'s> {
             let id = self.add_unused_undefined(&name);
             self.symbols[id].referenced = true;
         }
+        self.read_version_inputs();
         self.load_inputs();
         if self.failed() {
             return None;
@@ -12154,7 +13295,12 @@ impl<'s> Context<'s> {
         }
         self.and_features = 0;
         self.add_reserved_symbols();
+        self.scan_version_script();
         self.parse_versions_and_compute_preemptible();
+        self.combine_versioned_symbols();
+        if self.failed() {
+            return None;
+        }
         self.replace_common_symbols();
         self.aggregate_sections();
         self.maximum_page_size = self

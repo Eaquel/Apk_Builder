@@ -67865,4 +67865,271 @@ pointers:
         }
         finish(&folder);
     }
+
+    const COLLECTED_SOURCE: &str = r#"
+        .section .text._start,"ax",@progbits
+        .globl _start
+        .type _start,@function
+_start:
+        .cfi_startproc
+        call used_function
+        leaq kept_string(%rip), %rax
+        leaq __start___libc_keep(%rip), %rcx
+        leaq __stop_keep_me(%rip), %rdx
+        .reloc ., R_X86_64_NONE, other_named
+        movq comdat_value(%rip), %rsi
+        ret
+        .cfi_endproc
+        .size _start, .-_start
+        .section .text.used,"ax",@progbits
+        .type used_function,@function
+used_function:
+        .cfi_startproc
+        movl used_data(%rip), %eax
+        ret
+        .cfi_endproc
+        .section .text.unused,"ax",@progbits
+        .globl unused_function
+        .type unused_function,@function
+unused_function:
+        .cfi_startproc
+        leaq dropped_string(%rip), %rax
+        movl unused_data(%rip), %eax
+        ret
+        .cfi_endproc
+        .section .data.used,"aw",@progbits
+used_data:
+        .long 1
+        .section .data.unused,"aw",@progbits
+unused_data:
+        .long 2
+        .section .rodata.str1.1,"aMS",@progbits,1
+kept_string:
+        .asciz "kept"
+dropped_string:
+        .asciz "dropped"
+        .section keep_me,"a",@progbits
+        .quad 6
+        .section __libc_keep,"a",@progbits
+        .quad 7
+        .section other_named,"a",@progbits
+        .quad 8
+        .section .init_array,"aw",@init_array
+        .quad used_function
+        .section .data.retained,"awR",@progbits
+        .quad 9
+        .section .data.comdat,"awG",@progbits,group_name,comdat
+comdat_value:
+        .quad 10
+        .section .data.comdat2,"awG",@progbits,group_name,comdat
+        .quad 11
+        .section .note.custom,"a",@note
+        .long 0
+"#;
+
+    #[test]
+    fn garbage_collection_keeps_the_sections_lld_keeps() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("collect");
+        assemble(&folder, "collect", "x86_64-linux-gnu", COLLECTED_SOURCE);
+        let without_stop = COLLECTED_SOURCE.replace(
+            "        leaq __stop_keep_me(%rip), %rdx
+",
+            "",
+        );
+        assemble(&folder, "retained", "x86_64-linux-gnu", &without_stop);
+        let object = folder.join("collect.o").to_string_lossy().to_string();
+        let retained = folder.join("retained.o").to_string_lossy().to_string();
+        for (label, input, extra) in [
+            ("start-stop", &retained, &["--gc-sections"][..]),
+            (
+                "named",
+                &object,
+                &["--gc-sections", "-z", "nostart-stop-gc"][..],
+            ),
+            (
+                "exported",
+                &object,
+                &[
+                    "--gc-sections",
+                    "-z",
+                    "nostart-stop-gc",
+                    "--export-dynamic",
+                    "-pie",
+                ][..],
+            ),
+            (
+                "shared",
+                &object,
+                &["--gc-sections", "-z", "nostart-stop-gc", "-shared"][..],
+            ),
+            ("kept", &object, &[][..]),
+        ] {
+            compare_with_lld(&folder, std::slice::from_ref(input), extra, label);
+        }
+        let outcome = link_on_disk(&[
+            object,
+            "--gc-sections".to_string(),
+            "--print-gc-sections".to_string(),
+            "-o".to_string(),
+            folder.join("refused").to_string_lossy().to_string(),
+        ]);
+        assert!(!outcome.succeeded());
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "EI207"
+                && diagnostic
+                    .context
+                    .iter()
+                    .any(|line| line.contains("__stop_keep_me"))));
+        assert!(outcome
+            .messages
+            .iter()
+            .any(|line| line.ends_with("collect.o:(.text.unused)")));
+        finish(&folder);
+    }
+
+    const VERSIONED_SOURCE: &str = r#"
+        .text
+        .globl alpha, beta, gamma, hidden_by_script, old_impl, new_impl, wild_one, wild_two
+        .type alpha,@function
+alpha:  ret
+        .type beta,@function
+beta:   call gamma@PLT
+        ret
+gamma:  ret
+hidden_by_script: ret
+old_impl: ret
+new_impl: ret
+wild_one: ret
+wild_two: ret
+        .symver old_impl, versioned@VERS_1
+        .symver new_impl, versioned@@VERS_2
+        .data
+        .globl table
+table:  .quad alpha
+"#;
+
+    const VERSION_SCRIPT: &str = "VERS_1 {\n  global: alpha; table;\n  local: hidden_by_script;\n};\nVERS_2 {\n  global: beta; wild_*;\n} VERS_1;\nVERS_3 { local: *; };\n";
+
+    #[test]
+    fn version_scripts_and_dynamic_lists_export_what_lld_exports() {
+        use crate::compilers::linker::{glob_match, read_version_script, VersionDefinition};
+        assert!(glob_match("wild_*", "wild_one"));
+        assert!(glob_match("w?ld_[a-z]*", "wild_two"));
+        assert!(glob_match("[!x]y", "zy"));
+        assert!(!glob_match("[!z]y", "zy"));
+        assert!(glob_match("a\\*b", "a*b"));
+        assert!(!glob_match("a\\*b", "axb"));
+        assert!(glob_match("*", ""));
+        let mut definitions = vec![
+            VersionDefinition {
+                name: "local".to_string(),
+                identifier: 0,
+                non_local: Vec::new(),
+                local: Vec::new(),
+            },
+            VersionDefinition {
+                name: "global".to_string(),
+                identifier: 1,
+                non_local: Vec::new(),
+                local: Vec::new(),
+            },
+        ];
+        read_version_script(VERSION_SCRIPT, &mut definitions).expect("the script reads");
+        assert_eq!(definitions.len(), 5);
+        assert_eq!(definitions[3].name, "VERS_2");
+        assert!(definitions[3].non_local[1].wildcard);
+        assert!(
+            read_version_script("{ global: a; }; V { b; };", &mut definitions.clone()).is_err()
+        );
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("versions");
+        assemble(&folder, "versioned", "x86_64-linux-gnu", VERSIONED_SOURCE);
+        assemble(
+            &folder,
+            "listed",
+            "x86_64-linux-gnu",
+            ".globl _start, alpha, wild_x, other\n_start: ret\nalpha: ret\nwild_x: ret\nother: ret\n",
+        );
+        let script = folder.join("versions.map");
+        std::fs::write(&script, VERSION_SCRIPT).expect("the script is written");
+        let list = folder.join("dynamic.list");
+        std::fs::write(&list, "{ alpha; wild_*; };\n").expect("the list is written");
+        let wrapper = folder.join("wrapper.lds");
+        std::fs::write(&wrapper, format!("VERSION {{ {VERSION_SCRIPT} }}\n")).expect("written");
+        let versioned = folder.join("versioned.o").to_string_lossy().to_string();
+        let listed = folder.join("listed.o").to_string_lossy().to_string();
+        let script = script.to_string_lossy().to_string();
+        let list = list.to_string_lossy().to_string();
+        let wrapper = wrapper.to_string_lossy().to_string();
+        let version_option = format!("--version-script={script}");
+        let list_option = format!("--dynamic-list={list}");
+        compare_with_lld(
+            &folder,
+            std::slice::from_ref(&versioned),
+            &["-shared", "-soname", "libv.so.1", &version_option],
+            "versions",
+        );
+        compare_with_lld(
+            &folder,
+            std::slice::from_ref(&versioned),
+            &[
+                "-shared",
+                "-soname",
+                "libv.so.1",
+                "--gc-sections",
+                &version_option,
+            ],
+            "versions-collected",
+        );
+        compare_with_lld(
+            &folder,
+            &[versioned.clone(), wrapper],
+            &["-shared", "-soname", "libv.so.1"],
+            "versions-in-script",
+        );
+        for (label, extra) in [
+            ("list-pie", vec!["-pie", list_option.as_str()]),
+            ("list-shared", vec!["-shared", list_option.as_str()]),
+            ("symbol-pie", vec!["-pie", "--export-dynamic-symbol=other"]),
+            (
+                "symbolic-functions",
+                vec!["-shared", "-Bsymbolic-functions"],
+            ),
+            ("symbolic-non-weak", vec!["-shared", "-Bsymbolic-non-weak"]),
+        ] {
+            compare_with_lld(&folder, std::slice::from_ref(&listed), &extra, label);
+        }
+        let missing = folder.join("missing.map");
+        std::fs::write(&missing, "V { global: nowhere; };\n").expect("written");
+        let missing_option = format!("--version-script={}", missing.to_string_lossy());
+        let output = folder.join("refused").to_string_lossy().to_string();
+        let outcome = link_on_disk(&[
+            listed.clone(),
+            "-shared".to_string(),
+            missing_option.clone(),
+            "-o".to_string(),
+            output.clone(),
+        ]);
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "EI242"));
+        let outcome = link_on_disk(&[
+            listed,
+            "-shared".to_string(),
+            "--undefined-version".to_string(),
+            missing_option,
+            "-o".to_string(),
+            output,
+        ]);
+        assert!(outcome.succeeded(), "{}", describe(&outcome));
+        finish(&folder);
+    }
 }
