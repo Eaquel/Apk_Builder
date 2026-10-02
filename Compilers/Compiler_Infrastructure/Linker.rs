@@ -2377,7 +2377,14 @@ impl<'s> Context<'s> {
         }
     }
 
-    pub fn error(&mut self, diagnostic: Diagnostic) {
+    pub fn error(&mut self, mut diagnostic: Diagnostic) {
+        if self.options.no_inhibit_executable {
+            diagnostic.severity = Severity::Warning;
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
+    pub fn error_always(&mut self, diagnostic: Diagnostic) {
         self.diagnostics.push(diagnostic);
     }
 
@@ -4195,6 +4202,24 @@ impl<'s> Context<'s> {
             } else {
                 header.data.len() as u64
             };
+            let mut alignment = header.alignment.max(1);
+            if header.alignment > u64::from(u32::MAX) {
+                let name = self.files[index].name.clone();
+                self.error(
+                    problem("EI200", "The object file could not be read.")
+                        .with_context(format!("File: {name}"))
+                        .with_context("Reason: section sh_addralign is too large".to_string()),
+                );
+                alignment = 1;
+            } else if !alignment.is_power_of_two() {
+                let name = self.files[index].name.clone();
+                self.error(
+                    problem("EI200", "The object file could not be read.")
+                        .with_context(format!("File: {name}:({})", header.name))
+                        .with_context("Reason: sh_addralign is not a power of 2".to_string()),
+                );
+                alignment = 1;
+            }
             let section = InputSection {
                 file: Some(index),
                 elf_index: position,
@@ -4205,7 +4230,7 @@ impl<'s> Context<'s> {
                 } else {
                     header.flags & !section_flag::GROUP
                 },
-                alignment: header.alignment.max(1),
+                alignment,
                 entry_size: header.entry_size,
                 data: if header.kind == section_type::NO_BITS {
                     Vec::new()
