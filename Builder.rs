@@ -13,6 +13,8 @@ pub mod compilers {
     pub mod compiler_infrastructure_diagnostic;
     #[path = "Compilers/Cpp.rs"]
     pub mod cpp;
+    #[path = "Compilers/Compiler_Infrastructure/Elf.rs"]
+    pub mod elf;
     #[path = "Compilers/Java/Java.rs"]
     pub mod java;
     #[path = "Compilers/Java/Java_Diagnostic.rs"]
@@ -25,6 +27,8 @@ pub mod compilers {
     pub mod kotlin_diagnostic;
     #[path = "Compilers/Kotlin/Kotlin_Fixer.rs"]
     pub mod kotlin_fixer;
+    #[path = "Compilers/Compiler_Infrastructure/Linker.rs"]
+    pub mod linker;
     #[path = "Compilers/Rust.rs"]
     pub mod rust;
     #[path = "Compilers/Compiler_Infrastructure/TableGen.rs"]

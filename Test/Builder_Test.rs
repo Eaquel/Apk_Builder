@@ -66656,6 +66656,8 @@ block0:
         let source = [
             include_str!("../Compilers/Compiler_Infrastructure/Compiler_Infrastructure.rs"),
             include_str!("../Compilers/Compiler_Infrastructure/TableGen.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/Elf.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/Linker.rs"),
         ]
         .concat();
         let mut raised = BTreeSet::new();
@@ -67399,6 +67401,813 @@ def op {
                 reading.keeper.print_records(),
             )
             .expect("the records are written");
+        }
+    }
+}
+
+mod object_files {
+    use crate::compilers::elf::*;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    pub(super) fn work_folder(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "builder-object-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("a work folder");
+        path
+    }
+
+    pub(super) fn tool_missing(tool: &str) -> bool {
+        let present = Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|done| done.status.success())
+            .unwrap_or(false);
+        if !present {
+            assert!(
+                std::env::var("APK_BUILDER_REQUIRE_LINKER_CONFORMANCE").is_err(),
+                "APK_BUILDER_REQUIRE_LINKER_CONFORMANCE is set but {tool} is not here"
+            );
+            eprintln!("object file conformance: {tool} is not available here");
+        }
+        !present
+    }
+
+    pub(super) fn assemble(folder: &Path, name: &str, triple: &str, source: &str) -> Vec<u8> {
+        let input = folder.join(format!("{name}.s"));
+        let output = folder.join(format!("{name}.o"));
+        std::fs::write(&input, source).expect("the source is written");
+        let done = Command::new("llvm-mc")
+            .args(["-filetype=obj", &format!("-triple={triple}"), "-o"])
+            .arg(&output)
+            .arg(&input)
+            .output()
+            .expect("llvm-mc runs");
+        assert!(
+            done.status.success(),
+            "llvm-mc {triple}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        std::fs::read(&output).expect("the object is read")
+    }
+
+    const SAMPLE_X86_64: &str = r#"
+        .section .text.hot,"axG",@progbits,hot_group,comdat
+        .globl hot
+        .type hot,@function
+hot:
+        movq value@GOTPCREL(%rip), %rax
+        call external@PLT
+        ret
+        .size hot, .-hot
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        leaq message(%rip), %rsi
+        movl $60, %eax
+        syscall
+        .data
+        .p2align 3
+message:
+        .asciz "hello"
+        .quad hot
+        .weak weak_one
+        .quad weak_one
+        .section .tdata,"awT",@progbits
+        .globl value
+value:
+        .long 7
+        .section .init_array,"aw",@init_array
+        .quad hot
+        .section .note.example,"a",@note
+        .long 4, 4, 1
+        .asciz "abc"
+        .long 42
+        .comm shared_block, 64, 16
+"#;
+
+    #[test]
+    fn hashes_match_the_published_functions() {
+        assert_eq!(gnu_hash(b""), 5381);
+        assert_eq!(gnu_hash(b"printf"), 0x156b_2bb8);
+        assert_eq!(system_five_hash(b"printf"), 0x077905a6);
+        assert_eq!(system_five_hash(b""), 0);
+        assert_eq!(gnu_hash_mask_words(Encoding::LITTLE_64, 0), 1);
+        assert_eq!(gnu_hash_mask_words(Encoding::LITTLE_64, 5), 1);
+        assert_eq!(gnu_hash_mask_words(Encoding::LITTLE_64, 6), 2);
+    }
+
+    #[test]
+    fn a_string_table_shares_repeated_names() {
+        let mut table = StringTable::new();
+        assert_eq!(table.add(""), 0);
+        let first = table.add("alpha");
+        assert_eq!(table.add("alpha"), first);
+        let second = table.add("beta");
+        assert_eq!(table.bytes(), b"\0alpha\0beta\0");
+        assert_eq!(string_at(table.bytes(), second).as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn what_is_not_an_elf_file_is_refused_with_its_reason() {
+        let refused = ElfFile::parse(b"not an object").unwrap_err();
+        assert_eq!(refused.code, "EI200");
+        assert!(refused
+            .context
+            .iter()
+            .any(|line| line == "Reason: not an ELF file"));
+        let mut truncated = assemble_or_skip_minimal();
+        if truncated.is_empty() {
+            return;
+        }
+        truncated.truncate(80);
+        assert_eq!(ElfFile::parse(&truncated).unwrap_err().code, "EI200");
+    }
+
+    fn assemble_or_skip_minimal() -> Vec<u8> {
+        if tool_missing("llvm-mc") {
+            return Vec::new();
+        }
+        let folder = work_folder("minimal");
+        let bytes = assemble(&folder, "minimal", "x86_64-linux-gnu", "ret\n");
+        std::fs::remove_dir_all(&folder).ok();
+        bytes
+    }
+
+    #[test]
+    fn objects_from_every_target_survive_a_round_trip_byte_for_byte() {
+        if tool_missing("llvm-mc") {
+            return;
+        }
+        let folder = work_folder("round-trip");
+        let samples = [
+            ("x86_64-linux-gnu", SAMPLE_X86_64.to_string()),
+            (
+                "i386-linux-gnu",
+                "        .text\n        .globl _start\n_start:\n        call helper\n        movl message, %eax\nhelper:\n        ret\n        .data\nmessage:\n        .long _start\n        .section .tbss,\"awT\",@nobits\n        .zero 8\n".to_string(),
+            ),
+            (
+                "aarch64-linux-gnu",
+                "        .text\n        .globl _start\n_start:\n        adrp x0, message\n        add x0, x0, :lo12:message\n        bl helper\n        ret\nhelper:\n        ret\n        .data\nmessage:\n        .xword _start\n".to_string(),
+            ),
+            (
+                "armv7a-linux-gnueabihf",
+                "        .syntax unified\n        .text\n        .globl _start\n        .type _start,%function\n_start:\n        .fnstart\n        movw r0, :lower16:message\n        movt r0, :upper16:message\n        bl helper\n        bx lr\n        .fnend\n        .thumb\n        .type helper,%function\nhelper:\n        bx lr\n        .data\nmessage:\n        .long _start\n".to_string(),
+            ),
+            (
+                "armebv7a-linux-gnueabi",
+                "        .text\n        .globl _start\n_start:\n        bl _start\n        .data\n        .long _start\n".to_string(),
+            ),
+        ];
+        for (index, (triple, source)) in samples.iter().enumerate() {
+            let bytes = assemble(&folder, &format!("sample{index}"), triple, source);
+            let parsed = ElfFile::parse(&bytes).unwrap_or_else(|problem| {
+                panic!("{triple}: {} {:?}", problem.message, problem.context)
+            });
+            assert_eq!(parsed.header.file_type, file_type::RELOCATABLE);
+            assert_eq!(
+                parsed.to_bytes(),
+                bytes,
+                "{triple} changed in the round trip"
+            );
+            let table = parsed.symbol_table().expect("a symbol table");
+            let symbols = parsed.symbols(table).expect("the symbols are read");
+            assert!(
+                symbols.iter().any(|symbol| symbol.name == "_start"),
+                "{triple}"
+            );
+            for (position, section) in parsed.sections.iter().enumerate() {
+                if section.kind == section_type::RELOCATIONS
+                    || section.kind == section_type::RELOCATIONS_WITH_ADDENDS
+                {
+                    let relocations = parsed.relocations(position).expect("relocations");
+                    let mut again = Vec::new();
+                    for relocation in &relocations {
+                        encode_relocation(
+                            parsed.encoding(),
+                            relocation,
+                            section.kind == section_type::RELOCATIONS_WITH_ADDENDS,
+                            &mut again,
+                        );
+                    }
+                    assert_eq!(again, section.data, "{triple} {}", section.name);
+                }
+                if section.kind == section_type::SYMBOL_TABLE {
+                    let mut again = Vec::new();
+                    for symbol in parsed.symbols(position).expect("symbols") {
+                        encode_symbol(parsed.encoding(), &symbol, &mut again);
+                    }
+                    assert_eq!(again, section.data, "{triple} symbols");
+                }
+                if section.kind == section_type::GROUP {
+                    let group = parsed.group(position).expect("a group");
+                    assert_eq!(group.flags, group_flag::COMDAT);
+                    assert!(!group.members.is_empty());
+                }
+                if section.kind == section_type::NOTE {
+                    let notes = parsed.notes(position).expect("notes");
+                    let mut again = Vec::new();
+                    for note in &notes {
+                        encode_note(parsed.encoding(), note, section.alignment, &mut again);
+                    }
+                    assert_eq!(again, section.data, "{triple} notes");
+                }
+            }
+            let mut relaid = parsed.clone();
+            relaid.assign_object_layout();
+            relaid.rebuild_section_names();
+            let rewritten = ElfFile::parse(&relaid.to_bytes()).expect("the relaid object reads");
+            assert_eq!(rewritten.sections.len(), parsed.sections.len());
+            let names = parsed.header.section_name_table as usize;
+            for (position, (before, after)) in
+                parsed.sections.iter().zip(&rewritten.sections).enumerate()
+            {
+                assert_eq!(before.name, after.name);
+                if position != names {
+                    assert_eq!(before.data, after.data);
+                }
+            }
+        }
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn programs_and_libraries_on_this_machine_survive_a_round_trip() {
+        let mut checked = 0;
+        for candidate in [
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            "/usr/bin/ls",
+            "/usr/bin/env",
+            "/lib64/ld-linux-x86-64.so.2",
+        ] {
+            let Ok(bytes) = std::fs::read(candidate) else {
+                continue;
+            };
+            let parsed = ElfFile::parse(&bytes)
+                .unwrap_or_else(|problem| panic!("{candidate}: {:?}", problem.context));
+            assert_eq!(
+                parsed.to_bytes(),
+                bytes,
+                "{candidate} changed in the round trip"
+            );
+            let dynamic = parsed.dynamic_entries().expect("dynamic entries");
+            if parsed.header.file_type == file_type::SHARED && !dynamic.is_empty() {
+                let mut again = Vec::new();
+                encode_dynamic(parsed.encoding(), &dynamic, &mut again);
+                let index = parsed.sections_of_kind(section_type::DYNAMIC)[0];
+                assert_eq!(
+                    &parsed.sections[index].data[..again.len()],
+                    again.as_slice()
+                );
+                if let Some(table) = parsed.dynamic_symbol_table() {
+                    let symbols = parsed.symbols(table).expect("dynamic symbols");
+                    let versions = parsed.version_symbols();
+                    assert_eq!(versions.len(), symbols.len(), "{candidate}");
+                    let definitions = parsed.version_definitions().expect("definitions");
+                    let needs = parsed.version_needs().expect("needs");
+                    assert!(!definitions.is_empty() || !needs.is_empty(), "{candidate}");
+                }
+            }
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("object file conformance: no system library is readable here");
+        }
+    }
+}
+
+mod linker_conformance {
+    use super::object_files::{assemble, tool_missing, work_folder};
+    use crate::compilers::linker::{link, LinkOutcome};
+    use std::path::Path;
+    use std::process::Command;
+
+    pub(super) fn finish(folder: &Path) {
+        if std::env::var_os("APK_BUILDER_KEEP_LINKER_WORK").is_none() {
+            std::fs::remove_dir_all(folder).ok();
+        }
+    }
+
+    pub(super) fn link_on_disk(arguments: &[String]) -> LinkOutcome {
+        let outcome = link(arguments, &|path: &str| std::fs::read(path).ok());
+        for (path, bytes) in &outcome.outputs {
+            std::fs::write(path, bytes).expect("the output is written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        outcome
+    }
+
+    pub(super) fn describe(outcome: &LinkOutcome) -> String {
+        outcome
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                format!(
+                    "{} {} {:?}",
+                    diagnostic.code, diagnostic.message, diagnostic.context
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(super) fn structure(path: &Path) -> String {
+        let stripped = path.with_extension("structure");
+        let removed = Command::new("llvm-objcopy")
+            .args(["--remove-section=.comment"])
+            .arg(path)
+            .arg(&stripped)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let inspected = if removed { stripped.as_path() } else { path };
+        let done = Command::new("llvm-readelf")
+            .args([
+                "--file-header",
+                "--sections",
+                "--program-headers",
+                "--symbols",
+                "--relocations",
+                "--dynamic",
+                "--wide",
+            ])
+            .arg(inspected)
+            .output()
+            .expect("llvm-readelf runs");
+        String::from_utf8_lossy(&done.stdout)
+            .lines()
+            .filter(|line| !line.contains("File:") && !line.trim_start().starts_with("ELF Header"))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(super) fn reference_link(arguments: &[String]) -> bool {
+        Command::new("ld.lld")
+            .args(arguments)
+            .output()
+            .map(|done| done.status.success())
+            .unwrap_or(false)
+    }
+
+    pub(super) fn first_difference(ours: &str, theirs: &str) -> Option<String> {
+        let ours: Vec<&str> = ours.lines().collect();
+        let theirs: Vec<&str> = theirs.lines().collect();
+        for index in 0..ours.len().max(theirs.len()) {
+            let left = ours.get(index).copied().unwrap_or("<missing>");
+            let right = theirs.get(index).copied().unwrap_or("<missing>");
+            if left != right && !(left.contains(".comment") && right.contains(".comment")) {
+                return Some(format!("line {index}\nours:   {left}\nld.lld: {right}"));
+            }
+        }
+        None
+    }
+
+    const STATIC_START: &str = r#"
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        movq $1, %rax
+        movq $1, %rdi
+        leaq message(%rip), %rsi
+        movq length(%rip), %rdx
+        syscall
+        call finish
+        .size _start, .-_start
+        .section .text.finish,"ax",@progbits
+        .type finish,@function
+finish:
+        movq $60, %rax
+        movq counter(%rip), %rdi
+        addq $35, %rdi
+        syscall
+        .size finish, .-finish
+        .section .rodata.str1.1,"aMS",@progbits,1
+message:
+        .asciz "hello from omni\n"
+        .data
+        .p2align 3
+length:
+        .quad 16
+        .bss
+        .p2align 3
+counter:
+        .quad 0
+"#;
+
+    pub(super) fn section_bytes(path: &Path, name: &str) -> Vec<u8> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        parsed
+            .section_named(name)
+            .map(|index| parsed.sections[index].data.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn merged_strings_and_constants_land_where_lld_puts_them() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("merge");
+        let mut source = String::from(".globl _start\n_start:\n ret\n");
+        for (file, offset) in [("first", 0usize), ("second", 7usize)] {
+            let mut text = source.clone();
+            if file == "second" {
+                text = String::new();
+            }
+            text.push_str(".section .rodata.str1.1,\"aMS\",@progbits,1\n");
+            for length in (0..300).step_by(3) {
+                let body: String = (0..length)
+                    .map(|position| {
+                        char::from(b'a' + ((position * 7 + length + offset) % 26) as u8)
+                    })
+                    .collect();
+                text.push_str(&format!(".asciz \"{body}\"\n"));
+            }
+            text.push_str(".section .rodata.cst8,\"aM\",@progbits,8\n");
+            for value in 0..40u64 {
+                text.push_str(&format!(".quad {}\n", value * 0x0101_0101 + offset as u64));
+            }
+            text.push_str(".section .rodata.str2.2,\"aMS\",@progbits,2\n.p2align 1\n");
+            for length in 0..12 {
+                let body: String = (0..length)
+                    .map(|position| format!("\\{:o}\\0", 65 + position))
+                    .collect();
+                text.push_str(&format!(".ascii \"{body}\\0\\0\"\n"));
+            }
+            assemble(&folder, file, "x86_64-linux-gnu", &text);
+        }
+        source.clear();
+        let first = folder.join("first.o").to_string_lossy().to_string();
+        let second = folder.join("second.o").to_string_lossy().to_string();
+        let ours = folder.join("ours").to_string_lossy().to_string();
+        let theirs = folder.join("theirs").to_string_lossy().to_string();
+        let outcome = link_on_disk(&[
+            first.clone(),
+            second.clone(),
+            "-o".to_string(),
+            ours.clone(),
+        ]);
+        assert!(outcome.succeeded(), "{}", describe(&outcome));
+        assert!(reference_link(&[
+            first,
+            second,
+            "-o".to_string(),
+            theirs.clone()
+        ]));
+        let difference =
+            first_difference(&structure(Path::new(&ours)), &structure(Path::new(&theirs)));
+        assert!(difference.is_none(), "{}", difference.unwrap_or_default());
+        assert_eq!(
+            section_bytes(Path::new(&ours), ".rodata"),
+            section_bytes(Path::new(&theirs), ".rodata")
+        );
+        finish(&folder);
+    }
+
+    pub(super) fn allocated_bytes(path: &Path) -> Vec<(String, Vec<u8>)> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        parsed
+            .sections
+            .iter()
+            .filter(|section| {
+                section.flags & crate::compilers::elf::section_flag::ALLOCATE != 0
+                    && section.kind != crate::compilers::elf::section_type::NO_BITS
+            })
+            .map(|section| (section.name.clone(), section.data.clone()))
+            .collect()
+    }
+
+    pub(super) fn compare_with_lld(folder: &Path, objects: &[String], extra: &[&str], label: &str) {
+        let ours = folder
+            .join(format!("{label}-ours"))
+            .to_string_lossy()
+            .to_string();
+        let theirs = folder
+            .join(format!("{label}-theirs"))
+            .to_string_lossy()
+            .to_string();
+        let mut arguments: Vec<String> = objects.to_vec();
+        arguments.extend(extra.iter().map(|argument| argument.to_string()));
+        let mut ours_arguments = arguments.clone();
+        ours_arguments.extend(["-o".to_string(), ours.clone()]);
+        let mut theirs_arguments = arguments.clone();
+        theirs_arguments.extend(["-o".to_string(), theirs.clone()]);
+        let outcome = link_on_disk(&ours_arguments);
+        assert!(outcome.succeeded(), "{label}: {}", describe(&outcome));
+        assert!(reference_link(&theirs_arguments), "{label}: ld.lld refused");
+        let difference =
+            first_difference(&structure(Path::new(&ours)), &structure(Path::new(&theirs)));
+        assert!(
+            difference.is_none(),
+            "{label}: {}",
+            difference.unwrap_or_default()
+        );
+        let left = allocated_bytes(Path::new(&ours));
+        let right = allocated_bytes(Path::new(&theirs));
+        assert_eq!(left.len(), right.len(), "{label}");
+        for ((name, ours_bytes), (_, theirs_bytes)) in left.iter().zip(&right) {
+            assert!(
+                ours_bytes == theirs_bytes,
+                "{label}: section {name} differs"
+            );
+        }
+    }
+
+    const I386_SOURCE: &str = r#"
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        call helper
+        movl $value, %eax
+        movl value, %ebx
+        movl value@GOTOFF(%ebx), %ecx
+        addl $_GLOBAL_OFFSET_TABLE_, %ebx
+        movl %gs:counter@ntpoff, %edx
+        movl %gs:0, %eax
+        leal counter@ntpoff(%eax), %eax
+        jmp helper
+        .type helper,@function
+helper:
+        ret
+        .data
+value:
+        .long _start
+        .long helper - .
+        .short small
+        .byte tiny
+        .globl small
+        .set small, 0x1234
+        .set tiny, 0x12
+        .section .tbss,"awT",@nobits
+counter:
+        .zero 4
+"#;
+
+    const AARCH64_SOURCE: &str = r#"
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        adrp x0, value
+        add x0, x0, :lo12:value
+        adrp x1, far
+        ldr x1, [x1, :lo12:far]
+        ldrb w2, [x0, :lo12:value]
+        ldrh w2, [x0, :lo12:half]
+        ldr w2, [x0, :lo12:word]
+        ldr q3, [x0, :lo12:wide]
+        adrp x4, :got:value
+        ldr x4, [x4, :got_lo12:value]
+        bl helper
+        b helper
+        b.eq helper
+        tbz x0, #3, helper
+        cbz x0, helper
+        movz x5, #:abs_g3:value
+        movk x5, #:abs_g2_nc:value
+        movk x5, #:abs_g1_nc:value
+        movk x5, #:abs_g0_nc:value
+        ldr x6, literal
+        adr x7, helper
+        mrs x8, tpidr_el0
+        add x8, x8, #:tprel_lo12_nc:counter
+        movz x9, #:tprel_g1:counter
+        movk x9, #:tprel_g0_nc:counter
+        .type helper,%function
+helper:
+        ret
+literal:
+        .xword 42
+        .data
+        .p2align 4
+value:
+        .xword _start
+        .word helper - .
+        .xword helper - .
+        .hword 9
+half:
+        .hword 1
+word:
+        .p2align 2
+        .word value
+        .p2align 4
+wide:
+        .xword 1, 2
+far:
+        .xword 3
+        .section .tbss,"awT",@nobits
+        .p2align 3
+counter:
+        .zero 8
+"#;
+
+    const ARM_SOURCE: &str = r#"
+        .syntax unified
+        .arm
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        bl helper
+        bl thumb_helper
+        blx thumb_helper
+        b helper
+        movw r0, #:lower16:value
+        movt r0, #:upper16:value
+        movw r1, #:lower16:value - .
+        movt r1, #:upper16:value - .
+        ldr r2, =value
+        .type helper,%function
+helper:
+        bx lr
+        .ltorg
+        .thumb
+        .type thumb_helper,%function
+thumb_helper:
+        bl thumb_other
+        blx helper
+        b.w thumb_other
+        movw r0, #:lower16:value
+        movt r0, #:upper16:value
+        beq.w thumb_other
+        .type thumb_other,%function
+thumb_other:
+        bx lr
+        .data
+value:
+        .long _start
+        .long helper - .
+        .long thumb_helper
+"#;
+
+    const AARCH64_FAR: &str = r#"
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        bl far_function
+        b far_function
+        bl near_function
+        .type near_function,%function
+near_function:
+        ret
+        .section .far,"ax",%progbits
+        .globl far_function
+        .type far_function,%function
+far_function:
+        bl _start
+        ret
+"#;
+
+    const ARM_V7_FAR: &str = r#"
+        .syntax unified
+        .eabi_attribute Tag_CPU_arch, 10
+        .eabi_attribute Tag_ARM_ISA_use, 1
+        .eabi_attribute Tag_THUMB_ISA_use, 2
+        .eabi_attribute Tag_ABI_VFP_args, 1
+        .arm
+        .text
+        .globl _start
+        .type _start,%function
+_start:
+        bl far_function
+        b far_function
+        .thumb
+        .type thumb_caller,%function
+thumb_caller:
+        bl far_thumb
+        b.w far_thumb
+        .section .far,"ax",%progbits
+        .thumb
+        .type far_thumb,%function
+far_thumb:
+        bl thumb_caller
+        bx lr
+        .arm
+        .globl far_function
+        .type far_function,%function
+far_function:
+        bx lr
+"#;
+
+    #[test]
+    fn branches_out_of_range_go_through_the_thunks_lld_makes() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("thunks");
+        for (label, triple, source, extra) in [
+            (
+                "aarch64-far",
+                "aarch64-linux-gnu",
+                AARCH64_FAR,
+                &["--section-start=.far=0x10000000", "-Ttext=0x210000"][..],
+            ),
+            (
+                "aarch64-near",
+                "aarch64-linux-gnu",
+                AARCH64_FAR,
+                &["--section-start=.far=0x1000000"][..],
+            ),
+            (
+                "arm-far",
+                "armv7a-linux-gnueabihf",
+                ARM_V7_FAR,
+                &["--section-start=.far=0x3000000", "-Ttext=0x210000"][..],
+            ),
+            ("arm-near", "armv7a-linux-gnueabihf", ARM_V7_FAR, &[][..]),
+            (
+                "arm-big-far",
+                "armebv7a-linux-gnueabi",
+                ARM_V7_FAR,
+                &["--section-start=.far=0x3000000", "-Ttext=0x210000"][..],
+            ),
+        ] {
+            assemble(&folder, label, triple, source);
+            let object = folder
+                .join(format!("{label}.o"))
+                .to_string_lossy()
+                .to_string();
+            compare_with_lld(&folder, &[object], extra, label);
+        }
+        finish(&folder);
+    }
+
+    #[test]
+    fn every_target_relocates_the_way_lld_does() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("targets");
+        for (label, triple, source, extra) in [
+            ("i386", "i386-linux-gnu", I386_SOURCE, &[][..]),
+            ("aarch64", "aarch64-linux-gnu", AARCH64_SOURCE, &[][..]),
+            (
+                "aarch64-big",
+                "aarch64_be-linux-gnu",
+                AARCH64_SOURCE,
+                &[][..],
+            ),
+            ("arm", "armv7a-linux-gnueabihf", ARM_SOURCE, &[][..]),
+            ("arm-big", "armebv7a-linux-gnueabi", ARM_SOURCE, &[][..]),
+            (
+                "x86-64",
+                "x86_64-linux-gnu",
+                STATIC_START,
+                &["-z", "max-page-size=16384"][..],
+            ),
+        ] {
+            assemble(&folder, label, triple, source);
+            let object = folder
+                .join(format!("{label}.o"))
+                .to_string_lossy()
+                .to_string();
+            compare_with_lld(&folder, &[object], extra, label);
+        }
+        finish(&folder);
+    }
+
+    #[test]
+    fn a_static_program_without_libc_links_runs_and_matches_lld() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("static-start");
+        assemble(&folder, "start", "x86_64-linux-gnu", STATIC_START);
+        let object = folder.join("start.o").to_string_lossy().to_string();
+        let ours = folder.join("ours").to_string_lossy().to_string();
+        let theirs = folder.join("theirs").to_string_lossy().to_string();
+        let outcome = link_on_disk(&[object.clone(), "-o".to_string(), ours.clone()]);
+        assert!(outcome.succeeded(), "{}", describe(&outcome));
+        assert!(reference_link(&[object, "-o".to_string(), theirs.clone()]));
+        let difference =
+            first_difference(&structure(Path::new(&ours)), &structure(Path::new(&theirs)));
+        assert!(difference.is_none(), "{}", difference.unwrap_or_default());
+        let run = Command::new(&ours).output().expect("the program runs");
+        let reference = Command::new(&theirs).output().expect("the reference runs");
+        assert_eq!(run.status.code(), Some(35));
+        assert_eq!(run.status.code(), reference.status.code());
+        assert_eq!(run.stdout, b"hello from omni\n");
+        assert_eq!(run.stdout, reference.stdout);
+        if std::env::var_os("APK_BUILDER_KEEP_LINKER_WORK").is_none() {
+            finish(&folder);
         }
     }
 }
