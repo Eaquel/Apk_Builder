@@ -15158,6 +15158,7 @@ pub fn parse_coff_command_line(
             | "prefetch-inputs"
             | "failifmismatch"
             | "profile" => {}
+            _ if argument.starts_with('/') => options.inputs.push(CoffInput::File(argument)),
             _ => {
                 options.warnings.push(
                     caution(
@@ -15671,6 +15672,8 @@ pub struct CoffContext<'s> {
     pub debug_directory: Option<usize>,
     pub set_no_seh: bool,
     pub thread_local_alignment: u64,
+    pub import_name: String,
+    pub extra_outputs: Vec<(String, Vec<u8>)>,
 }
 
 pub fn coff_display(object: &CoffObjectInput) -> String {
@@ -15743,6 +15746,8 @@ impl<'s> CoffContext<'s> {
             debug_directory: None,
             set_no_seh: false,
             thread_local_alignment: 0,
+            import_name: String::new(),
+            extra_outputs: Vec::new(),
         }
     }
 
@@ -17127,6 +17132,7 @@ impl<'s> CoffContext<'s> {
             .inputs
             .iter()
             .all(|input| matches!(input, CoffInput::StartLibrary | CoffInput::EndLibrary))
+            && self.options.definition_file.is_none()
         {
             self.error(problem("EI213", "No input files were given."));
             return None;
@@ -17148,6 +17154,14 @@ impl<'s> CoffContext<'s> {
                 problem("EI204", "An option value is not valid.")
                     .with_context("Option: /noentry must be specified with /dll".to_string()),
             );
+        }
+        if self
+            .options
+            .inputs
+            .iter()
+            .all(|input| matches!(input, CoffInput::StartLibrary | CoffInput::EndLibrary))
+        {
+            self.options.no_entry = true;
         }
         self.dynamic_base = self.options.dynamic_base.unwrap_or(true);
         if self.options.fixed {
@@ -17279,6 +17293,18 @@ impl<'s> CoffContext<'s> {
         if self.failed() {
             return None;
         }
+        if self
+            .options
+            .inputs
+            .iter()
+            .all(|input| matches!(input, CoffInput::StartLibrary | CoffInput::EndLibrary))
+        {
+            self.fix_exports();
+            if !self.options.no_import_library && !self.failed() {
+                self.create_import_library(true);
+            }
+            return None;
+        }
         if self.subsystem == subsystem::UNKNOWN {
             self.subsystem = self.infer_subsystem();
             if self.subsystem == subsystem::UNKNOWN {
@@ -17408,6 +17434,12 @@ impl<'s> CoffContext<'s> {
         }
         if self.options.dll || !self.exports.is_empty() {
             self.fix_exports();
+            if !self.options.no_import_library
+                && (!self.options.mingw || self.options.import_library.is_some())
+                && !self.failed()
+            {
+                self.create_import_library(false);
+            }
             self.assign_export_ordinals();
         }
         for (name, alignment) in self.align_common.clone() {
@@ -18206,6 +18238,7 @@ impl<'s> CoffContext<'s> {
         if self.options.output.is_empty() {
             self.options.output = definition.output_file.clone();
         }
+        self.import_name = definition.import_name.clone();
         if definition.image_base != 0 {
             self.options.image_base = Some(definition.image_base);
         }
@@ -18250,6 +18283,69 @@ impl<'s> CoffContext<'s> {
             export.private = entry.private;
             export.constant = entry.constant;
             self.exports.push(export);
+        }
+    }
+
+    fn create_import_library(&mut self, as_library: bool) {
+        let file_name = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+        let replace_extension = |path: &str, extension: &str| {
+            let name_start = path.rfind(['/', '\\']).map_or(0, |position| position + 1);
+            match path[name_start..].rfind('.') {
+                Some(position) if position > 0 => {
+                    format!("{}{extension}", &path[..name_start + position])
+                }
+                _ => format!("{path}{extension}"),
+            }
+        };
+        let has_extension = |path: &str| {
+            let name = file_name(path);
+            name.rfind('.').is_some_and(|position| position > 0)
+        };
+        let import_name = if self.import_name.is_empty() {
+            let name = file_name(&self.options.output);
+            if as_library {
+                replace_extension(&name, ".dll")
+            } else {
+                name
+            }
+        } else if !has_extension(&self.import_name) {
+            let extension = if self.options.dll || as_library {
+                ".dll"
+            } else {
+                ".exe"
+            };
+            replace_extension(&self.import_name, extension)
+        } else {
+            self.import_name.clone()
+        };
+        let path = match &self.options.import_library {
+            Some(path) => path.clone(),
+            None => replace_extension(&self.options.output, ".lib"),
+        };
+        let exports: Vec<crate::compilers::pe::ShortExport> = self
+            .exports
+            .iter()
+            .map(|export| crate::compilers::pe::ShortExport {
+                name: export.name.clone(),
+                external_name: export.external_name.clone(),
+                symbol_name: export.symbol_name.clone(),
+                import_name: export.import_name.clone(),
+                export_as: export.export_as.clone(),
+                ordinal: export.ordinal,
+                no_name: export.no_name,
+                data: export.data,
+                private: export.private,
+                constant: export.constant,
+            })
+            .collect();
+        match crate::compilers::pe::write_import_library(
+            &import_name,
+            &exports,
+            self.machine,
+            self.options.mingw,
+        ) {
+            Ok(bytes) => self.extra_outputs.push((path, bytes)),
+            Err(diagnostic) => self.error(diagnostic),
         }
     }
 
@@ -18379,6 +18475,7 @@ pub fn link_coff(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>)
             .outputs
             .push((context.options.output.clone(), bytes));
     }
+    outcome.outputs.append(&mut context.extra_outputs);
     outcome
 }
 

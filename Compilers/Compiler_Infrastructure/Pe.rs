@@ -1615,3 +1615,645 @@ impl PeImage {
         Some(out)
     }
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShortExport {
+    pub name: String,
+    pub external_name: String,
+    pub symbol_name: String,
+    pub import_name: String,
+    pub export_as: String,
+    pub ordinal: u16,
+    pub no_name: bool,
+    pub data: bool,
+    pub private: bool,
+    pub constant: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArchiveMember {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+const IMPORT_DESCRIPTOR_PREFIX: &str = "__IMPORT_DESCRIPTOR_";
+const NULL_IMPORT_DESCRIPTOR: &str = "__NULL_IMPORT_DESCRIPTOR";
+
+fn image_relative_relocation(machine_number: u16) -> u16 {
+    match machine_number {
+        machine::I386 => relocation_i386::DIRECT_32_IMAGE_RELATIVE,
+        _ => relocation_amd64::ADDRESS_32_IMAGE_RELATIVE,
+    }
+}
+
+fn apply_name_type(name_type: u16, name: &str) -> String {
+    let trimmed = name.strip_prefix(['?', '@', '_']).unwrap_or(name);
+    match name_type {
+        import_name_type::NAME_NO_PREFIX => trimmed.to_string(),
+        import_name_type::NAME_UNDECORATE => trimmed.split('@').next().unwrap_or("").to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn short_name_type(symbol: &str, external: &str, machine_number: u16, mingw: bool) -> u16 {
+    if external.starts_with('_') && external.contains('@') && !mingw {
+        return import_name_type::NAME;
+    }
+    if symbol != external {
+        return import_name_type::NAME_UNDECORATE;
+    }
+    if machine_number == machine::I386 && symbol.starts_with('_') {
+        return import_name_type::NAME_NO_PREFIX;
+    }
+    import_name_type::NAME
+}
+
+fn replace_export_name(text: &str, from: &str, to: &str) -> Option<String> {
+    let (mut from, mut to) = (from, to);
+    let mut position = text.find(from);
+    if position.is_none() && from.starts_with('_') && to.starts_with('_') {
+        from = &from[1..];
+        to = &to[1..];
+        position = text.find(from);
+    }
+    let position = position?;
+    Some(format!(
+        "{}{}{}",
+        &text[..position],
+        to,
+        &text[position + from.len()..]
+    ))
+}
+
+fn put_coff_header(
+    out: &mut Vec<u8>,
+    machine_number: u16,
+    sections: u16,
+    symbol_table: u32,
+    symbols: u32,
+    characteristics: u16,
+) {
+    put_u16(out, machine_number);
+    put_u16(out, sections);
+    put_u32(out, 0);
+    put_u32(out, symbol_table);
+    put_u32(out, symbols);
+    put_u16(out, 0);
+    put_u16(out, characteristics);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn put_raw_section(
+    out: &mut Vec<u8>,
+    name: &[u8; 8],
+    size: u32,
+    data: u32,
+    relocations: u32,
+    relocation_count: u16,
+    characteristics: u32,
+) {
+    out.extend_from_slice(name);
+    put_u32(out, 0);
+    put_u32(out, 0);
+    put_u32(out, size);
+    put_u32(out, data);
+    put_u32(out, relocations);
+    put_u32(out, 0);
+    put_u16(out, relocation_count);
+    put_u16(out, 0);
+    put_u32(out, characteristics);
+}
+
+fn put_raw_symbol(out: &mut Vec<u8>, name: [u8; 8], section: u16, class: u8, auxiliary: u8) {
+    out.extend_from_slice(&name);
+    put_u32(out, 0);
+    put_u16(out, section);
+    put_u16(out, 0);
+    out.push(class);
+    out.push(auxiliary);
+}
+
+fn string_offset_name(offset: u32) -> [u8; 8] {
+    let mut name = [0u8; 8];
+    name[4..].copy_from_slice(&offset.to_le_bytes());
+    name
+}
+
+fn put_raw_strings(out: &mut Vec<u8>, strings: &[&str]) {
+    let start = out.len();
+    put_u32(out, 0);
+    for text in strings {
+        out.extend_from_slice(text.as_bytes());
+        out.push(0);
+    }
+    let length = (out.len() - start) as u32;
+    write_u32(out, start, length);
+}
+
+fn word_characteristics(machine_number: u16) -> u16 {
+    if is_64_bit(machine_number) {
+        0
+    } else {
+        file_characteristic::MACHINE_32_BIT
+    }
+}
+
+fn import_descriptor_object(import_name: &str, library: &str, machine_number: u16) -> Vec<u8> {
+    use section_characteristic as character;
+    let descriptor_symbol = format!("{IMPORT_DESCRIPTOR_PREFIX}{library}");
+    let thunk_symbol = format!("\u{7f}{library}_NULL_THUNK_DATA");
+    let headers = (COFF_HEADER_SIZE + 2 * SECTION_HEADER_SIZE) as u32;
+    let mut out = Vec::new();
+    let symbol_table = headers + 20 + 3 * RELOCATION_SIZE as u32 + import_name.len() as u32 + 1;
+    put_coff_header(
+        &mut out,
+        machine_number,
+        2,
+        symbol_table,
+        7,
+        word_characteristics(machine_number),
+    );
+    let data = character::INITIALIZED_DATA | character::READ | character::WRITE;
+    put_raw_section(
+        &mut out,
+        b".idata$2",
+        20,
+        headers,
+        headers + 20,
+        3,
+        alignment_characteristics(4) | data,
+    );
+    put_raw_section(
+        &mut out,
+        b".idata$6",
+        import_name.len() as u32 + 1,
+        headers + 20 + 3 * RELOCATION_SIZE as u32,
+        0,
+        0,
+        alignment_characteristics(2) | data,
+    );
+    out.extend_from_slice(&[0u8; 20]);
+    let relocation = image_relative_relocation(machine_number);
+    for (offset, symbol) in [(12u32, 2u32), (0, 3), (16, 4)] {
+        put_u32(&mut out, offset);
+        put_u32(&mut out, symbol);
+        put_u16(&mut out, relocation);
+    }
+    out.extend_from_slice(import_name.as_bytes());
+    out.push(0);
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(4),
+        1,
+        storage_class::EXTERNAL,
+        0,
+    );
+    put_raw_symbol(&mut out, *b".idata$2", 1, storage_class::SECTION, 0);
+    put_raw_symbol(&mut out, *b".idata$6", 2, storage_class::STATIC, 0);
+    put_raw_symbol(&mut out, *b".idata$4", 0, storage_class::SECTION, 0);
+    put_raw_symbol(&mut out, *b".idata$5", 0, storage_class::SECTION, 0);
+    let second = 4 + descriptor_symbol.len() as u32 + 1;
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(second),
+        0,
+        storage_class::EXTERNAL,
+        0,
+    );
+    let third = second + NULL_IMPORT_DESCRIPTOR.len() as u32 + 1;
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(third),
+        0,
+        storage_class::EXTERNAL,
+        0,
+    );
+    put_raw_strings(
+        &mut out,
+        &[&descriptor_symbol, NULL_IMPORT_DESCRIPTOR, &thunk_symbol],
+    );
+    out
+}
+
+fn null_import_descriptor_object(machine_number: u16) -> Vec<u8> {
+    use section_characteristic as character;
+    let headers = (COFF_HEADER_SIZE + SECTION_HEADER_SIZE) as u32;
+    let mut out = Vec::new();
+    put_coff_header(
+        &mut out,
+        machine_number,
+        1,
+        headers + 20,
+        1,
+        word_characteristics(machine_number),
+    );
+    put_raw_section(
+        &mut out,
+        b".idata$3",
+        20,
+        headers,
+        0,
+        0,
+        alignment_characteristics(4)
+            | character::INITIALIZED_DATA
+            | character::READ
+            | character::WRITE,
+    );
+    out.extend_from_slice(&[0u8; 20]);
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(4),
+        1,
+        storage_class::EXTERNAL,
+        0,
+    );
+    put_raw_strings(&mut out, &[NULL_IMPORT_DESCRIPTOR]);
+    out
+}
+
+fn null_thunk_object(library: &str, machine_number: u16) -> Vec<u8> {
+    use section_characteristic as character;
+    let thunk_symbol = format!("\u{7f}{library}_NULL_THUNK_DATA");
+    let headers = (COFF_HEADER_SIZE + 2 * SECTION_HEADER_SIZE) as u32;
+    let word = if is_64_bit(machine_number) { 8 } else { 4 };
+    let mut out = Vec::new();
+    put_coff_header(
+        &mut out,
+        machine_number,
+        2,
+        headers + 2 * word,
+        1,
+        word_characteristics(machine_number),
+    );
+    let alignment = if is_64_bit(machine_number) {
+        alignment_characteristics(8)
+    } else {
+        alignment_characteristics(4)
+    };
+    let flags = alignment | character::INITIALIZED_DATA | character::READ | character::WRITE;
+    put_raw_section(&mut out, b".idata$5", word, headers, 0, 0, flags);
+    put_raw_section(&mut out, b".idata$4", word, headers + word, 0, 0, flags);
+    out.extend(std::iter::repeat_n(0u8, 2 * word as usize));
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(4),
+        1,
+        storage_class::EXTERNAL,
+        0,
+    );
+    put_raw_strings(&mut out, &[&thunk_symbol]);
+    out
+}
+
+fn weak_external_object(symbol: &str, weak: &str, import: bool, machine_number: u16) -> Vec<u8> {
+    use section_characteristic as character;
+    let mut out = Vec::new();
+    put_coff_header(
+        &mut out,
+        machine_number,
+        1,
+        (COFF_HEADER_SIZE + SECTION_HEADER_SIZE) as u32,
+        5,
+        0,
+    );
+    put_raw_section(
+        &mut out,
+        b".drectve",
+        0,
+        0,
+        0,
+        0,
+        character::LINK_INFORMATION | character::LINK_REMOVE,
+    );
+    put_raw_symbol(&mut out, *b"@comp.id", 0xffff, storage_class::STATIC, 0);
+    put_raw_symbol(&mut out, *b"@feat.00", 0xffff, storage_class::STATIC, 0);
+    let prefix = if import { "__imp_" } else { "" };
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(4),
+        0,
+        storage_class::EXTERNAL,
+        0,
+    );
+    let second = 4 + (prefix.len() + symbol.len()) as u32 + 1;
+    put_raw_symbol(
+        &mut out,
+        string_offset_name(second),
+        0,
+        storage_class::WEAK_EXTERNAL,
+        1,
+    );
+    put_raw_symbol(
+        &mut out,
+        [2, 0, 0, 0, weak_search::ALIAS as u8, 0, 0, 0],
+        0,
+        0,
+        0,
+    );
+    let strong = format!("{prefix}{symbol}");
+    let weak = format!("{prefix}{weak}");
+    put_raw_strings(&mut out, &[&strong, &weak]);
+    out
+}
+
+fn short_import_object(
+    symbol: &str,
+    library: &str,
+    ordinal: u16,
+    kind: u16,
+    name_type: u16,
+    export_name: &str,
+    machine_number: u16,
+) -> Vec<u8> {
+    ImportObject {
+        machine: machine_number,
+        time_stamp: 0,
+        size_of_data: 0,
+        ordinal_or_hint: ordinal,
+        kind,
+        name_type,
+        symbol_name: symbol.to_string(),
+        library_name: library.to_string(),
+        export_name: (!export_name.is_empty()).then(|| export_name.to_string()),
+    }
+    .to_bytes()
+}
+
+pub fn write_import_library(
+    import_name: &str,
+    exports: &[ShortExport],
+    machine_number: u16,
+    mingw: bool,
+) -> Result<Vec<u8>, Diagnostic> {
+    let file_name = import_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(import_name);
+    let library = match file_name.rfind('.') {
+        Some(position) if position > 0 => &file_name[..position],
+        _ => file_name,
+    };
+    let member = |data: Vec<u8>| ArchiveMember {
+        name: file_name.to_string(),
+        data,
+    };
+    let mut members = vec![
+        member(import_descriptor_object(file_name, library, machine_number)),
+        member(null_import_descriptor_object(machine_number)),
+        member(null_thunk_object(library, machine_number)),
+    ];
+    let mut regular: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut renames: Vec<(String, u16, &ShortExport)> = Vec::new();
+    for export in exports {
+        if export.private {
+            continue;
+        }
+        let kind = if export.constant {
+            import_type::CONSTANT
+        } else if export.data {
+            import_type::DATA
+        } else {
+            import_type::CODE
+        };
+        let symbol_name = if export.symbol_name.is_empty() {
+            &export.name
+        } else {
+            &export.symbol_name
+        };
+        let name = if export.external_name.is_empty() {
+            symbol_name.clone()
+        } else {
+            match replace_export_name(symbol_name, &export.name, &export.external_name) {
+                Some(name) => name,
+                None => {
+                    return Err(
+                        fail("EI246", "The module definition file could not be read.")
+                            .with_context(format!("Symbol: {symbol_name}"))
+                            .with_context(format!("Export: {}", export.external_name)),
+                    )
+                }
+            }
+        };
+        let mut export_name = String::new();
+        let name_type = if export.no_name {
+            import_name_type::ORDINAL
+        } else if !export.export_as.is_empty() {
+            export_name = export.export_as.clone();
+            import_name_type::NAME_EXPORT_AS
+        } else if !export.import_name.is_empty() {
+            if machine_number == machine::I386
+                && apply_name_type(import_name_type::NAME_UNDECORATE, &name) == export.import_name
+            {
+                import_name_type::NAME_UNDECORATE
+            } else if machine_number == machine::I386
+                && apply_name_type(import_name_type::NAME_NO_PREFIX, &name) == export.import_name
+            {
+                import_name_type::NAME_NO_PREFIX
+            } else if name == export.import_name {
+                import_name_type::NAME
+            } else {
+                renames.push((name, kind, export));
+                continue;
+            }
+        } else {
+            short_name_type(symbol_name, &export.name, machine_number, mingw)
+        };
+        regular.insert(apply_name_type(name_type, &name), name.clone());
+        members.push(member(short_import_object(
+            &name,
+            file_name,
+            export.ordinal,
+            kind,
+            name_type,
+            &export_name,
+            machine_number,
+        )));
+    }
+    for (name, kind, export) in renames {
+        match regular.get(&export.import_name) {
+            Some(symbol) => {
+                if kind == import_type::CODE {
+                    members.push(member(weak_external_object(
+                        symbol,
+                        &name,
+                        false,
+                        machine_number,
+                    )));
+                }
+                members.push(member(weak_external_object(
+                    symbol,
+                    &name,
+                    true,
+                    machine_number,
+                )));
+            }
+            None => members.push(member(short_import_object(
+                &name,
+                file_name,
+                export.ordinal,
+                kind,
+                import_name_type::NAME_EXPORT_AS,
+                &export.import_name,
+                machine_number,
+            ))),
+        }
+    }
+    Ok(write_coff_archive(&members))
+}
+
+fn archive_symbols(data: &[u8]) -> Vec<String> {
+    if let Ok(import) = ImportObject::parse(data) {
+        let mut names = vec![format!("__imp_{}", import.symbol_name)];
+        if import.kind != import_type::DATA {
+            names.push(import.symbol_name);
+        }
+        return names;
+    }
+    let Ok(object) = CoffObject::parse(data) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for symbol in &object.symbols {
+        let global = symbol.storage_class == storage_class::EXTERNAL
+            || symbol.storage_class == storage_class::WEAK_EXTERNAL;
+        if !global || symbol.file_name().is_some() || symbol.is_section_definition() {
+            continue;
+        }
+        if symbol.storage_class == storage_class::EXTERNAL && symbol.is_undefined() {
+            continue;
+        }
+        if let Some((_, search)) = symbol.weak_external() {
+            if search != weak_search::ALIAS {
+                continue;
+            }
+        }
+        names.push(symbol.name.clone());
+    }
+    names
+}
+
+fn padded(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
+
+fn archive_header(name: &str, mode: &str, size: usize) -> String {
+    format!(
+        "{}{}{}{}{}{}`\n",
+        padded(name, 16),
+        padded("0", 12),
+        padded("0", 6),
+        padded("0", 6),
+        padded(mode, 8),
+        padded(&size.to_string(), 10)
+    )
+}
+
+pub fn write_coff_archive(members: &[ArchiveMember]) -> Vec<u8> {
+    let mut long_names: Vec<u8> = Vec::new();
+    let mut long_name_offsets: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut headers: Vec<String> = Vec::new();
+    let mut symbol_names: Vec<u8> = Vec::new();
+    let mut member_symbols: Vec<Vec<usize>> = Vec::new();
+    let mut symbol_map: std::collections::BTreeMap<Vec<u8>, u16> =
+        std::collections::BTreeMap::new();
+    for (index, member) in members.iter().enumerate() {
+        let name = if member.name.len() >= 16 || member.name.contains('/') {
+            let offset = *long_name_offsets
+                .entry(member.name.clone())
+                .or_insert_with(|| {
+                    let offset = long_names.len();
+                    long_names.extend_from_slice(member.name.as_bytes());
+                    long_names.push(0);
+                    offset
+                });
+            format!("/{offset}")
+        } else {
+            format!("{}/", member.name)
+        };
+        headers.push(archive_header(&name, "644", member.data.len()));
+        let mut offsets = Vec::new();
+        for symbol in archive_symbols(&member.data) {
+            let key = symbol.as_bytes().to_vec();
+            if symbol_map.contains_key(&key) {
+                continue;
+            }
+            symbol_map.insert(key, (index + 1) as u16);
+            offsets.push(symbol_names.len());
+            symbol_names.extend_from_slice(symbol.as_bytes());
+            symbol_names.push(0);
+        }
+        member_symbols.push(offsets);
+    }
+    let symbol_count: usize = member_symbols.iter().map(Vec::len).sum();
+    let mut table_size = 4 + symbol_count * 4 + symbol_names.len();
+    let table_padding = table_size % 2;
+    table_size += table_padding;
+    let mut map_size = 8
+        + members.len() * 4
+        + symbol_map
+            .keys()
+            .map(|name| 2 + name.len() + 1)
+            .sum::<usize>();
+    let map_padding = map_size % 2;
+    map_size += map_padding;
+    let long_padding = long_names.len() % 2;
+    let long_size = if long_names.is_empty() {
+        0
+    } else {
+        60 + long_names.len() + long_padding
+    };
+    let headers_size = 8 + 60 + table_size + 60 + map_size + long_size;
+    let mut positions = Vec::new();
+    let mut position = headers_size;
+    for (header, member) in headers.iter().zip(members) {
+        positions.push(position as u32);
+        position += header.len() + member.data.len() + member.data.len() % 2;
+    }
+    let mut out = b"!<arch>\n".to_vec();
+    out.extend_from_slice(archive_header("/", "0", table_size).as_bytes());
+    out.extend_from_slice(&(symbol_count as u32).to_be_bytes());
+    for (offsets, member_position) in member_symbols.iter().zip(&positions) {
+        for _ in offsets {
+            out.extend_from_slice(&member_position.to_be_bytes());
+        }
+    }
+    out.extend_from_slice(&symbol_names);
+    out.extend(std::iter::repeat_n(0u8, table_padding));
+    out.extend_from_slice(archive_header("/", "0", map_size).as_bytes());
+    put_u32(&mut out, members.len() as u32);
+    for member_position in &positions {
+        put_u32(&mut out, *member_position);
+    }
+    put_u32(&mut out, symbol_map.len() as u32);
+    for index in symbol_map.values() {
+        put_u16(&mut out, *index);
+    }
+    for name in symbol_map.keys() {
+        out.extend_from_slice(name);
+        out.push(0);
+    }
+    out.extend(std::iter::repeat_n(0u8, map_padding));
+    if !long_names.is_empty() {
+        out.extend_from_slice(
+            format!(
+                "{}{}`\n",
+                padded("//", 48),
+                padded(&(long_names.len() + long_padding).to_string(), 10)
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&long_names);
+        if long_padding == 1 {
+            out.push(b'\n');
+        }
+    }
+    for (header, member) in headers.iter().zip(members) {
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(&member.data);
+        if member.data.len() % 2 == 1 {
+            out.push(b'\n');
+        }
+    }
+    out
+}

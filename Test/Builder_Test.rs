@@ -68523,6 +68523,18 @@ _tls_used:
         );
         let parsed = crate::compilers::pe::PeImage::parse(&produced).expect("the image parses");
         assert!(!parsed.sections.is_empty());
+        if let Ok(library) = std::fs::read(folder.join(format!("reference/{label}.lib"))) {
+            let ours = outcome
+                .outputs
+                .iter()
+                .find(|(path, _)| path == &format!("ours/{label}.lib"))
+                .map(|(_, bytes)| bytes.clone())
+                .expect("our linker wrote the import library");
+            assert!(
+                library == ours,
+                "{label}: the import library differs from the one lld-link writes"
+            );
+        }
     }
 
     #[test]
@@ -68656,7 +68668,6 @@ _tls_used:
             &[
                 "/dll",
                 "/noentry",
-                "/noimplib",
                 "member.obj",
                 "/export:forced",
                 "/export:weak_function,@5,NONAME",
@@ -68676,5 +68687,449 @@ _tls_used:
                 "kernel32.lib",
             ],
         );
+    }
+}
+
+mod linker_lit {
+    use super::reference::{
+        catalogue, lit_tests, run_parallel, standard_tools, LitSuite, SuiteReport, ToolFunction,
+        ToolOutcome, Tree, World,
+    };
+    use crate::compilers::linker::{link, link_coff, LinkOutcome};
+    use crate::diag::Severity;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const HOST_TOOLS: &[&str] = &[
+        "llvm-mc",
+        "yaml2obj",
+        "obj2yaml",
+        "llvm-readobj",
+        "llvm-readelf",
+        "llvm-objdump",
+        "llvm-nm",
+        "llvm-ar",
+        "llvm-ranlib",
+        "llvm-lib",
+        "llvm-dlltool",
+        "llvm-objcopy",
+        "llvm-strip",
+        "llvm-dwarfdump",
+        "llvm-cvtres",
+        "llvm-strings",
+        "llvm-cxxfilt",
+        "grep",
+        "wc",
+        "od",
+        "ls",
+        "cmp",
+        "tar",
+        "touch",
+        "ln",
+        "chmod",
+        "mv",
+        "sort",
+        "head",
+        "tail",
+        "tr",
+        "xxd",
+    ];
+
+    fn host_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("builder-lit-{}-{unique}", std::process::id()))
+    }
+
+    fn materialize(world: &World, root: &Path, virtual_path: &str) {
+        let absolute = world.absolute(virtual_path);
+        if !absolute.starts_with('/') || absolute.len() < 2 {
+            return;
+        }
+        let target = root.join(absolute.trim_start_matches('/'));
+        if target.exists() {
+            return;
+        }
+        if let Some(bytes) = world.read(&absolute) {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&target, &bytes);
+            let text = String::from_utf8_lossy(&bytes);
+            let folder = absolute
+                .rsplit_once('/')
+                .map(|(folder, _)| folder.to_string())
+                .unwrap_or_default();
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                for directive in [".include", ".incbin"] {
+                    if let Some(rest) = trimmed.strip_prefix(directive) {
+                        if let Some(name) = rest
+                            .trim()
+                            .strip_prefix('"')
+                            .and_then(|rest| rest.split('"').next())
+                        {
+                            materialize(world, root, &format!("{folder}/{name}"));
+                            materialize(world, root, &format!("{}/{name}", world.directory));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn path_pieces(argument: &str) -> Vec<String> {
+        let mut pieces = vec![argument.to_string()];
+        for separator in ['=', ',', ':'] {
+            pieces = pieces
+                .iter()
+                .flat_map(|piece| {
+                    piece
+                        .split(separator)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+        }
+        let mut extra = Vec::new();
+        for piece in &pieces {
+            for prefix in ["-o", "-I", "-L", "@"] {
+                if let Some(rest) = piece.strip_prefix(prefix) {
+                    extra.push(rest.to_string());
+                }
+            }
+        }
+        pieces.extend(extra);
+        pieces.retain(|piece| !piece.is_empty() && !piece.starts_with('-'));
+        pieces
+    }
+
+    fn rewrite(argument: &str, root: &str) -> String {
+        let mut out = String::new();
+        let mut rest = argument;
+        while !rest.is_empty() {
+            let next = ["/output", "/llvm-project/"]
+                .iter()
+                .filter_map(|prefix| rest.find(prefix).map(|at| (at, *prefix)))
+                .min();
+            match next {
+                Some((at, _)) => {
+                    let boundary = at == 0 || {
+                        let previous = rest.as_bytes()[at - 1];
+                        !previous.is_ascii_alphanumeric() && previous != b'/' && previous != b'.'
+                    };
+                    out.push_str(&rest[..at]);
+                    if boundary {
+                        out.push_str(root);
+                    }
+                    out.push('/');
+                    rest = &rest[at + 1..];
+                }
+                None => {
+                    out.push_str(rest);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn read_back(world: &mut World, root: &Path, folder: &Path) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let relative = path
+                .strip_prefix(root)
+                .map(|relative| relative.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let virtual_path = format!("/{relative}");
+            if meta.is_dir() {
+                world.folders.insert(virtual_path);
+                read_back(world, root, &path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                if world.read(&virtual_path).as_deref() != Some(bytes.as_slice()) {
+                    world.write(&virtual_path, bytes, false);
+                }
+            }
+        }
+    }
+
+    fn tool_host(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let root = host_root();
+        let root_text = root.to_string_lossy().to_string();
+        for folder in world.folders.clone() {
+            let _ = std::fs::create_dir_all(root.join(folder.trim_start_matches('/')));
+        }
+        let files: Vec<String> = world.files.keys().cloned().collect();
+        for path in files {
+            materialize(world, &root, &path);
+        }
+        for argument in &arguments[1..] {
+            for piece in path_pieces(argument) {
+                materialize(world, &root, &piece);
+            }
+        }
+        let directory = root.join(world.directory.trim_start_matches('/'));
+        let _ = std::fs::create_dir_all(&directory);
+        let mut command = Command::new(&arguments[0]);
+        command
+            .args(
+                arguments[1..]
+                    .iter()
+                    .map(|argument| rewrite(argument, &root_text)),
+            )
+            .current_dir(&directory)
+            .envs(world.environment.iter())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let outcome = match command.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(input);
+                }
+                let identifier = child.id();
+                let (sender, receiver) = std::sync::mpsc::channel::<()>();
+                let watchdog = std::thread::spawn(move || {
+                    if receiver
+                        .recv_timeout(std::time::Duration::from_secs(120))
+                        .is_err()
+                    {
+                        let _ = Command::new("kill")
+                            .arg("-9")
+                            .arg(identifier.to_string())
+                            .status();
+                    }
+                });
+                let waited = child.wait_with_output();
+                let _ = sender.send(());
+                let _ = watchdog.join();
+                match waited {
+                    Ok(output) => {
+                        use std::os::unix::process::ExitStatusExt;
+                        let status = output
+                            .status
+                            .code()
+                            .unwrap_or_else(|| 128 + output.status.signal().unwrap_or(9));
+                        let clean = |bytes: Vec<u8>| {
+                            String::from_utf8_lossy(&bytes)
+                                .replace(&root_text, "")
+                                .into_bytes()
+                        };
+                        ToolOutcome {
+                            status,
+                            stdout: clean(output.stdout),
+                            stderr: clean(output.stderr),
+                        }
+                    }
+                    Err(error) => ToolOutcome::failed(126, format!("{error}\n")),
+                }
+            }
+            Err(_) => {
+                world.missing_tool.get_or_insert(arguments[0].clone());
+                ToolOutcome::failed(127, format!("'{}': command not found\n", arguments[0]))
+            }
+        };
+        read_back(world, &root, &root);
+        let _ = std::fs::remove_dir_all(&root);
+        outcome
+    }
+
+    fn render(outcome: &LinkOutcome, program: &str) -> (Vec<u8>, Vec<u8>, i32) {
+        let mut stderr = String::new();
+        for diagnostic in &outcome.diagnostics {
+            let level = match diagnostic.severity {
+                Severity::Error | Severity::Fatal => "error",
+                Severity::Warning => "warning",
+                _ => "message",
+            };
+            stderr.push_str(&format!(
+                "{program}: {level}: {} [{}]",
+                diagnostic.message, diagnostic.code
+            ));
+            for context in &diagnostic.context {
+                stderr.push_str(&format!("\n>>> {context}"));
+            }
+            stderr.push('\n');
+        }
+        let mut stdout = String::new();
+        for message in &outcome.messages {
+            stdout.push_str(message);
+            if !message.ends_with('\n') {
+                stdout.push('\n');
+            }
+        }
+        let status = if outcome.succeeded() { 0 } else { 1 };
+        (stdout.into_bytes(), stderr.into_bytes(), status)
+    }
+
+    fn finish_link(outcome: LinkOutcome, program: &str, world: &mut World) -> ToolOutcome {
+        let (mut stdout, stderr, status) = render(&outcome, program);
+        for (path, bytes) in outcome.outputs {
+            if path == "-" {
+                stdout.extend_from_slice(&bytes);
+            } else {
+                world.write(&path, bytes, false);
+            }
+        }
+        ToolOutcome {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+
+    fn oracle() -> bool {
+        std::env::var_os("APK_BUILDER_LLD_ORACLE").is_some()
+    }
+
+    fn tool_ld_lld(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        if oracle() {
+            return tool_host(arguments, input, world);
+        }
+        let outcome = {
+            let reader = |path: &str| world.read(path);
+            link(&arguments[1..], &reader)
+        };
+        finish_link(outcome, "ld.lld", world)
+    }
+
+    fn tool_lld_link(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        if oracle() {
+            return tool_host(arguments, input, world);
+        }
+        let outcome = {
+            let reader = |path: &str| world.read(path);
+            link_coff(&arguments[1..], &reader)
+        };
+        finish_link(outcome, "lld-link", world)
+    }
+
+    fn lld_tools() -> BTreeMap<String, ToolFunction> {
+        let mut tools = standard_tools();
+        for name in HOST_TOOLS {
+            tools.insert((*name).to_string(), tool_host);
+        }
+        tools.insert("ld.lld".to_string(), tool_ld_lld);
+        tools.insert("lld-link".to_string(), tool_lld_link);
+        tools
+    }
+
+    fn missing_input(tree: &Tree, path: &str) -> Option<String> {
+        let text = String::from_utf8_lossy(tree.file(path)?).into_owned();
+        let folder = path
+            .rsplit_once('/')
+            .map(|(folder, _)| folder)
+            .unwrap_or("");
+        for line in text.lines() {
+            let Some((_, command)) = line.split_once("RUN:") else {
+                continue;
+            };
+            if command.contains(">&") && !command.contains("2>&1") && !command.contains(">&2") {
+                return Some("the lit shell here does not support the >& redirect".to_string());
+            }
+            for word in command.split(|character: char| {
+                character.is_whitespace() || character == '=' || character == ','
+            }) {
+                let word = word.trim_matches(|character| character == '"' || character == '\'');
+                for prefix in ["%p/", "%S/"] {
+                    let Some(relative) = word.find(prefix).map(|at| &word[at + prefix.len()..])
+                    else {
+                        continue;
+                    };
+                    if relative.is_empty() || relative.contains('*') || relative.contains('%') {
+                        continue;
+                    }
+                    let full = format!("{folder}/{relative}");
+                    if tree.file(&full).is_none()
+                        && tree.paths_under(&format!("{full}/")).is_empty()
+                    {
+                        return Some(format!("binary input not in the bundle: {relative}"));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn lld_suite(name: &str, folder: &str) {
+        let names: Vec<String> = catalogue()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("Test_08"))
+            .collect();
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the LLD tests are present");
+        let root = format!("llvm-project/lld/test/{folder}/");
+        let mut tests = lit_tests(&tree, &root, &[".test", ".s", ".ll", ".yaml"]);
+        if let Ok(filter) = std::env::var("APK_BUILDER_LLD_FILTER") {
+            tests.retain(|path| path.contains(&filter));
+        }
+        let architectures: &[&str] = if folder == "COFF" {
+            &["x86"]
+        } else {
+            &["x86", "aarch64", "arm"]
+        };
+        let features = [
+            "shell",
+            "llvm-64-bits",
+            "system-linux",
+            "host-byteorder-little-endian",
+            "non-root-user",
+            "thread_support",
+            "gnutar",
+        ];
+        let suite = LitSuite {
+            tree: &tree,
+            features: features
+                .iter()
+                .chain(architectures)
+                .map(|feature| feature.to_string())
+                .collect(),
+            substitutions: vec![
+                ("%python".to_string(), "python3".to_string()),
+                (
+                    "%errc_ENOENT".to_string(),
+                    "No such file or directory".to_string(),
+                ),
+                ("%errc_EISDIR".to_string(), "Is a directory".to_string()),
+                ("%errc_EACCES".to_string(), "Permission denied".to_string()),
+                ("%errc_EINVAL".to_string(), "Invalid argument".to_string()),
+            ],
+            tools: lld_tools(),
+        };
+        let outcomes = run_parallel(tests, &|path| match missing_input(&tree, path) {
+            Some(reason) => super::reference::Verdict::OutOfScope(reason),
+            None => suite.run_test(path),
+        });
+        let report = SuiteReport {
+            name: name.to_string(),
+            outcomes,
+        };
+        report.publish();
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_lld_elf() {
+        lld_suite("lld-elf", "ELF");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_lld_coff() {
+        lld_suite("lld-coff", "COFF");
     }
 }
