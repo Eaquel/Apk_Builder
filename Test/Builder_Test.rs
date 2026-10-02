@@ -68133,3 +68133,238 @@ table:  .quad alpha
         finish(&folder);
     }
 }
+
+mod portable_executables {
+    use super::object_files::{tool_missing, work_folder};
+    use crate::compilers::pe::{
+        image_check_sum, machine, parse_module_definition, storage_class, CoffObject, ImportObject,
+    };
+    use std::process::Command;
+
+    const COFF_SOURCE: &str = r#"
+        .text
+        .globl main
+        .def main; .scl 2; .type 32; .endef
+main:
+        call helper
+        leaq message(%rip), %rax
+        movq table(%rip), %rcx
+        ret
+        .section .text$helper,"xr",discard,helper
+        .globl helper
+helper:
+        ret
+        .section .rdata,"dr"
+message:
+        .asciz "a long enough string"
+        .data
+        .globl table
+table:
+        .quad message
+        .quad main
+        .section .a_very_long_section_name,"dr"
+        .long 7
+        .weak weak_alias
+        .set weak_alias, main
+"#;
+
+    #[test]
+    fn coff_objects_round_trip_through_the_reader_and_writer() {
+        if tool_missing("llvm-mc") || tool_missing("llvm-readobj") {
+            return;
+        }
+        let folder = work_folder("coff");
+        for (label, triple) in [("x64", "x86_64-windows-msvc"), ("x86", "i686-windows-msvc")] {
+            let source = folder.join(format!("{label}.s"));
+            let object = folder.join(format!("{label}.o"));
+            let text = if label == "x86" {
+                COFF_SOURCE
+                    .replace("leaq message(%rip), %rax", "leal message, %eax")
+                    .replace("movq table(%rip), %rcx", "movl table, %ecx")
+                    .replace(".quad", ".long")
+            } else {
+                COFF_SOURCE.to_string()
+            };
+            std::fs::write(&source, text).expect("the source is written");
+            let done = Command::new("llvm-mc")
+                .args(["-filetype=obj", "-triple", triple])
+                .arg(&source)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .expect("llvm-mc runs");
+            assert!(done.success());
+            let bytes = std::fs::read(&object).expect("the object is read");
+            let parsed = CoffObject::parse(&bytes).expect("the object parses");
+            let expected_machine = if label == "x64" {
+                machine::AMD64
+            } else {
+                machine::I386
+            };
+            assert_eq!(parsed.machine, expected_machine);
+            assert!(parsed
+                .sections
+                .iter()
+                .any(|section| section.name == ".a_very_long_section_name"));
+            let helper = parsed
+                .sections
+                .iter()
+                .position(|section| section.name == ".text$helper")
+                .expect("the comdat section exists");
+            let definition = parsed
+                .symbols
+                .iter()
+                .find(|symbol| {
+                    symbol.section_number == helper as i32 + 1 && symbol.is_section_definition()
+                })
+                .and_then(|symbol| symbol.section_definition(false))
+                .expect("the comdat has a section definition");
+            assert_eq!(definition.selection, 2);
+            assert!(parsed.symbols.iter().any(|symbol| symbol.storage_class
+                == storage_class::WEAK_EXTERNAL
+                && symbol.weak_external().is_some()));
+            let text_section = parsed
+                .sections
+                .iter()
+                .find(|section| section.name == ".text")
+                .expect("the text section exists");
+            assert!(!text_section.relocations.is_empty());
+            for symbol in &parsed.symbols {
+                assert_eq!(parsed.symbol_at(symbol.index), Some(symbol));
+            }
+            let written = parsed.to_bytes();
+            let reparsed = CoffObject::parse(&written).expect("the written object parses");
+            assert_eq!(reparsed.sections.len(), parsed.sections.len());
+            for (left, right) in reparsed.sections.iter().zip(&parsed.sections) {
+                assert_eq!(left.name, right.name);
+                assert_eq!(left.data, right.data);
+                assert_eq!(left.relocations, right.relocations);
+                assert_eq!(left.characteristics, right.characteristics);
+            }
+            assert_eq!(reparsed.symbols, parsed.symbols);
+            let mut big = parsed.clone();
+            big.big = true;
+            let big_bytes = big.to_bytes();
+            let big_path = folder.join(format!("{label}-big.o"));
+            std::fs::write(&big_path, &big_bytes).expect("the big object is written");
+            let reparsed = CoffObject::parse(&big_bytes).expect("the big object parses");
+            assert!(reparsed.big);
+            assert_eq!(reparsed.symbols.len(), parsed.symbols.len());
+            for (left, right) in reparsed.symbols.iter().zip(&parsed.symbols) {
+                assert_eq!(left.name, right.name);
+                assert_eq!(left.section_number, right.section_number);
+                assert_eq!(left.storage_class, right.storage_class);
+            }
+            let listing = Command::new("llvm-readobj")
+                .args(["--sections", "--symbols"])
+                .arg(&big_path)
+                .output()
+                .expect("llvm-readobj runs");
+            assert!(
+                listing.status.success(),
+                "{}",
+                String::from_utf8_lossy(&listing.stderr)
+            );
+            let reference = Command::new("llvm-readobj")
+                .args(["--sections", "--symbols"])
+                .arg(&object)
+                .output()
+                .expect("llvm-readobj runs");
+            let names = |text: &[u8]| -> Vec<String> {
+                String::from_utf8_lossy(text)
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("Name:"))
+                    .map(|line| line.trim().split(" (").next().unwrap_or("").to_string())
+                    .collect()
+            };
+            assert_eq!(names(&listing.stdout), names(&reference.stdout));
+        }
+        if !tool_missing("llvm-dlltool") {
+            let definition = folder.join("library.def");
+            std::fs::write(
+                &definition,
+                "LIBRARY library.dll\nEXPORTS\n  alpha\n  beta @5 NONAME\n  gamma DATA\n  delta == other_name\n",
+            )
+            .expect("the definition is written");
+            let library = folder.join("library.lib");
+            let done = Command::new("llvm-dlltool")
+                .args(["-m", "i386:x86-64", "-d"])
+                .arg(&definition)
+                .arg("-l")
+                .arg(&library)
+                .status()
+                .expect("llvm-dlltool runs");
+            assert!(done.success());
+            let bytes = std::fs::read(&library).expect("the library is read");
+            let path = library.to_string_lossy().to_string();
+            let members = crate::compilers::linker::read_archive(&path, &bytes, &|_| None)
+                .expect("the library reads");
+            let imports: Vec<ImportObject> = members
+                .iter()
+                .filter(|member| crate::compilers::pe::is_import_object(&member.bytes))
+                .map(|member| ImportObject::parse(&member.bytes).expect("the import parses"))
+                .collect();
+            let names: Vec<&str> = imports
+                .iter()
+                .map(|import| import.symbol_name.as_str())
+                .collect();
+            assert!(names.contains(&"alpha"));
+            assert!(names.contains(&"gamma"));
+            let beta = imports
+                .iter()
+                .find(|import| import.symbol_name == "beta")
+                .expect("beta is imported");
+            assert_eq!(beta.name_type, 0);
+            assert_eq!(beta.ordinal_or_hint, 5);
+            assert_eq!(
+                imports
+                    .iter()
+                    .find(|import| import.symbol_name == "gamma")
+                    .map(|import| import.kind),
+                Some(1)
+            );
+            for import in &imports {
+                assert_eq!(import.library_name, "library.dll");
+                assert_eq!(ImportObject::parse(&import.to_bytes()).as_ref(), Ok(import));
+            }
+        }
+        super::linker_conformance::finish(&folder);
+    }
+
+    #[test]
+    fn module_definitions_parse_the_way_llvm_reads_them() {
+        let text = "; comment\nLIBRARY \"my lib\" BASE=0x10000000\nHEAPSIZE 0x1000,0x200\nSTACKSIZE 4096\nVERSION 3.14\nEXPORTS\n  first\n  second=internal @7 NONAME\n  third @ 9 DATA PRIVATE\n  fourth == imported\n  fifth EXPORTAS renamed\n";
+        let parsed = parse_module_definition(text, machine::AMD64, false, false).expect("parses");
+        assert_eq!(parsed.import_name, "my lib");
+        assert_eq!(parsed.output_file, "my lib.dll");
+        assert_eq!(parsed.image_base, 0x1000_0000);
+        assert_eq!(parsed.heap_reserve, Some(0x1000));
+        assert_eq!(parsed.heap_commit, Some(0x200));
+        assert_eq!(parsed.stack_reserve, Some(4096));
+        assert_eq!(
+            (parsed.major_image_version, parsed.minor_image_version),
+            (3, 14)
+        );
+        assert_eq!(parsed.exports.len(), 5);
+        assert_eq!(parsed.exports[1].name, "internal");
+        assert_eq!(parsed.exports[1].external_name, "second");
+        assert_eq!(parsed.exports[1].ordinal, 7);
+        assert!(parsed.exports[1].no_name);
+        assert_eq!(parsed.exports[2].ordinal, 9);
+        assert!(parsed.exports[2].data && parsed.exports[2].private);
+        assert_eq!(parsed.exports[3].import_name, "imported");
+        assert_eq!(parsed.exports[4].export_as, "renamed");
+        let decorated = parse_module_definition(
+            "EXPORTS\n  plain\n  _already\n  stdcall@4\n",
+            machine::I386,
+            false,
+            true,
+        )
+        .expect("parses");
+        assert_eq!(decorated.exports[0].name, "_plain");
+        assert_eq!(decorated.exports[1].name, "__already");
+        assert_eq!(decorated.exports[2].name, "stdcall@4");
+        assert!(parse_module_definition("BOGUS\n", machine::AMD64, false, false).is_err());
+        assert_eq!(image_check_sum(&[1, 0, 2, 0, 3]), 6 + 5);
+    }
+}

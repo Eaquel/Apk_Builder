@@ -29,6 +29,8 @@ pub mod compilers {
     pub mod kotlin_fixer;
     #[path = "Compilers/Compiler_Infrastructure/Linker.rs"]
     pub mod linker;
+    #[path = "Compilers/Compiler_Infrastructure/Pe.rs"]
+    pub mod pe;
     #[path = "Compilers/Rust.rs"]
     pub mod rust;
 }
