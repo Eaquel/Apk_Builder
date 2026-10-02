@@ -14,6 +14,8 @@ pub const CATALOGUE: &[(&str, &str)] = &[
         "The program used more stack than it was allowed to.",
     ),
     ("EI101", "The TableGen source could not be read."),
+    ("EI102", "The instruction tables could not be built."),
+    ("EI103", "The instruction table could not be read."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

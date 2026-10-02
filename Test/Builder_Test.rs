@@ -67193,6 +67193,228 @@ def op {
         publish_with_scope(&report);
     }
 
+    pub(super) fn tables_folder() -> std::path::PathBuf {
+        repository()
+            .join("Compilers")
+            .join("Compiler_Infrastructure")
+            .join("Tables")
+    }
+
+    pub(super) fn manifest_path() -> std::path::PathBuf {
+        repository()
+            .join("Compilers")
+            .join("Compiler_Infrastructure")
+            .join("Tables.manifest")
+    }
+
+    fn generation(threads: usize) -> Generation {
+        generate_tables(&llvm_sources(), threads).expect("the tables are built")
+    }
+
+    #[test]
+    #[ignore]
+    fn write_tables_into_the_tree() {
+        let generation = generation(suite_threads());
+        std::fs::create_dir_all(tables_folder()).expect("the tables folder");
+        for (file, bytes) in &generation.tables {
+            std::fs::write(tables_folder().join(file), bytes).expect("a table is written");
+        }
+        std::fs::write(manifest_path(), &generation.manifest).expect("the manifest is written");
+    }
+
+    #[test]
+    fn the_tables_regenerate_byte_for_byte_on_one_worker_and_many() {
+        let alone = generation(1);
+        let together = generation(suite_threads().max(2));
+        assert_eq!(alone.manifest, together.manifest);
+        assert_eq!(alone.tables, together.tables);
+        assert_eq!(alone.canonical, together.canonical);
+        let committed =
+            std::fs::read_to_string(manifest_path()).expect("Tables.manifest is committed");
+        assert_eq!(
+            alone.manifest, committed,
+            "Tables.manifest no longer matches the .td sources; run write_tables_into_the_tree"
+        );
+        for architecture in ARCHITECTURES {
+            let file = table_file_name(architecture.name);
+            let held = std::fs::read(tables_folder().join(&file)).expect("a table is committed");
+            assert!(
+                alone.tables.get(&file) == Some(&held),
+                "{file} no longer matches the .td sources"
+            );
+        }
+        let listed: Vec<&str> = committed
+            .lines()
+            .filter(|line| line.starts_with("table "))
+            .collect();
+        assert_eq!(listed.len(), ARCHITECTURES.len());
+        assert!(committed
+            .lines()
+            .any(|line| line.starts_with("source include/llvm/Target/Target.td ")));
+        assert!(committed.contains(&format!("tablegen {TABLEGEN_VERSION}\n")));
+    }
+
+    #[test]
+    fn every_committed_table_reads_back_and_writes_the_same_bytes() {
+        for architecture in ARCHITECTURES {
+            let file = table_file_name(architecture.name);
+            let bytes = std::fs::read(tables_folder().join(&file)).expect("a table is committed");
+            let table = read_table(&bytes).unwrap_or_else(|problem| panic!("{file}: {problem:?}"));
+            assert_eq!(table.architecture, architecture.name);
+            assert_eq!(table.target, architecture.target);
+            assert!(table
+                .records
+                .windows(2)
+                .all(|pair| pair[0].name < pair[1].name));
+            assert_eq!(
+                write_table(&table),
+                bytes,
+                "{file} does not survive a round trip"
+            );
+        }
+    }
+
+    fn has(table: &Table, name: &str) -> bool {
+        table.record(name).is_some()
+    }
+
+    #[test]
+    fn each_table_holds_the_instructions_of_its_mode() {
+        let read = |architecture: &str| {
+            let bytes = std::fs::read(tables_folder().join(table_file_name(architecture)))
+                .expect("a table is committed");
+            read_table(&bytes).expect("the table reads")
+        };
+        let x86 = read("X86");
+        assert!(has(&x86, "AAA") && has(&x86, "PUSH32r") && has(&x86, "ADD32rr"));
+        assert!(!has(&x86, "PUSH64r"));
+        let x86_64 = read("X86_64");
+        assert!(has(&x86_64, "PUSH64r") && has(&x86_64, "SYSCALL") && has(&x86_64, "ADD32rr"));
+        assert!(!has(&x86_64, "AAA") && !has(&x86_64, "PUSH32r"));
+        let add = x86_64.record("ADD32rr").expect("ADD32rr");
+        for field in [
+            "Opcode",
+            "OpMap",
+            "OpPrefix",
+            "Form",
+            "OpSize",
+            "AdSize",
+            "ImmT",
+            "hasREX_W",
+            "CD8_Scale",
+            "TSFlags",
+            "AsmString",
+            "InOperandList",
+            "OutOperandList",
+            "Predicates",
+        ] {
+            assert!(add.field(field).is_some(), "ADD32rr carries {field}");
+        }
+        assert!(has(&x86_64, "GR32") && has(&x86_64, "EAX") && has(&x86_64, "MRMDestReg"));
+        let armv7 = read("Armv7");
+        assert!(has(&armv7, "t2ADDri") && has(&armv7, "VADDfq") && has(&armv7, "SDIV"));
+        assert!(!has(&armv7, "MVE_VADDf32") && !has(&armv7, "LDA") && !has(&armv7, "VSELEQD"));
+        let inst = armv7
+            .record("t2ADDri")
+            .and_then(|record| record.field("Inst"));
+        assert!(matches!(inst, Some(TableValue::Bits(bits)) if bits.len() == 32));
+        let armv8 = read("Armv8");
+        assert!(has(&armv8, "ADDXri") && has(&armv8, "LDRXui"));
+        assert!(armv8.records.iter().any(|record| record.is_a("SysReg")));
+        assert!(armv8.records.iter().any(|record| record.is_a("InstAlias")));
+    }
+
+    #[test]
+    fn sha256_agrees_with_the_published_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        let million = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha256_hex(&million),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+        for length in 0..300usize {
+            let bytes: Vec<u8> = (0..length).map(|index| (index * 7 + 3) as u8).collect();
+            assert_eq!(sha256_hex(&bytes), crate::hash::sha256(&bytes).to_hex());
+        }
+    }
+
+    #[test]
+    fn a_damaged_table_is_refused_with_its_reason() {
+        let table = Table {
+            architecture: "Test".to_string(),
+            target: "Test".to_string(),
+            selection: "everything".to_string(),
+            records: vec![TableRecord {
+                name: "Example".to_string(),
+                classes: vec!["Instruction".to_string()],
+                fields: vec![
+                    TableField {
+                        name: "Inst".to_string(),
+                        field_type: "bits<4>".to_string(),
+                        value: TableValue::Bits(vec![
+                            TableValue::Bit(true),
+                            TableValue::VariableBit {
+                                variable: "Rd".to_string(),
+                                bit: 0,
+                            },
+                            TableValue::Bit(false),
+                            TableValue::Unset,
+                        ]),
+                    },
+                    TableField {
+                        name: "Size".to_string(),
+                        field_type: "int".to_string(),
+                        value: TableValue::Integer(-4),
+                    },
+                ],
+            }],
+        };
+        let bytes = write_table(&table);
+        assert_eq!(read_table(&bytes).expect("the table reads"), table);
+        let mut wrong = bytes.clone();
+        wrong[0] = b'X';
+        let refused = read_table(&wrong).expect_err("a wrong magic is refused");
+        assert_eq!(refused.code, "EI103");
+        for cut in 12..bytes.len() {
+            assert!(
+                read_table(&bytes[..cut]).is_err(),
+                "a table cut at {cut} is refused"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_canonical_form() {
+        let files = llvm_sources();
+        let folder = repository().join("Tests").join("tablegen");
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        let started = std::time::Instant::now();
+        let generation = generate_tables(&files, 4).expect("the tables are built");
+        println!("generated in {:?}", started.elapsed());
+        for (target, text) in &generation.canonical {
+            std::fs::write(folder.join(format!("canonical-{target}.txt")), text)
+                .expect("the canonical form is written");
+        }
+        for (file, bytes) in &generation.tables {
+            println!("{file}: {} bytes", bytes.len());
+            std::fs::write(folder.join(file), bytes).expect("a table is written");
+        }
+        std::fs::write(folder.join("Tables.manifest"), &generation.manifest)
+            .expect("the manifest is written");
+    }
+
     #[test]
     #[ignore]
     fn dump_target_records() {
