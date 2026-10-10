@@ -7,6 +7,7 @@ use crate::compilers::elf::{
 use crate::diag::{Diagnostic, Severity};
 use crate::FailureClass;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 pub const LINKER_IDENTITY: &str = "Linker: Omni Builder 1.0.0";
 
@@ -70,6 +71,8 @@ pub enum InputItem {
     Static(bool),
     PushState,
     PopState,
+    Script(String),
+    Defsym(String),
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +151,17 @@ pub struct Options {
     pub threads: Option<usize>,
     pub error_limit: Option<usize>,
     pub warnings: Vec<Diagnostic>,
+    pub sort_section: SortPolicy,
+    pub omagic: bool,
+    pub nmagic: bool,
+    pub no_standard_library: bool,
+    pub format_binary: bool,
+    pub big_endian_requested: bool,
+    pub little_endian_requested: bool,
+    pub output_format: Option<String>,
+    pub output_binary: bool,
+    pub operating_system_abi: Option<u8>,
+    pub output_format_machine: Option<String>,
 }
 
 impl Default for Options {
@@ -227,6 +241,17 @@ impl Default for Options {
             threads: None,
             error_limit: None,
             warnings: Vec::new(),
+            sort_section: SortPolicy::Default,
+            omagic: false,
+            nmagic: false,
+            no_standard_library: false,
+            format_binary: false,
+            big_endian_requested: false,
+            little_endian_requested: false,
+            output_format: None,
+            output_binary: false,
+            operating_system_abi: None,
+            output_format_machine: None,
         }
     }
 }
@@ -631,12 +656,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--defsym"])? {
-            let (name, expression) = value
-                .split_once('=')
-                .ok_or_else(|| invalid_value("--defsym", &value))?;
-            options
-                .defined_symbols
-                .push((name.to_string(), expression.to_string()));
+            options.inputs.push(InputItem::Defsym(value));
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--image-base"])? {
@@ -731,6 +751,25 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             let address = parse_number(&value).ok_or_else(|| invalid_value(&raw, &value))?;
             options.section_start.insert(section.to_string(), address);
             continue;
+        }
+        if let Some(value) = option_value(&mut cursor, argument, &["--script"])? {
+            options.inputs.push(InputItem::Script(value));
+            continue;
+        }
+        if argument == "-T" {
+            let value = cursor.next().ok_or_else(|| missing_value("-T"))?;
+            options.inputs.push(InputItem::Script(value));
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("-T") {
+            if !value.is_empty()
+                && !value.starts_with("text")
+                && !value.starts_with("data")
+                && !value.starts_with("bss")
+            {
+                options.inputs.push(InputItem::Script(value.to_string()));
+                continue;
+            }
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--target2"])? {
             if !matches!(value.as_str(), "rel" | "abs" | "got-rel") {
@@ -901,7 +940,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             }
         }
     }
-    let _ = nostdlib;
+    options.no_standard_library = nostdlib;
     options.kind = if relocatable {
         OutputKind::Relocatable
     } else if shared {
@@ -1484,6 +1523,7 @@ pub struct InputSection {
     pub next_in_group: Option<SectionIndex>,
     pub common_symbol: Option<SymbolIndex>,
     pub merged_members: Vec<SectionIndex>,
+    pub description: usize,
 }
 
 impl InputSection {
@@ -1520,6 +1560,7 @@ impl InputSection {
             is_exception_frame: false,
             common_symbol: None,
             merged_members: Vec::new(),
+            description: usize::MAX,
             next_in_group: None,
         }
     }
@@ -2113,6 +2154,7 @@ pub struct OutputSection {
     pub used_in_expression: bool,
     pub live: bool,
     pub relocation_for: Option<OutputIndex>,
+    pub script: OutputScript,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2147,6 +2189,7 @@ impl OutputSection {
             used_in_expression: false,
             live: true,
             relocation_for: None,
+            script: OutputScript::default(),
         }
     }
 }
@@ -2161,6 +2204,8 @@ pub struct Segment {
     pub memory_size_override: Option<u64>,
     pub includes_headers: bool,
     pub header_only: bool,
+    pub load_offset: u64,
+    pub physical_override: Option<u64>,
 }
 
 impl Segment {
@@ -2174,6 +2219,8 @@ impl Segment {
             memory_size_override: None,
             includes_headers: false,
             header_only: false,
+            load_offset: 0,
+            physical_override: None,
         }
     }
 }
@@ -2262,6 +2309,9 @@ pub struct Context<'s> {
     pub arm_features: ArmFeatures,
     pub thunk_state: ThunkState,
     pub synthetic_file_symbol: Option<SymbolIndex>,
+    pub script: LinkerScript,
+    pub changed_output: Option<OutputIndex>,
+    pub changed_symbol: Option<SymbolIndex>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -2374,6 +2424,9 @@ impl<'s> Context<'s> {
             arm_features: ArmFeatures::default(),
             thunk_state: ThunkState::default(),
             synthetic_file_symbol: None,
+            script: LinkerScript::default(),
+            changed_output: None,
+            changed_symbol: None,
         }
     }
 
@@ -2777,7 +2830,7 @@ pub fn emulation_target(emulation: &str) -> Option<(Architecture, Endian)> {
 }
 
 #[derive(Clone, Copy)]
-struct LoadState {
+pub struct LoadState {
     whole_archive: bool,
     as_needed: bool,
     is_static: bool,
@@ -2841,6 +2894,25 @@ impl<'s> Context<'s> {
                 InputItem::StartLibrary => state.in_library = true,
                 InputItem::EndLibrary => state.in_library = false,
                 InputItem::StartGroup | InputItem::EndGroup => group += 1,
+                InputItem::Script(path) => match self.search_script(&path) {
+                    Some(found) => {
+                        let bytes = (self.source)(&found).unwrap_or_default();
+                        let text = String::from_utf8_lossy(&bytes).to_string();
+                        let mut load = ScriptLoad {
+                            state,
+                            group,
+                            target_reference: &mut target_reference,
+                            in_group: false,
+                        };
+                        self.read_linker_script(&text, &found, &mut load);
+                        group = load.group;
+                    }
+                    None => self.error_always(
+                        problem("EI205", "An input file could not be found.")
+                            .with_context(format!("Script: {path}")),
+                    ),
+                },
+                InputItem::Defsym(text) => self.read_defsym(&text),
                 InputItem::PushState => stack.push(state),
                 InputItem::PopState => {
                     if let Some(previous) = stack.pop() {
@@ -2979,101 +3051,14 @@ impl<'s> Context<'s> {
         target_reference: &mut Option<String>,
     ) {
         let text = String::from_utf8_lossy(bytes).to_string();
-        if let Err(reason) = self.read_input_commands(&text, path, state, group, target_reference) {
-            self.script_error(display, &reason);
-        }
-    }
-
-    fn read_input_commands(
-        &mut self,
-        text: &str,
-        path: &str,
-        state: LoadState,
-        group: usize,
-        target_reference: &mut Option<String>,
-    ) -> Result<(), String> {
-        let mut lexer = ScriptLexer::new(text, false);
-        let parenthesized = |lexer: &mut ScriptLexer| -> Result<Vec<String>, String> {
-            lexer.expect("(")?;
-            let mut values = Vec::new();
-            while let Some(token) = lexer.till(")")? {
-                if token != "," {
-                    values.push(unquote(&token));
-                }
-            }
-            Ok(values)
+        let _ = display;
+        let mut load = ScriptLoad {
+            state,
+            group,
+            target_reference,
+            in_group: false,
         };
-        while let Some(command) = lexer.next_token()? {
-            match command.as_str() {
-                ";" => {}
-                "GROUP" | "INPUT" => {
-                    lexer.expect("(")?;
-                    while let Some(token) = lexer.till(")")? {
-                        match token.as_str() {
-                            "," => {}
-                            "AS_NEEDED" => {
-                                let mut inner = state;
-                                inner.as_needed = true;
-                                for name in parenthesized(&mut lexer)? {
-                                    self.add_script_file(
-                                        &name,
-                                        path,
-                                        inner,
-                                        group,
-                                        target_reference,
-                                    );
-                                }
-                            }
-                            _ => {
-                                let name = unquote(&token);
-                                self.add_script_file(&name, path, state, group, target_reference);
-                            }
-                        }
-                    }
-                }
-                "OUTPUT_FORMAT" | "OUTPUT_ARCH" | "TARGET" => {
-                    parenthesized(&mut lexer)?;
-                }
-                "SEARCH_DIR" => {
-                    if let Some(folder) = parenthesized(&mut lexer)?.first() {
-                        self.options.library_paths.push(folder.clone());
-                    }
-                }
-                "ENTRY" => {
-                    if let Some(name) = parenthesized(&mut lexer)?.first() {
-                        if self.options.entry.is_none() {
-                            self.options.entry = Some(name.clone());
-                        }
-                    }
-                }
-                "EXTERN" => {
-                    lexer.expect("(")?;
-                    while let Some(token) = lexer.till(")")? {
-                        let name = unquote(&token);
-                        let id = self.add_unused_undefined(&name);
-                        self.symbols[id].referenced = true;
-                        self.options.undefined.push(name);
-                    }
-                }
-                "VERSION" => {
-                    lexer.expect("{")?;
-                    let mut definitions = std::mem::take(&mut self.version_definitions);
-                    let result = read_version_command(&mut lexer, &mut definitions);
-                    self.version_definitions = definitions;
-                    result?;
-                    lexer.expect("}")?;
-                }
-                other => {
-                    self.error(
-                        not_supported("linker script command")
-                            .with_context(format!("Command: {other}"))
-                            .with_context(format!("File: {path}")),
-                    );
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
+        self.read_linker_script(&text, path, &mut load);
     }
 
     fn script_error(&mut self, display: &str, reason: &str) {
@@ -3082,66 +3067,6 @@ impl<'s> Context<'s> {
                 .with_context(format!("File: {display}"))
                 .with_context(format!("Reason: {reason}")),
         );
-    }
-
-    fn add_script_file(
-        &mut self,
-        name: &str,
-        script: &str,
-        state: LoadState,
-        group: usize,
-        target_reference: &mut Option<String>,
-    ) {
-        if let Some(library) = name.strip_prefix("-l") {
-            match self.find_library(library, state.is_static) {
-                Some((path, bytes)) => {
-                    self.add_file(&path, &path, bytes, state, group, true, target_reference)
-                }
-                None => self.error(
-                    problem("EI205", "An input file could not be found.")
-                        .with_context(format!("Library: -l{library}")),
-                ),
-            }
-            return;
-        }
-        let mut candidates: Vec<(String, bool)> = Vec::new();
-        if let Some(root) = self.options.sysroot.clone() {
-            if script.starts_with(&root) && name.starts_with('/') {
-                candidates.push((format!("{root}{name}"), false));
-            }
-        }
-        if name.starts_with('/') {
-            candidates.push((name.to_string(), false));
-        } else if let Some(rest) = name.strip_prefix('=') {
-            match &self.options.sysroot {
-                Some(root) => candidates.push((format!("{root}/{rest}"), false)),
-                None => candidates.push((rest.to_string(), false)),
-            }
-        } else {
-            if let Some((folder, _)) = script.rsplit_once('/') {
-                candidates.push((format!("{folder}/{name}"), false));
-            }
-            candidates.push((name.to_string(), false));
-            for folder in self.options.library_paths.clone() {
-                let folder = self.resolve_path(&folder);
-                candidates.push((format!("{folder}/{name}"), true));
-            }
-        }
-        for (candidate, from_library) in candidates {
-            if let Some(bytes) = (self.source)(&candidate) {
-                self.add_file(
-                    &candidate,
-                    &candidate,
-                    bytes,
-                    state,
-                    group,
-                    from_library,
-                    target_reference,
-                );
-                return;
-            }
-        }
-        self.error(file_missing(name));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4254,6 +4179,7 @@ impl<'s> Context<'s> {
                 is_exception_frame,
                 common_symbol: None,
                 merged_members: Vec::new(),
+                description: usize::MAX,
                 next_in_group: None,
             };
             map[position] = Some(self.sections.len());
@@ -5701,36 +5627,8 @@ impl<'s> Context<'s> {
     }
 
     pub fn create_output_sections(&mut self) {
-        let mut by_name: BTreeMap<String, Vec<OutputIndex>> = BTreeMap::new();
-        let order = self.input_order.clone();
-        for section in order {
-            if !self.sections[section].live || self.sections[section].output.is_some() {
-                continue;
-            }
-            let name = output_section_name(&self.sections[section].name);
-            let kind = self.sections[section].kind;
-            let flags = self.sections[section].flags;
-            let is_group = kind == section_type::GROUP || flags & section_flag::GROUP != 0;
-            let output = if is_group && self.is_relocatable() {
-                None
-            } else {
-                by_name
-                    .get(&name)
-                    .and_then(|candidates| candidates.first().copied())
-            };
-            let output = match output {
-                Some(found) => found,
-                None => {
-                    let index = self.outputs.len();
-                    self.outputs.push(OutputSection::new(&name));
-                    by_name.entry(name).or_default().push(index);
-                    self.order.push(index);
-                    index
-                }
-            };
-            self.sections[section].output = Some(output);
-            self.outputs[output].members.push(section);
-        }
+        self.process_section_commands();
+        self.add_orphan_sections();
     }
 
     pub fn finalize_input_sections(&mut self) {
@@ -5770,6 +5668,7 @@ impl<'s> Context<'s> {
                         );
                         merged.entry_size = entry_size;
                         merged.output = Some(output);
+                        merged.description = self.sections[member].description;
                         self.sections.push(merged);
                         merges.push(index);
                         kept.push(index);
@@ -5797,10 +5696,12 @@ impl<'s> Context<'s> {
         let entry_size = self.sections[section].entry_size;
         let architecture = self.target.architecture;
         let target = &mut self.outputs[output];
+        let type_is_set = target.script.type_is_set;
         if target.kind != kind {
-            if !target.has_input_sections {
+            if !target.has_input_sections && !type_is_set {
                 target.kind = kind;
-            } else if !can_merge_to_program_bits(target.kind, architecture)
+            } else if type_is_set
+                || !can_merge_to_program_bits(target.kind, architecture)
                 || !can_merge_to_program_bits(kind, architecture)
             {
                 if target.kind != section_type::NO_BITS {
@@ -5817,7 +5718,9 @@ impl<'s> Context<'s> {
                         .with_context(format!("Output: {output_name}")),
                     );
                 }
-                self.outputs[output].kind = section_type::PROGRAM_BITS;
+                if !type_is_set {
+                    self.outputs[output].kind = section_type::PROGRAM_BITS;
+                }
             } else {
                 target.kind = section_type::PROGRAM_BITS;
             }
@@ -5846,6 +5749,9 @@ impl<'s> Context<'s> {
         let and_flags = (target.flags & flags) & and_mask;
         let or_flags = (target.flags | flags) & !and_mask;
         target.flags = and_flags | or_flags;
+        if target.script.non_allocated {
+            target.flags &= !section_flag::ALLOCATE;
+        }
         target.alignment = target.alignment.max(alignment);
         if target.entry_size != entry_size {
             target.entry_size = 0;
@@ -6135,6 +6041,9 @@ impl<'s> Context<'s> {
         }
         for name in ["__ehdr_start", "__executable_start", "__dso_handle"] {
             self.add_optional_regular(name, SymbolPlace::Header, 0, visibility::HIDDEN);
+        }
+        if self.script.has_sections {
+            return;
         }
         for name in [
             "__bss_start",
@@ -7966,6 +7875,7 @@ impl<'s> Context<'s> {
                 .unwrap_or_else(|| "_fini".to_string()),
         );
         roots.extend(self.options.undefined.iter().cloned());
+        roots.extend(self.script.referenced_symbols.iter().cloned());
         for name in roots {
             if let Some(id) = self.find(&name) {
                 self.mark_symbol_live(id, &mut queue);
@@ -8032,7 +7942,7 @@ impl<'s> Context<'s> {
                         || name.starts_with(".dtors")
                 }
             };
-            if reserved {
+            if reserved || self.script_should_keep(section) {
                 self.enqueue_live(section, 0, &mut queue);
             } else if (!self.options.start_stop_garbage_collection || name.starts_with("__libc_"))
                 && is_c_identifier(&name)
@@ -9690,8 +9600,19 @@ impl<'s> Context<'s> {
             let joins = match load {
                 Some(segment) => {
                     let last = self.segments[segment].last;
+                    let first = self.segments[segment].first;
+                    let first_script = first.map(|first| &self.outputs[first].script);
+                    let section_script = &self.outputs[output].script;
+                    let same_load_region = section_script.load_address.is_none()
+                        && first_script.map(|script| script.load_region)
+                            == Some(section_script.load_region);
+                    let same_memory_region = first_script.map(|script| script.memory_region)
+                        == Some(section_script.memory_region);
                     !relocation_ends.contains(&output)
-                        && (self.outputs[output].kind == section_type::NO_BITS
+                        && same_memory_region
+                        && (same_load_region || last == Some(programs))
+                        && (self.script.has_sections
+                            || self.outputs[output].kind == section_type::NO_BITS
                             || last.is_none_or(|last| {
                                 last == programs
                                     || last == header
@@ -10068,6 +9989,9 @@ impl<'s> Context<'s> {
             dot = align_to(dot, self.outputs[output].alignment);
             if self.outputs[output].address != dot {
                 changed = true;
+                if self.changed_output.is_none() {
+                    self.changed_output = Some(output);
+                }
             }
             self.outputs[output].address = dot;
             let start = dot;
@@ -10197,7 +10121,13 @@ impl<'s> Context<'s> {
                 header.memory_size = last.address + last.size - first.address;
                 header.offset = first.offset;
                 header.virtual_address = first.address;
-                header.physical_address = first.address;
+                header.physical_address = match segment.first {
+                    Some(output) => self.load_address_of(output),
+                    None => first.address,
+                };
+            }
+            if let Some(address) = segment.physical_override {
+                header.physical_address = address;
             }
             if let Some(size) = segment.memory_size_override {
                 header.memory_size = size;
@@ -13095,12 +13025,17 @@ impl<'s> Context<'s> {
             let start = self.outputs[output].offset as usize;
             let size = self.outputs[output].size as usize;
             let executable = self.outputs[output].flags & section_flag::EXECUTE != 0;
-            let filler = if executable { self.target.trap } else { [0; 4] };
+            let filler = match self.outputs[output].script.filler {
+                Some(filler) => filler,
+                None if executable => self.target.trap,
+                None => [0; 4],
+            };
+            let fill = filler != [0; 4];
             let members = self.outputs[output].members.clone();
             let mut cursor = 0usize;
             for member in members {
                 let begin = self.sections[member].offset_in_output as usize;
-                if executable && filler != [0; 4] {
+                if fill {
                     for position in cursor..begin.min(size) {
                         out[start + position] = filler[(position - cursor) % 4];
                     }
@@ -13112,9 +13047,31 @@ impl<'s> Context<'s> {
                 }
                 cursor = begin + self.sections[member].size as usize;
             }
-            if executable && filler != [0; 4] {
+            if fill {
                 for position in cursor..size {
                     out[start + position] = filler[(position - cursor) % 4];
+                }
+            }
+            for command in self.outputs[output].script.commands.clone() {
+                if let OutputCommand::Data {
+                    expression,
+                    size: width,
+                    offset,
+                    ..
+                } = command
+                {
+                    let value = self.evaluate_value(&expression);
+                    let mut bytes = Vec::new();
+                    match width {
+                        1 => bytes.push(value as u8),
+                        2 => encoding.put_u16(&mut bytes, value as u16),
+                        4 => encoding.put_u32(&mut bytes, value as u32),
+                        _ => encoding.put_u64(&mut bytes, value),
+                    }
+                    let at = start + offset as usize;
+                    if at + bytes.len() <= out.len() {
+                        out[at..at + bytes.len()].copy_from_slice(&bytes);
+                    }
                 }
             }
         }
@@ -13282,14 +13239,16 @@ impl<'s> Context<'s> {
         self.has_dynamic_symbols = !self.shared_files.is_empty() || self.is_pic();
         self.options.export_dynamic |= self.is_shared();
         self.options.export_dynamic &= self.has_dynamic_symbols;
-        self.entry_name = match &self.options.entry {
-            Some(entry) => entry.clone(),
-            None if self.is_relocatable() => String::new(),
-            None => "_start".to_string(),
+        self.entry_name = match (&self.options.entry, &self.script.entry) {
+            (Some(entry), _) => entry.clone(),
+            (None, Some(entry)) => entry.clone(),
+            (None, None) if self.is_relocatable() => String::new(),
+            (None, None) => "_start".to_string(),
         };
         if let Some(id) = self.find(&self.entry_name.clone()) {
             self.handle_undefined(id);
         }
+        self.add_script_referenced_symbols();
         for name in self.options.undefined.clone() {
             if let Some(id) = self.find(&name) {
                 if self.symbols[id].is_defined() {
@@ -13306,6 +13265,7 @@ impl<'s> Context<'s> {
         if self.failed() {
             return None;
         }
+        self.declare_script_symbols();
         if self.is_relocatable() {
             self.error(not_supported("relocatable output"));
             return None;
@@ -13386,6 +13346,7 @@ impl<'s> Context<'s> {
         }
         self.combine_exception_frames();
         self.demote_symbols_and_compute_preemptible();
+        self.process_script_symbol_assignments();
         let undefined = self.scan_relocations();
         self.report_undefined(undefined);
         if self.failed() {
@@ -13394,7 +13355,24 @@ impl<'s> Context<'s> {
         self.post_scan_relocations();
         self.build_symbol_tables();
         self.remove_unused_synthetic_sections();
-        self.sort_output_sections();
+        if self.script_layout() {
+            self.sort_script_sections();
+        } else {
+            self.sort_output_sections();
+            let mut commands: Vec<ScriptCommand> = self
+                .order
+                .iter()
+                .map(|output| ScriptCommand::Output(*output))
+                .collect();
+            commands.extend(
+                self.script
+                    .commands
+                    .iter()
+                    .filter(|command| matches!(command, ScriptCommand::Assignment(_)))
+                    .copied(),
+            );
+            self.script.commands = commands;
+        }
         self.assign_section_indices();
         for output in self.order.clone() {
             if let Some(address) = self.options.section_start.get(&self.outputs[output].name) {
@@ -13411,13 +13389,20 @@ impl<'s> Context<'s> {
         programs.alignment = self.word_size();
         self.program_header_output = self.outputs.len();
         self.outputs.push(programs);
-        self.create_segments();
+        if self.script.program_header_commands.is_empty() {
+            self.create_segments();
+        } else {
+            self.create_script_segments();
+        }
         self.set_reserved_symbol_sections();
         self.finalize_dynamic_tables();
         self.finalize_synthetic_sizes();
-        self.fix_section_alignments();
-        self.assign_addresses();
+        if !self.script.has_sections {
+            self.fix_section_alignments();
+        }
+        self.layout_addresses();
         let mut pass = 0u32;
+        let mut assign_passes = 0u32;
         loop {
             let mut changed = if self.needs_thunks() {
                 self.create_thunks(pass)
@@ -13426,22 +13411,59 @@ impl<'s> Context<'s> {
             };
             pass += 1;
             if changed && pass >= 30 {
-                self.error(problem("EI237", "Address assignment did not settle."));
+                self.error(
+                    problem("EI237", "Address assignment did not settle.")
+                        .with_context("Reason: address assignment did not converge".to_string()),
+                );
                 break;
             }
             self.finalize_synthetic_sizes();
             changed |= self.update_frame_header();
-            changed |= self.assign_addresses();
+            self.changed_output = None;
+            self.changed_symbol = None;
+            let moved = self.layout_addresses();
             if !changed {
+                if !moved {
+                    break;
+                }
+                assign_passes += 1;
+                if assign_passes == 5 {
+                    if let Some(output) = self.changed_output {
+                        let address = self.outputs[output].address;
+                        let name = self.outputs[output].name.clone();
+                        self.error(
+                            problem("EI237", "Address assignment did not settle.").with_context(format!(
+                                "Reason: address (0x{address:x}) of section '{name}' does not converge"
+                            )),
+                        );
+                    }
+                    if let Some(id) = self.changed_symbol {
+                        let name = self.symbols[id].name.clone();
+                        self.error(
+                            problem("EI237", "Address assignment did not settle.").with_context(
+                                format!("Reason: assignment to symbol {name} does not converge"),
+                            ),
+                        );
+                    }
+                    break;
+                }
+            }
+            if self.failed() {
                 break;
             }
         }
         self.finalize_symbol_table();
         self.finalize_synthetic_sizes();
-        self.assign_addresses();
+        self.layout_addresses();
+        if self.script_active() {
+            self.check_final_script_conditions();
+        }
         self.finalize_output_headers();
         if self.failed() {
             return None;
+        }
+        if self.script.has_sections {
+            self.allocate_script_headers();
         }
         self.remove_empty_loads();
         self.assign_file_offsets();
@@ -20271,4 +20293,4600 @@ pub fn tail_merged_layout(strings: &[Vec<u8>], alignment: u64) -> (BTreeMap<Vec<
         previous = string.clone();
     }
     (offsets, size)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LexerState {
+    Script,
+    Expression,
+    VersionNode,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptBuffer {
+    pub text: String,
+    pub name: String,
+    pub at: usize,
+    pub line: usize,
+    pub under_sysroot: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptFailure {
+    pub location: String,
+    pub reason: String,
+    pub source_line: Option<String>,
+    pub column: usize,
+}
+
+pub struct LinkerScriptLexer {
+    pub buffers: Vec<ScriptBuffer>,
+    pub state: LexerState,
+    pub failure: Option<ScriptFailure>,
+    pub active_names: BTreeSet<String>,
+    previous_start: usize,
+    previous_length: usize,
+    previous_line: usize,
+    pending: Option<(String, LexerState, usize, usize)>,
+    end_of_file: bool,
+}
+
+const SCRIPT_CHARACTERS: &str =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.$/\\~=+[]*?-!^:";
+const EXPRESSION_CHARACTERS: &str =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.$";
+
+impl LinkerScriptLexer {
+    pub fn new(text: &str, name: &str, under_sysroot: bool) -> LinkerScriptLexer {
+        let mut active_names = BTreeSet::new();
+        active_names.insert(name.to_string());
+        LinkerScriptLexer {
+            buffers: vec![ScriptBuffer {
+                text: text.to_string(),
+                name: name.to_string(),
+                at: 0,
+                line: 1,
+                under_sysroot,
+            }],
+            state: LexerState::Script,
+            failure: None,
+            active_names,
+            previous_start: 0,
+            previous_length: 0,
+            previous_line: 1,
+            pending: None,
+            end_of_file: false,
+        }
+    }
+
+    fn buffer(&self) -> &ScriptBuffer {
+        self.buffers.last().expect("a script buffer")
+    }
+
+    fn buffer_mut(&mut self) -> &mut ScriptBuffer {
+        self.buffers.last_mut().expect("a script buffer")
+    }
+
+    pub fn file_name(&self) -> String {
+        self.buffer().name.clone()
+    }
+
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.buffer().name, self.previous_line)
+    }
+
+    fn current_line_text(&self) -> (String, usize) {
+        let text = &self.buffer().text;
+        let start = self.previous_start.min(text.len());
+        let line_start = text[..start].rfind('\n').map_or(0, |position| position + 1);
+        let rest = &text[line_start..];
+        let line_end = rest.find(['\r', '\n']).unwrap_or(rest.len());
+        (rest[..line_end].to_string(), start - line_start)
+    }
+
+    pub fn set_error(&mut self, message: &str) {
+        if self.failure.is_some() {
+            return;
+        }
+        let source = if self.previous_length > 0 {
+            let (line, column) = self.current_line_text();
+            Some((line, column))
+        } else {
+            None
+        };
+        self.failure = Some(ScriptFailure {
+            location: self.location(),
+            reason: message.to_string(),
+            column: source.as_ref().map_or(0, |(_, column)| *column),
+            source_line: source.map(|(line, _)| line),
+        });
+    }
+
+    pub fn failed(&self) -> bool {
+        self.failure.is_some()
+    }
+
+    fn skip_space(&mut self) {
+        loop {
+            let buffer = self.buffer();
+            let rest = &buffer.text[buffer.at..];
+            if let Some(body) = rest.strip_prefix("/*") {
+                match body.find("*/") {
+                    Some(end) => {
+                        let lines = rest[..end + 2].matches('\n').count();
+                        let buffer = self.buffer_mut();
+                        buffer.line += lines;
+                        buffer.at += end + 4;
+                        continue;
+                    }
+                    None => {
+                        self.set_error("unclosed comment in a linker script");
+                        let buffer = self.buffer_mut();
+                        buffer.at = buffer.text.len();
+                        return;
+                    }
+                }
+            }
+            if let Some(body) = rest.strip_prefix('#') {
+                match body.find('\n') {
+                    Some(end) => {
+                        let buffer = self.buffer_mut();
+                        buffer.line += 1;
+                        buffer.at += end + 2;
+                    }
+                    None => {
+                        let buffer = self.buffer_mut();
+                        buffer.at = buffer.text.len();
+                    }
+                }
+                continue;
+            }
+            let trimmed = rest.trim_start();
+            let skipped = rest.len() - trimmed.len();
+            if skipped == 0 {
+                return;
+            }
+            let lines = rest[..skipped].matches('\n').count();
+            let buffer = self.buffer_mut();
+            buffer.line += lines;
+            buffer.at += skipped;
+        }
+    }
+
+    fn lex(&mut self) -> Option<(String, usize, usize)> {
+        self.skip_space();
+        let state = self.state;
+        let buffer = self.buffer();
+        let start = buffer.at;
+        let rest = &buffer.text[start..];
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(body) = rest.strip_prefix('"') {
+            return match body.find('"') {
+                Some(end) => Some((rest[..end + 2].to_string(), start, start + end + 2)),
+                None => {
+                    let line = buffer.text[..start].matches('\n').count() + 1;
+                    let name = buffer.name.clone();
+                    if self.failure.is_none() {
+                        self.failure = Some(ScriptFailure {
+                            location: format!("{name}:{line}"),
+                            reason: "unclosed quote".to_string(),
+                            source_line: None,
+                            column: 0,
+                        });
+                    }
+                    None
+                }
+            };
+        }
+        let bytes = rest.as_bytes();
+        if state != LexerState::VersionNode {
+            if rest.starts_with("<<=") || rest.starts_with(">>=") {
+                return Some((rest[..3].to_string(), start, start + 3));
+            }
+            if bytes.len() > 1 && bytes[1] == b'=' && b"+-*/!&^|".contains(&bytes[0]) {
+                return Some((rest[..2].to_string(), start, start + 2));
+            }
+        }
+        let mut length = match state {
+            LexerState::Script => rest
+                .find(|character: char| !SCRIPT_CHARACTERS.contains(character))
+                .unwrap_or(rest.len()),
+            LexerState::Expression => {
+                let mut length = rest
+                    .find(|character: char| !EXPRESSION_CHARACTERS.contains(character))
+                    .unwrap_or(rest.len());
+                if length == 0 && bytes.len() >= 2 {
+                    let pair = &rest[..2];
+                    if (bytes[0] == bytes[1] && b"<>&|".contains(&bytes[0]))
+                        || ["==", "!=", "<=", ">=", "<<", ">>"].contains(&pair)
+                    {
+                        length = 2;
+                    }
+                }
+                length
+            }
+            LexerState::VersionNode => {
+                let mut position = 0;
+                while position < bytes.len() {
+                    if bytes[position] == b':' {
+                        if position + 1 < bytes.len() && bytes[position + 1] == b':' {
+                            position += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    if SCRIPT_CHARACTERS.contains(bytes[position] as char) {
+                        position += 1;
+                        continue;
+                    }
+                    break;
+                }
+                position
+            }
+        };
+        if length == 0 {
+            length = rest.chars().next().map_or(1, char::len_utf8);
+        }
+        Some((rest[..length].to_string(), start, start + length))
+    }
+
+    pub fn peek(&mut self) -> String {
+        if let Some((token, state, _, _)) = &self.pending {
+            if *state == self.state {
+                return token.clone();
+            }
+            self.pending = None;
+        }
+        if self.failure.is_some() {
+            return String::new();
+        }
+        match self.lex() {
+            Some((token, start, end)) => {
+                self.pending = Some((token.clone(), self.state, start, end));
+                token
+            }
+            None => String::new(),
+        }
+    }
+
+    pub fn next_token(&mut self) -> String {
+        let token = self.peek();
+        match self.pending.take() {
+            Some((_, _, start, end)) => {
+                self.previous_start = start;
+                self.previous_length = end - start;
+                self.previous_line = self.buffer().line;
+                self.buffer_mut().at = end;
+            }
+            None => {
+                self.end_of_file = true;
+                self.previous_length = 0;
+            }
+        }
+        token
+    }
+
+    pub fn at_end(&mut self) -> bool {
+        if self.failure.is_some() || self.end_of_file {
+            return true;
+        }
+        if self.pending.is_some() {
+            return false;
+        }
+        self.skip_space();
+        let buffer = self.buffer();
+        buffer.at >= buffer.text.len()
+    }
+
+    pub fn consume(&mut self, expected: &str) -> bool {
+        if self.peek() != expected {
+            return false;
+        }
+        self.next_token();
+        true
+    }
+
+    pub fn skip(&mut self) {
+        self.next_token();
+    }
+
+    pub fn expect(&mut self, expected: &str) {
+        if self.failure.is_some() {
+            return;
+        }
+        let token = self.next_token();
+        if token != expected {
+            if self.end_of_file || token.is_empty() {
+                self.set_error("unexpected EOF");
+            } else {
+                self.set_error(&format!("{expected} expected, but got {token}"));
+            }
+        }
+    }
+
+    pub fn till(&mut self, end: &str) -> Option<String> {
+        let token = self.next_token();
+        if token == end {
+            return None;
+        }
+        if !token.is_empty() && self.failure.is_none() {
+            return Some(token);
+        }
+        self.previous_length = 0;
+        self.set_error("unexpected EOF");
+        None
+    }
+
+    pub fn push_buffer(&mut self, text: &str, name: &str, under_sysroot: bool) {
+        self.pending = None;
+        self.buffers.push(ScriptBuffer {
+            text: text.to_string(),
+            name: name.to_string(),
+            at: 0,
+            line: 1,
+            under_sysroot,
+        });
+        self.previous_length = 0;
+        self.previous_line = 1;
+    }
+
+    pub fn pop_buffer(&mut self) {
+        self.pending = None;
+        if self.buffers.len() > 1 {
+            self.buffers.pop();
+        }
+        self.end_of_file = false;
+    }
+
+    pub fn under_sysroot(&self) -> bool {
+        self.buffer().under_sysroot
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueBase {
+    Input(SectionIndex),
+    Output(OutputIndex),
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpressionValue {
+    pub base: Option<ValueBase>,
+    pub value: u64,
+    pub alignment: u64,
+    pub kind: u8,
+    pub force_absolute: bool,
+    pub location: String,
+}
+
+impl ExpressionValue {
+    pub fn absolute(value: u64) -> ExpressionValue {
+        ExpressionValue {
+            base: None,
+            value,
+            alignment: 1,
+            kind: symbol_type::NO_TYPE,
+            force_absolute: false,
+            location: String::new(),
+        }
+    }
+
+    pub fn relative(base: ValueBase, value: u64, location: &str) -> ExpressionValue {
+        ExpressionValue {
+            base: Some(base),
+            value,
+            alignment: 1,
+            kind: symbol_type::NO_TYPE,
+            force_absolute: false,
+            location: location.to_string(),
+        }
+    }
+
+    pub fn is_absolute(&self) -> bool {
+        self.force_absolute || self.base.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortPolicy {
+    Default,
+    Name,
+    Alignment,
+    Priority,
+    None,
+    Reverse,
+}
+
+#[derive(Clone, Debug)]
+pub enum ScriptExpression {
+    Number(u64),
+    Symbol {
+        name: String,
+        location: String,
+    },
+    Negate(Rc<ScriptExpression>),
+    Complement(Rc<ScriptExpression>),
+    Not(Rc<ScriptExpression>),
+    Binary {
+        operator: String,
+        left: Rc<ScriptExpression>,
+        right: Rc<ScriptExpression>,
+        location: String,
+    },
+    Ternary {
+        condition: Rc<ScriptExpression>,
+        then: Rc<ScriptExpression>,
+        otherwise: Rc<ScriptExpression>,
+    },
+    Absolute(Rc<ScriptExpression>),
+    Address {
+        output: OutputIndex,
+        location: String,
+    },
+    AlignDot {
+        alignment: Rc<ScriptExpression>,
+        location: String,
+    },
+    AlignValue {
+        value: Rc<ScriptExpression>,
+        alignment: Rc<ScriptExpression>,
+        location: String,
+    },
+    AlignOf {
+        output: OutputIndex,
+        location: String,
+    },
+    CheckedAlignment {
+        value: Rc<ScriptExpression>,
+        location: String,
+    },
+    Assert {
+        condition: Rc<ScriptExpression>,
+        message: String,
+    },
+    CommonPageSize,
+    MaximumPageSize,
+    DataSegmentAlign(Rc<ScriptExpression>),
+    DataSegmentEnd,
+    DataSegmentRelocationReadOnlyEnd,
+    Defined {
+        name: String,
+        order: u32,
+    },
+    RegionLength(usize),
+    RegionOrigin(usize),
+    LoadAddress {
+        output: OutputIndex,
+        location: String,
+    },
+    Log2Ceil(Rc<ScriptExpression>),
+    Maximum(Rc<ScriptExpression>, Rc<ScriptExpression>),
+    Minimum(Rc<ScriptExpression>, Rc<ScriptExpression>),
+    SizeOf(OutputIndex),
+    SizeOfHeaders,
+    CompoundAssign {
+        name: String,
+        operator: char,
+        value: Rc<ScriptExpression>,
+        location: String,
+    },
+    OverlayEnd {
+        members: Vec<OutputIndex>,
+        address: Rc<ScriptExpression>,
+    },
+    OverlayFollow(OutputIndex),
+    OutputStart(OutputIndex),
+    Fixed(u64),
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptAssignment {
+    pub name: String,
+    pub symbol: Option<SymbolIndex>,
+    pub expression: Rc<ScriptExpression>,
+    pub provide: bool,
+    pub hidden: bool,
+    pub data_segment_relocation_read_only_end: bool,
+    pub order: u32,
+    pub location: String,
+    pub command_text: String,
+    pub address: u64,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SectionPatternRule {
+    pub excluded_files: Vec<String>,
+    pub sections: Vec<String>,
+    pub sort_outer: SortPolicy,
+    pub sort_inner: SortPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileMatch {
+    Trivial,
+    WholeArchive,
+    ArchivesExcluded,
+}
+
+#[derive(Clone, Debug)]
+pub struct InputDescription {
+    pub file_pattern: String,
+    pub file_match: FileMatch,
+    pub patterns: Vec<SectionPatternRule>,
+    pub with_flags: u64,
+    pub without_flags: u64,
+    pub class_reference: String,
+    pub bases: Vec<SectionIndex>,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutputCommand {
+    Input(usize),
+    Assignment(usize),
+    Data {
+        expression: Rc<ScriptExpression>,
+        size: u64,
+        offset: u64,
+        text: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputConstraint {
+    None,
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutputScript {
+    pub commands: Vec<OutputCommand>,
+    pub location: String,
+    pub address: Option<Rc<ScriptExpression>>,
+    pub load_address: Option<Rc<ScriptExpression>>,
+    pub alignment: Option<Rc<ScriptExpression>>,
+    pub sub_alignment: Option<Rc<ScriptExpression>>,
+    pub constraint: OutputConstraint,
+    pub memory_region_name: String,
+    pub load_region_name: String,
+    pub memory_region: Option<usize>,
+    pub load_region: Option<usize>,
+    pub program_headers: Vec<String>,
+    pub filler: Option<[u8; 4]>,
+    pub type_is_set: bool,
+    pub non_allocated: bool,
+    pub in_overlay: bool,
+    pub first_in_overlay: bool,
+    pub expressions_use_symbols: bool,
+    pub section_index: u32,
+    pub relocation_read_only: bool,
+    pub created: bool,
+}
+
+impl Default for OutputScript {
+    fn default() -> OutputScript {
+        OutputScript {
+            commands: Vec::new(),
+            location: String::new(),
+            address: None,
+            load_address: None,
+            alignment: None,
+            sub_alignment: None,
+            constraint: OutputConstraint::None,
+            memory_region_name: String::new(),
+            load_region_name: String::new(),
+            memory_region: None,
+            load_region: None,
+            program_headers: Vec::new(),
+            filler: None,
+            type_is_set: false,
+            non_allocated: false,
+            in_overlay: false,
+            first_in_overlay: false,
+            expressions_use_symbols: false,
+            section_index: u32::MAX,
+            relocation_read_only: false,
+            created: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptCommand {
+    Assignment(usize),
+    Output(OutputIndex),
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryRegion {
+    pub name: String,
+    pub origin: Rc<ScriptExpression>,
+    pub length: Rc<ScriptExpression>,
+    pub flags: u64,
+    pub inverted_flags: u64,
+    pub negated_flags: u64,
+    pub negated_inverted_flags: u64,
+    pub position: u64,
+}
+
+impl MemoryRegion {
+    pub fn compatible_with(&self, flags: u64) -> bool {
+        if flags & self.negated_flags != 0 || !flags & self.negated_inverted_flags != 0 {
+            return false;
+        }
+        flags & self.flags != 0 || !flags & self.inverted_flags != 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProgramHeaderCommand {
+    pub name: String,
+    pub kind: u32,
+    pub file_header: bool,
+    pub program_headers: bool,
+    pub flags: Option<u32>,
+    pub load_address: Option<Rc<ScriptExpression>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InsertCommand {
+    pub names: Vec<String>,
+    pub after: bool,
+    pub place: String,
+}
+
+#[derive(Default)]
+pub struct LinkerScript {
+    pub commands: Vec<ScriptCommand>,
+    pub assignments: Vec<ScriptAssignment>,
+    pub descriptions: Vec<InputDescription>,
+    pub program_header_commands: Vec<ProgramHeaderCommand>,
+    pub region_names: Vec<(String, usize)>,
+    pub regions: Vec<MemoryRegion>,
+    pub inserts: Vec<InsertCommand>,
+    pub overwrite_sections: Vec<OutputIndex>,
+    pub no_cross_references: Vec<(Vec<String>, bool)>,
+    pub referenced_symbols: Vec<String>,
+    pub provide_map: Vec<(String, Vec<String>)>,
+    pub kept_descriptions: Vec<usize>,
+    pub has_sections: bool,
+    pub seen_data_align: bool,
+    pub seen_relocation_read_only_end: bool,
+    pub error_on_missing_section: bool,
+    pub recorded_errors: Vec<String>,
+    pub output_names: BTreeMap<String, OutputIndex>,
+    pub dot: u64,
+    pub symbol_order_counter: u32,
+    pub symbol_order: BTreeMap<SymbolIndex, u32>,
+    pub unused_provide_symbols: BTreeSet<SymbolIndex>,
+    pub orphan_sections: Vec<SectionIndex>,
+    pub active_provide: Option<String>,
+    pub aether: Option<OutputIndex>,
+    pub state_output: Option<OutputIndex>,
+    pub state_memory_region: Option<usize>,
+    pub state_load_region: Option<usize>,
+    pub state_load_offset: u64,
+    pub state_thread_bss_address: u64,
+    pub state_overlay_size: u64,
+    pub entry: Option<String>,
+}
+
+impl LinkerScript {
+    pub fn region(&self, name: &str) -> Option<usize> {
+        self.region_names
+            .iter()
+            .find(|(held, _)| held == name)
+            .map(|(_, index)| *index)
+    }
+}
+
+pub struct ScriptLoad<'a> {
+    pub state: LoadState,
+    pub group: usize,
+    pub target_reference: &'a mut Option<String>,
+    pub in_group: bool,
+}
+
+fn parse_script_integer(token: &str) -> Option<u64> {
+    let lower = token.to_ascii_lowercase();
+    if let Some(hexadecimal) = lower.strip_prefix("0x") {
+        return u64::from_str_radix(hexadecimal, 16).ok();
+    }
+    if let Some(hexadecimal) = lower.strip_suffix('h') {
+        return u64::from_str_radix(hexadecimal, 16).ok();
+    }
+    if let Some(decimal) = lower.strip_suffix('k') {
+        return decimal
+            .parse::<u64>()
+            .ok()
+            .and_then(|value| value.checked_mul(1024));
+    }
+    if let Some(decimal) = lower.strip_suffix('m') {
+        return decimal
+            .parse::<u64>()
+            .ok()
+            .and_then(|value| value.checked_mul(1024 * 1024));
+    }
+    if !lower.bytes().all(|byte| byte.is_ascii_digit()) || lower.is_empty() {
+        return None;
+    }
+    lower.parse::<u64>().ok()
+}
+
+fn script_precedence(operator: &str) -> i32 {
+    match operator {
+        "*" | "/" | "%" => 11,
+        "+" | "-" => 10,
+        "<<" | ">>" => 9,
+        "<" | "<=" | ">" | ">=" => 8,
+        "==" | "!=" => 7,
+        "&" => 6,
+        "^" => 5,
+        "|" => 4,
+        "&&" => 3,
+        "||" => 2,
+        "?" => 1,
+        _ => -1,
+    }
+}
+
+fn is_valid_script_symbol(name: &str) -> bool {
+    let valid = |character: char| character.is_ascii_alphanumeric() || "$._".contains(character);
+    !name.is_empty()
+        && !name.starts_with(|character: char| character.is_ascii_digit())
+        && name.chars().all(valid)
+}
+
+fn squeeze_spaces(text: &str) -> String {
+    let mut out = String::new();
+    let mut previous = '\0';
+    for character in text.chars() {
+        let character = if character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if character == ' ' && previous == ' ' {
+            continue;
+        }
+        out.push(character);
+        previous = character;
+    }
+    out
+}
+
+fn section_flag_by_name(token: &str) -> Option<u64> {
+    if let Some(value) = parse_script_integer(token) {
+        return Some(value);
+    }
+    Some(match token {
+        "SHF_WRITE" => section_flag::WRITE,
+        "SHF_ALLOC" => section_flag::ALLOCATE,
+        "SHF_EXECINSTR" => section_flag::EXECUTE,
+        "SHF_MERGE" => section_flag::MERGE,
+        "SHF_STRINGS" => section_flag::STRINGS,
+        "SHF_INFO_LINK" => 0x40,
+        "SHF_LINK_ORDER" => section_flag::LINK_ORDER,
+        "SHF_OS_NONCONFORMING" => 0x100,
+        "SHF_GROUP" => section_flag::GROUP,
+        "SHF_TLS" => section_flag::THREAD_LOCAL,
+        "SHF_COMPRESSED" => 0x800,
+        "SHF_EXCLUDE" => 0x8000_0000,
+        "SHF_ARM_PURECODE" => section_flag::ARM_PURE_CODE,
+        "SHF_AARCH64_PURECODE" => section_flag::AARCH64_PURE_CODE,
+        _ => return None,
+    })
+}
+
+fn program_header_type_by_name(token: &str) -> Option<u32> {
+    if let Some(value) = parse_script_integer(token) {
+        return Some(value as u32);
+    }
+    Some(match token {
+        "PT_NULL" => 0,
+        "PT_LOAD" => segment_type::LOAD,
+        "PT_DYNAMIC" => segment_type::DYNAMIC,
+        "PT_INTERP" => segment_type::INTERPRETER,
+        "PT_NOTE" => segment_type::NOTE,
+        "PT_SHLIB" => 5,
+        "PT_PHDR" => segment_type::PROGRAM_HEADERS,
+        "PT_TLS" => segment_type::THREAD_LOCAL,
+        "PT_GNU_EH_FRAME" => segment_type::GNU_EXCEPTION_FRAME,
+        "PT_GNU_STACK" => segment_type::GNU_STACK,
+        "PT_GNU_RELRO" => segment_type::GNU_RELRO,
+        "PT_OPENBSD_MUTABLE" => 0x65a3_dbe5,
+        "PT_OPENBSD_RANDOMIZE" => 0x65a3_dbe6,
+        "PT_OPENBSD_SYSCALLS" => 0x65a3_dbe9,
+        "PT_OPENBSD_WXNEEDED" => 0x65a3_dbe7,
+        "PT_OPENBSD_BOOTDATA" => 0x65a4_1be6,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IncludeKind {
+    Statements,
+    Sections,
+    OutputSection(OutputIndex),
+    Memory,
+}
+
+impl<'s> Context<'s> {
+    pub fn script_failure(&mut self, failure: ScriptFailure) {
+        let mut diagnostic = problem("EI239", "The linker script could not be read.")
+            .with_context(format!("Location: {}", failure.location))
+            .with_context(format!("Reason: {}", failure.reason));
+        if let Some(line) = failure.source_line {
+            diagnostic = diagnostic
+                .with_context(format!("Line: {line}"))
+                .with_context(format!("Column: {}", failure.column));
+        }
+        self.error_always(diagnostic);
+    }
+
+    fn ensure_aether(&mut self) -> OutputIndex {
+        if let Some(aether) = self.script.aether {
+            return aether;
+        }
+        let mut aether = OutputSection::new("");
+        aether.flags = section_flag::ALLOCATE;
+        aether.index = 1;
+        aether.live = false;
+        let index = self.outputs.len();
+        self.outputs.push(aether);
+        self.script.aether = Some(index);
+        index
+    }
+
+    pub fn create_script_output(&mut self, name: &str, location: &str) -> OutputIndex {
+        let existing = self.script.output_names.get(name).copied();
+        let index = match existing {
+            Some(found) if self.outputs[found].script.location.is_empty() => found,
+            _ => {
+                let index = self.outputs.len();
+                self.outputs.push(OutputSection::new(name));
+                if existing.is_none() {
+                    self.script.output_names.insert(name.to_string(), index);
+                }
+                index
+            }
+        };
+        self.outputs[index].script.location = location.to_string();
+        self.outputs[index].script.created = true;
+        index
+    }
+
+    pub fn script_output_named(&mut self, name: &str) -> OutputIndex {
+        if let Some(found) = self.script.output_names.get(name) {
+            return *found;
+        }
+        let index = self.outputs.len();
+        self.outputs.push(OutputSection::new(name));
+        self.script.output_names.insert(name.to_string(), index);
+        index
+    }
+
+    pub fn read_linker_script(&mut self, text: &str, name: &str, load: &mut ScriptLoad) {
+        let under_sysroot = self
+            .options
+            .sysroot
+            .as_ref()
+            .is_some_and(|root| !root.is_empty() && name.starts_with(root.as_str()));
+        let mut lexer = LinkerScriptLexer::new(text, name, under_sysroot);
+        self.read_script_statements(&mut lexer, load, IncludeKind::Statements, &mut Vec::new());
+        if let Some(failure) = lexer.failure.take() {
+            self.script_failure(failure);
+        }
+    }
+
+    fn read_script_statements(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        kind: IncludeKind,
+        sections: &mut Vec<ScriptCommand>,
+    ) {
+        while !lexer.at_end() {
+            let token = lexer.next_token();
+            if lexer.failed() || token.is_empty() {
+                return;
+            }
+            match kind {
+                IncludeKind::Statements => self.read_script_statement(lexer, load, &token),
+                IncludeKind::Sections => {
+                    self.read_sections_statement(lexer, load, sections, &token)
+                }
+                IncludeKind::OutputSection(output) => {
+                    self.read_output_section_statement(lexer, load, output, &token)
+                }
+                IncludeKind::Memory => self.read_memory_statement(lexer, load, &token),
+            }
+        }
+    }
+
+    fn read_script_statement(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        token: &str,
+    ) {
+        match token {
+            ";" => {}
+            "ENTRY" => {
+                lexer.expect("(");
+                let name = unquote(&lexer.next_token());
+                if self.options.entry.is_none() && self.script.entry.is_none() {
+                    self.script.entry = Some(name);
+                }
+                lexer.expect(")");
+            }
+            "EXTERN" => {
+                lexer.expect("(");
+                while let Some(token) = lexer.till(")") {
+                    let name = unquote(&token);
+                    let id = self.add_unused_undefined(&name);
+                    self.symbols[id].referenced = true;
+                    self.options.undefined.push(name);
+                }
+            }
+            "GROUP" => {
+                let was_in_group = load.in_group;
+                load.in_group = true;
+                self.read_script_input(lexer, load);
+                load.in_group = was_in_group;
+                if !was_in_group {
+                    load.group += 1;
+                }
+            }
+            "INCLUDE" => {
+                self.read_script_include(lexer, load, IncludeKind::Statements, &mut Vec::new())
+            }
+            "INPUT" => self.read_script_input(lexer, load),
+            "MEMORY" => {
+                lexer.expect("{");
+                while let Some(token) = lexer.till("}") {
+                    self.read_memory_statement(lexer, load, &token);
+                }
+            }
+            "OUTPUT" => {
+                lexer.expect("(");
+                let name = unquote(&lexer.next_token());
+                if self.options.output.is_empty() {
+                    self.options.output = name;
+                }
+                lexer.expect(")");
+            }
+            "OUTPUT_ARCH" => {
+                lexer.expect("(");
+                while lexer.till(")").is_some() {}
+            }
+            "OUTPUT_FORMAT" => self.read_output_format(lexer),
+            "OVERWRITE_SECTIONS" => {
+                lexer.expect("{");
+                while let Some(token) = lexer.till("}") {
+                    let output = self.read_output_section_description(lexer, load, &token);
+                    self.script.overwrite_sections.push(output);
+                }
+            }
+            "PHDRS" => self.read_program_headers(lexer),
+            "REGION_ALIAS" => {
+                lexer.expect("(");
+                let alias = unquote(&lexer.next_token());
+                lexer.expect(",");
+                let name = unquote(&lexer.next_token());
+                lexer.expect(")");
+                if self.script.region(&alias).is_some() {
+                    lexer.set_error(&format!("redefinition of memory region '{alias}'"));
+                }
+                match self.script.region(&name) {
+                    Some(region) => {
+                        if self.script.region(&alias).is_none() {
+                            self.script.region_names.push((alias, region));
+                        }
+                    }
+                    None => lexer.set_error(&format!("memory region '{name}' is not defined")),
+                }
+            }
+            "SEARCH_DIR" => {
+                lexer.expect("(");
+                let name = unquote(&lexer.next_token());
+                if !self.options.no_standard_library {
+                    self.options.library_paths.push(name);
+                }
+                lexer.expect(")");
+            }
+            "SECTIONS" => self.read_sections(lexer, load),
+            "TARGET" => {
+                lexer.expect("(");
+                let name = unquote(&lexer.next_token());
+                lexer.expect(")");
+                if name.starts_with("elf") {
+                    self.options.format_binary = false;
+                } else if name == "binary" {
+                    self.options.format_binary = true;
+                } else {
+                    lexer.set_error(&format!("unknown target: {name}"));
+                }
+            }
+            "VERSION" => {
+                lexer.expect("{");
+                self.read_script_version(lexer);
+                lexer.expect("}");
+            }
+            "NOCROSSREFS" | "NOCROSSREFS_TO" => {
+                lexer.expect("(");
+                let mut names = Vec::new();
+                while let Some(token) = lexer.till(")") {
+                    names.push(unquote(&token));
+                }
+                if names.len() < 2 {
+                    let location = lexer.location();
+                    self.warn(
+                        problem("EI239", "The linker script could not be read.")
+                            .with_context(format!("Location: {location}"))
+                            .with_context(
+                                "Reason: ignored with fewer than 2 output sections".to_string(),
+                            ),
+                    );
+                } else {
+                    self.script
+                        .no_cross_references
+                        .push((names, token == "NOCROSSREFS_TO"));
+                }
+            }
+            _ => match self.read_script_assignment(lexer, token) {
+                Some(assignment) => self
+                    .script
+                    .commands
+                    .push(ScriptCommand::Assignment(assignment)),
+                None => lexer.set_error(&format!("unknown directive: {token}")),
+            },
+        }
+    }
+
+    fn read_script_version(&mut self, lexer: &mut LinkerScriptLexer) {
+        let (text, start) = {
+            let buffer = lexer.buffers.last().expect("a script buffer");
+            (buffer.text.clone(), buffer.at)
+        };
+        let bytes = text.as_bytes();
+        let mut depth = 0i32;
+        let mut position = start;
+        while position < bytes.len() {
+            match bytes[position] {
+                b'{' => depth += 1,
+                b'}' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            position += 1;
+        }
+        let body = &text[start..position];
+        let mut inner = ScriptLexer::new(body, true);
+        let mut definitions = std::mem::take(&mut self.version_definitions);
+        let result = read_version_command(&mut inner, &mut definitions);
+        self.version_definitions = definitions;
+        if let Err(reason) = result {
+            lexer.set_error(&reason);
+            return;
+        }
+        let lines = body.matches('\n').count();
+        let buffer = lexer.buffers.last_mut().expect("a script buffer");
+        buffer.at = position;
+        buffer.line += lines;
+    }
+
+    fn read_script_input(&mut self, lexer: &mut LinkerScriptLexer, load: &mut ScriptLoad) {
+        lexer.expect("(");
+        while let Some(token) = lexer.till(")") {
+            if token == "AS_NEEDED" {
+                lexer.expect("(");
+                let saved = load.state;
+                load.state.as_needed = true;
+                while let Some(token) = lexer.till(")") {
+                    self.script_add_file(lexer, load, &unquote(&token));
+                }
+                load.state = saved;
+            } else {
+                self.script_add_file(lexer, load, &unquote(&token));
+            }
+        }
+    }
+
+    fn script_add_file(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        name: &str,
+    ) {
+        let state = load.state;
+        let group = load.group;
+        if lexer.under_sysroot() && name.starts_with('/') {
+            let root = self.options.sysroot.clone().unwrap_or_default();
+            let path = format!("{root}{name}");
+            match (self.source)(&path) {
+                Some(bytes) => self.add_file(
+                    &path,
+                    &path,
+                    bytes,
+                    state,
+                    group,
+                    false,
+                    load.target_reference,
+                ),
+                None => lexer.set_error(&format!("cannot find {name} inside {root}")),
+            }
+            return;
+        }
+        if name.starts_with('/') {
+            match (self.source)(name) {
+                Some(bytes) => self.add_file(
+                    name,
+                    name,
+                    bytes,
+                    state,
+                    group,
+                    false,
+                    load.target_reference,
+                ),
+                None => self.error(file_missing(name)),
+            }
+            return;
+        }
+        if let Some(rest) = name.strip_prefix('=') {
+            let path = match &self.options.sysroot {
+                Some(root) if !root.is_empty() => format!("{root}/{rest}"),
+                _ => rest.to_string(),
+            };
+            match (self.source)(&path) {
+                Some(bytes) => self.add_file(
+                    &path,
+                    &path,
+                    bytes,
+                    state,
+                    group,
+                    false,
+                    load.target_reference,
+                ),
+                None => self.error(file_missing(&path)),
+            }
+            return;
+        }
+        if let Some(library) = name.strip_prefix("-l") {
+            match self.find_library(library, state.is_static) {
+                Some((path, bytes)) => self.add_file(
+                    &path,
+                    &path,
+                    bytes,
+                    state,
+                    group,
+                    true,
+                    load.target_reference,
+                ),
+                None => self.error(
+                    problem("EI205", "An input file could not be found.")
+                        .with_context(format!("Library: -l{library}")),
+                ),
+            }
+            return;
+        }
+        let script = lexer.file_name();
+        if let Some((folder, _)) = script.rsplit_once('/') {
+            let path = format!("{folder}/{name}");
+            if let Some(bytes) = (self.source)(&path) {
+                self.add_file(
+                    &path,
+                    &path,
+                    bytes,
+                    state,
+                    group,
+                    false,
+                    load.target_reference,
+                );
+                return;
+            }
+        }
+        if let Some(bytes) = (self.source)(name) {
+            self.add_file(
+                name,
+                name,
+                bytes,
+                state,
+                group,
+                false,
+                load.target_reference,
+            );
+            return;
+        }
+        for folder in self.options.library_paths.clone() {
+            let folder = self.resolve_path(&folder);
+            let path = format!("{folder}/{name}");
+            if let Some(bytes) = (self.source)(&path) {
+                self.add_file(
+                    &path,
+                    &path,
+                    bytes,
+                    state,
+                    group,
+                    true,
+                    load.target_reference,
+                );
+                return;
+            }
+        }
+        lexer.set_error(&format!("unable to find {name}"));
+    }
+
+    fn search_script(&self, name: &str) -> Option<String> {
+        if (self.source)(name).is_some() {
+            return Some(name.to_string());
+        }
+        for folder in &self.options.library_paths {
+            let folder = self.resolve_path(folder);
+            let path = format!("{folder}/{name}");
+            if (self.source)(&path).is_some() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn read_script_include(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        kind: IncludeKind,
+        sections: &mut Vec<ScriptCommand>,
+    ) {
+        let name = unquote(&lexer.next_token());
+        if lexer.active_names.contains(&name) {
+            lexer.set_error("there is a cycle in linker script INCLUDEs");
+            return;
+        }
+        let Some(path) = self.search_script(&name) else {
+            lexer.set_error(&format!("cannot find linker script {name}"));
+            return;
+        };
+        let Some(bytes) = (self.source)(&path) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        lexer.active_names.insert(name.clone());
+        let under = lexer.under_sysroot();
+        lexer.push_buffer(&text, &path, under);
+        self.read_script_statements(lexer, load, kind, sections);
+        if lexer.failed() {
+            return;
+        }
+        lexer.pop_buffer();
+        lexer.active_names.remove(&name);
+    }
+
+    fn read_output_format(&mut self, lexer: &mut LinkerScriptLexer) {
+        lexer.expect("(");
+        let mut name = unquote(&lexer.next_token());
+        if !lexer.consume(")") {
+            lexer.expect(",");
+            let big = unquote(&lexer.next_token());
+            if self.options.big_endian_requested {
+                name = big;
+            }
+            lexer.expect(",");
+            let little = unquote(&lexer.next_token());
+            if self.options.little_endian_requested {
+                name = little;
+            }
+            lexer.consume(")");
+        }
+        if self.options.output_format.is_some() {
+            return;
+        }
+        self.options.output_format = Some(name.clone());
+        if name == "binary" {
+            self.options.output_binary = true;
+            return;
+        }
+        let stem = name.strip_suffix("-freebsd").unwrap_or(&name);
+        if name.ends_with("-freebsd") {
+            self.options.operating_system_abi = Some(9);
+        }
+        let known = matches!(
+            stem,
+            "elf32-i386"
+                | "elf32-avr"
+                | "elf32-iamcu"
+                | "elf32-littlearm"
+                | "elf32-bigarm"
+                | "elf32-x86-64"
+                | "elf64-aarch64"
+                | "elf64-littleaarch64"
+                | "elf64-bigaarch64"
+                | "elf32-powerpc"
+                | "elf32-powerpcle"
+                | "elf64-powerpc"
+                | "elf64-powerpcle"
+                | "elf64-x86-64"
+                | "elf32-tradbigmips"
+                | "elf32-bigmips"
+                | "elf32-ntradbigmips"
+                | "elf32-tradlittlemips"
+                | "elf32-ntradlittlemips"
+                | "elf64-tradbigmips"
+                | "elf64-tradlittlemips"
+                | "elf32-littleriscv"
+                | "elf64-littleriscv"
+                | "elf64-sparc"
+                | "elf32-msp430"
+                | "elf32-loongarch"
+                | "elf64-loongarch"
+                | "elf64-s390"
+                | "elf32-hexagon"
+                | "elf32-littlehexagon"
+        );
+        if !known {
+            lexer.set_error(&format!("unknown output format name: {name}"));
+            return;
+        }
+        self.options.output_format_machine = Some(stem.to_string());
+    }
+
+    fn read_program_headers(&mut self, lexer: &mut LinkerScriptLexer) {
+        lexer.expect("{");
+        while let Some(token) = lexer.till("}") {
+            let kind_token = lexer.next_token();
+            let kind = match program_header_type_by_name(&kind_token) {
+                Some(kind) => kind,
+                None => {
+                    lexer.set_error(&format!("invalid program header type: {kind_token}"));
+                    0
+                }
+            };
+            let mut command = ProgramHeaderCommand {
+                name: token,
+                kind,
+                file_header: false,
+                program_headers: false,
+                flags: None,
+                load_address: None,
+            };
+            while !lexer.failed() && !lexer.consume(";") {
+                if lexer.consume("FILEHDR") {
+                    command.file_header = true;
+                } else if lexer.consume("PHDRS") {
+                    command.program_headers = true;
+                } else if lexer.consume("AT") {
+                    command.load_address = Some(self.read_paren_expression(lexer));
+                } else if lexer.consume("FLAGS") {
+                    let expression = self.read_paren_expression(lexer);
+                    command.flags = Some(self.evaluate_value(&expression) as u32);
+                } else {
+                    let token = lexer.next_token();
+                    lexer.set_error(&format!("unexpected header attribute: {token}"));
+                }
+            }
+            self.script.program_header_commands.push(command);
+        }
+    }
+
+    fn read_memory_statement(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        token: &str,
+    ) {
+        if token == "INCLUDE" {
+            self.read_script_include(lexer, load, IncludeKind::Memory, &mut Vec::new());
+            return;
+        }
+        let mut flags = 0u64;
+        let mut inverted = 0u64;
+        let mut negated = 0u64;
+        let mut negated_inverted = 0u64;
+        if lexer.consume("(") {
+            let mut invert = false;
+            let attributes = lexer.next_token().to_ascii_lowercase();
+            for character in attributes.chars() {
+                match character {
+                    '!' => {
+                        invert = !invert;
+                        std::mem::swap(&mut flags, &mut negated);
+                        std::mem::swap(&mut inverted, &mut negated_inverted);
+                    }
+                    'w' => flags |= section_flag::WRITE,
+                    'x' => flags |= section_flag::EXECUTE,
+                    'a' => flags |= section_flag::ALLOCATE,
+                    'r' => inverted |= section_flag::WRITE,
+                    _ => lexer.set_error("invalid memory region attribute"),
+                }
+            }
+            if invert {
+                std::mem::swap(&mut flags, &mut negated);
+                std::mem::swap(&mut inverted, &mut negated_inverted);
+            }
+            lexer.expect(")");
+        }
+        lexer.expect(":");
+        let origin = self.read_memory_assignment(lexer, ["ORIGIN", "org", "o"]);
+        lexer.expect(",");
+        let length = self.read_memory_assignment(lexer, ["LENGTH", "len", "l"]);
+        if self.script.region(token).is_some() {
+            lexer.set_error(&format!("region '{token}' already defined"));
+            return;
+        }
+        let index = self.script.regions.len();
+        self.script.regions.push(MemoryRegion {
+            name: token.to_string(),
+            origin,
+            length,
+            flags,
+            inverted_flags: inverted,
+            negated_flags: negated,
+            negated_inverted_flags: negated_inverted,
+            position: 0,
+        });
+        self.script.region_names.push((token.to_string(), index));
+    }
+
+    fn read_memory_assignment(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        names: [&str; 3],
+    ) -> Rc<ScriptExpression> {
+        if !lexer.consume(names[0]) && !lexer.consume(names[1]) && !lexer.consume(names[2]) {
+            lexer.set_error(&format!(
+                "expected one of: {}, {}, or {}",
+                names[0], names[1], names[2]
+            ));
+            return Rc::new(ScriptExpression::Number(0));
+        }
+        lexer.expect("=");
+        self.read_expression(lexer)
+    }
+
+    fn read_sections(&mut self, lexer: &mut LinkerScriptLexer, load: &mut ScriptLoad) {
+        lexer.expect("{");
+        let mut commands: Vec<ScriptCommand> = Vec::new();
+        while let Some(token) = lexer.till("}") {
+            self.read_sections_statement(lexer, load, &mut commands, &token);
+        }
+        if !self.script.seen_relocation_read_only_end {
+            for command in &commands {
+                if let ScriptCommand::Output(output) = command {
+                    self.outputs[*output].script.relocation_read_only = false;
+                }
+            }
+        }
+        self.script.commands.extend(commands.iter().copied());
+        if lexer.at_end() || !lexer.consume("INSERT") {
+            self.script.has_sections = true;
+            return;
+        }
+        let mut after = false;
+        if lexer.consume("AFTER") {
+            after = true;
+        } else if !lexer.consume("BEFORE") {
+            let token = lexer.next_token();
+            lexer.set_error(&format!("expected AFTER/BEFORE, but got '{token}'"));
+        }
+        let place = unquote(&lexer.next_token());
+        let names: Vec<String> = commands
+            .iter()
+            .filter_map(|command| match command {
+                ScriptCommand::Output(output) => Some(self.outputs[*output].name.clone()),
+                ScriptCommand::Assignment(_) => None,
+            })
+            .collect();
+        if !names.is_empty() {
+            self.script.inserts.push(InsertCommand {
+                names,
+                after,
+                place,
+            });
+        }
+    }
+
+    fn read_sections_statement(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        commands: &mut Vec<ScriptCommand>,
+        token: &str,
+    ) {
+        if token == "OVERLAY" {
+            let overlay = self.read_overlay(lexer, load);
+            commands.extend(overlay);
+            return;
+        }
+        if token == "CLASS" {
+            lexer.set_error("section classes are not supported");
+            return;
+        }
+        if token == "INCLUDE" {
+            self.read_script_include(lexer, load, IncludeKind::Sections, commands);
+            return;
+        }
+        if let Some(assignment) = self.read_script_assignment(lexer, token) {
+            commands.push(ScriptCommand::Assignment(assignment));
+        } else {
+            let output = self.read_output_section_description(lexer, load, token);
+            commands.push(ScriptCommand::Output(output));
+        }
+    }
+
+    fn read_overlay(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+    ) -> Vec<ScriptCommand> {
+        let mut address: Option<Rc<ScriptExpression>> = None;
+        if !lexer.consume(":") {
+            address = Some(self.read_expression(lexer));
+            lexer.expect(":");
+        }
+        let no_cross_references = lexer.consume("NOCROSSREFS");
+        let load_address = if lexer.consume("AT") {
+            Some(self.read_paren_expression(lexer))
+        } else {
+            None
+        };
+        lexer.expect("{");
+        let mut members: Vec<OutputIndex> = Vec::new();
+        let mut previous: Option<OutputIndex> = None;
+        while !lexer.failed() && !lexer.consume("}") {
+            let name = unquote(&lexer.next_token());
+            let location = lexer.location();
+            let output = self.create_script_output(&name, &location);
+            self.outputs[output].script.in_overlay = true;
+            lexer.expect("{");
+            while let Some(token) = lexer.till("}") {
+                self.read_output_section_statement(lexer, load, output, &token);
+            }
+            self.outputs[output].script.program_headers =
+                self.read_output_section_program_headers(lexer);
+            self.outputs[output].script.address = address.clone();
+            match previous {
+                Some(previous) => {
+                    self.outputs[output].script.load_address =
+                        Some(Rc::new(ScriptExpression::OverlayFollow(previous)));
+                }
+                None => {
+                    self.outputs[output].script.load_address = load_address.clone();
+                    self.outputs[output].used_in_expression = true;
+                    address = Some(Rc::new(ScriptExpression::OutputStart(output)));
+                }
+            }
+            members.push(output);
+            previous = Some(output);
+        }
+        if let Some(first) = members.first() {
+            self.outputs[*first].script.first_in_overlay = true;
+        }
+        if lexer.consume(">") {
+            let region = unquote(&lexer.next_token());
+            for member in &members {
+                self.outputs[*member].script.memory_region_name = region.clone();
+            }
+        }
+        if no_cross_references {
+            let names = members
+                .iter()
+                .map(|member| self.outputs[*member].name.clone())
+                .collect();
+            self.script.no_cross_references.push((names, false));
+        }
+        let mut commands: Vec<ScriptCommand> = members
+            .iter()
+            .map(|member| ScriptCommand::Output(*member))
+            .collect();
+        let move_dot = ScriptExpression::OverlayEnd {
+            members: members.clone(),
+            address: address.unwrap_or_else(|| Rc::new(ScriptExpression::Number(0))),
+        };
+        let location = lexer.location();
+        let index = self.script.assignments.len();
+        self.script.assignments.push(ScriptAssignment {
+            name: ".".to_string(),
+            symbol: None,
+            expression: Rc::new(move_dot),
+            provide: false,
+            hidden: false,
+            data_segment_relocation_read_only_end: false,
+            order: 0,
+            location,
+            command_text: String::new(),
+            address: 0,
+            size: 0,
+        });
+        commands.push(ScriptCommand::Assignment(index));
+        commands
+    }
+
+    fn read_output_section_description(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        token: &str,
+    ) -> OutputIndex {
+        let location = lexer.location();
+        let output = self.create_script_output(&unquote(token), &location);
+        self.outputs[output].script.relocation_read_only =
+            self.script.seen_data_align && !self.script.seen_relocation_read_only_end;
+        let referenced_before = self.script.referenced_symbols.len();
+        if lexer.peek() != ":" {
+            self.read_section_address_type(lexer, output);
+        }
+        lexer.expect(":");
+        let location = lexer.location();
+        if lexer.consume("AT") {
+            self.outputs[output].script.load_address = Some(self.read_paren_expression(lexer));
+        }
+        if lexer.consume("ALIGN") {
+            let expression = self.read_paren_expression(lexer);
+            self.outputs[output].script.alignment =
+                Some(Rc::new(ScriptExpression::CheckedAlignment {
+                    value: expression,
+                    location: location.clone(),
+                }));
+        }
+        if lexer.consume("SUBALIGN") {
+            let expression = self.read_paren_expression(lexer);
+            self.outputs[output].script.sub_alignment =
+                Some(Rc::new(ScriptExpression::CheckedAlignment {
+                    value: expression,
+                    location: location.clone(),
+                }));
+        }
+        if lexer.consume("ONLY_IF_RO") {
+            self.outputs[output].script.constraint = OutputConstraint::ReadOnly;
+        }
+        if lexer.consume("ONLY_IF_RW") {
+            self.outputs[output].script.constraint = OutputConstraint::ReadWrite;
+        }
+        lexer.expect("{");
+        while let Some(token) = lexer.till("}") {
+            self.read_output_section_statement(lexer, load, output, &token);
+        }
+        if lexer.consume(">") {
+            self.outputs[output].script.memory_region_name = unquote(&lexer.next_token());
+        }
+        if lexer.consume("AT") {
+            lexer.expect(">");
+            self.outputs[output].script.load_region_name = unquote(&lexer.next_token());
+        }
+        if self.outputs[output].script.load_address.is_some()
+            && !self.outputs[output].script.load_region_name.is_empty()
+        {
+            self.error_always(
+                problem("EI239", "The linker script could not be read.").with_context(
+                    "Reason: section can't have both LMA and a load region".to_string(),
+                ),
+            );
+        }
+        self.outputs[output].script.program_headers =
+            self.read_output_section_program_headers(lexer);
+        let next = lexer.peek();
+        if next == "=" || next.starts_with('=') {
+            lexer.state = LexerState::Expression;
+            lexer.consume("=");
+            let filler = self.read_fill(lexer);
+            self.outputs[output].script.filler = Some(filler);
+            lexer.state = LexerState::Script;
+        }
+        lexer.consume(",");
+        if self.script.referenced_symbols.len() > referenced_before {
+            self.outputs[output].script.expressions_use_symbols = true;
+        }
+        output
+    }
+
+    fn read_section_directive(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        output: OutputIndex,
+        token: &str,
+    ) -> bool {
+        if !matches!(token, "NOLOAD" | "COPY" | "INFO" | "OVERLAY" | "TYPE") {
+            return false;
+        }
+        if lexer.consume("NOLOAD") {
+            self.outputs[output].kind = section_type::NO_BITS;
+            self.outputs[output].script.type_is_set = true;
+        } else if lexer.consume("TYPE") {
+            lexer.expect("=");
+            let value = lexer.peek();
+            let known = match value.as_str() {
+                "SHT_PROGBITS" => Some(section_type::PROGRAM_BITS),
+                "SHT_NOTE" => Some(section_type::NOTE),
+                "SHT_NOBITS" => Some(section_type::NO_BITS),
+                "SHT_INIT_ARRAY" => Some(section_type::INIT_ARRAY),
+                "SHT_FINI_ARRAY" => Some(section_type::FINI_ARRAY),
+                "SHT_PREINIT_ARRAY" => Some(section_type::PREINIT_ARRAY),
+                _ => None,
+            };
+            if let Some(kind) = known {
+                self.outputs[output].kind = kind;
+                lexer.skip();
+            } else if value.starts_with("SHT_") {
+                lexer.set_error(&format!("unknown section type {value}"));
+            } else {
+                let expression = self.read_expression(lexer);
+                self.outputs[output].kind = self.evaluate_value(&expression) as u32;
+            }
+            self.outputs[output].script.type_is_set = true;
+        } else {
+            lexer.skip();
+            self.outputs[output].script.non_allocated = true;
+        }
+        lexer.expect(")");
+        true
+    }
+
+    fn read_section_address_type(&mut self, lexer: &mut LinkerScriptLexer, output: OutputIndex) {
+        if lexer.consume("(") {
+            let saved = lexer.state;
+            lexer.state = LexerState::Expression;
+            let token = lexer.peek();
+            if self.read_section_directive(lexer, output, &token) {
+                lexer.state = saved;
+                return;
+            }
+            self.outputs[output].script.address = Some(self.read_expression(lexer));
+            lexer.expect(")");
+            lexer.state = saved;
+        } else {
+            self.outputs[output].script.address = Some(self.read_expression(lexer));
+        }
+        if lexer.consume("(") {
+            let saved = lexer.state;
+            lexer.state = LexerState::Expression;
+            let token = lexer.peek();
+            if !self.read_section_directive(lexer, output, &token) {
+                lexer.set_error(&format!("unknown section directive: {token}"));
+            }
+            lexer.state = saved;
+        }
+    }
+
+    fn read_output_section_program_headers(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+    ) -> Vec<String> {
+        let mut headers = Vec::new();
+        while !lexer.failed() && lexer.peek().starts_with(':') {
+            let token = lexer.next_token();
+            if token.len() == 1 {
+                headers.push(unquote(&lexer.next_token()));
+            } else {
+                headers.push(token[1..].to_string());
+            }
+        }
+        headers
+    }
+
+    fn read_output_section_statement(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        load: &mut ScriptLoad,
+        output: OutputIndex,
+        token: &str,
+    ) {
+        if token == ";" {
+            return;
+        }
+        if let Some(assignment) = self.read_script_assignment(lexer, token) {
+            self.outputs[output]
+                .script
+                .commands
+                .push(OutputCommand::Assignment(assignment));
+            return;
+        }
+        if let Some(command) = self.read_byte_command(lexer, token) {
+            self.outputs[output].script.commands.push(command);
+            return;
+        }
+        match token {
+            "CONSTRUCTORS" => {}
+            "FILL" => {
+                if lexer.peek() != "(" {
+                    let next = lexer.peek();
+                    lexer.set_error(&format!("( expected, but got {next}"));
+                }
+                let filler = self.read_fill(lexer);
+                self.outputs[output].script.filler = Some(filler);
+            }
+            "SORT" => {
+                lexer.expect("(");
+                lexer.expect("CONSTRUCTORS");
+                lexer.expect(")");
+            }
+            "INCLUDE" => {
+                self.read_script_include(
+                    lexer,
+                    load,
+                    IncludeKind::OutputSection(output),
+                    &mut Vec::new(),
+                );
+            }
+            "(" | ")" => lexer.set_error("expected filename pattern"),
+            _ => {
+                if lexer.peek() == "(" {
+                    let description = self.read_input_section_description(lexer, token);
+                    self.outputs[output]
+                        .script
+                        .commands
+                        .push(OutputCommand::Input(description));
+                } else {
+                    let index = self.new_input_description(token, 0, 0);
+                    self.script.descriptions[index]
+                        .patterns
+                        .push(SectionPatternRule {
+                            excluded_files: Vec::new(),
+                            sections: vec!["*".to_string()],
+                            sort_outer: SortPolicy::Default,
+                            sort_inner: SortPolicy::Default,
+                        });
+                    self.outputs[output]
+                        .script
+                        .commands
+                        .push(OutputCommand::Input(index));
+                }
+            }
+        }
+    }
+
+    fn new_input_description(
+        &mut self,
+        file_pattern: &str,
+        with_flags: u64,
+        without_flags: u64,
+    ) -> usize {
+        let (pattern, file_match) = if let Some(stripped) = file_pattern.strip_suffix(':') {
+            (stripped.to_string(), FileMatch::WholeArchive)
+        } else if let Some(stripped) = file_pattern.strip_prefix(':') {
+            (stripped.to_string(), FileMatch::ArchivesExcluded)
+        } else {
+            (file_pattern.to_string(), FileMatch::Trivial)
+        };
+        let index = self.script.descriptions.len();
+        self.script.descriptions.push(InputDescription {
+            file_pattern: pattern,
+            file_match,
+            patterns: Vec::new(),
+            with_flags,
+            without_flags,
+            class_reference: String::new(),
+            bases: Vec::new(),
+        });
+        index
+    }
+
+    fn read_fill(&mut self, lexer: &mut LinkerScriptLexer) -> [u8; 4] {
+        let expression = self.read_primary(lexer);
+        let value = self.evaluate_raw(&expression);
+        if value > u64::from(u32::MAX) {
+            lexer.set_error(&format!(
+                "filler expression result does not fit 32-bit: 0x{value:x}"
+            ));
+        }
+        (value as u32).to_be_bytes()
+    }
+
+    fn read_byte_command(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        token: &str,
+    ) -> Option<OutputCommand> {
+        let size = match token {
+            "BYTE" => 1,
+            "SHORT" => 2,
+            "LONG" => 4,
+            "QUAD" => 8,
+            _ => return None,
+        };
+        let start = lexer.buffers.last().map_or(0, |buffer| buffer.at);
+        let expression = self.read_paren_expression(lexer);
+        let end = lexer.buffers.last().map_or(0, |buffer| buffer.at);
+        let text = lexer
+            .buffers
+            .last()
+            .map(|buffer| format!("{token}{}", &buffer.text[start..end]))
+            .unwrap_or_default();
+        Some(OutputCommand::Data {
+            expression,
+            size,
+            offset: 0,
+            text: squeeze_spaces(&text),
+        })
+    }
+
+    fn peek_sort_kind(&mut self, lexer: &mut LinkerScriptLexer) -> SortPolicy {
+        match lexer.peek().as_str() {
+            "REVERSE" => SortPolicy::Reverse,
+            "SORT" | "SORT_BY_NAME" => SortPolicy::Name,
+            "SORT_BY_ALIGNMENT" => SortPolicy::Alignment,
+            "SORT_BY_INIT_PRIORITY" => SortPolicy::Priority,
+            "SORT_NONE" => SortPolicy::None,
+            _ => SortPolicy::Default,
+        }
+    }
+
+    fn read_sort_kind(&mut self, lexer: &mut LinkerScriptLexer) -> SortPolicy {
+        let kind = self.peek_sort_kind(lexer);
+        if kind != SortPolicy::Default {
+            lexer.skip();
+        }
+        kind
+    }
+
+    fn read_file_patterns(&mut self, lexer: &mut LinkerScriptLexer) -> Vec<String> {
+        let mut patterns = Vec::new();
+        while let Some(token) = lexer.till(")") {
+            patterns.push(token);
+        }
+        patterns
+    }
+
+    fn read_input_sections_list(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+    ) -> Vec<SectionPatternRule> {
+        let mut rules = Vec::new();
+        while !lexer.failed() && lexer.peek() != ")" {
+            let mut excluded = Vec::new();
+            if lexer.consume("EXCLUDE_FILE") {
+                lexer.expect("(");
+                excluded = self.read_file_patterns(lexer);
+            }
+            let mut sections = Vec::new();
+            while !lexer.failed() && self.peek_sort_kind(lexer) == SortPolicy::Default {
+                let token = lexer.peek();
+                if token == ")" || token == "EXCLUDE_FILE" {
+                    break;
+                }
+                if token.starts_with(['(', ')', '{', '}']) {
+                    lexer.skip();
+                    lexer.set_error("section pattern is expected");
+                    break;
+                }
+                if token.is_empty() {
+                    break;
+                }
+                sections.push(unquote(&lexer.next_token()));
+            }
+            if !sections.is_empty() {
+                rules.push(SectionPatternRule {
+                    excluded_files: excluded,
+                    sections,
+                    sort_outer: SortPolicy::Default,
+                    sort_inner: SortPolicy::Default,
+                });
+            } else if excluded.is_empty() {
+                break;
+            } else {
+                lexer.set_error("section pattern is expected");
+            }
+        }
+        rules
+    }
+
+    fn read_input_section_rules(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        file_pattern: &str,
+        with_flags: u64,
+        without_flags: u64,
+    ) -> usize {
+        let index = self.new_input_description(file_pattern, with_flags, without_flags);
+        lexer.expect("(");
+        while lexer.peek() != ")" && !lexer.at_end() {
+            let outer = self.read_sort_kind(lexer);
+            let mut inner = SortPolicy::Default;
+            let rules = if outer != SortPolicy::Default {
+                lexer.expect("(");
+                inner = self.read_sort_kind(lexer);
+                let rules = if inner != SortPolicy::Default {
+                    lexer.expect("(");
+                    let rules = self.read_input_sections_list(lexer);
+                    lexer.expect(")");
+                    rules
+                } else {
+                    self.read_input_sections_list(lexer)
+                };
+                lexer.expect(")");
+                rules
+            } else {
+                self.read_input_sections_list(lexer)
+            };
+            for mut rule in rules {
+                rule.sort_inner = inner;
+                rule.sort_outer = outer;
+                self.script.descriptions[index].patterns.push(rule);
+            }
+        }
+        lexer.expect(")");
+        index
+    }
+
+    fn read_input_section_flags(&mut self, lexer: &mut LinkerScriptLexer) -> (u64, u64) {
+        let mut with_flags = 0;
+        let mut without_flags = 0;
+        lexer.expect("(");
+        while !lexer.failed() {
+            let token = unquote(&lexer.next_token());
+            let (without, name) = match token.strip_prefix('!') {
+                Some(rest) => (true, rest.to_string()),
+                None => (false, token.clone()),
+            };
+            match section_flag_by_name(&name) {
+                Some(flag) => {
+                    if without {
+                        without_flags |= flag;
+                    } else {
+                        with_flags |= flag;
+                    }
+                }
+                None => lexer.set_error(&format!("unrecognised flag: {name}")),
+            }
+            if lexer.consume(")") {
+                break;
+            }
+            if !lexer.consume("&") {
+                lexer.next_token();
+                lexer.set_error("expected & or )");
+            }
+        }
+        (with_flags, without_flags)
+    }
+
+    fn read_input_section_description(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        token: &str,
+    ) -> usize {
+        let mut with_flags = 0;
+        let mut without_flags = 0;
+        let mut token = token.to_string();
+        if token == "KEEP" {
+            lexer.expect("(");
+            if lexer.consume("INPUT_SECTION_FLAGS") {
+                (with_flags, without_flags) = self.read_input_section_flags(lexer);
+            }
+            let next = lexer.next_token();
+            if next == "CLASS" {
+                lexer.set_error("section classes are not supported");
+            }
+            let index = self.read_input_section_rules(lexer, &next, with_flags, without_flags);
+            lexer.expect(")");
+            self.script.kept_descriptions.push(index);
+            return index;
+        }
+        if token == "INPUT_SECTION_FLAGS" {
+            (with_flags, without_flags) = self.read_input_section_flags(lexer);
+            token = lexer.next_token();
+        }
+        if token == "CLASS" {
+            lexer.set_error("section classes are not supported");
+        }
+        self.read_input_section_rules(lexer, &token, with_flags, without_flags)
+    }
+
+    fn read_script_assignment(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        token: &str,
+    ) -> Option<usize> {
+        if token == "ASSERT" {
+            let location = lexer.location();
+            let expression = self.read_assert(lexer);
+            let index = self.script.assignments.len();
+            self.script.assignments.push(ScriptAssignment {
+                name: ".".to_string(),
+                symbol: None,
+                expression,
+                provide: false,
+                hidden: false,
+                data_segment_relocation_read_only_end: false,
+                order: 0,
+                location,
+                command_text: String::new(),
+                address: 0,
+                size: 0,
+            });
+            return Some(index);
+        }
+        let start = lexer
+            .buffers
+            .last()
+            .map_or(0, |buffer| buffer.at.saturating_sub(token.len()));
+        let saved_relocation_end = self.script.seen_relocation_read_only_end;
+        let saved_state = lexer.state;
+        lexer.state = LexerState::Expression;
+        let operator = lexer.peek();
+        let compound =
+            (operator.len() == 2 && operator.ends_with('=') && "+-*/&^|".contains(&operator[..1]))
+                || operator == "<<="
+                || operator == ">>=";
+        let result = if operator.starts_with('=') || compound {
+            Some(self.read_symbol_assignment(lexer, &unquote(token)))
+        } else if token == "PROVIDE" {
+            self.read_provide_hidden(lexer, true, false)
+        } else if token == "HIDDEN" {
+            self.read_provide_hidden(lexer, false, true)
+        } else if token == "PROVIDE_HIDDEN" {
+            self.read_provide_hidden(lexer, true, true)
+        } else {
+            None
+        };
+        lexer.state = saved_state;
+        if let Some(index) = result {
+            self.script.assignments[index].data_segment_relocation_read_only_end =
+                !saved_relocation_end && self.script.seen_relocation_read_only_end;
+            let end = lexer.buffers.last().map_or(0, |buffer| buffer.at);
+            let text = lexer
+                .buffers
+                .last()
+                .map(|buffer| buffer.text[start.min(end)..end].to_string())
+                .unwrap_or_default();
+            self.script.assignments[index].command_text = squeeze_spaces(&text);
+            lexer.expect(";");
+        }
+        result
+    }
+
+    fn read_provide_hidden(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        provide: bool,
+        hidden: bool,
+    ) -> Option<usize> {
+        lexer.expect("(");
+        let name = unquote(&lexer.next_token());
+        let equals = lexer.peek();
+        if equals != "=" {
+            let token = lexer.next_token();
+            lexer.set_error(&format!("= expected, but got {token}"));
+            while lexer.till(")").is_some() {}
+            return None;
+        }
+        let saved = self.script.active_provide.take();
+        if provide {
+            self.script.active_provide = Some(name.clone());
+        }
+        let index = self.read_symbol_assignment(lexer, &name);
+        self.script.active_provide = saved;
+        self.script.assignments[index].provide = provide;
+        self.script.assignments[index].hidden = hidden;
+        lexer.expect(")");
+        Some(index)
+    }
+
+    fn read_symbol_assignment(&mut self, lexer: &mut LinkerScriptLexer, name: &str) -> usize {
+        let operator = lexer.next_token();
+        let mut expression = self.read_expression(lexer);
+        let location = lexer.location();
+        if operator != "=" {
+            let character = operator.chars().next().unwrap_or('=');
+            expression = Rc::new(ScriptExpression::CompoundAssign {
+                name: name.to_string(),
+                operator: character,
+                value: expression,
+                location: location.clone(),
+            });
+        }
+        let order = self.script.symbol_order_counter;
+        self.script.symbol_order_counter += 1;
+        let index = self.script.assignments.len();
+        self.script.assignments.push(ScriptAssignment {
+            name: name.to_string(),
+            symbol: None,
+            expression,
+            provide: false,
+            hidden: false,
+            data_segment_relocation_read_only_end: false,
+            order,
+            location,
+            command_text: String::new(),
+            address: 0,
+            size: 0,
+        });
+        index
+    }
+
+    fn read_assert(&mut self, lexer: &mut LinkerScriptLexer) -> Rc<ScriptExpression> {
+        lexer.expect("(");
+        let condition = self.read_expression(lexer);
+        lexer.expect(",");
+        let message = unquote(&lexer.next_token());
+        lexer.expect(")");
+        Rc::new(ScriptExpression::Assert { condition, message })
+    }
+
+    pub fn read_expression(&mut self, lexer: &mut LinkerScriptLexer) -> Rc<ScriptExpression> {
+        if lexer.at_end() {
+            return Rc::new(ScriptExpression::Number(0));
+        }
+        let saved = lexer.state;
+        lexer.state = LexerState::Expression;
+        let primary = self.read_primary(lexer);
+        let expression = self.read_expression_rest(lexer, primary, 0);
+        lexer.state = saved;
+        expression
+    }
+
+    fn read_expression_rest(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        mut left: Rc<ScriptExpression>,
+        minimum: i32,
+    ) -> Rc<ScriptExpression> {
+        while !lexer.at_end() && !lexer.failed() {
+            let first = lexer.peek();
+            if script_precedence(&first) < minimum {
+                break;
+            }
+            lexer.skip();
+            if first == "?" {
+                return self.read_ternary(lexer, left);
+            }
+            let mut right = self.read_primary(lexer);
+            while !lexer.at_end() {
+                let second = lexer.peek();
+                if script_precedence(&second) <= script_precedence(&first) {
+                    break;
+                }
+                right = self.read_expression_rest(lexer, right, script_precedence(&second));
+            }
+            let location = lexer.location();
+            left = Rc::new(ScriptExpression::Binary {
+                operator: first,
+                left,
+                right,
+                location,
+            });
+        }
+        left
+    }
+
+    fn read_ternary(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        condition: Rc<ScriptExpression>,
+    ) -> Rc<ScriptExpression> {
+        let then = self.read_expression(lexer);
+        lexer.expect(":");
+        let otherwise = self.read_expression(lexer);
+        Rc::new(ScriptExpression::Ternary {
+            condition,
+            then,
+            otherwise,
+        })
+    }
+
+    pub fn read_paren_expression(&mut self, lexer: &mut LinkerScriptLexer) -> Rc<ScriptExpression> {
+        lexer.expect("(");
+        let expression = self.read_expression(lexer);
+        lexer.expect(")");
+        expression
+    }
+
+    fn read_paren_name(&mut self, lexer: &mut LinkerScriptLexer) -> String {
+        lexer.expect("(");
+        let saved = lexer.state;
+        lexer.state = LexerState::Script;
+        let name = unquote(&lexer.next_token());
+        lexer.state = saved;
+        lexer.expect(")");
+        name
+    }
+
+    fn read_primary(&mut self, lexer: &mut LinkerScriptLexer) -> Rc<ScriptExpression> {
+        if lexer.peek() == "(" {
+            return self.read_paren_expression(lexer);
+        }
+        if lexer.consume("~") {
+            let inner = self.read_primary(lexer);
+            return Rc::new(ScriptExpression::Complement(inner));
+        }
+        if lexer.consume("!") {
+            let inner = self.read_primary(lexer);
+            return Rc::new(ScriptExpression::Not(inner));
+        }
+        if lexer.consume("-") {
+            let inner = self.read_primary(lexer);
+            return Rc::new(ScriptExpression::Negate(inner));
+        }
+        if lexer.consume("+") {
+            return self.read_primary(lexer);
+        }
+        let token = lexer.next_token();
+        let location = lexer.location();
+        match token.as_str() {
+            "ABSOLUTE" => {
+                let inner = self.read_paren_expression(lexer);
+                return Rc::new(ScriptExpression::Absolute(inner));
+            }
+            "ADDR" => {
+                let name = self.read_paren_name(lexer);
+                let output = self.script_output_named(&name);
+                self.outputs[output].used_in_expression = true;
+                return Rc::new(ScriptExpression::Address { output, location });
+            }
+            "ALIGN" => {
+                lexer.expect("(");
+                let value = self.read_expression(lexer);
+                if lexer.consume(")") {
+                    return Rc::new(ScriptExpression::AlignDot {
+                        alignment: value,
+                        location,
+                    });
+                }
+                lexer.expect(",");
+                let alignment = self.read_expression(lexer);
+                lexer.expect(")");
+                return Rc::new(ScriptExpression::AlignValue {
+                    value,
+                    alignment,
+                    location,
+                });
+            }
+            "ALIGNOF" => {
+                let name = self.read_paren_name(lexer);
+                let output = self.script_output_named(&name);
+                return Rc::new(ScriptExpression::AlignOf { output, location });
+            }
+            "ASSERT" => return self.read_assert(lexer),
+            "CONSTANT" => {
+                let name = self.read_paren_name(lexer);
+                return match name.as_str() {
+                    "COMMONPAGESIZE" => Rc::new(ScriptExpression::CommonPageSize),
+                    "MAXPAGESIZE" => Rc::new(ScriptExpression::MaximumPageSize),
+                    _ => {
+                        lexer.set_error(&format!("unknown constant: {name}"));
+                        Rc::new(ScriptExpression::Number(0))
+                    }
+                };
+            }
+            "DATA_SEGMENT_ALIGN" => {
+                lexer.expect("(");
+                let value = self.read_expression(lexer);
+                lexer.expect(",");
+                self.read_expression(lexer);
+                lexer.expect(")");
+                self.script.seen_data_align = true;
+                return Rc::new(ScriptExpression::DataSegmentAlign(value));
+            }
+            "DATA_SEGMENT_END" => {
+                lexer.expect("(");
+                lexer.expect(".");
+                lexer.expect(")");
+                return Rc::new(ScriptExpression::DataSegmentEnd);
+            }
+            "DATA_SEGMENT_RELRO_END" => {
+                lexer.expect("(");
+                self.read_expression(lexer);
+                lexer.expect(",");
+                self.read_expression(lexer);
+                lexer.expect(")");
+                self.script.seen_relocation_read_only_end = true;
+                return Rc::new(ScriptExpression::DataSegmentRelocationReadOnlyEnd);
+            }
+            "DEFINED" => {
+                let name = self.read_paren_name(lexer);
+                let order = self.script.symbol_order_counter;
+                self.script.symbol_order_counter += 1;
+                return Rc::new(ScriptExpression::Defined { name, order });
+            }
+            "LENGTH" | "ORIGIN" => {
+                let name = self.read_paren_name(lexer);
+                return match self.script.region(&name) {
+                    Some(region) => Rc::new(if token == "LENGTH" {
+                        ScriptExpression::RegionLength(region)
+                    } else {
+                        ScriptExpression::RegionOrigin(region)
+                    }),
+                    None => {
+                        lexer.set_error(&format!("memory region not defined: {name}"));
+                        Rc::new(ScriptExpression::Number(0))
+                    }
+                };
+            }
+            "LOADADDR" => {
+                let name = self.read_paren_name(lexer);
+                let output = self.script_output_named(&name);
+                self.outputs[output].used_in_expression = true;
+                return Rc::new(ScriptExpression::LoadAddress { output, location });
+            }
+            "LOG2CEIL" => {
+                lexer.expect("(");
+                let value = self.read_expression(lexer);
+                lexer.expect(")");
+                return Rc::new(ScriptExpression::Log2Ceil(value));
+            }
+            "MAX" | "MIN" => {
+                lexer.expect("(");
+                let left = self.read_expression(lexer);
+                lexer.expect(",");
+                let right = self.read_expression(lexer);
+                lexer.expect(")");
+                return Rc::new(if token == "MIN" {
+                    ScriptExpression::Minimum(left, right)
+                } else {
+                    ScriptExpression::Maximum(left, right)
+                });
+            }
+            "SEGMENT_START" => {
+                lexer.expect("(");
+                lexer.skip();
+                lexer.expect(",");
+                let value = self.read_expression(lexer);
+                lexer.expect(")");
+                return value;
+            }
+            "SIZEOF" => {
+                let name = self.read_paren_name(lexer);
+                let output = self.script_output_named(&name);
+                return Rc::new(ScriptExpression::SizeOf(output));
+            }
+            "SIZEOF_HEADERS" => return Rc::new(ScriptExpression::SizeOfHeaders),
+            "." => {
+                return Rc::new(ScriptExpression::Symbol {
+                    name: ".".to_string(),
+                    location,
+                })
+            }
+            _ => {}
+        }
+        if let Some(value) = parse_script_integer(&token) {
+            return Rc::new(ScriptExpression::Number(value));
+        }
+        let name = if token.starts_with('"') {
+            unquote(&token)
+        } else {
+            if !is_valid_script_symbol(&token) {
+                lexer.set_error(&format!("malformed number: {token}"));
+            }
+            token.clone()
+        };
+        match &self.script.active_provide {
+            Some(provide) => {
+                let provide = provide.clone();
+                match self
+                    .script
+                    .provide_map
+                    .iter_mut()
+                    .find(|(held, _)| *held == provide)
+                {
+                    Some((_, list)) => list.push(name.clone()),
+                    None => self.script.provide_map.push((provide, vec![name.clone()])),
+                }
+            }
+            None => self.script.referenced_symbols.push(name.clone()),
+        }
+        Rc::new(ScriptExpression::Symbol { name, location })
+    }
+
+    pub fn read_defsym(&mut self, text: &str) {
+        let mut lexer = LinkerScriptLexer::new(text, "--defsym", false);
+        lexer.state = LexerState::Expression;
+        let name = unquote(&lexer.next_token());
+        lexer.expect("=");
+        let expression = self.read_expression(&mut lexer);
+        if !lexer.at_end() {
+            let token = lexer.next_token();
+            lexer.set_error(&format!("EOF expected, but got {token}"));
+        }
+        if let Some(failure) = lexer.failure.take() {
+            self.script_failure(failure);
+            return;
+        }
+        let index = self.script.assignments.len();
+        self.script.assignments.push(ScriptAssignment {
+            name,
+            symbol: None,
+            expression,
+            provide: false,
+            hidden: false,
+            data_segment_relocation_read_only_end: false,
+            order: 0,
+            location: "--defsym".to_string(),
+            command_text: String::new(),
+            address: 0,
+            size: 0,
+        });
+        self.script.commands.push(ScriptCommand::Assignment(index));
+    }
+}
+
+fn align_up_power(value: u64, alignment: u64) -> u64 {
+    if alignment <= 1 {
+        return value;
+    }
+    value.wrapping_add(alignment - 1) & !(alignment - 1)
+}
+
+impl<'s> Context<'s> {
+    pub fn script_layout(&self) -> bool {
+        self.script.has_sections
+            || !self.script.inserts.is_empty()
+            || !self.script.overwrite_sections.is_empty()
+            || !self.script.regions.is_empty()
+            || !self.script.program_header_commands.is_empty()
+    }
+
+    pub fn layout_addresses(&mut self) -> bool {
+        if self.script_active() {
+            self.script_assign_addresses()
+        } else {
+            self.assign_addresses()
+        }
+    }
+
+    pub fn script_active(&self) -> bool {
+        self.script.has_sections
+            || !self.script.commands.is_empty()
+            || !self.script.regions.is_empty()
+            || !self.script.overwrite_sections.is_empty()
+            || !self.script.program_header_commands.is_empty()
+    }
+
+    fn script_expression_error(&mut self, location: &str, reason: &str) {
+        self.error_always(
+            problem("EI261", "A linker script expression cannot be evaluated.")
+                .with_context(format!("Location: {location}"))
+                .with_context(format!("Reason: {reason}")),
+        );
+    }
+
+    pub fn record_script_error(&mut self, message: String) {
+        self.script.recorded_errors.push(message);
+    }
+
+    fn base_address(&self, base: ValueBase) -> u64 {
+        match base {
+            ValueBase::Input(section) => self.section_address(section, 0),
+            ValueBase::Output(output) => self.outputs[output].address,
+        }
+    }
+
+    pub fn value_of(&self, value: &ExpressionValue) -> u64 {
+        let raw = match value.base {
+            Some(ValueBase::Input(section)) => self.section_address(section, value.value),
+            Some(ValueBase::Output(output)) => {
+                self.outputs[output].address.wrapping_add(value.value)
+            }
+            None => value.value,
+        };
+        align_up_power(raw, value.alignment)
+    }
+
+    fn section_offset_of(&self, value: &ExpressionValue) -> u64 {
+        let base = value.base.map_or(0, |base| self.base_address(base));
+        self.value_of(value).wrapping_sub(base)
+    }
+
+    pub fn evaluate_value(&mut self, expression: &ScriptExpression) -> u64 {
+        let value = self.evaluate_script(expression);
+        self.value_of(&value)
+    }
+
+    pub fn evaluate_raw(&mut self, expression: &ScriptExpression) -> u64 {
+        self.evaluate_script(expression).value
+    }
+
+    fn checked_alignment(&mut self, expression: &ScriptExpression, location: &str) -> u64 {
+        let alignment = self.evaluate_value(expression).max(1);
+        if !alignment.is_power_of_two() {
+            self.script_expression_error(location, "alignment must be power of 2");
+            return 1;
+        }
+        alignment
+    }
+
+    fn header_size(&self) -> u64 {
+        if self.options.output_binary {
+            return 0;
+        }
+        let header = self
+            .outputs
+            .get(self.elf_header_output)
+            .map_or(0, |output| output.size);
+        let programs = self
+            .outputs
+            .get(self.program_header_output)
+            .map_or(0, |output| output.size);
+        if self.elf_header_output == 0 && self.program_header_output == 0 {
+            return 0;
+        }
+        header + programs
+    }
+
+    pub fn load_address_of(&self, output: OutputIndex) -> u64 {
+        let address = self.outputs[output].address;
+        match self.outputs[output].load_segment {
+            Some(segment) => address.wrapping_add(self.segments[segment].load_offset),
+            None => address,
+        }
+    }
+
+    fn check_output_exists(&mut self, output: OutputIndex, location: &str) {
+        if self.outputs[output].script.location.is_empty() && self.script.error_on_missing_section {
+            let name = self.outputs[output].name.clone();
+            self.record_script_error(format!("{location}: undefined section {name}"));
+        }
+    }
+
+    fn move_absolute_right(&mut self, left: &mut ExpressionValue, right: &mut ExpressionValue) {
+        if left.base.is_none() || (left.force_absolute && !right.is_absolute()) {
+            std::mem::swap(left, right);
+        }
+        if !right.is_absolute() {
+            let location = left.location.clone();
+            self.record_script_error(format!(
+                "{location}: at least one side of the expression must be absolute"
+            ));
+        }
+    }
+
+    fn script_add(
+        &mut self,
+        mut left: ExpressionValue,
+        mut right: ExpressionValue,
+    ) -> ExpressionValue {
+        self.move_absolute_right(&mut left, &mut right);
+        let offset = self
+            .section_offset_of(&left)
+            .wrapping_add(self.value_of(&right));
+        ExpressionValue {
+            base: left.base,
+            value: offset,
+            alignment: 1,
+            kind: symbol_type::NO_TYPE,
+            force_absolute: left.force_absolute,
+            location: left.location,
+        }
+    }
+
+    fn script_subtract(
+        &mut self,
+        left: ExpressionValue,
+        right: ExpressionValue,
+    ) -> ExpressionValue {
+        if !left.is_absolute() && !right.is_absolute() {
+            return ExpressionValue::absolute(
+                self.value_of(&left).wrapping_sub(self.value_of(&right)),
+            );
+        }
+        let offset = self
+            .section_offset_of(&left)
+            .wrapping_sub(self.value_of(&right));
+        ExpressionValue {
+            base: left.base,
+            value: offset,
+            alignment: 1,
+            kind: symbol_type::NO_TYPE,
+            force_absolute: false,
+            location: left.location,
+        }
+    }
+
+    fn script_bitwise(
+        &mut self,
+        operator: &str,
+        mut left: ExpressionValue,
+        mut right: ExpressionValue,
+    ) -> ExpressionValue {
+        self.move_absolute_right(&mut left, &mut right);
+        let a = self.value_of(&left);
+        let b = self.value_of(&right);
+        let combined = match operator {
+            "&" => a & b,
+            "^" => a ^ b,
+            _ => a | b,
+        };
+        let base = left.base.map_or(0, |base| self.base_address(base));
+        ExpressionValue {
+            base: left.base,
+            value: combined.wrapping_sub(base),
+            alignment: 1,
+            kind: symbol_type::NO_TYPE,
+            force_absolute: left.force_absolute,
+            location: left.location,
+        }
+    }
+
+    pub fn script_symbol_value(&mut self, name: &str, location: &str) -> ExpressionValue {
+        if name == "." {
+            if let Some(output) = self.script.state_output {
+                let offset = self.script.dot.wrapping_sub(self.outputs[output].address);
+                return ExpressionValue::relative(ValueBase::Output(output), offset, location);
+            }
+            self.script_expression_error(location, "unable to get location counter value");
+            return ExpressionValue::absolute(0);
+        }
+        if let Some(id) = self.find(name) {
+            let symbol = &self.symbols[id];
+            if symbol.is_defined() {
+                let kind = symbol.kind;
+                let mut value = if symbol.header_relative {
+                    let header = self.elf_header_output;
+                    let offset = if symbol.output_relative_end {
+                        self.outputs.get(header).map_or(0, |output| output.size)
+                    } else {
+                        symbol.value
+                    };
+                    ExpressionValue::relative(ValueBase::Output(header), offset, location)
+                } else if let Some(output) = symbol.output_section_symbol {
+                    let offset = if symbol.output_relative_end {
+                        self.outputs[output].size.wrapping_add(symbol.value)
+                    } else {
+                        symbol.value
+                    };
+                    ExpressionValue::relative(ValueBase::Output(output), offset, location)
+                } else if let Some(section) = symbol.section {
+                    ExpressionValue::relative(ValueBase::Input(section), symbol.value, location)
+                } else {
+                    let mut value = ExpressionValue::absolute(symbol.value);
+                    value.location = location.to_string();
+                    value
+                };
+                value.kind = kind;
+                return value;
+            }
+            if symbol.is_shared() && !self.script.error_on_missing_section {
+                let mut value = ExpressionValue::absolute(0);
+                value.location = location.to_string();
+                return value;
+            }
+        }
+        self.script_expression_error(location, &format!("symbol not found: {name}"));
+        ExpressionValue::absolute(0)
+    }
+
+    pub fn evaluate_script(&mut self, expression: &ScriptExpression) -> ExpressionValue {
+        match expression {
+            ScriptExpression::Number(value) | ScriptExpression::Fixed(value) => {
+                ExpressionValue::absolute(*value)
+            }
+            ScriptExpression::Symbol { name, location } => self.script_symbol_value(name, location),
+            ScriptExpression::Negate(inner) => {
+                let value = self.evaluate_value(inner);
+                ExpressionValue::absolute(value.wrapping_neg())
+            }
+            ScriptExpression::Complement(inner) => {
+                let value = self.evaluate_value(inner);
+                ExpressionValue::absolute(!value)
+            }
+            ScriptExpression::Not(inner) => {
+                let value = self.evaluate_value(inner);
+                ExpressionValue::absolute(u64::from(value == 0))
+            }
+            ScriptExpression::Binary {
+                operator,
+                left,
+                right,
+                location,
+            } => self.evaluate_binary(operator, left, right, location),
+            ScriptExpression::Ternary {
+                condition,
+                then,
+                otherwise,
+            } => {
+                if self.evaluate_value(condition) != 0 {
+                    self.evaluate_script(then)
+                } else {
+                    self.evaluate_script(otherwise)
+                }
+            }
+            ScriptExpression::Absolute(inner) => {
+                let mut value = self.evaluate_script(inner);
+                value.force_absolute = true;
+                value
+            }
+            ScriptExpression::Address { output, location } => {
+                self.check_output_exists(*output, location);
+                ExpressionValue::relative(ValueBase::Output(*output), 0, location)
+            }
+            ScriptExpression::AlignDot {
+                alignment,
+                location,
+            } => {
+                let alignment = self.checked_alignment(alignment, location);
+                ExpressionValue::absolute(align_up_power(self.script.dot, alignment))
+            }
+            ScriptExpression::CheckedAlignment { value, location } => {
+                let checked = self.checked_alignment(value, location);
+                ExpressionValue::absolute(checked)
+            }
+            ScriptExpression::AlignValue {
+                value,
+                alignment,
+                location,
+            } => {
+                let mut result = self.evaluate_script(value);
+                result.alignment = self.checked_alignment(alignment, location);
+                result
+            }
+            ScriptExpression::AlignOf { output, location } => {
+                self.check_output_exists(*output, location);
+                ExpressionValue::absolute(self.outputs[*output].alignment)
+            }
+            ScriptExpression::Assert { condition, message } => {
+                if self.evaluate_value(condition) == 0 {
+                    self.record_script_error(message.clone());
+                }
+                ExpressionValue::absolute(self.script.dot)
+            }
+            ScriptExpression::CommonPageSize => ExpressionValue::absolute(self.common_page_size),
+            ScriptExpression::MaximumPageSize => ExpressionValue::absolute(self.maximum_page_size),
+            ScriptExpression::DataSegmentAlign(inner) => {
+                let alignment = self.evaluate_value(inner).max(1);
+                let dot = self.script.dot;
+                ExpressionValue::absolute(
+                    dot.wrapping_add(alignment - 1) & alignment.wrapping_neg(),
+                )
+            }
+            ScriptExpression::DataSegmentEnd => ExpressionValue::absolute(self.script.dot),
+            ScriptExpression::DataSegmentRelocationReadOnlyEnd => {
+                ExpressionValue::absolute(align_up_power(self.script.dot, self.maximum_page_size))
+            }
+            ScriptExpression::Defined { name, order } => {
+                let defined = match self.find(name) {
+                    Some(id) => {
+                        self.symbols[id].is_defined()
+                            && self.script.symbol_order.get(&id).copied().unwrap_or(0) < *order
+                    }
+                    None => false,
+                };
+                ExpressionValue::absolute(u64::from(defined))
+            }
+            ScriptExpression::RegionLength(region) => {
+                let expression = self.script.regions[*region].length.clone();
+                self.evaluate_script(&expression)
+            }
+            ScriptExpression::RegionOrigin(region) => {
+                let expression = self.script.regions[*region].origin.clone();
+                self.evaluate_script(&expression)
+            }
+            ScriptExpression::LoadAddress { output, location } => {
+                self.check_output_exists(*output, location);
+                ExpressionValue::absolute(self.load_address_of(*output))
+            }
+            ScriptExpression::Log2Ceil(inner) => {
+                let value = self.evaluate_value(inner).max(1);
+                let result = if value.is_power_of_two() {
+                    u64::from(value.trailing_zeros())
+                } else {
+                    u64::from(64 - value.leading_zeros())
+                };
+                ExpressionValue::absolute(result)
+            }
+            ScriptExpression::Maximum(left, right) => {
+                let a = self.evaluate_value(left);
+                let b = self.evaluate_value(right);
+                ExpressionValue::absolute(a.max(b))
+            }
+            ScriptExpression::Minimum(left, right) => {
+                let a = self.evaluate_value(left);
+                let b = self.evaluate_value(right);
+                ExpressionValue::absolute(a.min(b))
+            }
+            ScriptExpression::SizeOf(output) => {
+                ExpressionValue::absolute(self.outputs[*output].size)
+            }
+            ScriptExpression::SizeOfHeaders => ExpressionValue::absolute(self.header_size()),
+            ScriptExpression::CompoundAssign {
+                name,
+                operator,
+                value,
+                location,
+            } => {
+                let left = self.script_symbol_value(name, location);
+                match operator {
+                    '+' => {
+                        let right = self.evaluate_script(value);
+                        self.script_add(left, right)
+                    }
+                    '-' => {
+                        let right = self.evaluate_script(value);
+                        self.script_subtract(left, right)
+                    }
+                    _ => {
+                        let a = self.value_of(&left);
+                        let b = self.evaluate_value(value);
+                        let result = match operator {
+                            '*' => a.wrapping_mul(b),
+                            '/' => match a.checked_div(b) {
+                                Some(value) => value,
+                                None => {
+                                    self.script_expression_error(location, "division by zero");
+                                    0
+                                }
+                            },
+                            '<' => a.wrapping_shl((b % 64) as u32),
+                            '>' => a.wrapping_shr((b % 64) as u32),
+                            '&' => a & b,
+                            '^' => a ^ b,
+                            _ => a | b,
+                        };
+                        ExpressionValue::absolute(result)
+                    }
+                }
+            }
+            ScriptExpression::OverlayEnd { members, address } => {
+                let maximum = members
+                    .iter()
+                    .map(|member| self.outputs[*member].size)
+                    .max()
+                    .unwrap_or(0);
+                let start = self.evaluate_value(address);
+                ExpressionValue::absolute(start.wrapping_add(maximum))
+            }
+            ScriptExpression::OverlayFollow(previous) => {
+                let value = self
+                    .load_address_of(*previous)
+                    .wrapping_add(self.outputs[*previous].size);
+                ExpressionValue::absolute(value)
+            }
+            ScriptExpression::OutputStart(output) => {
+                ExpressionValue::relative(ValueBase::Output(*output), 0, "")
+            }
+        }
+    }
+
+    fn evaluate_binary(
+        &mut self,
+        operator: &str,
+        left: &ScriptExpression,
+        right: &ScriptExpression,
+        location: &str,
+    ) -> ExpressionValue {
+        match operator {
+            "+" => {
+                let a = self.evaluate_script(left);
+                let b = self.evaluate_script(right);
+                self.script_add(a, b)
+            }
+            "-" => {
+                let a = self.evaluate_script(left);
+                let b = self.evaluate_script(right);
+                self.script_subtract(a, b)
+            }
+            "&" | "^" | "|" => {
+                let a = self.evaluate_script(left);
+                let b = self.evaluate_script(right);
+                self.script_bitwise(operator, a, b)
+            }
+            "||" => {
+                let result = self.evaluate_value(left) != 0 || self.evaluate_value(right) != 0;
+                ExpressionValue::absolute(u64::from(result))
+            }
+            "&&" => {
+                let result = self.evaluate_value(left) != 0 && self.evaluate_value(right) != 0;
+                ExpressionValue::absolute(u64::from(result))
+            }
+            _ => {
+                let a = self.evaluate_value(left);
+                let b = self.evaluate_value(right);
+                let result = match operator {
+                    "*" => a.wrapping_mul(b),
+                    "/" => match a.checked_div(b) {
+                        Some(value) => value,
+                        None => {
+                            self.script_expression_error(location, "division by zero");
+                            0
+                        }
+                    },
+                    "%" => {
+                        if b == 0 {
+                            self.script_expression_error(location, "modulo by zero");
+                            0
+                        } else {
+                            a % b
+                        }
+                    }
+                    "<<" => a.wrapping_shl((b % 64) as u32),
+                    ">>" => a.wrapping_shr((b % 64) as u32),
+                    "<" => u64::from(a < b),
+                    ">" => u64::from(a > b),
+                    ">=" => u64::from(a >= b),
+                    "<=" => u64::from(a <= b),
+                    "==" => u64::from(a == b),
+                    _ => u64::from(a != b),
+                };
+                ExpressionValue::absolute(result)
+            }
+        }
+    }
+
+    pub fn should_add_provide_symbol(&mut self, name: &str) -> bool {
+        let Some(id) = self.find(name) else {
+            return false;
+        };
+        let symbol = &self.symbols[id];
+        if symbol.is_defined() || symbol.is_common() {
+            self.script.unused_provide_symbols.insert(id);
+            return false;
+        }
+        !self.script.unused_provide_symbols.contains(&id)
+    }
+
+    fn should_define_script_symbol(&mut self, assignment: usize) -> bool {
+        let name = self.script.assignments[assignment].name.clone();
+        if name == "." {
+            return false;
+        }
+        !self.script.assignments[assignment].provide || self.should_add_provide_symbol(&name)
+    }
+
+    pub fn add_script_referenced_symbols(&mut self) {
+        let reference = |context: &mut Context, name: &str| {
+            let id = context.add_unused_undefined(name);
+            context.symbols[id].used_in_regular_object = true;
+            context.symbols[id].referenced = true;
+        };
+        for name in self.script.referenced_symbols.clone() {
+            reference(self, &name);
+        }
+        let mut added: BTreeSet<String> = BTreeSet::new();
+        let mut stack: Vec<Vec<String>> = Vec::new();
+        for (name, references) in self.script.provide_map.clone() {
+            if self.should_add_provide_symbol(&name) && added.insert(name.clone()) {
+                stack.push(references);
+            }
+        }
+        while let Some(references) = stack.pop() {
+            for name in references {
+                reference(self, &name);
+                self.script.referenced_symbols.push(name.clone());
+                let found = self
+                    .script
+                    .provide_map
+                    .iter()
+                    .find(|(held, _)| *held == name)
+                    .map(|(_, list)| list.clone());
+                if let Some(list) = found {
+                    if self.should_add_provide_symbol(&name) && added.insert(name.clone()) {
+                        stack.push(list);
+                    }
+                }
+            }
+        }
+    }
+
+    fn declare_script_symbol(&mut self, assignment: usize) {
+        if !self.should_define_script_symbol(assignment) {
+            return;
+        }
+        let name = self.script.assignments[assignment].name.clone();
+        let hidden = self.script.assignments[assignment].hidden;
+        let order = self.script.assignments[assignment].order;
+        let id = self.insert(&name);
+        if !self.symbols[id].is_defined() {
+            self.script.symbol_order.insert(id, order);
+        }
+        let other = if hidden {
+            visibility::HIDDEN
+        } else {
+            visibility::DEFAULT
+        };
+        self.define_script_symbol_plain(id, other);
+        self.script.assignments[assignment].symbol = Some(id);
+        self.script.assignments[assignment].provide = false;
+        self.symbols[id].used_in_regular_object = true;
+        self.symbols[id].script_defined = true;
+    }
+
+    fn define_script_symbol_plain(&mut self, id: SymbolIndex, other: u8) {
+        self.merge_visibility(id, other);
+        let entry = &mut self.symbols[id];
+        entry.state = SymbolState::Defined;
+        entry.file = Some(INTERNAL);
+        entry.binding = symbol_binding::GLOBAL;
+        entry.kind = symbol_type::NO_TYPE;
+        entry.value = 0;
+        entry.size = 0;
+        entry.section = None;
+        entry.header_relative = false;
+        entry.output_section_symbol = None;
+        entry.output_relative_end = false;
+    }
+
+    pub fn declare_script_symbols(&mut self) {
+        for command in self.script.commands.clone() {
+            match command {
+                ScriptCommand::Assignment(assignment) => self.declare_script_symbol(assignment),
+                ScriptCommand::Output(output) => {
+                    if self.outputs[output].script.constraint != OutputConstraint::None {
+                        continue;
+                    }
+                    for inner in self.outputs[output].script.commands.clone() {
+                        if let OutputCommand::Assignment(assignment) = inner {
+                            self.declare_script_symbol(assignment);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_symbol_from_value(&mut self, id: SymbolIndex, value: &ExpressionValue) {
+        let absolute = value.is_absolute();
+        let resolved = self.value_of(value);
+        let offset = self.section_offset_of(value);
+        let header = self.elf_header_output;
+        let entry = &mut self.symbols[id];
+        entry.section = None;
+        entry.header_relative = false;
+        entry.output_section_symbol = None;
+        entry.output_relative_end = false;
+        if absolute {
+            entry.value = resolved;
+        } else {
+            match value.base {
+                Some(ValueBase::Input(section)) => {
+                    entry.section = Some(section);
+                    entry.value = offset;
+                }
+                Some(ValueBase::Output(output)) => {
+                    if output == header && header != 0 {
+                        entry.header_relative = true;
+                    } else {
+                        entry.output_section_symbol = Some(output);
+                    }
+                    entry.value = offset;
+                }
+                None => entry.value = resolved,
+            }
+        }
+        entry.kind = value.kind;
+    }
+
+    fn add_script_symbol(&mut self, assignment: usize) {
+        if !self.should_define_script_symbol(assignment) {
+            return;
+        }
+        let expression = self.script.assignments[assignment].expression.clone();
+        let value = self.evaluate_script(&expression);
+        let name = self.script.assignments[assignment].name.clone();
+        let hidden = self.script.assignments[assignment].hidden;
+        let id = self.insert(&name);
+        let other = if hidden {
+            visibility::HIDDEN
+        } else {
+            visibility::DEFAULT
+        };
+        self.define_script_symbol_plain(id, other);
+        let base = if value.is_absolute() {
+            None
+        } else {
+            value.base
+        };
+        let symbol_value = if value.base.is_some() {
+            0
+        } else {
+            self.value_of(&value)
+        };
+        let header = self.elf_header_output;
+        let entry = &mut self.symbols[id];
+        entry.value = symbol_value;
+        entry.kind = value.kind;
+        match base {
+            Some(ValueBase::Input(section)) => entry.section = Some(section),
+            Some(ValueBase::Output(output)) => {
+                if output == header && header != 0 {
+                    entry.header_relative = true;
+                } else {
+                    entry.output_section_symbol = Some(output);
+                }
+            }
+            None => {}
+        }
+        self.symbols[id].used_in_regular_object = true;
+        self.script.assignments[assignment].symbol = Some(id);
+    }
+
+    pub fn process_script_symbol_assignments(&mut self) {
+        let aether = self.ensure_aether();
+        self.script.state_output = Some(aether);
+        self.script.state_memory_region = None;
+        self.script.state_load_region = None;
+        for command in self.script.commands.clone() {
+            match command {
+                ScriptCommand::Assignment(assignment) => self.add_script_symbol(assignment),
+                ScriptCommand::Output(output) => {
+                    for inner in self.outputs[output].script.commands.clone() {
+                        if let OutputCommand::Assignment(assignment) = inner {
+                            self.add_script_symbol(assignment);
+                        }
+                    }
+                }
+            }
+        }
+        self.script.state_output = None;
+    }
+
+    fn expand_memory_regions(&mut self, size: u64) {
+        if let Some(region) = self.script.state_memory_region {
+            self.script.regions[region].position =
+                self.script.regions[region].position.wrapping_add(size);
+        }
+        if let Some(region) = self.script.state_load_region {
+            if Some(region) != self.script.state_memory_region {
+                self.script.regions[region].position =
+                    self.script.regions[region].position.wrapping_add(size);
+            }
+        }
+    }
+
+    fn expand_output_section(&mut self, size: u64) {
+        let Some(output) = self.script.state_output else {
+            return;
+        };
+        self.outputs[output].size = self.outputs[output].size.wrapping_add(size);
+        let mut region_size = size;
+        if self.outputs[output].script.in_overlay {
+            if self.outputs[output].size > self.script.state_overlay_size {
+                region_size = self.outputs[output].size - self.script.state_overlay_size;
+                self.script.state_overlay_size = self.outputs[output].size;
+            } else {
+                region_size = 0;
+            }
+        }
+        self.expand_memory_regions(region_size);
+    }
+
+    fn set_script_dot(&mut self, expression: &ScriptExpression, location: &str, in_section: bool) {
+        let value = self.evaluate_value(expression);
+        if value < self.script.dot && in_section {
+            let name = self
+                .script
+                .state_output
+                .map(|output| self.outputs[output].name.clone())
+                .unwrap_or_default();
+            let dot = self.script.dot;
+            self.record_script_error(format!(
+                "{location}: unable to move location counter (0x{dot:x}) backward to 0x{value:x} for section '{name}'"
+            ));
+        }
+        if in_section {
+            let size = value.wrapping_sub(self.script.dot);
+            self.expand_output_section(size);
+        }
+        self.script.dot = value;
+    }
+
+    fn assign_script_symbol(&mut self, assignment: usize, in_section: bool) {
+        let name = self.script.assignments[assignment].name.clone();
+        let expression = self.script.assignments[assignment].expression.clone();
+        if name == "." {
+            let location = self.script.assignments[assignment].location.clone();
+            self.set_script_dot(&expression, &location, in_section);
+            return;
+        }
+        let Some(id) = self.script.assignments[assignment].symbol else {
+            return;
+        };
+        let value = self.evaluate_script(&expression);
+        self.set_symbol_from_value(id, &value);
+    }
+}
+
+fn script_pattern_matches(patterns: &[String], text: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        if pattern == "*" {
+            return true;
+        }
+        if pattern.contains(['*', '?', '[', '\\']) {
+            glob_match(pattern, text)
+        } else {
+            pattern == text
+        }
+    })
+}
+
+fn sort_sections_by(sections: &mut [SectionIndex], policy: SortPolicy, data: &[InputSection]) {
+    match policy {
+        SortPolicy::Default | SortPolicy::None => {}
+        SortPolicy::Alignment => {
+            sections.sort_by(|left, right| data[*right].alignment.cmp(&data[*left].alignment))
+        }
+        SortPolicy::Name => {
+            sections.sort_by(|left, right| data[*left].name.cmp(&data[*right].name))
+        }
+        SortPolicy::Priority => sections.sort_by_key(|section| priority_of(&data[*section].name)),
+        SortPolicy::Reverse => sections.reverse(),
+    }
+}
+
+fn sort_input_sections_by(
+    sections: &mut [SectionIndex],
+    outer: SortPolicy,
+    inner: SortPolicy,
+    configured: SortPolicy,
+    data: &[InputSection],
+) {
+    if outer == SortPolicy::None {
+        return;
+    }
+    if inner == SortPolicy::Default {
+        sort_sections_by(sections, configured, data);
+    } else {
+        sort_sections_by(sections, inner, data);
+    }
+    sort_sections_by(sections, outer, data);
+}
+
+impl<'s> Context<'s> {
+    fn script_file_name(&self, file: Option<FileIndex>) -> (String, String) {
+        match file {
+            Some(index) if index < self.files.len() => {
+                let data = &self.files[index];
+                let archive = data.archive_name.clone().unwrap_or_default();
+                let name = if archive.is_empty() {
+                    data.name.clone()
+                } else {
+                    format!("{archive}:{}", data.name)
+                };
+                (name, archive)
+            }
+            _ => (String::new(), String::new()),
+        }
+    }
+
+    fn description_matches_file(&self, description: usize, file: Option<FileIndex>) -> bool {
+        let held = &self.script.descriptions[description];
+        if held.file_pattern == "*" {
+            return true;
+        }
+        let (name, archive) = self.script_file_name(file);
+        let patterns = vec![held.file_pattern.clone()];
+        match held.file_match {
+            FileMatch::WholeArchive => script_pattern_matches(&patterns, &archive),
+            FileMatch::ArchivesExcluded => {
+                archive.is_empty() && script_pattern_matches(&patterns, &name)
+            }
+            FileMatch::Trivial => script_pattern_matches(&patterns, &name),
+        }
+    }
+
+    pub fn script_should_keep(&self, section: SectionIndex) -> bool {
+        let data = &self.sections[section];
+        for description in &self.script.kept_descriptions {
+            if !self.description_matches_file(*description, data.file) {
+                continue;
+            }
+            let held = &self.script.descriptions[*description];
+            for rule in &held.patterns {
+                if script_pattern_matches(&rule.sections, &data.name)
+                    && data.flags & held.with_flags == held.with_flags
+                    && data.flags & held.without_flags == 0
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn compute_input_sections(
+        &mut self,
+        description: usize,
+        candidates: &[SectionIndex],
+    ) -> Vec<SectionIndex> {
+        let mut result: Vec<SectionIndex> = Vec::new();
+        let mut positions: Vec<usize> = Vec::new();
+        let mut seen: BTreeSet<usize> = BTreeSet::new();
+        let mut size_after_previous_sort = 0usize;
+        let configured = self.options.sort_section;
+        let rules = self.script.descriptions[description].patterns.clone();
+        let with_flags = self.script.descriptions[description].with_flags;
+        let without_flags = self.script.descriptions[description].without_flags;
+        let sort_by_position = |context: &Context,
+                                result: &mut Vec<SectionIndex>,
+                                positions: &mut [usize],
+                                begin: usize,
+                                end: usize| {
+            positions[begin..end].sort();
+            for index in begin..end {
+                result[index] = candidates[positions[index]];
+            }
+            sort_input_sections_by(
+                &mut result[begin..end],
+                configured,
+                SortPolicy::None,
+                configured,
+                &context.sections,
+            );
+        };
+        for rule in &rules {
+            let size_before = result.len();
+            for (position, section) in candidates.iter().enumerate() {
+                let data = &self.sections[*section];
+                if !data.live || data.output.is_some() || seen.contains(&position) {
+                    continue;
+                }
+                if !script_pattern_matches(&rule.sections, &data.name) {
+                    continue;
+                }
+                if !self.description_matches_file(description, data.file) {
+                    continue;
+                }
+                if !rule.excluded_files.is_empty() {
+                    let (name, _) = self.script_file_name(data.file);
+                    if script_pattern_matches(&rule.excluded_files, &name) {
+                        continue;
+                    }
+                }
+                if data.flags & with_flags != with_flags || data.flags & without_flags != 0 {
+                    continue;
+                }
+                result.push(*section);
+                positions.push(position);
+                seen.insert(position);
+            }
+            if rule.sort_outer == SortPolicy::Default {
+                continue;
+            }
+            sort_by_position(
+                self,
+                &mut result,
+                &mut positions,
+                size_after_previous_sort,
+                size_before,
+            );
+            let end = result.len();
+            sort_input_sections_by(
+                &mut result[size_before..end],
+                rule.sort_outer,
+                rule.sort_inner,
+                configured,
+                &self.sections,
+            );
+            size_after_previous_sort = result.len();
+        }
+        let end = result.len();
+        sort_by_position(
+            self,
+            &mut result,
+            &mut positions,
+            size_after_previous_sort,
+            end,
+        );
+        result
+    }
+
+    fn discard_script_section(&mut self, section: SectionIndex) {
+        if self.synthetic_section(".shstrtab") == Some(section) {
+            let name = self.sections[section].name.clone();
+            self.error_always(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context(format!("Reason: discarding {name} section is not allowed")),
+            );
+        }
+        self.sections[section].live = false;
+        self.sections[section].output = None;
+        for dependent in self.sections[section].dependents.clone() {
+            self.discard_script_section(dependent);
+        }
+    }
+
+    fn create_script_input_list(&mut self, output: OutputIndex) -> Vec<SectionIndex> {
+        let mut list = Vec::new();
+        let candidates = self.input_order.clone();
+        for command in self.outputs[output].script.commands.clone() {
+            if let OutputCommand::Input(description) = command {
+                let bases = self.compute_input_sections(description, &candidates);
+                for section in &bases {
+                    self.sections[*section].output = Some(output);
+                }
+                list.extend(bases.iter().copied());
+                self.script.descriptions[description].bases = bases;
+            }
+        }
+        list
+    }
+
+    fn process_script_output(&mut self, output: OutputIndex) -> bool {
+        let list = self.create_script_input_list(output);
+        if self.outputs[output].name == "/DISCARD/" {
+            for section in list {
+                self.discard_script_section(section);
+            }
+            self.outputs[output].script.commands.clear();
+            return false;
+        }
+        let constraint = self.outputs[output].script.constraint;
+        if constraint != OutputConstraint::None {
+            let writable = list
+                .iter()
+                .any(|section| self.sections[*section].flags & section_flag::WRITE != 0);
+            let matches = (writable && constraint == OutputConstraint::ReadWrite)
+                || (!writable && constraint == OutputConstraint::ReadOnly);
+            if !matches {
+                for section in list {
+                    self.sections[section].output = None;
+                }
+                self.outputs[output].script.commands.clear();
+                return false;
+            }
+        }
+        if let Some(expression) = self.outputs[output].script.sub_alignment.clone() {
+            let alignment = self.evaluate_value(&expression);
+            for section in &list {
+                self.sections[*section].alignment = alignment;
+            }
+        }
+        self.outputs[output].script.created = true;
+        self.outputs[output].live = true;
+        true
+    }
+
+    pub fn process_section_commands(&mut self) {
+        let mut overwrite: BTreeMap<String, OutputIndex> = BTreeMap::new();
+        let mut index = 0u32;
+        let mut used_overwrite: BTreeSet<OutputIndex> = BTreeSet::new();
+        for output in self.script.overwrite_sections.clone() {
+            if self.process_script_output(output) {
+                let name = self.outputs[output].name.clone();
+                if let std::collections::btree_map::Entry::Vacant(slot) =
+                    overwrite.entry(name.clone())
+                {
+                    slot.insert(output);
+                } else {
+                    self.warn(
+                        problem(
+                            "EI263",
+                            "A linker script places sections in a way the linker cannot carry out.",
+                        )
+                        .with_context(format!(
+                            "Reason: OVERWRITE_SECTIONS specifies duplicate {name}"
+                        )),
+                    );
+                }
+            }
+        }
+        let mut commands = self.script.commands.clone();
+        for command in commands.iter_mut() {
+            if let ScriptCommand::Output(output) = *command {
+                let name = self.outputs[output].name.clone();
+                if let Some(replacement) = overwrite.get(&name).copied() {
+                    self.outputs[replacement].script.section_index = index;
+                    index += 1;
+                    used_overwrite.insert(replacement);
+                    *command = ScriptCommand::Output(replacement);
+                } else if self.process_script_output(output) {
+                    self.outputs[output].script.section_index = index;
+                    index += 1;
+                }
+            }
+        }
+        for output in self.script.overwrite_sections.clone() {
+            if self.outputs[output].script.created
+                && self.outputs[output].script.section_index == u32::MAX
+                && !used_overwrite.contains(&output)
+            {
+                commands.push(ScriptCommand::Output(output));
+            }
+        }
+        self.script.commands = commands;
+    }
+
+    fn record_script_section(&mut self, output: OutputIndex, section: SectionIndex) {
+        self.sections[section].output = Some(output);
+        let needs_new = !matches!(
+            self.outputs[output].script.commands.last(),
+            Some(OutputCommand::Input(_))
+        );
+        if needs_new {
+            let index = self.new_input_description("", 0, 0);
+            self.outputs[output]
+                .script
+                .commands
+                .push(OutputCommand::Input(index));
+        }
+        if let Some(OutputCommand::Input(description)) = self.outputs[output].script.commands.last()
+        {
+            let description = *description;
+            self.script.descriptions[description].bases.push(section);
+        }
+    }
+
+    fn script_output_by_name(&self, name: &str) -> Option<OutputIndex> {
+        self.script
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                ScriptCommand::Output(output) if self.outputs[*output].name == name => {
+                    Some(*output)
+                }
+                _ => None,
+            })
+    }
+
+    pub fn orphan_output_name(&self, section: SectionIndex) -> String {
+        let name = &self.sections[section].name;
+        if name == "COMMON" {
+            return ".bss".to_string();
+        }
+        if self.script.has_sections {
+            return name.clone();
+        }
+        output_section_name(name)
+    }
+
+    pub fn add_orphan_sections(&mut self) {
+        let mut by_name: BTreeMap<String, Vec<OutputIndex>> = BTreeMap::new();
+        let mut created: Vec<OutputIndex> = Vec::new();
+        for section in self.input_order.clone() {
+            if !self.sections[section].live || self.sections[section].output.is_some() {
+                continue;
+            }
+            self.script.orphan_sections.push(section);
+            let name = self.orphan_output_name(section);
+            if let Some(output) = self.script_output_by_name(&name) {
+                self.record_script_section(output, section);
+                continue;
+            }
+            let kind = self.sections[section].kind;
+            let flags = self.sections[section].flags;
+            let is_group = kind == section_type::GROUP || flags & section_flag::GROUP != 0;
+            let existing = if is_group {
+                None
+            } else {
+                by_name.get(&name).and_then(|list| list.first().copied())
+            };
+            match existing {
+                Some(output) => self.record_script_section(output, section),
+                None => {
+                    let output = self.create_script_output(&name, "<internal>");
+                    self.outputs[output].live = true;
+                    self.record_script_section(output, section);
+                    by_name.entry(name).or_default().push(output);
+                    created.push(output);
+                }
+            }
+        }
+        let new_commands: Vec<ScriptCommand> =
+            created.into_iter().map(ScriptCommand::Output).collect();
+        if self.script.has_sections {
+            self.script.commands.extend(new_commands);
+        } else {
+            let mut commands = new_commands;
+            commands.extend(self.script.commands.iter().copied());
+            self.script.commands = commands;
+        }
+        self.rebuild_order_from_script();
+    }
+
+    pub fn rebuild_order_from_script(&mut self) {
+        self.order = self
+            .script
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                ScriptCommand::Output(output) => Some(*output),
+                ScriptCommand::Assignment(_) => None,
+            })
+            .collect();
+        for output in self.order.clone() {
+            let mut members = Vec::new();
+            for command in self.outputs[output].script.commands.clone() {
+                if let OutputCommand::Input(description) = command {
+                    for section in self.script.descriptions[description].bases.clone() {
+                        if self.sections[section].output == Some(output) {
+                            self.sections[section].description = description;
+                            members.push(section);
+                        }
+                    }
+                }
+            }
+            if !self.outputs[output].script.commands.is_empty() {
+                self.outputs[output].members = members;
+            }
+        }
+    }
+
+    pub fn process_insert_commands(&mut self) {
+        let inserts = self.script.inserts.clone();
+        for insert in inserts {
+            let mut moves: Vec<ScriptCommand> = Vec::new();
+            for name in &insert.names {
+                let found = self.script.commands.iter().position(|command| {
+                    matches!(command, ScriptCommand::Output(output) if self.outputs[*output].name == *name)
+                });
+                if let Some(position) = found {
+                    moves.push(self.script.commands.remove(position));
+                }
+            }
+            let place = self.script.commands.iter().position(|command| {
+                matches!(command, ScriptCommand::Output(output) if self.outputs[*output].name == insert.place)
+            });
+            match place {
+                None => {
+                    let first = insert.names.first().cloned().unwrap_or_default();
+                    let direction = if insert.after { "after" } else { "before" };
+                    self.error_always(
+                        problem(
+                            "EI263",
+                            "A linker script places sections in a way the linker cannot carry out.",
+                        )
+                        .with_context(format!(
+                            "Reason: unable to insert {first} {direction} {}",
+                            insert.place
+                        )),
+                    );
+                }
+                Some(mut position) => {
+                    if insert.after {
+                        position += 1;
+                    }
+                    for (offset, command) in moves.into_iter().enumerate() {
+                        self.script.commands.insert(position + offset, command);
+                    }
+                }
+            }
+        }
+    }
+
+    fn output_is_discardable(&self, output: OutputIndex) -> bool {
+        let section = &self.outputs[output];
+        if section.name == "/DISCARD/" {
+            return true;
+        }
+        if section.script.expressions_use_symbols || section.used_in_expression {
+            return false;
+        }
+        for command in &section.script.commands {
+            match command {
+                OutputCommand::Assignment(assignment) => {
+                    let held = &self.script.assignments[*assignment];
+                    if held.name != "." && held.symbol.is_none() {
+                        continue;
+                    }
+                    return false;
+                }
+                OutputCommand::Data { .. } => return false,
+                OutputCommand::Input(_) => {}
+            }
+        }
+        true
+    }
+
+    fn propagate_program_headers(&mut self, output: OutputIndex, defaults: &mut Vec<String>) {
+        if self.outputs[output].script.program_headers.is_empty() {
+            if self.outputs[output].flags & section_flag::ALLOCATE != 0 {
+                self.outputs[output].script.program_headers = defaults.clone();
+            }
+        } else {
+            *defaults = self.outputs[output].script.program_headers.clone();
+        }
+    }
+
+    pub fn adjust_script_output_sections(&mut self) {
+        let mut flags = section_flag::ALLOCATE;
+        let mut defaults: Vec<String> = Vec::new();
+        let mut seen_relocation_read_only = false;
+        let padding = self
+            .synthetic_section(".relro_padding")
+            .and_then(|section| self.sections[section].output);
+        let mut kept: Vec<ScriptCommand> = Vec::new();
+        for command in self.script.commands.clone() {
+            let ScriptCommand::Output(output) = command else {
+                kept.push(command);
+                continue;
+            };
+            if let Some(expression) = self.outputs[output].script.alignment.clone() {
+                let alignment = self.evaluate_value(&expression);
+                self.outputs[output].alignment = self.outputs[output].alignment.max(alignment);
+            }
+            let empty = self.outputs[output].members.is_empty();
+            let mut discardable = empty && self.output_is_discardable(output);
+            if self.outputs[output].has_input_sections && !discardable {
+                flags = self.outputs[output].flags;
+            }
+            if empty {
+                let allocate = if self.outputs[output].script.non_allocated {
+                    0
+                } else {
+                    section_flag::ALLOCATE
+                };
+                self.outputs[output].flags = flags & (allocate | section_flag::WRITE);
+                self.outputs[output].relocation_read_only = self.is_relocation_read_only(output);
+                self.outputs[output].rank = self.rank_of(output);
+            }
+            if self.outputs[output].script.section_index != u32::MAX {
+                self.propagate_program_headers(output, &mut defaults);
+            }
+            if Some(output) == padding && !seen_relocation_read_only {
+                discardable = true;
+            }
+            if discardable {
+                self.outputs[output].live = false;
+                for member in self.outputs[output].members.clone() {
+                    self.sections[member].live = false;
+                }
+            } else {
+                let section = &self.outputs[output];
+                seen_relocation_read_only |= section.relocation_read_only
+                    && !(section.kind == section_type::NO_BITS
+                        && section.flags & section_flag::THREAD_LOCAL != 0);
+                kept.push(command);
+            }
+        }
+        self.script.commands = kept;
+    }
+
+    fn compare_output_sections(&self, left: OutputIndex, right: OutputIndex) -> std::cmp::Ordering {
+        let a = &self.outputs[left];
+        let b = &self.outputs[right];
+        if a.rank != b.rank {
+            return a.rank.cmp(&b.rank);
+        }
+        if a.rank & rank::NOT_ADDRESS_SET == 0 {
+            let starts = &self.options.section_start;
+            return starts.get(&a.name).cmp(&starts.get(&b.name));
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    fn rank_proximity(&self, output: OutputIndex, command: ScriptCommand) -> i32 {
+        match command {
+            ScriptCommand::Output(other) if self.outputs[other].has_input_sections => {
+                (self.outputs[output].rank ^ self.outputs[other].rank).leading_zeros() as i32
+            }
+            _ => -1,
+        }
+    }
+
+    fn should_skip_command(&self, command: ScriptCommand) -> bool {
+        match command {
+            ScriptCommand::Assignment(assignment) => {
+                self.script.assignments[assignment].name != "."
+            }
+            ScriptCommand::Output(_) => false,
+        }
+    }
+
+    fn find_orphan_position(&self, commands: &[ScriptCommand], begin: usize, end: usize) -> usize {
+        let ScriptCommand::Output(output) = commands[end] else {
+            return end;
+        };
+        if self.outputs[output].flags & section_flag::ALLOCATE == 0 {
+            return end;
+        }
+        let padding = self
+            .synthetic_section(".relro_padding")
+            .and_then(|section| self.sections[section].output);
+        if Some(output) == padding {
+            if let Some(found) = (begin..end).find(|position| {
+                matches!(commands[*position], ScriptCommand::Assignment(assignment)
+                    if self.script.assignments[assignment].data_segment_relocation_read_only_end)
+            }) {
+                return found;
+            }
+        }
+        let mut maximum = 0;
+        let mut chosen = end;
+        for (position, command) in commands.iter().enumerate().take(end).skip(begin) {
+            let proximity = self.rank_proximity(output, *command);
+            let other_rank = match *command {
+                ScriptCommand::Output(other) => self.outputs[other].rank,
+                ScriptCommand::Assignment(_) => u32::MAX,
+            };
+            if proximity > maximum
+                || (proximity == maximum
+                    && matches!(commands[position], ScriptCommand::Output(_))
+                    && other_rank <= self.outputs[output].rank)
+            {
+                maximum = proximity;
+                chosen = position;
+            }
+        }
+        if chosen == end {
+            return end;
+        }
+        let with_inputs = |command: ScriptCommand| match command {
+            ScriptCommand::Output(other) => self.outputs[other].has_input_sections,
+            ScriptCommand::Assignment(_) => false,
+        };
+        let must_after =
+            !self.script.program_header_commands.is_empty() || !self.script.regions.is_empty();
+        let chosen_rank = match commands[chosen] {
+            ScriptCommand::Output(other) => self.outputs[other].rank,
+            ScriptCommand::Assignment(_) => u32::MAX,
+        };
+        let mut position = chosen;
+        if chosen_rank <= self.outputs[output].rank || must_after {
+            position += 1;
+            let mut cursor = position;
+            while cursor < end {
+                if !with_inputs(commands[cursor]) {
+                    cursor += 1;
+                    continue;
+                }
+                if self.rank_proximity(output, commands[cursor]) != maximum {
+                    break;
+                }
+                position = cursor + 1;
+                cursor += 1;
+            }
+        } else {
+            while position > begin {
+                if with_inputs(commands[position - 1]) {
+                    break;
+                }
+                position -= 1;
+            }
+        }
+        if !(position..end).any(|cursor| with_inputs(commands[cursor])) {
+            return end;
+        }
+        while position < end && self.should_skip_command(commands[position]) {
+            position += 1;
+        }
+        position
+    }
+
+    fn sort_orphan_sections(&mut self) {
+        let mut commands = self.script.commands.clone();
+        let total = commands.len();
+        let mut non_script = commands
+            .iter()
+            .position(|command| {
+                matches!(command, ScriptCommand::Output(output)
+                    if self.outputs[*output].script.section_index == u32::MAX)
+            })
+            .unwrap_or(total);
+        let mut tail: Vec<ScriptCommand> = commands[non_script..].to_vec();
+        tail.sort_by(|left, right| match (left, right) {
+            (ScriptCommand::Output(a), ScriptCommand::Output(b)) => {
+                self.compare_output_sections(*a, *b)
+            }
+            _ => std::cmp::Ordering::Equal,
+        });
+        commands.truncate(non_script);
+        commands.extend(tail);
+        let mut begin = commands
+            .iter()
+            .position(|command| !self.should_skip_command(*command))
+            .unwrap_or(total);
+        if begin != total && matches!(commands[begin], ScriptCommand::Assignment(_)) {
+            begin += 1;
+        }
+        while non_script < total {
+            let position = self.find_orphan_position(&commands, begin, non_script);
+            let ScriptCommand::Output(orphan) = commands[non_script] else {
+                non_script += 1;
+                continue;
+            };
+            let rank = self.outputs[orphan].rank;
+            let end = (non_script + 1..total)
+                .find(|cursor| {
+                    !matches!(commands[*cursor], ScriptCommand::Output(other) if self.outputs[other].rank == rank)
+                })
+                .unwrap_or(total);
+            commands[position..end].rotate_left(non_script - position);
+            non_script = end;
+        }
+        self.script.commands = commands;
+    }
+
+    fn find_memory_region(
+        &mut self,
+        output: OutputIndex,
+        hint: Option<usize>,
+    ) -> (Option<usize>, Option<usize>) {
+        let section = &self.outputs[output];
+        if section.flags & section_flag::ALLOCATE == 0 {
+            let has_content = section.has_input_sections
+                || section
+                    .script
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, OutputCommand::Data { .. }));
+            if !section.script.memory_region_name.is_empty() && has_content {
+                let name = section.name.clone();
+                self.warn(
+                    problem("EI263", "A linker script places sections in a way the linker cannot carry out.")
+                        .with_context(format!(
+                            "Reason: ignoring memory region assignment for non-allocatable section '{name}'"
+                        )),
+                );
+            }
+            return (None, None);
+        }
+        if !section.script.memory_region_name.is_empty() {
+            let name = section.script.memory_region_name.clone();
+            if let Some(region) = self.script.region(&name) {
+                return (Some(region), Some(region));
+            }
+            self.error_always(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context(format!("Reason: memory region '{name}' not declared")),
+            );
+            return (None, None);
+        }
+        if self.script.regions.is_empty() {
+            return (None, None);
+        }
+        if section.script.section_index == u32::MAX && hint.is_some() {
+            return (hint, hint);
+        }
+        let flags = section.flags;
+        for (_, region) in self.script.region_names.clone() {
+            if self.script.regions[region].compatible_with(flags) {
+                return (Some(region), None);
+            }
+        }
+        let name = section.name.clone();
+        self.error_always(
+            problem(
+                "EI263",
+                "A linker script places sections in a way the linker cannot carry out.",
+            )
+            .with_context(format!(
+                "Reason: no memory region specified for section '{name}'"
+            )),
+        );
+        (None, None)
+    }
+
+    fn adjust_sections_after_sorting(&mut self) {
+        let mut hint: Option<usize> = None;
+        for command in self.script.commands.clone() {
+            let ScriptCommand::Output(output) = command else {
+                continue;
+            };
+            let load_name = self.outputs[output].script.load_region_name.clone();
+            if !load_name.is_empty() {
+                match self.script.region(&load_name) {
+                    Some(region) => self.outputs[output].script.load_region = Some(region),
+                    None => self.error_always(
+                        problem(
+                            "EI263",
+                            "A linker script places sections in a way the linker cannot carry out.",
+                        )
+                        .with_context(format!("Reason: memory region '{load_name}' not declared")),
+                    ),
+                }
+            }
+            let (region, next_hint) = self.find_memory_region(output, hint);
+            self.outputs[output].script.memory_region = region;
+            hint = next_hint;
+        }
+        let mut defaults: Vec<String> = Vec::new();
+        if let Some(first) = self
+            .script
+            .program_header_commands
+            .iter()
+            .find(|command| command.kind == segment_type::LOAD)
+        {
+            defaults.push(first.name.clone());
+        }
+        for command in self.script.commands.clone() {
+            if let ScriptCommand::Output(output) = command {
+                self.propagate_program_headers(output, &mut defaults);
+            }
+        }
+    }
+
+    pub fn sort_script_sections(&mut self) {
+        for output in self.order.clone() {
+            if self.outputs[output].script.relocation_read_only {
+                self.outputs[output].relocation_read_only = true;
+            }
+            let read_only = self.is_relocation_read_only(output);
+            self.outputs[output].relocation_read_only = read_only;
+            let rank = self.rank_of(output);
+            self.outputs[output].rank = rank;
+        }
+        if !self.script.has_sections {
+            let mut outputs: Vec<ScriptCommand> = Vec::new();
+            let mut others: Vec<ScriptCommand> = Vec::new();
+            for command in self.script.commands.clone() {
+                match command {
+                    ScriptCommand::Output(_) => outputs.push(command),
+                    ScriptCommand::Assignment(_) => others.push(command),
+                }
+            }
+            outputs.sort_by(|left, right| match (left, right) {
+                (ScriptCommand::Output(a), ScriptCommand::Output(b)) => {
+                    self.compare_output_sections(*a, *b)
+                }
+                _ => std::cmp::Ordering::Equal,
+            });
+            outputs.extend(others);
+            self.script.commands = outputs;
+            for output in self.order.clone() {
+                let name = self.outputs[output].name.clone();
+                if name == ".init_array" || name == ".fini_array" {
+                    self.sort_by_priority(output);
+                } else if name == ".ctors" || name == ".dtors" {
+                    self.sort_constructors(output);
+                }
+            }
+        }
+        self.process_insert_commands();
+        self.adjust_script_output_sections();
+        if self.script.has_sections {
+            self.sort_orphan_sections();
+        }
+        self.adjust_sections_after_sorting();
+        self.order = self
+            .script
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                ScriptCommand::Output(output) => Some(*output),
+                ScriptCommand::Assignment(_) => None,
+            })
+            .collect();
+    }
+
+    fn assign_script_output_offsets(&mut self, output: OutputIndex) -> bool {
+        let flags = self.outputs[output].flags;
+        let is_thread_bss = flags & section_flag::THREAD_LOCAL != 0
+            && self.outputs[output].kind == section_type::NO_BITS;
+        let memory_region = self.outputs[output].script.memory_region;
+        let load_region = self.outputs[output].script.load_region;
+        let same_region = self.script.state_memory_region == memory_region;
+        let previous_load_default = self.script.state_load_region.is_none();
+        let saved_dot = self.script.dot;
+        self.script.state_memory_region = memory_region;
+        self.script.state_load_region = load_region;
+        let address_expression = self.outputs[output].script.address.clone().or_else(|| {
+            self.outputs[output]
+                .address_fixed
+                .map(|address| Rc::new(ScriptExpression::Fixed(address)))
+        });
+        let has_sections = self.script.has_sections;
+        let location = self.outputs[output].script.location.clone();
+        if flags & section_flag::ALLOCATE == 0 {
+            self.script.dot = 0;
+        } else if is_thread_bss && address_expression.is_none() {
+            if self.script.state_thread_bss_address == 0 {
+                self.script.state_thread_bss_address = self.script.dot;
+            } else {
+                self.script.dot = self.script.state_thread_bss_address;
+            }
+        } else {
+            if let Some(region) = self.script.state_memory_region {
+                if !(has_sections && address_expression.is_some()) {
+                    self.script.dot = self.script.regions[region].position;
+                }
+            }
+            if let Some(expression) = &address_expression {
+                self.set_script_dot(expression, &location, false);
+            } else if !has_sections {
+                if let Some(mode) = self.outputs[output].page_align {
+                    let dot = self.script.dot;
+                    let page = self.maximum_page_size;
+                    self.script.dot = match mode {
+                        PageAlign::Aligned => align_to(dot, page),
+                        PageAlign::Congruent => align_to(dot, page) + dot % page,
+                        PageAlign::ThreadLocal => {
+                            let alignment = self
+                                .tls_segment
+                                .map(|segment| self.segments[segment].alignment)
+                                .unwrap_or(1);
+                            align_to(dot, page) + align_to(dot % page, alignment)
+                        }
+                    };
+                }
+            }
+            if let Some(region) = self.script.state_memory_region {
+                let position = self.script.regions[region].position;
+                if position < self.script.dot {
+                    self.script.regions[region].position = self.script.dot;
+                }
+            }
+        }
+        self.script.state_output = Some(output);
+        if !(address_expression.is_some() && has_sections) {
+            let position = self.script.dot;
+            self.script.dot = align_up_power(self.script.dot, self.outputs[output].alignment);
+            let grown = self.script.dot.wrapping_sub(position);
+            self.expand_memory_regions(grown);
+        }
+        let changed = self.outputs[output].address != self.script.dot;
+        self.outputs[output].address = self.script.dot;
+        if let Some(expression) = self.outputs[output].script.load_address.clone() {
+            let load = self.evaluate_value(&expression);
+            self.script.state_load_offset = load.wrapping_sub(self.script.dot);
+        } else if let Some(region) = load_region {
+            let start = align_up_power(
+                self.script.regions[region].position,
+                self.outputs[output].alignment,
+            );
+            if self.script.regions[region].position < start {
+                self.script.regions[region].position = start;
+            }
+            self.script.state_load_offset = start.wrapping_sub(self.script.dot);
+        } else if !same_region || !previous_load_default {
+            self.script.state_load_offset = 0;
+        }
+        if let Some(segment) = self.outputs[output].load_segment {
+            if self.segments[segment].first == Some(output) {
+                self.segments[segment].load_offset = self.script.state_load_offset;
+            }
+        }
+        self.outputs[output].size = 0;
+        if self.outputs[output].script.first_in_overlay {
+            self.script.state_overlay_size = 0;
+        }
+        let commands = self.outputs[output].script.commands.clone();
+        let members = self.outputs[output].members.clone();
+        let mut placed: BTreeSet<SectionIndex> = BTreeSet::new();
+        let single = commands
+            .iter()
+            .filter(|command| matches!(command, OutputCommand::Input(_)))
+            .count()
+            <= 1;
+        let place = |context: &mut Context, section: SectionIndex| {
+            let position = context.script.dot;
+            context.script.dot =
+                align_up_power(context.script.dot, context.sections[section].alignment);
+            context.sections[section].offset_in_output =
+                context.script.dot - context.outputs[output].address;
+            context.script.dot = context
+                .script
+                .dot
+                .wrapping_add(context.sections[section].size);
+            let grown = context.script.dot.wrapping_sub(position);
+            context.expand_output_section(grown);
+        };
+        let mut data_offsets: Vec<(usize, u64)> = Vec::new();
+        for (command_index, command) in commands.iter().enumerate() {
+            match command {
+                OutputCommand::Assignment(assignment) => {
+                    self.script.assignments[*assignment].address = self.script.dot;
+                    self.assign_script_symbol(*assignment, true);
+                    let size = self
+                        .script
+                        .dot
+                        .wrapping_sub(self.script.assignments[*assignment].address);
+                    self.script.assignments[*assignment].size = size;
+                }
+                OutputCommand::Data { size, .. } => {
+                    data_offsets.push((
+                        command_index,
+                        self.script.dot - self.outputs[output].address,
+                    ));
+                    self.script.dot = self.script.dot.wrapping_add(*size);
+                    self.expand_output_section(*size);
+                }
+                OutputCommand::Input(description) => {
+                    for member in &members {
+                        if placed.contains(member) {
+                            continue;
+                        }
+                        if !single && self.sections[*member].description != *description {
+                            continue;
+                        }
+                        placed.insert(*member);
+                        place(self, *member);
+                    }
+                }
+            }
+        }
+        for member in &members {
+            if !placed.contains(member) {
+                place(self, *member);
+            }
+        }
+        for (command_index, offset) in data_offsets {
+            if let OutputCommand::Data { offset: held, .. } =
+                &mut self.outputs[output].script.commands[command_index]
+            {
+                *held = offset;
+            }
+        }
+        let padding = self
+            .synthetic_section(".relro_padding")
+            .and_then(|section| self.sections[section].output);
+        if Some(output) == padding {
+            let dot = self.script.dot;
+            let grown = align_up_power(dot, self.common_page_size) - dot;
+            self.expand_output_section(grown);
+        }
+        if flags & section_flag::ALLOCATE == 0 {
+            self.script.dot = saved_dot;
+        } else if is_thread_bss {
+            self.script.state_thread_bss_address = self.script.dot;
+            self.script.dot = saved_dot;
+        }
+        changed
+    }
+
+    pub fn script_assign_addresses(&mut self) -> bool {
+        if self.script.has_sections {
+            self.script.dot = self.options.image_base.unwrap_or(0);
+        } else {
+            let base = if self.is_relocatable() {
+                0
+            } else {
+                self.image_base
+            };
+            self.script.dot = base;
+            let header = self.elf_header_output;
+            let programs = self.program_header_output;
+            self.outputs[header].address = base;
+            self.outputs[programs].address = base + self.outputs[header].size;
+            if !self.is_relocatable() {
+                self.script.dot += self.header_size();
+            }
+        }
+        for region in 0..self.script.regions.len() {
+            let origin = self.script.regions[region].origin.clone();
+            let value = self.evaluate_value(&origin);
+            self.script.regions[region].position = value;
+        }
+        let aether = self.ensure_aether();
+        self.script.state_output = Some(aether);
+        self.script.state_memory_region = None;
+        self.script.state_load_region = None;
+        self.script.state_load_offset = 0;
+        self.script.state_thread_bss_address = 0;
+        self.script.error_on_missing_section = true;
+        self.script.recorded_errors.clear();
+        let snapshot: Vec<(SymbolIndex, Option<SectionIndex>, Option<OutputIndex>, u64)> = self
+            .script
+            .assignments
+            .iter()
+            .filter_map(|assignment| assignment.symbol)
+            .map(|id| {
+                let symbol = &self.symbols[id];
+                (
+                    id,
+                    symbol.section,
+                    symbol.output_section_symbol,
+                    symbol.value,
+                )
+            })
+            .collect();
+        let mut changed = false;
+        for command in self.script.commands.clone() {
+            match command {
+                ScriptCommand::Assignment(assignment) => {
+                    self.script.assignments[assignment].address = self.script.dot;
+                    self.assign_script_symbol(assignment, false);
+                    let size = self
+                        .script
+                        .dot
+                        .wrapping_sub(self.script.assignments[assignment].address);
+                    self.script.assignments[assignment].size = size;
+                }
+                ScriptCommand::Output(output) => {
+                    if self.assign_script_output_offsets(output) {
+                        changed = true;
+                        if self.changed_output.is_none() {
+                            self.changed_output = Some(output);
+                        }
+                    }
+                }
+            }
+        }
+        self.script.state_output = None;
+        for (id, section, output, value) in snapshot {
+            let symbol = &self.symbols[id];
+            if symbol.section != section
+                || symbol.output_section_symbol != output
+                || symbol.value != value
+            {
+                changed = true;
+                let better = self
+                    .changed_symbol
+                    .is_none_or(|held| self.symbols[id].name < self.symbols[held].name);
+                if better {
+                    self.changed_symbol = Some(id);
+                }
+            }
+        }
+        changed
+    }
+
+    pub fn create_script_segments(&mut self) {
+        let header = self.elf_header_output;
+        let programs = self.program_header_output;
+        let commands = self.script.program_header_commands.clone();
+        let base = self.segments.len();
+        for command in &commands {
+            let mut segment =
+                Segment::new(command.kind, command.flags.unwrap_or(segment_flag::READ));
+            segment.alignment = if command.kind == segment_type::LOAD {
+                self.maximum_page_size
+            } else {
+                0
+            };
+            self.segments.push(segment);
+            let index = self.segments.len() - 1;
+            if command.file_header {
+                self.segment_add(index, header);
+            }
+            if command.program_headers {
+                self.segment_add(index, programs);
+            }
+            if let Some(expression) = &command.load_address {
+                let address = self.evaluate_value(expression);
+                self.segments[index].physical_override = Some(address);
+            }
+        }
+        for output in self.order.clone() {
+            let names = self.outputs[output].script.program_headers.clone();
+            for name in names {
+                match commands.iter().position(|command| command.name == name) {
+                    Some(position) => {
+                        let index = base + position;
+                        self.segment_add(index, output);
+                        if commands[position].flags.is_none() {
+                            let flags = self.segment_flags_of(output);
+                            self.segments[index].flags |= flags;
+                        }
+                    }
+                    None => {
+                        if name != "NONE" {
+                            let location = self.outputs[output].script.location.clone();
+                            self.error_always(
+                                problem("EI263", "A linker script places sections in a way the linker cannot carry out.")
+                                    .with_context(format!(
+                                        "Reason: {location}: program header '{name}' is not listed in PHDRS"
+                                    )),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for (index, segment) in self.segments.iter().enumerate() {
+            if segment.kind == segment_type::THREAD_LOCAL && segment.first.is_some() {
+                self.tls_segment = Some(index);
+            }
+        }
+        let size = (self.segments.len() * self.encoding().program_header_size()) as u64;
+        self.outputs[programs].size = size;
+    }
+
+    pub fn allocate_script_headers(&mut self) {
+        let mut minimum = u64::MAX;
+        for output in &self.order {
+            if self.outputs[*output].flags & section_flag::ALLOCATE != 0 {
+                minimum = minimum.min(self.outputs[*output].address);
+            }
+        }
+        let Some(first_load) = self
+            .segments
+            .iter()
+            .position(|segment| segment.kind == segment_type::LOAD)
+        else {
+            return;
+        };
+        let explicit = self
+            .script
+            .program_header_commands
+            .iter()
+            .any(|command| command.file_header || command.program_headers);
+        let paged = !self.options.omagic && !self.options.nmagic;
+        let header_size = self.header_size();
+        let mut base = 0;
+        if self.script.has_sections && !explicit {
+            base = minimum - minimum % self.maximum_page_size;
+        }
+        if (paged || explicit) && header_size <= minimum.wrapping_sub(base) && minimum != u64::MAX {
+            let address = minimum - header_size;
+            let address = address - address % self.maximum_page_size;
+            let header = self.elf_header_output;
+            let programs = self.program_header_output;
+            self.outputs[header].address = address;
+            self.outputs[programs].address = address + self.outputs[header].size;
+            return;
+        }
+        if explicit {
+            self.error_always(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context("Reason: could not allocate headers".to_string()),
+            );
+        }
+        let header = self.elf_header_output;
+        let programs = self.program_header_output;
+        self.outputs[header].load_segment = None;
+        self.outputs[programs].load_segment = None;
+        for segment in self.segments.iter_mut() {
+            if segment.first == Some(header) || segment.first == Some(programs) {
+                segment.first = None;
+            }
+            if segment.last == Some(header) || segment.last == Some(programs) {
+                segment.last = None;
+            }
+        }
+        let first = self
+            .order
+            .iter()
+            .copied()
+            .find(|output| self.outputs[*output].load_segment == Some(first_load));
+        self.segments[first_load].first = first;
+        if self.segments[first_load].last.is_none() {
+            self.segments[first_load].last = first;
+        }
+        let removed: Vec<usize> = self
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.kind == segment_type::PROGRAM_HEADERS)
+            .map(|(index, _)| index)
+            .collect();
+        for index in removed.into_iter().rev() {
+            self.remove_segment(index);
+        }
+    }
+
+    pub fn remove_segment(&mut self, index: usize) {
+        self.segments.remove(index);
+        let renumber = |value: Option<usize>| -> Option<usize> {
+            match value {
+                Some(old) if old == index => None,
+                Some(old) if old > index => Some(old - 1),
+                other => other,
+            }
+        };
+        for output in self.outputs.iter_mut() {
+            output.load_segment = renumber(output.load_segment);
+        }
+        self.tls_segment = renumber(self.tls_segment);
+        self.relocation_read_only_segment = renumber(self.relocation_read_only_segment);
+    }
+
+    pub fn check_final_script_conditions(&mut self) {
+        for message in std::mem::take(&mut self.script.recorded_errors) {
+            self.error(
+                problem("EI261", "A linker script expression cannot be evaluated.")
+                    .with_context(format!("Reason: {message}")),
+            );
+        }
+        for output in self.order.clone() {
+            let size = self.outputs[output].size;
+            let name = self.outputs[output].name.clone();
+            if let Some(region) = self.outputs[output].script.memory_region {
+                let address = self.outputs[output].address;
+                self.check_memory_region(region, &name, address, size);
+            }
+            if let Some(region) = self.outputs[output].script.load_region {
+                let address = self.load_address_of(output);
+                self.check_memory_region(region, &name, address, size);
+            }
+        }
+    }
+
+    fn check_memory_region(&mut self, region: usize, name: &str, address: u64, size: u64) {
+        let origin_expression = self.script.regions[region].origin.clone();
+        let length_expression = self.script.regions[region].length.clone();
+        let origin = self.evaluate_value(&origin_expression);
+        let length = self.evaluate_value(&length_expression);
+        let end = address.wrapping_add(size);
+        let region_end = origin.wrapping_add(length);
+        if end > region_end {
+            let region_name = self.script.regions[region].name.clone();
+            self.error_always(
+                problem("EI262", "A section does not fit in its memory region.")
+                    .with_context(format!("Section: {name}"))
+                    .with_context(format!("Region: {region_name}"))
+                    .with_context(format!("Overflow: {} bytes", end - region_end)),
+            );
+        }
+    }
 }

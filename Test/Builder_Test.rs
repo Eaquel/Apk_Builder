@@ -68946,6 +68946,97 @@ mod linker_lit {
         outcome
     }
 
+    fn context_values<'d>(diagnostic: &'d crate::diag::Diagnostic, label: &str) -> Vec<&'d str> {
+        let prefix = format!("{label}: ");
+        diagnostic
+            .context
+            .iter()
+            .filter_map(|context| context.strip_prefix(prefix.as_str()))
+            .collect()
+    }
+
+    fn context_value<'d>(diagnostic: &'d crate::diag::Diagnostic, label: &str) -> Option<&'d str> {
+        context_values(diagnostic, label).into_iter().next()
+    }
+
+    fn lld_message(diagnostic: &crate::diag::Diagnostic, program: &str) -> String {
+        let value = |label: &str| context_value(diagnostic, label).unwrap_or("");
+        let values = |label: &str| context_values(diagnostic, label);
+        let coff = program == "lld-link";
+        match diagnostic.code.as_str() {
+            "EI207" => {
+                let visibility = context_value(diagnostic, "Visibility")
+                    .map(|shown| format!("{shown} "))
+                    .unwrap_or_default();
+                let references = values("Reference");
+                if coff && references.first() == Some(&"<root>") {
+                    return format!("<root>: undefined symbol: {}", value("Symbol"));
+                }
+                let mut text = format!("undefined {visibility}symbol: {}", value("Symbol"));
+                for reference in references {
+                    text.push_str(&format!("\n>>> referenced by {reference}"));
+                }
+                if let Some(more) = context_value(diagnostic, "More references") {
+                    text.push_str(&format!("\n>>> referenced {more} more times"));
+                }
+                text
+            }
+            "EI206" => {
+                let mut text = format!("duplicate symbol: {}", value("Symbol"));
+                for definition in values("Definition") {
+                    text.push_str(&format!("\n>>> defined at {definition}"));
+                }
+                text
+            }
+            "EI205" => {
+                if let Some(library) = context_value(diagnostic, "Library") {
+                    format!("unable to find library {library}")
+                } else if let Some(script) = context_value(diagnostic, "Script") {
+                    format!("cannot find linker script {script}")
+                } else {
+                    format!("cannot open {}: No such file or directory", value("File"))
+                }
+            }
+            "EI202" => format!("unknown argument '{}'", value("Option")),
+            "EI247" => format!("ignoring unknown argument '{}'", value("Option")),
+            "EI213" => "no input files".to_string(),
+            "EI262" => format!(
+                "section '{}' will not fit in region '{}': overflowed by {}",
+                value("Section"),
+                value("Region"),
+                value("Overflow")
+            ),
+            _ => {
+                let reason = context_value(diagnostic, "Reason");
+                let location = context_value(diagnostic, "Location");
+                match (reason, location) {
+                    (Some(reason), Some(location)) => {
+                        let mut text = format!("{location}: {reason}");
+                        if let (Some(line), Some(column)) = (
+                            context_value(diagnostic, "Line"),
+                            context_value(diagnostic, "Column"),
+                        ) {
+                            let column: usize = column.parse().unwrap_or(0);
+                            text.push_str(&format!("\n>>> {line}\n>>> {}^", " ".repeat(column)));
+                        }
+                        text
+                    }
+                    (Some(reason), None) => match context_value(diagnostic, "File") {
+                        Some(file) => format!("{file}: {reason}"),
+                        None => reason.to_string(),
+                    },
+                    _ => {
+                        let mut text = format!("{} [{}]", diagnostic.message, diagnostic.code);
+                        for context in &diagnostic.context {
+                            text.push_str(&format!("\n>>> {context}"));
+                        }
+                        text
+                    }
+                }
+            }
+        }
+    }
+
     fn render(outcome: &LinkOutcome, program: &str) -> (Vec<u8>, Vec<u8>, i32) {
         let mut stderr = String::new();
         for diagnostic in &outcome.diagnostics {
@@ -68955,13 +69046,9 @@ mod linker_lit {
                 _ => "message",
             };
             stderr.push_str(&format!(
-                "{program}: {level}: {} [{}]",
-                diagnostic.message, diagnostic.code
+                "{program}: {level}: {}\n",
+                lld_message(diagnostic, program)
             ));
-            for context in &diagnostic.context {
-                stderr.push_str(&format!("\n>>> {context}"));
-            }
-            stderr.push('\n');
         }
         let mut stdout = String::new();
         for message in &outcome.messages {
@@ -69110,9 +69197,15 @@ mod linker_lit {
             ],
             tools: lld_tools(),
         };
-        let outcomes = run_parallel(tests, &|path| match missing_input(&tree, path) {
-            Some(reason) => super::reference::Verdict::OutOfScope(reason),
-            None => suite.run_test(path),
+        let outcomes = run_parallel(tests, &|path| {
+            let verdict = match missing_input(&tree, path) {
+                Some(reason) => super::reference::Verdict::OutOfScope(reason),
+                None => suite.run_test(path),
+            };
+            if std::env::var_os("APK_BUILDER_SUITE_TRACE").is_some() {
+                eprintln!("finished: {path}");
+            }
+            verdict
         });
         let report = SuiteReport {
             name: name.to_string(),

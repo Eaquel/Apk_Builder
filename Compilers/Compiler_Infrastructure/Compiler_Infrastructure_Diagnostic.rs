@@ -66,6 +66,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI258", "The target machine was not given, so x64 is assumed."),
     ("EI259", "A locally defined symbol is imported."),
     ("EI260", "An input is not compatible with safe exception handlers."),
+    ("EI261", "A linker script expression cannot be evaluated."),
+    ("EI262", "A section does not fit in its memory region."),
+    ("EI263", "A linker script places sections in a way the linker cannot carry out."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
