@@ -69,6 +69,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI261", "A linker script expression cannot be evaluated."),
     ("EI262", "A section does not fit in its memory region."),
     ("EI263", "A linker script places sections in a way the linker cannot carry out."),
+    ("EI264", "Output sections overlap or run past the end of the address space."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

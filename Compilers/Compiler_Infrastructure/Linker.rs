@@ -113,6 +113,7 @@ pub struct Options {
     pub no_inhibit_executable: bool,
     pub section_start: BTreeMap<String, u64>,
     pub emit_relocations: bool,
+    pub check_sections: bool,
     pub relax: bool,
     pub dynamic_linker: Option<String>,
     pub no_dynamic_linker: bool,
@@ -203,6 +204,7 @@ impl Default for Options {
             no_inhibit_executable: false,
             section_start: BTreeMap::new(),
             emit_relocations: false,
+            check_sections: true,
             relax: true,
             dynamic_linker: None,
             no_dynamic_linker: false,
@@ -849,6 +851,8 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--eh-frame-hdr" => options.exception_frame_header = true,
             "--no-eh-frame-hdr" => options.exception_frame_header = false,
             "--emit-relocs" | "-q" => options.emit_relocations = true,
+            "--check-sections" => options.check_sections = true,
+            "--no-check-sections" => options.check_sections = false,
             "--noinhibit-exec" => options.no_inhibit_executable = true,
             "--fatal-warnings" => options.fatal_warnings = true,
             "--no-fatal-warnings" => options.fatal_warnings = false,
@@ -1486,6 +1490,7 @@ pub enum Synthetic {
     Common,
     ArmAttributes,
     Thunks,
+    GnuStack,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1526,6 +1531,7 @@ pub struct InputSection {
     pub common_symbol: Option<SymbolIndex>,
     pub merged_members: Vec<SectionIndex>,
     pub description: usize,
+    pub relocated_section: Option<SectionIndex>,
 }
 
 impl InputSection {
@@ -1563,6 +1569,7 @@ impl InputSection {
             common_symbol: None,
             merged_members: Vec::new(),
             description: usize::MAX,
+            relocated_section: None,
             next_in_group: None,
         }
     }
@@ -2314,6 +2321,8 @@ pub struct Context<'s> {
     pub script: LinkerScript,
     pub changed_output: Option<OutputIndex>,
     pub changed_symbol: Option<SymbolIndex>,
+    pub copy_relocation_sections: bool,
+    pub output_section_symbols: BTreeMap<OutputIndex, SymbolIndex>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -2429,6 +2438,8 @@ impl<'s> Context<'s> {
             script: LinkerScript::default(),
             changed_output: None,
             changed_symbol: None,
+            copy_relocation_sections: false,
+            output_section_symbols: BTreeMap::new(),
         }
     }
 
@@ -4070,14 +4081,41 @@ impl<'s> Context<'s> {
                 section_type::GROUP => {
                     if !relocatable {
                         self.files[index].discarded[position] = true;
+                        continue;
                     }
+                    if !self.files[index].kept_groups.contains(&position) {
+                        continue;
+                    }
+                }
+                section_type::RELOCATIONS | section_type::RELOCATIONS_WITH_ADDENDS => {
+                    if !self.copy_relocation_sections {
+                        continue;
+                    }
+                    let mut section = InputSection::synthetic(
+                        &header.name,
+                        header.kind,
+                        header.flags & !section_flag::GROUP,
+                        header.alignment.max(1),
+                        Synthetic::Bss,
+                    );
+                    section.synthetic = None;
+                    section.file = Some(index);
+                    section.elf_index = position;
+                    section.entry_size = header.entry_size;
+                    section.data = header.data.clone();
+                    section.size = header.data.len() as u64;
+                    section.info = header.info;
+                    section.link = header.link;
+                    if relocatable {
+                        section.flags = header.flags;
+                    }
+                    map[position] = Some(self.sections.len());
+                    self.sections.push(section);
                     continue;
                 }
                 section_type::SYMBOL_TABLE_INDICES
                 | section_type::SYMBOL_TABLE
                 | section_type::STRING_TABLE
-                | section_type::RELOCATIONS
-                | section_type::RELOCATIONS_WITH_ADDENDS
                 | section_type::NULL => continue,
                 _ => {}
             }
@@ -4182,6 +4220,7 @@ impl<'s> Context<'s> {
                 common_symbol: None,
                 merged_members: Vec::new(),
                 description: usize::MAX,
+                relocated_section: None,
                 next_in_group: None,
             };
             map[position] = Some(self.sections.len());
@@ -4225,6 +4264,10 @@ impl<'s> Context<'s> {
                     self.sections[target].is_merge = false;
                 }
                 self.sections[target].relocation_section = Some(position);
+                if let Some(own) = map[position] {
+                    self.sections[own].relocated_section = Some(target);
+                    self.sections[target].dependents.push(own);
+                }
                 continue;
             }
             let flags = header.flags;
@@ -4900,7 +4943,10 @@ impl<'s> Context<'s> {
         ));
         self.input_order.push(index);
         self.synthetic.insert("igot".to_string(), index);
-        if self.options.relocation_read_only && !relocatable {
+        let script_allows_padding = (self.script.program_header_commands.is_empty()
+            && !self.script.has_sections)
+            || self.script.seen_relocation_read_only_end;
+        if self.options.relocation_read_only && !relocatable && script_allows_padding {
             self.add_synthetic(
                 ".relro_padding",
                 section_type::NO_BITS,
@@ -4947,6 +4993,15 @@ impl<'s> Context<'s> {
                 section_flag::ALLOCATE,
                 word,
                 Synthetic::GnuProperty,
+            );
+        }
+        if relocatable {
+            self.add_synthetic(
+                ".note.GNU-stack",
+                section_type::PROGRAM_BITS,
+                0,
+                1,
+                Synthetic::GnuStack,
             );
         }
         if self.options.strip != Strip::All {
@@ -7845,6 +7900,23 @@ impl<'s> Context<'s> {
                     }
                 }
             }
+            if self.copy_relocation_sections && self.options.discard != Discard::None {
+                for file in self.object_files.clone() {
+                    let sections: Vec<SectionIndex> = self.files[file]
+                        .sections
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .collect();
+                    for section in sections {
+                        for entry in self.raw_relocations(section) {
+                            if let Some(id) = self.symbol_of(section, entry.symbol) {
+                                self.symbols[id].used = true;
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
         let candidates: Vec<SectionIndex> = self
@@ -9189,6 +9261,9 @@ impl<'s> Context<'s> {
         if symbol.is_section() {
             return false;
         }
+        if symbol.used && self.copy_relocation_sections {
+            return true;
+        }
         if self.target.architecture == Architecture::Arm {
             if let Some(section) = symbol.section {
                 if self.sections[section].kind == section_type::ARM_EXCEPTION_INDEX {
@@ -9232,6 +9307,7 @@ impl<'s> Context<'s> {
             for file in self.object_files.clone() {
                 let first_global = self.files[file].first_global;
                 let handles = self.files[file].symbols.clone();
+                let mut kept: Vec<SymbolIndex> = Vec::new();
                 for (position, id) in handles.into_iter().enumerate() {
                     if position == 0 || position >= first_global || id == usize::MAX {
                         continue;
@@ -9246,9 +9322,24 @@ impl<'s> Context<'s> {
                         }
                     }
                     if self.include_in_symbol_table(id) && self.keep_local_in_symbol_table(id) {
-                        self.add_to_symbol_table(id);
+                        kept.push(id);
                     }
                 }
+                if self.is_relocatable()
+                    && self.options.discard != Discard::All
+                    && !kept.is_empty()
+                    && !kept
+                        .iter()
+                        .any(|id| self.symbols[*id].kind == symbol_type::FILE)
+                {
+                    self.add_relocatable_file_symbol(file);
+                }
+                for id in kept {
+                    self.add_to_symbol_table(id);
+                }
+            }
+            if self.copy_relocation_sections {
+                self.add_output_section_symbols();
             }
         }
         self.symbol_table_first_global = self.symbol_table.len();
@@ -9728,7 +9819,10 @@ impl<'s> Context<'s> {
                     (Some(first), Some(last)) => {
                         let first = &self.outputs[first];
                         let last = &self.outputs[last];
-                        last.address + last.size - first.address != 0
+                        last.address
+                            .wrapping_add(last.size)
+                            .wrapping_sub(first.address)
+                            != 0
                     }
                     _ => false,
                 }
@@ -10040,7 +10134,7 @@ impl<'s> Context<'s> {
             offset = self.compute_file_offset(output, offset, bss_load);
             self.outputs[output].offset = offset;
             if self.outputs[output].kind != section_type::NO_BITS {
-                offset += self.outputs[output].size;
+                offset = offset.wrapping_add(self.outputs[output].size);
             } else if self.outputs[output].load_segment.is_some() {
                 bss_load = self.outputs[output].load_segment;
             }
@@ -10059,12 +10153,124 @@ impl<'s> Context<'s> {
             offset = align_to(offset, self.outputs[output].alignment);
             self.outputs[output].offset = offset;
             if self.outputs[output].kind != section_type::NO_BITS {
-                offset += self.outputs[output].size;
+                offset = offset.wrapping_add(self.outputs[output].size);
             }
         }
         self.section_header_offset = align_to(offset, self.word_size());
         self.file_size = self.section_header_offset
             + (self.order.len() as u64 + 1) * self.encoding().section_header_size() as u64;
+        for output in self.order.clone() {
+            let section = &self.outputs[output];
+            if section.kind == section_type::NO_BITS {
+                continue;
+            }
+            let end = section.offset.wrapping_add(section.size);
+            if section.offset > self.file_size || end > self.file_size {
+                let name = section.name.clone();
+                let first = section.offset;
+                let last = end.wrapping_sub(1);
+                self.error_always(
+                    problem("EI263", "A linker script places sections in a way the linker cannot carry out.")
+                        .with_context(format!(
+                            "Reason: unable to place section {name} at file offset [0x{first:X}, 0x{last:X}]; check your linker script for overflows"
+                        )),
+                );
+            }
+        }
+    }
+
+    fn check_overlap(
+        &mut self,
+        label: &str,
+        mut ranges: Vec<(OutputIndex, u64)>,
+        virtual_address: bool,
+    ) {
+        ranges.sort_by_key(|range| range.1);
+        for pair in ranges.windows(2) {
+            let (left, left_start) = pair[0];
+            let (right, right_start) = pair[1];
+            let left_size = self.outputs[left].size;
+            if right_start >= left_start.wrapping_add(left_size) {
+                continue;
+            }
+            if virtual_address
+                && self.outputs[left].script.in_overlay
+                && self.outputs[right].script.in_overlay
+            {
+                continue;
+            }
+            let left_name = self.outputs[left].name.clone();
+            let right_name = self.outputs[right].name.clone();
+            let right_size = self.outputs[right].size;
+            let left_end = left_start.wrapping_add(left_size).wrapping_sub(1);
+            let right_end = right_start.wrapping_add(right_size).wrapping_sub(1);
+            self.error(
+                problem("EI264", "Output sections overlap or run past the end of the address space.").with_context(
+                    format!(
+                        "Reason: section {left_name} {label} range overlaps with {right_name}\n>>> {left_name} range is [0x{left_start:X}, 0x{left_end:X}]\n>>> {right_name} range is [0x{right_start:X}, 0x{right_end:X}]"
+                    ),
+                ),
+            );
+        }
+    }
+
+    pub fn check_sections(&mut self) {
+        let is_64 = self.encoding().is_64();
+        for output in self.order.clone() {
+            let section = &self.outputs[output];
+            let end = section.address.wrapping_add(section.size);
+            if end < section.address || (!is_64 && end > u64::from(u32::MAX) + 1) {
+                let name = section.name.clone();
+                let address = section.address;
+                let size = section.size;
+                self.error(
+                    problem("EI264", "Output sections overlap or run past the end of the address space.").with_context(
+                        format!("Reason: section {name} at 0x{address:x} of size 0x{size:x} exceeds available address space"),
+                    ),
+                );
+            }
+        }
+        let binary = self.options.output_binary;
+        let files: Vec<(OutputIndex, u64)> = self
+            .order
+            .iter()
+            .filter(|output| {
+                let section = &self.outputs[**output];
+                section.size > 0
+                    && section.kind != section_type::NO_BITS
+                    && (!binary || section.flags & section_flag::ALLOCATE != 0)
+            })
+            .map(|output| (*output, self.outputs[*output].offset))
+            .collect();
+        self.check_overlap("file", files, false);
+        if self.is_relocatable() {
+            return;
+        }
+        let addresses: Vec<(OutputIndex, u64)> = self
+            .order
+            .iter()
+            .filter(|output| {
+                let section = &self.outputs[**output];
+                section.size > 0
+                    && section.flags & section_flag::ALLOCATE != 0
+                    && section.flags & section_flag::THREAD_LOCAL == 0
+            })
+            .map(|output| (*output, self.outputs[*output].address))
+            .collect();
+        self.check_overlap("virtual address", addresses, true);
+        let loads: Vec<(OutputIndex, u64)> = self
+            .order
+            .iter()
+            .filter(|output| {
+                let section = &self.outputs[**output];
+                section.size > 0
+                    && section.kind != section_type::NO_BITS
+                    && section.flags & section_flag::ALLOCATE != 0
+                    && section.flags & section_flag::THREAD_LOCAL == 0
+            })
+            .map(|output| (*output, self.load_address_of(*output)))
+            .collect();
+        self.check_overlap("load address", loads, false);
     }
 
     fn compute_file_offset(
@@ -10101,7 +10307,10 @@ impl<'s> Context<'s> {
         let first = self.segments[segment]
             .first
             .expect("a load segment has a first section");
-        self.outputs[first].offset + section.address - self.outputs[first].address
+        self.outputs[first]
+            .offset
+            .wrapping_add(section.address)
+            .wrapping_sub(self.outputs[first].address)
     }
 
     pub fn program_headers(&self) -> Vec<ProgramHeader> {
@@ -10116,11 +10325,14 @@ impl<'s> Context<'s> {
             if let (Some(first), Some(last)) = (segment.first, segment.last) {
                 let first = &self.outputs[first];
                 let last = &self.outputs[last];
-                header.file_size = last.offset - first.offset;
+                header.file_size = last.offset.wrapping_sub(first.offset);
                 if last.kind != section_type::NO_BITS {
-                    header.file_size += last.size;
+                    header.file_size = header.file_size.wrapping_add(last.size);
                 }
-                header.memory_size = last.address + last.size - first.address;
+                header.memory_size = last
+                    .address
+                    .wrapping_add(last.size)
+                    .wrapping_sub(first.address);
                 header.offset = first.offset;
                 header.virtual_address = first.address;
                 header.physical_address = match segment.first {
@@ -12804,8 +13016,8 @@ impl<'s> Context<'s> {
         elf::encode_symbol(encoding, &elf::Symbol::default(), &mut out);
         for (id, name_offset) in self.symbol_table.iter().zip(&self.symbol_string_offsets) {
             let symbol = &self.symbols[*id];
-            let section_number = self.output_index_of_symbol(*id);
-            let value = if symbol.is_defined() {
+            let mut section_number = self.output_index_of_symbol(*id);
+            let mut value = if symbol.is_defined() {
                 self.symbol_address(*id, 0)
             } else {
                 0
@@ -12815,6 +13027,14 @@ impl<'s> Context<'s> {
             } else {
                 0
             };
+            if self.is_relocatable() && symbol.is_defined() {
+                if let Some(held) = symbol.section {
+                    if self.sections[held].synthetic == Some(Synthetic::Common) {
+                        section_number = section_index::COMMON;
+                        value = self.sections[held].alignment;
+                    }
+                }
+            }
             let binding = if symbol.is_local {
                 symbol_binding::LOCAL
             } else {
@@ -12875,8 +13095,19 @@ impl<'s> Context<'s> {
     fn section_contents(&mut self, section: SectionIndex) -> Vec<u8> {
         let size = self.sections[section].size as usize;
         let Some(which) = self.sections[section].synthetic else {
+            let kind = self.sections[section].kind;
+            if self.copy_relocation_sections && self.sections[section].relocated_section.is_some() {
+                return self.write_copied_relocations(section);
+            }
+            if kind == section_type::GROUP {
+                return self.write_group_section(section);
+            }
             let mut data = self.sections[section].data.clone();
             data.resize(size.max(data.len()), 0);
+            if self.is_relocatable() {
+                self.rewrite_section_symbol_addends(section, &mut data);
+                return data;
+            }
             if self.sections[section].flags & section_flag::ALLOCATE != 0 {
                 self.apply_relocations(section, &mut data);
             } else {
@@ -13229,6 +13460,7 @@ impl<'s> Context<'s> {
     }
 
     pub fn run(&mut self) -> Option<Vec<u8>> {
+        self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
         for name in self.options.undefined.clone() {
             let id = self.add_unused_undefined(&name);
             self.symbols[id].referenced = true;
@@ -13268,10 +13500,7 @@ impl<'s> Context<'s> {
             return None;
         }
         self.declare_script_symbols();
-        if self.is_relocatable() {
-            self.error(not_supported("relocatable output"));
-            return None;
-        }
+        let relocatable = self.is_relocatable();
         self.and_features = self
             .object_files
             .iter()
@@ -13281,10 +13510,12 @@ impl<'s> Context<'s> {
             self.and_features = 0;
         }
         self.and_features = 0;
-        self.add_reserved_symbols();
-        self.scan_version_script();
-        self.parse_versions_and_compute_preemptible();
-        self.combine_versioned_symbols();
+        if !relocatable {
+            self.add_reserved_symbols();
+            self.scan_version_script();
+            self.parse_versions_and_compute_preemptible();
+            self.combine_versioned_symbols();
+        }
         if self.failed() {
             return None;
         }
@@ -13304,7 +13535,9 @@ impl<'s> Context<'s> {
         } else {
             self.target.default_image_base
         });
-        self.create_comment_section();
+        if !relocatable {
+            self.create_comment_section();
+        }
         self.split_merge_sections();
         self.mark_live();
         self.create_synthetic_sections();
@@ -13314,6 +13547,8 @@ impl<'s> Context<'s> {
                     .alignment
                     .max(self.sections[section].alignment);
                 self.sections[synthetic].alignment = alignment;
+                let dependents = self.sections[section].dependents.clone();
+                self.sections[synthetic].dependents.extend(dependents);
             }
         }
         self.create_output_sections();
@@ -13321,7 +13556,9 @@ impl<'s> Context<'s> {
         if self.failed() {
             return None;
         }
-        self.add_start_end_symbols();
+        if !relocatable {
+            self.add_start_end_symbols();
+        }
         if self.has_dynamic_symbols {
             if let Some(dynamic) = self.synthetic_section(".dynamic") {
                 let id = self.insert("_DYNAMIC");
@@ -13349,15 +13586,20 @@ impl<'s> Context<'s> {
         self.combine_exception_frames();
         self.demote_symbols_and_compute_preemptible();
         self.process_script_symbol_assignments();
-        let undefined = self.scan_relocations();
-        self.report_undefined(undefined);
-        if self.failed() {
-            return None;
+        if !relocatable {
+            let undefined = self.scan_relocations();
+            self.report_undefined(undefined);
+            if self.failed() {
+                return None;
+            }
+            self.post_scan_relocations();
         }
-        self.post_scan_relocations();
         self.build_symbol_tables();
         self.remove_unused_synthetic_sections();
-        if self.script_layout() {
+        if relocatable {
+            self.adjust_script_output_sections();
+            self.rebuild_order_from_script();
+        } else if self.script_layout() {
             self.sort_script_sections();
         } else {
             self.sort_output_sections();
@@ -13391,22 +13633,24 @@ impl<'s> Context<'s> {
         programs.alignment = self.word_size();
         self.program_header_output = self.outputs.len();
         self.outputs.push(programs);
-        if self.script.program_header_commands.is_empty() {
-            self.create_segments();
-        } else {
-            self.create_script_segments();
+        if !relocatable {
+            if self.script.program_header_commands.is_empty() {
+                self.create_segments();
+            } else {
+                self.create_script_segments();
+            }
         }
         self.set_reserved_symbol_sections();
         self.finalize_dynamic_tables();
         self.finalize_synthetic_sizes();
-        if !self.script.has_sections {
+        if !self.script.has_sections && !relocatable {
             self.fix_section_alignments();
         }
         self.layout_addresses();
         let mut pass = 0u32;
         let mut assign_passes = 0u32;
         loop {
-            let mut changed = if self.needs_thunks() {
+            let mut changed = if self.needs_thunks() && !relocatable {
                 self.create_thunks(pass)
             } else {
                 false
@@ -13456,7 +13700,13 @@ impl<'s> Context<'s> {
         }
         self.finalize_symbol_table();
         self.finalize_synthetic_sizes();
+        self.finalize_copied_sections();
         self.layout_addresses();
+        if relocatable {
+            for output in self.order.clone() {
+                self.outputs[output].address = 0;
+            }
+        }
         if self.script_active() {
             self.check_final_script_conditions();
         }
@@ -13469,6 +13719,12 @@ impl<'s> Context<'s> {
         }
         self.remove_empty_loads();
         self.assign_file_offsets();
+        if self.options.check_sections {
+            self.check_sections();
+        }
+        if self.failed() {
+            return None;
+        }
         let bytes = self.write_output();
         if self.failed() {
             return None;
@@ -22853,16 +23109,21 @@ impl<'s> Context<'s> {
     fn base_address(&self, base: ValueBase) -> u64 {
         match base {
             ValueBase::Input(section) => self.section_address(section, 0),
-            ValueBase::Output(output) => self.outputs[output].address,
+            ValueBase::Output(output) => self
+                .outputs
+                .get(output)
+                .map_or(0, |section| section.address),
         }
     }
 
     pub fn value_of(&self, value: &ExpressionValue) -> u64 {
         let raw = match value.base {
             Some(ValueBase::Input(section)) => self.section_address(section, value.value),
-            Some(ValueBase::Output(output)) => {
-                self.outputs[output].address.wrapping_add(value.value)
-            }
+            Some(ValueBase::Output(output)) => self
+                .outputs
+                .get(output)
+                .map_or(0, |section| section.address)
+                .wrapping_add(value.value),
             None => value.value,
         };
         align_up_power(raw, value.alignment)
@@ -23917,6 +24178,16 @@ impl<'s> Context<'s> {
 
     pub fn orphan_output_name(&self, section: SectionIndex) -> String {
         let name = &self.sections[section].name;
+        if self.copy_relocation_sections {
+            if self.sections[section].relocated_section.is_some() {
+                return self
+                    .relocation_section_name(section)
+                    .unwrap_or_else(|| name.clone());
+            }
+            if self.is_relocatable() {
+                return name.clone();
+            }
+        }
         if name == "COMMON" {
             return ".bss".to_string();
         }
@@ -23926,35 +24197,64 @@ impl<'s> Context<'s> {
         output_section_name(name)
     }
 
+    fn add_orphan_section(
+        &mut self,
+        section: SectionIndex,
+        by_name: &mut BTreeMap<String, Vec<OutputIndex>>,
+        created: &mut Vec<OutputIndex>,
+    ) {
+        if !self.sections[section].live || self.sections[section].output.is_some() {
+            return;
+        }
+        self.script.orphan_sections.push(section);
+        let name = self.orphan_output_name(section);
+        if let Some(output) = self.script_output_by_name(&name) {
+            self.record_script_section(output, section);
+            return;
+        }
+        let kind = self.sections[section].kind;
+        let flags = self.sections[section].flags;
+        let is_group = kind == section_type::GROUP || flags & section_flag::GROUP != 0;
+        let existing = if is_group {
+            None
+        } else {
+            by_name.get(&name).and_then(|list| list.first().copied())
+        };
+        match existing {
+            Some(output) => self.record_script_section(output, section),
+            None => {
+                let output = self.create_script_output(&name, "<internal>");
+                self.outputs[output].live = true;
+                self.record_script_section(output, section);
+                by_name.entry(name).or_default().push(output);
+                created.push(output);
+            }
+        }
+    }
+
     pub fn add_orphan_sections(&mut self) {
         let mut by_name: BTreeMap<String, Vec<OutputIndex>> = BTreeMap::new();
         let mut created: Vec<OutputIndex> = Vec::new();
+        let copy = self.copy_relocation_sections;
+        let relocatable = self.is_relocatable();
         for section in self.input_order.clone() {
-            if !self.sections[section].live || self.sections[section].output.is_some() {
-                continue;
+            if copy {
+                if relocatable && self.sections[section].flags & section_flag::LINK_ORDER != 0 {
+                    continue;
+                }
+                if let Some(target) = self.sections[section].relocated_section {
+                    let target = self.sections[target].merged_into.unwrap_or(target);
+                    if !self.sections[target].is_exception_frame {
+                        self.add_orphan_section(target, &mut by_name, &mut created);
+                    }
+                }
             }
-            self.script.orphan_sections.push(section);
-            let name = self.orphan_output_name(section);
-            if let Some(output) = self.script_output_by_name(&name) {
-                self.record_script_section(output, section);
-                continue;
-            }
-            let kind = self.sections[section].kind;
-            let flags = self.sections[section].flags;
-            let is_group = kind == section_type::GROUP || flags & section_flag::GROUP != 0;
-            let existing = if is_group {
-                None
-            } else {
-                by_name.get(&name).and_then(|list| list.first().copied())
-            };
-            match existing {
-                Some(output) => self.record_script_section(output, section),
-                None => {
-                    let output = self.create_script_output(&name, "<internal>");
-                    self.outputs[output].live = true;
-                    self.record_script_section(output, section);
-                    by_name.entry(name).or_default().push(output);
-                    created.push(output);
+            self.add_orphan_section(section, &mut by_name, &mut created);
+            if relocatable {
+                for dependent in self.sections[section].dependents.clone() {
+                    if self.sections[dependent].flags & section_flag::LINK_ORDER != 0 {
+                        self.add_orphan_section(dependent, &mut by_name, &mut created);
+                    }
                 }
             }
         }
@@ -24541,8 +24841,10 @@ impl<'s> Context<'s> {
             let position = context.script.dot;
             context.script.dot =
                 align_up_power(context.script.dot, context.sections[section].alignment);
-            context.sections[section].offset_in_output =
-                context.script.dot - context.outputs[output].address;
+            context.sections[section].offset_in_output = context
+                .script
+                .dot
+                .wrapping_sub(context.outputs[output].address);
             context.script.dot = context
                 .script
                 .dot
@@ -28041,4 +28343,310 @@ pub fn normalize_elf_arguments(arguments: &[String]) -> Result<Vec<String>, Diag
         }
     }
     Ok(normalized)
+}
+
+impl<'s> Context<'s> {
+    pub fn symbol_table_positions(&self) -> BTreeMap<SymbolIndex, u32> {
+        self.symbol_table
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (*id, position as u32 + 1))
+            .collect()
+    }
+
+    fn section_symbol_output(&self, id: SymbolIndex) -> Option<OutputIndex> {
+        let symbol = &self.symbols[id];
+        if !symbol.is_defined() {
+            return None;
+        }
+        if let Some(output) = symbol.output_section_symbol {
+            return Some(output);
+        }
+        let section = symbol.section?;
+        let target = self.sections[section].merged_into.unwrap_or(section);
+        self.sections[target].output
+    }
+
+    fn copied_symbol_index(
+        &self,
+        id: SymbolIndex,
+        positions: &BTreeMap<SymbolIndex, u32>,
+    ) -> Option<u32> {
+        if self.symbols[id].kind == symbol_type::SECTION
+            && self.symbols[id].output_section_symbol.is_none()
+        {
+            let output = self.section_symbol_output(id)?;
+            let symbol = self.output_section_symbols.get(&output)?;
+            return positions.get(symbol).copied();
+        }
+        positions.get(&id).copied().or(Some(0))
+    }
+
+    pub fn add_output_section_symbols(&mut self) {
+        for output in self.order.clone() {
+            let mut chosen: Option<SectionIndex> = None;
+            for member in &self.outputs[output].members {
+                let data = &self.sections[*member];
+                if matches!(
+                    data.kind,
+                    section_type::RELOCATIONS | section_type::RELOCATIONS_WITH_ADDENDS
+                ) && data.relocated_section.is_some()
+                {
+                    continue;
+                }
+                if data.synthetic.is_some() && data.flags & section_flag::MERGE == 0 {
+                    continue;
+                }
+                chosen = Some(*member);
+                break;
+            }
+            let Some(section) = chosen else {
+                continue;
+            };
+            let mut data = SymbolData::new("");
+            data.state = SymbolState::Defined;
+            data.is_local = true;
+            data.binding = symbol_binding::LOCAL;
+            data.kind = symbol_type::SECTION;
+            data.file = self.sections[section].file;
+            data.output_section_symbol = Some(output);
+            data.used_in_regular_object = true;
+            let id = self.symbols.len();
+            self.symbols.push(data);
+            self.output_section_symbols.insert(output, id);
+            self.add_to_symbol_table(id);
+        }
+    }
+
+    pub fn add_relocatable_file_symbol(&mut self, file: FileIndex) {
+        let name = self.files[file].name.clone();
+        let base = name.rsplit('/').next().unwrap_or(&name).to_string();
+        let mut data = SymbolData::new(&base);
+        data.state = SymbolState::Defined;
+        data.is_local = true;
+        data.binding = symbol_binding::LOCAL;
+        data.kind = symbol_type::FILE;
+        data.file = Some(file);
+        let id = self.symbols.len();
+        self.symbols.push(data);
+        self.add_to_symbol_table(id);
+    }
+
+    fn relocation_section_name(&self, section: SectionIndex) -> Option<String> {
+        let data = &self.sections[section];
+        let target = data.relocated_section?;
+        let target = if self.sections[target].is_exception_frame {
+            self.synthetic_section(".eh_frame")?
+        } else {
+            self.sections[target].merged_into.unwrap_or(target)
+        };
+        let output = self.sections[target].output?;
+        let prefix = if data.kind == section_type::RELOCATIONS_WITH_ADDENDS {
+            ".rela"
+        } else {
+            ".rel"
+        };
+        Some(format!("{prefix}{}", self.outputs[output].name))
+    }
+
+    pub fn write_copied_relocations(&mut self, section: SectionIndex) -> Vec<u8> {
+        let size = self.sections[section].size as usize;
+        let mut out = Vec::with_capacity(size);
+        let Some(target) = self.sections[section].relocated_section else {
+            return vec![0; size];
+        };
+        let encoding = self.encoding();
+        let with_addend = self.sections[section].kind == section_type::RELOCATIONS_WITH_ADDENDS;
+        let positions = self.symbol_table_positions();
+        let raw = self.raw_relocations(target);
+        let target_name = self.sections[target].name.clone();
+        for entry in raw {
+            let offset = self.section_address(target, entry.offset);
+            let mut encoded = elf::Relocation {
+                offset,
+                kind: entry.kind,
+                symbol: 0,
+                addend: entry.addend,
+            };
+            let Some(id) = self.symbol_of(target, entry.symbol) else {
+                elf::encode_relocation(encoding, &encoded, with_addend, &mut out);
+                continue;
+            };
+            let symbol_kind = self.symbols[id].kind;
+            if symbol_kind == symbol_type::SECTION
+                && self.symbols[id].output_section_symbol.is_none()
+            {
+                let live = self.symbols[id].is_defined()
+                    && self.symbols[id]
+                        .section
+                        .is_some_and(|held| self.sections[held].live);
+                if !live {
+                    if !is_debug_section(&target_name)
+                        && target_name != ".eh_frame"
+                        && target_name != ".gcc_except_table"
+                        && target_name != ".got2"
+                        && target_name != ".toc"
+                    {
+                        let file = self.symbols[id].file;
+                        let discarded = self.symbols[id].discarded_section as usize;
+                        let name = file
+                            .filter(|file| *file < self.files.len())
+                            .and_then(|file| self.files[file].elf.sections.get(discarded))
+                            .map(|header| header.name.clone())
+                            .unwrap_or_default();
+                        let place = self.object_message(target, entry.offset);
+                        self.warn(
+                            problem("EI248", "A relocation points outside its section or at a discarded section.")
+                                .with_context(format!(
+                                    "Reason: relocation refers to a discarded section: {name}\n>>> referenced by {place}"
+                                )),
+                        );
+                    }
+                    encoded.symbol = 0;
+                    encoded.kind = 0;
+                    elf::encode_relocation(encoding, &encoded, with_addend, &mut out);
+                    continue;
+                }
+                encoded.symbol = self.copied_symbol_index(id, &positions).unwrap_or(0);
+                if with_addend {
+                    let output = self.section_symbol_output(id);
+                    let base = output.map_or(0, |output| self.outputs[output].address);
+                    let value = self.symbol_address(id, entry.addend);
+                    encoded.addend = value.wrapping_sub(base) as i64;
+                }
+            } else {
+                encoded.symbol = self.copied_symbol_index(id, &positions).unwrap_or(0);
+            }
+            elf::encode_relocation(encoding, &encoded, with_addend, &mut out);
+        }
+        out.resize(size, 0);
+        out
+    }
+
+    pub fn rewrite_section_symbol_addends(&mut self, section: SectionIndex, buffer: &mut [u8]) {
+        let Some(relocation_index) = self.sections[section].relocation_section else {
+            return;
+        };
+        let Some(file) = self.sections[section]
+            .file
+            .filter(|file| *file < self.files.len())
+        else {
+            return;
+        };
+        if self.files[file].elf.sections[relocation_index].kind != section_type::RELOCATIONS
+            || self.sections[section].flags & section_flag::ALLOCATE == 0
+        {
+            return;
+        }
+        let raw = self.raw_relocations(section);
+        for entry in raw {
+            let Some(id) = self.symbol_of(section, entry.symbol) else {
+                continue;
+            };
+            if self.symbols[id].kind != symbol_type::SECTION || !self.symbols[id].is_defined() {
+                continue;
+            }
+            if entry.kind == 0 {
+                continue;
+            }
+            let value = self.symbol_address(id, entry.addend);
+            let at = entry.offset as usize;
+            if at >= buffer.len() {
+                continue;
+            }
+            let relocation = Relocation {
+                expression: Expression::Absolute,
+                kind: entry.kind,
+                offset: entry.offset,
+                addend: entry.addend,
+                symbol: id,
+            };
+            let location = self.error_location(section, entry.offset);
+            self.relocate(buffer, at, &relocation, value, &location);
+        }
+    }
+
+    fn group_member_outputs(&self, section: SectionIndex) -> Vec<u32> {
+        let data = &self.sections[section];
+        let Some(file) = data.file.filter(|file| *file < self.files.len()) else {
+            return Vec::new();
+        };
+        let encoding = self.encoding();
+        let mut seen: Vec<u32> = Vec::new();
+        let words = data.data.len() / 4;
+        for word in 1..words {
+            let Some(member) = encoding.read_u32(&data.data, word * 4) else {
+                continue;
+            };
+            let Some(Some(input)) = self.files[file].sections.get(member as usize) else {
+                continue;
+            };
+            let input = self.sections[*input].merged_into.unwrap_or(*input);
+            if !self.sections[input].live {
+                continue;
+            }
+            let Some(output) = self.sections[input].output else {
+                continue;
+            };
+            let index = self.outputs[output].index as u32;
+            if !seen.contains(&index) {
+                seen.push(index);
+            }
+        }
+        seen
+    }
+
+    pub fn write_group_section(&self, section: SectionIndex) -> Vec<u8> {
+        let encoding = self.encoding();
+        let data = &self.sections[section];
+        let mut out = Vec::new();
+        encoding.put_u32(&mut out, encoding.read_u32(&data.data, 0).unwrap_or(0));
+        for index in self.group_member_outputs(section) {
+            encoding.put_u32(&mut out, index);
+        }
+        out
+    }
+
+    pub fn finalize_copied_sections(&mut self) {
+        let symbol_table = self
+            .synthetic_section(".symtab")
+            .and_then(|section| self.sections[section].output)
+            .map(|output| self.outputs[output].index as u32)
+            .unwrap_or(0);
+        let positions = self.symbol_table_positions();
+        for output in self.order.clone() {
+            let Some(first) = self.outputs[output].members.first().copied() else {
+                continue;
+            };
+            if self.outputs[output].kind == section_type::GROUP {
+                self.outputs[output].link = symbol_table;
+                self.outputs[output].entry_size = 4;
+                let signature = self.sections[first].info;
+                if let Some(id) = self.symbol_of(first, signature) {
+                    self.outputs[output].info =
+                        self.copied_symbol_index(id, &positions).unwrap_or(0);
+                }
+                let count = self.group_member_outputs(first).len() as u64;
+                self.outputs[output].size = (1 + count) * 4;
+                self.sections[first].size = (1 + count) * 4;
+                continue;
+            }
+            if !self.copy_relocation_sections {
+                continue;
+            }
+            let kind = self.outputs[output].kind;
+            if kind != section_type::RELOCATIONS && kind != section_type::RELOCATIONS_WITH_ADDENDS {
+                continue;
+            }
+            let Some(target) = self.sections[first].relocated_section else {
+                continue;
+            };
+            let target = self.sections[target].merged_into.unwrap_or(target);
+            self.outputs[output].link = symbol_table;
+            if let Some(relocated) = self.sections[target].output {
+                self.outputs[output].info = self.outputs[relocated].index as u32;
+            }
+            self.outputs[output].flags |= section_flag::INFO_LINK;
+        }
+    }
 }
