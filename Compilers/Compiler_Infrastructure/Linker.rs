@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 pub const LINKER_IDENTITY: &str = "Linker: Omni Builder 1.0.0";
+pub const VERSION_BANNER: &str = "Omni Builder LLD 1.0.0 (compatible with GNU linkers)";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OutputKind {
@@ -114,6 +115,9 @@ pub struct Options {
     pub section_start: BTreeMap<String, u64>,
     pub emit_relocations: bool,
     pub check_sections: bool,
+    pub retain_symbols_file: Option<String>,
+    pub print_version: bool,
+    pub verbose_version: bool,
     pub demangle: bool,
     pub map_file: Option<String>,
     pub cross_reference: bool,
@@ -215,6 +219,9 @@ impl Default for Options {
             section_start: BTreeMap::new(),
             emit_relocations: false,
             check_sections: true,
+            retain_symbols_file: None,
+            print_version: false,
+            verbose_version: false,
             demangle: true,
             map_file: None,
             cross_reference: false,
@@ -729,6 +736,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.map_file = Some(value);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--retain-symbols-file"])? {
+            options.retain_symbols_file = Some(value);
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--keep-unique"])? {
             options.keep_unique.push(value);
             continue;
@@ -883,6 +894,8 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--check-sections" => options.check_sections = true,
             "--no-check-sections" => options.check_sections = false,
             "--print-map" => options.map_file = Some("-".to_string()),
+            "--version" => options.print_version = true,
+            "-v" => options.verbose_version = true,
             "--demangle" => options.demangle = true,
             "--no-demangle" => options.demangle = false,
             "--cref" => options.cross_reference = true,
@@ -1797,6 +1810,15 @@ pub struct ScriptLexer<'t> {
     text: &'t str,
     at: usize,
     pub version_mode: bool,
+    previous_start: Option<usize>,
+    failure: Option<(usize, bool)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptPlace {
+    pub reason: String,
+    pub line: usize,
+    pub excerpt: Option<(String, usize)>,
 }
 
 impl<'t> ScriptLexer<'t> {
@@ -1805,6 +1827,38 @@ impl<'t> ScriptLexer<'t> {
             text,
             at: 0,
             version_mode,
+            previous_start: None,
+            failure: None,
+        }
+    }
+
+    fn fail_here(&mut self) {
+        if self.failure.is_none() {
+            self.failure = Some(match self.previous_start {
+                Some(start) => (start, true),
+                None => (0, false),
+            });
+        }
+    }
+
+    pub fn place(&self, reason: String) -> ScriptPlace {
+        let (offset, show) = self.failure.unwrap_or(match self.previous_start {
+            Some(start) => (start, true),
+            None => (0, false),
+        });
+        let offset = offset.min(self.text.len());
+        let line = self.text[..offset].matches('\n').count() + 1;
+        let excerpt = show.then(|| {
+            let begin = self.text[..offset].rfind('\n').map_or(0, |at| at + 1);
+            let end = self.text[offset..]
+                .find('\n')
+                .map_or(self.text.len(), |at| offset + at);
+            (self.text[begin..end].to_string(), offset - begin)
+        });
+        ScriptPlace {
+            reason,
+            line,
+            excerpt,
         }
     }
 
@@ -1846,9 +1900,15 @@ impl<'t> ScriptLexer<'t> {
             return match self.text[start + 1..].find('"') {
                 Some(end) => {
                     self.at = start + end + 2;
+                    self.previous_start = Some(start);
                     Ok(Some(self.text[start..self.at].to_string()))
                 }
-                None => Err("unclosed quote".to_string()),
+                None => {
+                    if self.failure.is_none() {
+                        self.failure = Some((start, false));
+                    }
+                    Err("unclosed quote".to_string())
+                }
             };
         }
         let word = |byte: u8| byte.is_ascii_alphanumeric() || b"_.$/\\~=+[]*?-!^".contains(&byte);
@@ -1875,13 +1935,16 @@ impl<'t> ScriptLexer<'t> {
             end = start + 1;
         }
         self.at = end;
+        self.previous_start = Some(start);
         Ok(Some(self.text[start..end].to_string()))
     }
 
     pub fn peek(&mut self) -> Result<Option<String>, String> {
         let saved = self.at;
+        let previous = self.previous_start;
         let token = self.next_token();
         self.at = saved;
+        self.previous_start = previous;
         token
     }
 
@@ -1896,8 +1959,14 @@ impl<'t> ScriptLexer<'t> {
     pub fn expect(&mut self, expected: &str) -> Result<(), String> {
         match self.next_token()? {
             Some(token) if token == expected => Ok(()),
-            Some(token) => Err(format!("{expected} expected, but got {token}")),
-            None => Err("unexpected EOF".to_string()),
+            Some(token) => {
+                self.fail_here();
+                Err(format!("{expected} expected, but got {token}"))
+            }
+            None => {
+                self.fail_here();
+                Err("unexpected EOF".to_string())
+            }
         }
     }
 
@@ -1905,7 +1974,10 @@ impl<'t> ScriptLexer<'t> {
         match self.next_token()? {
             Some(token) if token == end => Ok(None),
             Some(token) => Ok(Some(token)),
-            None => Err("unexpected EOF".to_string()),
+            None => {
+                self.fail_here();
+                Err("unexpected EOF".to_string())
+            }
         }
     }
 }
@@ -2014,26 +2086,47 @@ pub fn read_version_script(
     text: &str,
     definitions: &mut Vec<VersionDefinition>,
 ) -> Result<(), String> {
+    read_version_script_placed(text, definitions).map_err(|place| place.reason)
+}
+
+pub fn read_version_script_placed(
+    text: &str,
+    definitions: &mut Vec<VersionDefinition>,
+) -> Result<(), ScriptPlace> {
     let mut lexer = ScriptLexer::new(text, true);
-    read_version_command(&mut lexer, definitions)?;
-    match lexer.peek()? {
-        Some(token) => Err(format!("EOF expected, but got {token}")),
-        None => Ok(()),
-    }
+    let result = (|| {
+        read_version_command(&mut lexer, definitions)?;
+        match lexer.peek()? {
+            Some(token) => {
+                lexer.next_token()?;
+                Err(format!("EOF expected, but got {token}"))
+            }
+            None => Ok(()),
+        }
+    })();
+    result.map_err(|reason| lexer.place(reason))
 }
 
 pub fn read_dynamic_list(text: &str) -> Result<Vec<SymbolPattern>, String> {
+    read_dynamic_list_placed(text).map_err(|place| place.reason)
+}
+
+pub fn read_dynamic_list_placed(text: &str) -> Result<Vec<SymbolPattern>, ScriptPlace> {
     let mut lexer = ScriptLexer::new(text, true);
-    lexer.expect("{")?;
-    let (locals, globals) = read_version_symbols(&mut lexer)?;
-    lexer.expect(";")?;
-    if let Some(token) = lexer.peek()? {
-        return Err(format!("EOF expected, but got {token}"));
-    }
-    if !locals.is_empty() {
-        return Err("\"local:\" scope not supported in --dynamic-list".to_string());
-    }
-    Ok(globals)
+    let result = (|| {
+        lexer.expect("{")?;
+        let (locals, globals) = read_version_symbols(&mut lexer)?;
+        lexer.expect(";")?;
+        if let Some(token) = lexer.peek()? {
+            lexer.next_token()?;
+            return Err(format!("EOF expected, but got {token}"));
+        }
+        if !locals.is_empty() {
+            return Err("\"local:\" scope not supported in --dynamic-list".to_string());
+        }
+        Ok(globals)
+    })();
+    result.map_err(|reason| lexer.place(reason))
 }
 
 #[derive(Clone, Debug)]
@@ -2377,6 +2470,7 @@ pub struct Context<'s> {
     pub relocating_section: Option<SectionIndex>,
     pub identity: String,
     pub extra_outputs: Vec<(String, Vec<u8>)>,
+    pub retained_symbols: Option<BTreeSet<String>>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -2497,6 +2591,7 @@ impl<'s> Context<'s> {
             relocating_section: None,
             identity: LINKER_IDENTITY.to_string(),
             extra_outputs: Vec::new(),
+            retained_symbols: None,
         }
     }
 
@@ -3132,11 +3227,16 @@ impl<'s> Context<'s> {
         self.read_linker_script(&text, path, &mut load);
     }
 
-    fn script_error(&mut self, display: &str, reason: &str) {
-        self.error(
+    fn placed_script_error(&mut self, display: &str, place: &ScriptPlace) {
+        let mut cause = format!("{display}:{}: {}", place.line, place.reason);
+        if let Some((text, column)) = &place.excerpt {
+            cause.push_str(&format!("\n>>> {text}\n>>> {}^", " ".repeat(*column)));
+        }
+        self.error_always(
             problem("EI239", "The linker script could not be read.")
                 .with_context(format!("File: {display}"))
-                .with_context(format!("Reason: {reason}")),
+                .with_context(format!("Reason: {}", place.reason))
+                .with_context(format!("Cause: {cause}")),
         );
     }
 
@@ -4786,6 +4886,60 @@ pub fn output_section_name(name: &str) -> String {
 
 const X86_64_DESCRIPTOR_FORM: &str =
     "R_X86_64_GOTPC32_TLSDESC/R_X86_64_CODE_4_GOTPC32_TLSDESC must be used in leaq x@tlsdesc(%rip), %REG";
+const KEY_FUNCTION_NOTE: &str = "the vtable symbol may be undefined because the class is missing its key function (see https://lld.llvm.org/missingkeyfunction)";
+const START_STOP_NOTE: &str = "the encapsulation symbol needs to be retained under --gc-sections properly; consider -z nostart-stop-gc (see https://lld.llvm.org/ELF/start-stop-gc)";
+
+const BOTH_SCOPES: &str =
+    "wildcard pattern '*' is used for both 'local' and 'global' scopes in version script";
+const MULTIPLE_DEFINITIONS: &str =
+    "wildcard pattern '*' is used for multiple version definitions in version script";
+
+fn glob_problem(pattern: &str) -> Option<&'static str> {
+    let bytes = pattern.as_bytes();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => {
+                if at + 1 >= bytes.len() {
+                    return Some("invalid glob pattern, stray '\\'");
+                }
+                at += 2;
+            }
+            b'[' => {
+                let mut end = at + 1;
+                if matches!(bytes.get(end), Some(b'!' | b'^')) {
+                    end += 1;
+                }
+                if bytes.get(end) == Some(&b']') {
+                    end += 1;
+                }
+                while end < bytes.len() && bytes[end] != b']' {
+                    end += 1;
+                }
+                if end >= bytes.len() {
+                    return Some("invalid glob pattern, unmatched '['");
+                }
+                at = end + 1;
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+fn demangle_for_version(name: &str) -> String {
+    let (base, version) = match name.split_once('@') {
+        Some((base, version)) => (base, version),
+        None => (name, ""),
+    };
+    let mut text = demangle_itanium(base).unwrap_or_else(|| base.to_string());
+    if !version.is_empty() && !version.starts_with('@') {
+        text.push('@');
+        text.push_str(version);
+    }
+    text
+}
+
 const MALFORMED_LEB: &str = "malformed uleb128, extends past end";
 const X86_DESCRIPTOR_FORM: &str = "R_386_TLS_GOTDESC must be used in leal x@tlsdesc(%ebx), %eax";
 
@@ -6353,15 +6507,18 @@ impl<'s> Context<'s> {
     pub fn read_version_inputs(&mut self) {
         for path in self.options.version_script.clone() {
             let Some(bytes) = self.read_script_file(&path) else {
-                self.error(file_missing(&path));
+                self.error_always(
+                    file_missing(&path)
+                        .with_context(format!("Cause: cannot find version script {path}")),
+                );
                 continue;
             };
             let text = String::from_utf8_lossy(&bytes).to_string();
             let mut definitions = std::mem::take(&mut self.version_definitions);
-            let result = read_version_script(&text, &mut definitions);
+            let result = read_version_script_placed(&text, &mut definitions);
             self.version_definitions = definitions;
-            if let Err(reason) = result {
-                self.script_error(&path, &reason);
+            if let Err(place) = result {
+                self.placed_script_error(&path, &place);
             }
         }
         for name in self.options.export_dynamic_symbols.clone() {
@@ -6377,19 +6534,10 @@ impl<'s> Context<'s> {
                 continue;
             };
             let text = String::from_utf8_lossy(&bytes).to_string();
-            match read_dynamic_list(&text) {
+            match read_dynamic_list_placed(&text) {
                 Ok(patterns) => self.dynamic_list_patterns.extend(patterns),
-                Err(reason) => self.script_error(&path, &reason),
+                Err(place) => self.placed_script_error(&path, &place),
             }
-        }
-        let uses_cpp = self
-            .version_definitions
-            .iter()
-            .flat_map(|definition| definition.non_local.iter().chain(&definition.local))
-            .chain(&self.dynamic_list_patterns)
-            .any(|pattern| pattern.extern_cpp);
-        if uses_cpp {
-            self.error(not_supported("extern \"C++\" symbol patterns"));
         }
     }
 
@@ -6415,6 +6563,18 @@ impl<'s> Context<'s> {
         self.find(name).filter(|id| self.can_be_versioned(*id))
     }
 
+    fn find_by_version_pattern(&self, name: &str, extern_cpp: bool) -> Vec<SymbolIndex> {
+        if !extern_cpp {
+            return self.find_by_version(name).into_iter().collect();
+        }
+        self.global_symbols()
+            .into_iter()
+            .filter(|id| {
+                self.can_be_versioned(*id) && demangle_for_version(&self.symbols[*id].name) == name
+            })
+            .collect()
+    }
+
     fn version_label(&self, version: u16) -> String {
         match version {
             elf::version_index::LOCAL => "VER_NDX_LOCAL".to_string(),
@@ -6429,31 +6589,34 @@ impl<'s> Context<'s> {
         }
     }
 
-    fn assign_exact_version(&mut self, name: &str, version: u16) -> bool {
-        let Some(id) = self.find_by_version(name) else {
-            return false;
-        };
-        if self.symbols[id].name.contains('@') {
-            return true;
+    fn assign_exact_version(&mut self, name: &str, extern_cpp: bool, version: u16) -> bool {
+        let found = self.find_by_version_pattern(name, extern_cpp);
+        for id in found.iter().copied() {
+            if self.symbols[id].name.contains('@') {
+                continue;
+            }
+            if !self.symbols[id].version_script_assigned {
+                self.symbols[id].version_script_assigned = true;
+                self.symbols[id].version = version;
+            }
+            if self.symbols[id].version != version {
+                let previous = self.version_label(self.symbols[id].version);
+                let requested = self.version_label(version);
+                self.warn(
+                    caution(
+                        "EI244",
+                        "A version script assigns a symbol to a second version.",
+                    )
+                    .with_context(format!("Symbol: {name}"))
+                    .with_context(format!("Previous: {previous}"))
+                    .with_context(format!("Version: {requested}"))
+                    .with_context(format!(
+                        "Cause: attempt to reassign symbol '{name}' of {previous} to {requested}"
+                    )),
+                );
+            }
         }
-        if !self.symbols[id].version_script_assigned {
-            self.symbols[id].version_script_assigned = true;
-            self.symbols[id].version = version;
-        }
-        if self.symbols[id].version != version {
-            let previous = self.version_label(self.symbols[id].version);
-            let requested = self.version_label(version);
-            self.warn(
-                caution(
-                    "EI244",
-                    "A version script assigns a symbol to a second version.",
-                )
-                .with_context(format!("Symbol: {name}"))
-                .with_context(format!("Previous: {previous}"))
-                .with_context(format!("Version: {requested}")),
-            );
-        }
-        true
+        !found.is_empty()
     }
 
     pub fn scan_version_script(&mut self) {
@@ -6463,10 +6626,14 @@ impl<'s> Context<'s> {
                          pattern: &SymbolPattern,
                          version: u16,
                          label: &str| {
-                let mut found = context.assign_exact_version(&pattern.name, version);
-                found |= context
-                    .find_by_version(&format!("{}@{}", pattern.name, definition.name))
-                    .is_some();
+                let mut found =
+                    context.assign_exact_version(&pattern.name, pattern.extern_cpp, version);
+                found |= !context
+                    .find_by_version_pattern(
+                        &format!("{}@{}", pattern.name, definition.name),
+                        pattern.extern_cpp,
+                    )
+                    .is_empty();
                 if !found && !context.options.undefined_version {
                     context.error(
                             problem(
@@ -6512,6 +6679,13 @@ impl<'s> Context<'s> {
                 };
                 for pattern in list.iter().filter(|pattern| pattern.wildcard) {
                     if pattern.name != "*" {
+                        if let Some(reason) = glob_problem(&pattern.name) {
+                            self.error(
+                                problem("EI239", "The linker script could not be read.")
+                                    .with_context(format!("Reason: {reason}"))
+                                    .with_context(format!("Cause: {reason}: {}", pattern.name)),
+                            );
+                        }
                         patterns.push((pattern.clone(), version));
                         continue;
                     }
@@ -6519,13 +6693,15 @@ impl<'s> Context<'s> {
                         if (local && global_asterisk) || (!local && local_asterisk) {
                             self.warn(
                                 caution("EI245", "The wildcard pattern * is used more than once in the version script.")
-                                    .with_context("Scope: both local and global".to_string()),
+                                    .with_context("Scope: both local and global".to_string())
+                                    .with_context(format!("Cause: {BOTH_SCOPES}")),
                             );
                             reported = true;
                         } else if !local && global_asterisk {
                             self.warn(
                                 caution("EI245", "The wildcard pattern * is used more than once in the version script.")
-                                    .with_context("Scope: multiple version definitions".to_string()),
+                                    .with_context("Scope: multiple version definitions".to_string())
+                                    .with_context(format!("Cause: {MULTIPLE_DEFINITIONS}")),
                             );
                             reported = true;
                         } else {
@@ -6547,17 +6723,24 @@ impl<'s> Context<'s> {
                 {
                     continue;
                 }
-                if let Some((_, version)) = patterns
-                    .iter()
-                    .find(|(pattern, _)| pattern_matches(pattern, &symbol.name))
-                {
+                let demangled = demangle_for_version(&symbol.name);
+                if let Some((_, version)) = patterns.iter().find(|(pattern, _)| {
+                    pattern_matches(
+                        pattern,
+                        if pattern.extern_cpp {
+                            &demangled
+                        } else {
+                            &symbol.name
+                        },
+                    )
+                }) {
                     self.symbols[id].version = *version;
                 }
             }
         }
         let list = self.dynamic_list_patterns.clone();
         for pattern in list.iter().filter(|pattern| !pattern.wildcard) {
-            if let Some(id) = self.find_by_version(&pattern.name) {
+            for id in self.find_by_version_pattern(&pattern.name, pattern.extern_cpp) {
                 self.symbols[id].exported = true;
                 self.symbols[id].in_dynamic_list = true;
             }
@@ -6570,10 +6753,17 @@ impl<'s> Context<'s> {
                     continue;
                 }
                 let name = self.symbols[id].name.clone();
-                if wildcards
-                    .iter()
-                    .any(|pattern| pattern_matches(pattern, &name))
-                {
+                let demangled = demangle_for_version(&name);
+                if wildcards.iter().any(|pattern| {
+                    pattern_matches(
+                        pattern,
+                        if pattern.extern_cpp {
+                            &demangled
+                        } else {
+                            &name
+                        },
+                    )
+                }) {
                     self.symbols[id].exported = true;
                     self.symbols[id].in_dynamic_list = true;
                 }
@@ -6603,8 +6793,12 @@ impl<'s> Context<'s> {
             if definition.name != version {
                 continue;
             }
-            let matches =
-                |list: &[SymbolPattern]| list.iter().any(|pattern| pattern_matches(pattern, base));
+            let demangled = demangle_itanium(base).unwrap_or_else(|| base.to_string());
+            let matches = |list: &[SymbolPattern]| {
+                list.iter().any(|pattern| {
+                    pattern_matches(pattern, if pattern.extern_cpp { &demangled } else { base })
+                })
+            };
             let identifier = if !matches(&definition.non_local) && matches(&definition.local) {
                 elf::version_index::LOCAL
             } else if default {
@@ -6904,17 +7098,22 @@ impl<'s> Context<'s> {
 
     pub fn report_undefined(&mut self, undefined: Vec<UndefinedReference>) {
         let mut grouped: Vec<UndefinedGroup> = Vec::new();
-        for reference in undefined {
+        let mut firsts: Vec<usize> = Vec::new();
+        for (position, reference) in undefined.into_iter().enumerate() {
             match grouped.iter_mut().find(|entry| entry.0 == reference.symbol) {
                 Some(entry) => entry.2.push((reference.section, reference.offset)),
-                None => grouped.push((
-                    reference.symbol,
-                    reference.warning,
-                    vec![(reference.section, reference.offset)],
-                )),
+                None => {
+                    grouped.push((
+                        reference.symbol,
+                        reference.warning,
+                        vec![(reference.section, reference.offset)],
+                    ));
+                    firsts.push(position);
+                }
             }
         }
-        for (id, warning, places) in grouped {
+        for ((id, warning, places), first) in grouped.into_iter().zip(firsts) {
+            let correct = first < 2;
             let symbol = &self.symbols[id];
             let name = symbol.name.clone();
             let mut discarded_head: Option<String> = None;
@@ -6998,18 +7197,42 @@ impl<'s> Context<'s> {
                 diagnostic =
                     diagnostic.with_context(format!("More references: {}", places.len() - 3));
             }
-            if let Some(mut head) = discarded_head {
-                for (section, offset) in places.iter().take(3) {
+            let mut head = discarded_head.unwrap_or_else(|| {
+                let visible = if shown.is_empty() {
+                    String::new()
+                } else {
+                    format!("{shown} ")
+                };
+                format!("undefined {visible}symbol: {}", self.shown_name(&name))
+            });
+            for (section, offset) in places.iter().take(3) {
+                head.push_str(&format!(
+                    "\n>>> referenced by {}",
+                    self.object_message(*section, *offset)
+                ));
+            }
+            if places.len() > 3 {
+                head.push_str(&format!("\n>>> referenced {} more times", places.len() - 3));
+            }
+            if correct {
+                if let Some((found, before, after)) = self.alternative_spelling(id) {
                     head.push_str(&format!(
-                        "\n>>> referenced by {}",
-                        self.object_message(*section, *offset)
+                        "\n>>> did you mean{before}{}{after}\n>>> defined in: {}",
+                        self.symbol_text(found),
+                        self.file_name(self.symbols[found].file)
                     ));
                 }
-                if places.len() > 3 {
-                    head.push_str(&format!("\n>>> referenced {} more times", places.len() - 3));
-                }
-                diagnostic = diagnostic.with_context(format!("Cause: {head}"));
             }
+            if name.starts_with("_ZTV") {
+                head.push_str(&format!("\n>>> {KEY_FUNCTION_NOTE}"));
+            }
+            if self.options.gc_sections
+                && self.options.start_stop_garbage_collection
+                && name.starts_with("__start_")
+            {
+                head.push_str(&format!("\n>>> {START_STOP_NOTE}"));
+            }
+            diagnostic = diagnostic.with_context(format!("Cause: {head}"));
             if name.starts_with("_ZTV") {
                 diagnostic = diagnostic
                     .with_context("Advice: the class may be missing its key function".to_string());
@@ -8193,7 +8416,9 @@ impl<'s> Context<'s> {
                     }
                 }
             }
-            if self.copy_relocation_sections && self.options.discard != Discard::None {
+            if self.copy_relocation_sections
+                && (self.options.discard != Discard::None || self.retained_symbols.is_some())
+            {
                 for file in self.object_files.clone() {
                     let sections: Vec<SectionIndex> = self.files[file]
                         .sections
@@ -9593,7 +9818,7 @@ impl<'s> Context<'s> {
                 return false;
             }
         }
-        true
+        self.retains(id)
     }
 
     fn add_to_symbol_table(&mut self, id: SymbolIndex) {
@@ -9660,7 +9885,7 @@ impl<'s> Context<'s> {
                 let binding = self.compute_binding(id);
                 self.symbols[id].binding = binding;
             }
-            if has_table {
+            if has_table && self.retains(id) {
                 self.add_to_symbol_table(id);
             }
             let symbol = &self.symbols[id];
@@ -13869,8 +14094,35 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn retains(&self, id: SymbolIndex) -> bool {
+        match &self.retained_symbols {
+            None => true,
+            Some(names) => {
+                (self.symbols[id].used && self.copy_relocation_sections)
+                    || names.contains(&self.symbols[id].name)
+            }
+        }
+    }
+
     pub fn run(&mut self) -> Option<Vec<u8>> {
         self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
+        if let Some(path) = self.options.retain_symbols_file.clone() {
+            let mut names = BTreeSet::new();
+            match (self.source)(&path) {
+                Some(bytes) => {
+                    for line in String::from_utf8_lossy(&bytes).lines() {
+                        let name = line.split('#').next().unwrap_or("").trim();
+                        if !name.is_empty() {
+                            names.insert(name.to_string());
+                        }
+                    }
+                }
+                None => self.error(file_missing(&path).with_context(format!(
+                    "Cause: cannot open {path}: No such file or directory"
+                ))),
+            }
+            self.retained_symbols = Some(names);
+        }
         for name in self.options.undefined.clone() {
             let id = self.add_unused_undefined(&name);
             self.symbols[id].referenced = true;
@@ -14184,8 +14436,21 @@ pub fn link_as(
             }
         }
     };
+    let mut messages = Vec::new();
+    if options.print_version || options.verbose_version {
+        messages.push(VERSION_BANNER.to_string());
+    }
+    let no_inputs = options.inputs.is_empty();
+    if options.print_version || (options.verbose_version && no_inputs) {
+        return LinkOutcome {
+            outputs: Vec::new(),
+            diagnostics: Vec::new(),
+            messages,
+        };
+    }
     let output = options.output.clone();
     let mut context = Context::new(options, source);
+    context.messages = messages;
     context.identity = identity.to_string();
     let bytes = context.run();
     let mut outcome = LinkOutcome {
@@ -31125,4 +31390,140 @@ pub fn demangle_itanium(name: &str) -> Option<String> {
         return None;
     }
     Some(mangled_text(&node))
+}
+
+pub fn demangled_function_name(name: &str) -> Option<String> {
+    let body = name.strip_prefix("_Z")?;
+    let mut demangler = Demangler {
+        text: body.as_bytes(),
+        at: 0,
+        substitutions: Vec::new(),
+        template_parameters: Vec::new(),
+        depth: 0,
+    };
+    match demangler.encoding()? {
+        Mangled::Encoding { name, .. } => Some(mangled_text(&name)),
+        _ => None,
+    }
+}
+
+impl<'s> Context<'s> {
+    fn spelling_candidate(
+        &self,
+        locals: &BTreeMap<String, SymbolIndex>,
+        name: &[u8],
+    ) -> Option<SymbolIndex> {
+        let name = std::str::from_utf8(name).ok()?;
+        if let Some(id) = locals.get(name) {
+            return Some(*id);
+        }
+        self.find(name)
+            .filter(|id| !self.symbols[*id].is_undefined())
+    }
+
+    pub fn alternative_spelling(&self, id: SymbolIndex) -> Option<(SymbolIndex, String, String)> {
+        let mut locals: BTreeMap<String, SymbolIndex> = BTreeMap::new();
+        let mut local_order: Vec<(String, SymbolIndex)> = Vec::new();
+        if let Some(file) = self.symbols[id]
+            .file
+            .filter(|file| *file < self.files.len())
+        {
+            let discarded = self.symbols[id].discarded_section as usize;
+            if discarded != 0
+                && self.files[file]
+                    .discarded
+                    .get(discarded)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                return None;
+            }
+            let first_global = self.files[file].first_global;
+            for (position, local) in self.files[file].symbols.iter().enumerate() {
+                if position == 0 || position >= first_global || *local == usize::MAX {
+                    continue;
+                }
+                let symbol = &self.symbols[*local];
+                if symbol.is_defined()
+                    && !symbol.name.is_empty()
+                    && !locals.contains_key(&symbol.name)
+                {
+                    locals.insert(symbol.name.clone(), *local);
+                    local_order.push((symbol.name.clone(), *local));
+                }
+            }
+        }
+        let name = self.symbols[id].name.clone();
+        let bytes = name.as_bytes();
+        let plain = |found: SymbolIndex| Some((found, ": ".to_string(), String::new()));
+        for at in 0..=bytes.len() {
+            let mut inserted: Vec<u8> = Vec::with_capacity(bytes.len() + 1);
+            inserted.extend_from_slice(&bytes[..at]);
+            inserted.push(b'0');
+            inserted.extend_from_slice(&bytes[at..]);
+            for character in b'0'..=b'z' {
+                inserted[at] = character;
+                if let Some(found) = self.spelling_candidate(&locals, &inserted) {
+                    return plain(found);
+                }
+            }
+            if at == bytes.len() {
+                break;
+            }
+            let mut changed = bytes.to_vec();
+            for character in b'0'..=b'z' {
+                changed[at] = character;
+                if let Some(found) = self.spelling_candidate(&locals, &changed) {
+                    return plain(found);
+                }
+            }
+            if at + 1 < bytes.len() {
+                changed[at] = bytes[at + 1];
+                changed[at + 1] = bytes[at];
+                if let Some(found) = self.spelling_candidate(&locals, &changed) {
+                    return plain(found);
+                }
+            }
+            let mut removed = bytes[..at].to_vec();
+            removed.extend_from_slice(&bytes[at + 1..]);
+            if let Some(found) = self.spelling_candidate(&locals, &removed) {
+                return plain(found);
+            }
+        }
+        for (local, found) in &local_order {
+            if local.eq_ignore_ascii_case(&name) {
+                return plain(*found);
+            }
+        }
+        let globals = self.global_symbols();
+        for found in &globals {
+            if !self.symbols[*found].is_undefined()
+                && self.symbols[*found].name.eq_ignore_ascii_case(&name)
+            {
+                return plain(*found);
+            }
+        }
+        if name.starts_with("_Z") {
+            let function = demangled_function_name(&name)?;
+            let found = self.spelling_candidate(&locals, function.as_bytes())?;
+            return Some((found, ": extern \"C\" ".to_string(), String::new()));
+        }
+        let suggests =
+            |other: &str| demangled_function_name(other).is_some_and(|function| function == name);
+        let found = local_order
+            .iter()
+            .find(|(local, _)| suggests(local))
+            .map(|(_, found)| *found)
+            .or_else(|| {
+                globals
+                    .iter()
+                    .copied()
+                    .find(|found| suggests(&self.symbols[*found].name))
+            })?;
+        Some((
+            found,
+            " to declare ".to_string(),
+            " as extern \"C\"?".to_string(),
+        ))
+    }
 }
