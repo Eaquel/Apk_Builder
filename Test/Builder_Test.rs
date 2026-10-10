@@ -68879,6 +68879,23 @@ mod linker_lit {
                 materialize(world, &root, &piece);
             }
         }
+        let mut include_folders: Vec<String> = Vec::new();
+        for (position, argument) in arguments.iter().enumerate() {
+            if argument == "-I" {
+                if let Some(folder) = arguments.get(position + 1) {
+                    include_folders.push(folder.clone());
+                }
+            } else if let Some(folder) = argument.strip_prefix("-I") {
+                include_folders.push(folder.to_string());
+            }
+        }
+        for folder in include_folders {
+            let absolute = world.absolute(&folder);
+            let prefix = format!("{}/", absolute.trim_start_matches('/'));
+            for path in world.tree.paths_under(&prefix) {
+                materialize(world, &root, &format!("/{path}"));
+            }
+        }
         let directory = root.join(world.directory.trim_start_matches('/'));
         let _ = std::fs::create_dir_all(&directory);
         let mut command = Command::new(&arguments[0]);
@@ -68929,6 +68946,25 @@ mod linker_lit {
                         };
                         let stderr = clean(output.stderr);
                         let said = String::from_utf8_lossy(&stderr).to_string();
+                        let assembler = matches!(arguments[0].as_str(), "llvm-mc" | "yaml2obj");
+                        let too_new = [
+                            "unknown token in expression",
+                            "unknown flag",
+                            "expect relocation specifier",
+                            "unknown directive",
+                            "unknown relocation name",
+                            "unexpected token",
+                            "expected identifier",
+                            "invalid hex32 number",
+                        ];
+                        if status != 0 && assembler {
+                            if let Some(found) = too_new.iter().find(|text| said.contains(**text)) {
+                                world.missing_tool.get_or_insert(format!(
+                                    "{} on this machine reports {found}",
+                                    arguments[0]
+                                ));
+                            }
+                        }
                         if status != 0 && said.contains("SHT_CREL") {
                             world.missing_tool.get_or_insert(format!(
                                 "{} on this machine does not know SHT_CREL",

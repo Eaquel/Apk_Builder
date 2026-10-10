@@ -115,6 +115,8 @@ pub struct Options {
     pub section_start: BTreeMap<String, u64>,
     pub emit_relocations: bool,
     pub check_sections: bool,
+    pub retpoline_plt: bool,
+    pub explicit_addends: Option<bool>,
     pub symbol_ordering_file: Option<String>,
     pub call_graph_ordering_file: Option<String>,
     pub call_graph_sort: CallGraphSort,
@@ -224,6 +226,8 @@ impl Default for Options {
             section_start: BTreeMap::new(),
             emit_relocations: false,
             check_sections: true,
+            retpoline_plt: false,
+            explicit_addends: None,
             symbol_ordering_file: None,
             call_graph_ordering_file: None,
             call_graph_sort: CallGraphSort::Cdsort,
@@ -1090,6 +1094,9 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "relro" => options.relocation_read_only = true,
         "norelro" => options.relocation_read_only = false,
         "now" => options.bind_now = true,
+        "retpolineplt" => options.retpoline_plt = true,
+        "rel" => options.explicit_addends = Some(false),
+        "rela" => options.explicit_addends = Some(true),
         "lazy" => options.bind_now = false,
         "text" => options.text_relocations_forbidden = true,
         "notext" | "textoff" => options.text_relocations_forbidden = false,
@@ -5526,7 +5533,10 @@ impl<'s> Context<'s> {
                 !self.got_plt_entries.is_empty() || self.has_got_plt_offset_relocation
             }
             Synthetic::IndirectGotPlt => !self.indirect_got_plt_entries.is_empty(),
-            Synthetic::Plt => !self.plt_entries.is_empty(),
+            Synthetic::Plt => {
+                !self.plt_entries.is_empty()
+                    || (self.retpoline() && !self.indirect_plt_entries.is_empty())
+            }
             Synthetic::IndirectPlt => !self.indirect_plt_entries.is_empty(),
             Synthetic::PltRelocations => !self.plt_relocations.is_empty(),
             Synthetic::DynamicRelocations => !self.dynamic_relocations.is_empty(),
@@ -11029,7 +11039,9 @@ impl<'s> Context<'s> {
             ("igot", self.indirect_got_plt_entries.len() as u64 * entry),
             (
                 ".plt",
-                if self.plt_entries.is_empty() {
+                if self.plt_entries.is_empty()
+                    && !(self.retpoline() && !self.indirect_plt_entries.is_empty())
+                {
                     0
                 } else {
                     self.target.plt_header_size
@@ -13477,6 +13489,12 @@ impl<'s> Context<'s> {
         for (position, id) in self.got_plt_entries.iter().enumerate() {
             let at = (position + self.target.got_plt_header_entries as usize) * entry;
             let value = match self.target.architecture {
+                Architecture::X86_64 if self.retpoline() && self.options.bind_now => continue,
+                Architecture::X86_64 if self.retpoline() => self.plt_address(*id) + 17,
+                Architecture::X86 if self.retpoline() && self.is_pic() => {
+                    self.plt_address(*id) + 17
+                }
+                Architecture::X86 if self.retpoline() => self.plt_address(*id) + 16,
                 Architecture::X86_64 | Architecture::X86 => self.plt_address(*id) + 6,
                 _ => plt,
             };
@@ -13523,7 +13541,174 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn retpoline(&self) -> bool {
+        self.options.retpoline_plt
+            && matches!(
+                self.target.architecture,
+                Architecture::X86_64 | Architecture::X86
+            )
+    }
+
+    pub fn apply_retpoline_sizes(&mut self) {
+        if !self.retpoline() {
+            return;
+        }
+        let (header, entry) =
+            if self.target.architecture == Architecture::X86_64 && self.options.bind_now {
+                (32, 16)
+            } else {
+                (48, 32)
+            };
+        self.target.plt_header_size = header;
+        self.target.plt_entry_size = entry;
+        self.target.indirect_plt_entry_size = entry;
+    }
+
+    fn write_retpoline_header(&self, out: &mut [u8], plt: u64, got_plt: u64) {
+        let put = |out: &mut [u8], at: usize, value: u64| {
+            out[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        };
+        if self.target.architecture == Architecture::X86_64 {
+            if self.options.bind_now {
+                out.copy_from_slice(&[
+                    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xf3, 0x90, 0x0f, 0xae, 0xe8, 0xeb, 0xf9, 0xcc,
+                    0xcc, 0xcc, 0xcc, 0x4c, 0x89, 0x1c, 0x24, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+                    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+                ]);
+                return;
+            }
+            out.copy_from_slice(&[
+                0xff, 0x35, 0, 0, 0, 0, 0x4c, 0x8b, 0x1d, 0, 0, 0, 0, 0xe8, 0x0e, 0x00, 0x00, 0x00,
+                0xf3, 0x90, 0x0f, 0xae, 0xe8, 0xeb, 0xf9, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+                0x4c, 0x89, 0x1c, 0x24, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+                0xcc, 0xcc,
+            ]);
+            put(
+                out,
+                2,
+                got_plt.wrapping_sub(plt).wrapping_sub(6).wrapping_add(8),
+            );
+            put(
+                out,
+                9,
+                got_plt.wrapping_sub(plt).wrapping_sub(13).wrapping_add(16),
+            );
+            return;
+        }
+        if self.is_pic() {
+            out.copy_from_slice(&[
+                0xff, 0xb3, 4, 0, 0, 0, 0x50, 0x8b, 0x83, 8, 0, 0, 0, 0xe8, 0x0e, 0x00, 0x00, 0x00,
+                0xf3, 0x90, 0x0f, 0xae, 0xe8, 0xeb, 0xf9, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+                0x89, 0x0c, 0x24, 0x8b, 0x4c, 0x24, 0x04, 0x89, 0x44, 0x24, 0x04, 0x89, 0xc8, 0x59,
+                0xc3, 0xcc,
+            ]);
+            return;
+        }
+        out.copy_from_slice(&[
+            0xff, 0x35, 0, 0, 0, 0, 0x50, 0xa1, 0, 0, 0, 0, 0xe8, 0x0f, 0x00, 0x00, 0x00, 0xf3,
+            0x90, 0x0f, 0xae, 0xe8, 0xeb, 0xf9, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+            0x89, 0x0c, 0x24, 0x8b, 0x4c, 0x24, 0x04, 0x89, 0x44, 0x24, 0x04, 0x89, 0xc8, 0x59,
+            0xc3, 0xcc,
+        ]);
+        put(out, 2, got_plt + 4);
+        put(out, 8, got_plt + 8);
+    }
+
+    fn write_retpoline_entry(
+        &self,
+        out: &mut [u8],
+        id: SymbolIndex,
+        entry_address: u64,
+        index: u64,
+    ) {
+        let put = |out: &mut [u8], at: usize, value: u64| {
+            out[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        };
+        let got_plt_entry = self.got_plt_address(id);
+        let plt = self.synthetic_address(".plt");
+        let offset = entry_address.wrapping_sub(plt);
+        if self.target.architecture == Architecture::X86_64 {
+            if self.options.bind_now {
+                out.copy_from_slice(&[
+                    0x4c, 0x8b, 0x1d, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0, 0xcc, 0xcc, 0xcc, 0xcc,
+                ]);
+                put(
+                    out,
+                    3,
+                    got_plt_entry.wrapping_sub(entry_address).wrapping_sub(7),
+                );
+                put(out, 8, plt.wrapping_sub(entry_address).wrapping_sub(12));
+                return;
+            }
+            out.copy_from_slice(&[
+                0x4c, 0x8b, 0x1d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0, 0x68, 0, 0, 0, 0,
+                0xe9, 0, 0, 0, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+            ]);
+            put(
+                out,
+                3,
+                got_plt_entry.wrapping_sub(entry_address).wrapping_sub(7),
+            );
+            put(
+                out,
+                8,
+                0u64.wrapping_sub(offset).wrapping_sub(12).wrapping_add(32),
+            );
+            put(
+                out,
+                13,
+                0u64.wrapping_sub(offset).wrapping_sub(17).wrapping_add(18),
+            );
+            put(out, 18, index);
+            put(out, 23, 0u64.wrapping_sub(offset).wrapping_sub(27));
+            return;
+        }
+        let relocation_offset = 8 * index;
+        if self.is_pic() {
+            out.copy_from_slice(&[
+                0x50, 0x8b, 0x83, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0, 0x68, 0, 0, 0, 0,
+                0xe9, 0, 0, 0, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+            ]);
+            let got_plt = self.synthetic_address(".got.plt");
+            put(out, 3, got_plt_entry.wrapping_sub(got_plt));
+            put(
+                out,
+                8,
+                0u64.wrapping_sub(offset).wrapping_sub(12).wrapping_add(32),
+            );
+            put(
+                out,
+                13,
+                0u64.wrapping_sub(offset).wrapping_sub(17).wrapping_add(18),
+            );
+            put(out, 18, relocation_offset);
+            put(out, 23, 0u64.wrapping_sub(offset).wrapping_sub(27));
+            return;
+        }
+        out.copy_from_slice(&[
+            0x50, 0xa1, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0, 0x68, 0, 0, 0, 0, 0xe9, 0,
+            0, 0, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        ]);
+        put(out, 2, got_plt_entry);
+        put(
+            out,
+            7,
+            0u64.wrapping_sub(offset).wrapping_sub(11).wrapping_add(32),
+        );
+        put(
+            out,
+            12,
+            0u64.wrapping_sub(offset).wrapping_sub(16).wrapping_add(17),
+        );
+        put(out, 17, relocation_offset);
+        put(out, 22, 0u64.wrapping_sub(offset).wrapping_sub(26));
+    }
+
     fn write_plt_header(&self, out: &mut [u8], plt: u64, got_plt: u64) {
+        if self.retpoline() {
+            self.write_retpoline_header(out, plt, got_plt);
+            return;
+        }
         let encoding = self.encoding();
         match self.target.architecture {
             Architecture::X86_64 => {
@@ -13602,6 +13787,10 @@ impl<'s> Context<'s> {
     }
 
     fn write_plt_entry(&self, out: &mut [u8], id: SymbolIndex, entry_address: u64, index: u64) {
+        if self.retpoline() {
+            self.write_retpoline_entry(out, id, entry_address, index);
+            return;
+        }
         let encoding = self.encoding();
         let got_plt_entry = self.got_plt_address(id);
         let plt = self.synthetic_address(".plt");
@@ -14260,6 +14449,10 @@ impl<'s> Context<'s> {
         self.load_inputs();
         if self.failed() {
             return None;
+        }
+        self.apply_retpoline_sizes();
+        if let Some(rela) = self.options.explicit_addends {
+            self.target.uses_addends = rela;
         }
         self.has_dynamic_symbols = !self.shared_files.is_empty() || self.is_pic();
         self.options.export_dynamic |= self.is_shared();
