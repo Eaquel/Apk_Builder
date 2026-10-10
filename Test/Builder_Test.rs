@@ -68927,10 +68927,22 @@ mod linker_lit {
                                 .replace(&root_text, "")
                                 .into_bytes()
                         };
+                        let stderr = clean(output.stderr);
+                        let said = String::from_utf8_lossy(&stderr).to_string();
+                        if status != 0 {
+                            if let Some(rest) = said.split("Unknown command line argument '").nth(1)
+                            {
+                                let option = rest.split('\'').next().unwrap_or_default();
+                                world.missing_tool.get_or_insert(format!(
+                                    "{} on this machine does not know {option}",
+                                    arguments[0]
+                                ));
+                            }
+                        }
                         ToolOutcome {
                             status,
                             stdout: clean(output.stdout),
-                            stderr: clean(output.stderr),
+                            stderr,
                         }
                     }
                     Err(error) => ToolOutcome::failed(126, format!("{error}\n")),

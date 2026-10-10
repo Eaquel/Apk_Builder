@@ -70,6 +70,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI262", "A section does not fit in its memory region."),
     ("EI263", "A linker script places sections in a way the linker cannot carry out."),
     ("EI264", "Output sections overlap or run past the end of the address space."),
+    ("EI265", "A symbol named to keep its section unique cannot be found."),
+    ("EI266", "The address significance table is ignored for safe folding."),
+    ("EI267", "The entry symbol cannot be found, so no start address is set."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

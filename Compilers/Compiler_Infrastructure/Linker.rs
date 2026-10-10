@@ -114,6 +114,13 @@ pub struct Options {
     pub section_start: BTreeMap<String, u64>,
     pub emit_relocations: bool,
     pub check_sections: bool,
+    pub folding: IdenticalCodeFolding,
+    pub print_identical_folding: bool,
+    pub keep_unique: Vec<String>,
+    pub ignore_data_address_equality: bool,
+    pub ignore_function_address_equality: bool,
+    pub read_only_segment: bool,
+    pub execute_only_segment: bool,
     pub relax: bool,
     pub dynamic_linker: Option<String>,
     pub no_dynamic_linker: bool,
@@ -205,6 +212,13 @@ impl Default for Options {
             section_start: BTreeMap::new(),
             emit_relocations: false,
             check_sections: true,
+            folding: IdenticalCodeFolding::None,
+            print_identical_folding: false,
+            keep_unique: Vec::new(),
+            ignore_data_address_equality: false,
+            ignore_function_address_equality: false,
+            read_only_segment: true,
+            execute_only_segment: false,
             relax: true,
             dynamic_linker: None,
             no_dynamic_linker: false,
@@ -705,6 +719,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.sysroot = Some(value);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--keep-unique"])? {
+            options.keep_unique.push(value);
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--threads"])? {
             options.threads = value.parse().ok();
             continue;
@@ -735,8 +753,8 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             let (name, address) = value
                 .split_once('=')
                 .ok_or_else(|| invalid_value("--section-start", &value))?;
-            let address =
-                parse_number(address).ok_or_else(|| invalid_value("--section-start", &value))?;
+            let address = parse_section_address(address)
+                .ok_or_else(|| invalid_value("--section-start", &value))?;
             options.section_start.insert(name.to_string(), address);
             continue;
         }
@@ -752,7 +770,8 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             }
         }
         if let Some((section, value)) = segment_start {
-            let address = parse_number(&value).ok_or_else(|| invalid_value(&raw, &value))?;
+            let address =
+                parse_section_address(&value).ok_or_else(|| invalid_value(&raw, &value))?;
             options.section_start.insert(section.to_string(), address);
             continue;
         }
@@ -853,6 +872,17 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--emit-relocs" | "-q" => options.emit_relocations = true,
             "--check-sections" => options.check_sections = true,
             "--no-check-sections" => options.check_sections = false,
+            "--icf=all" => options.folding = IdenticalCodeFolding::All,
+            "--icf=safe" => options.folding = IdenticalCodeFolding::Safe,
+            "--icf=none" => options.folding = IdenticalCodeFolding::None,
+            "--print-icf-sections" => options.print_identical_folding = true,
+            "--no-print-icf-sections" => options.print_identical_folding = false,
+            "--ignore-data-address-equality" => options.ignore_data_address_equality = true,
+            "--ignore-function-address-equality" => options.ignore_function_address_equality = true,
+            "--rosegment" => options.read_only_segment = true,
+            "--no-rosegment" => options.read_only_segment = false,
+            "--xosegment" => options.execute_only_segment = true,
+            "--no-xosegment" => options.execute_only_segment = false,
             "--noinhibit-exec" => options.no_inhibit_executable = true,
             "--fatal-warnings" => options.fatal_warnings = true,
             "--no-fatal-warnings" => options.fatal_warnings = false,
@@ -1288,6 +1318,7 @@ pub struct SymbolData {
     pub output_section_symbol: Option<OutputIndex>,
     pub output_relative_end: bool,
     pub header_relative: bool,
+    pub folded: bool,
 }
 
 impl SymbolData {
@@ -1328,6 +1359,7 @@ impl SymbolData {
             output_section_symbol: None,
             output_relative_end: false,
             header_relative: false,
+            folded: false,
         }
     }
 
@@ -1532,6 +1564,8 @@ pub struct InputSection {
     pub merged_members: Vec<SectionIndex>,
     pub description: usize,
     pub relocated_section: Option<SectionIndex>,
+    pub keep_unique: bool,
+    pub replacement: Option<SectionIndex>,
 }
 
 impl InputSection {
@@ -1570,6 +1604,8 @@ impl InputSection {
             merged_members: Vec::new(),
             description: usize::MAX,
             relocated_section: None,
+            keep_unique: false,
+            replacement: None,
             next_in_group: None,
         }
     }
@@ -1593,6 +1629,7 @@ pub struct InputFile {
     pub sections: Vec<Option<SectionIndex>>,
     pub discarded: Vec<bool>,
     pub kept_groups: Vec<usize>,
+    pub address_significance: Option<usize>,
     pub group: usize,
     pub shared_object_name: String,
     pub needed: bool,
@@ -3170,6 +3207,7 @@ impl<'s> Context<'s> {
             sections: Vec::new(),
             discarded: Vec::new(),
             kept_groups: Vec::new(),
+            address_significance: None,
             group,
             shared_object_name: shared_name,
             needed: !state.as_needed,
@@ -4081,6 +4119,20 @@ impl<'s> Context<'s> {
             }
             let header = self.files[index].elf.sections[position].clone();
             if header.flags & section_flag::EXCLUDE != 0 && !relocatable {
+                if header.kind == section_type::LLVM_ADDRESS_SIGNIFICANCE {
+                    if header.link != 0 {
+                        self.files[index].address_significance = Some(position);
+                    } else if self.options.folding == IdenticalCodeFolding::Safe {
+                        let display = self.file_name(Some(index));
+                        self.warn(
+                            problem("EI266", "The address significance table is ignored for safe folding.")
+                                .with_context(format!("File: {display}"))
+                                .with_context(format!(
+                                    "Cause: {display}: --icf=safe conservatively ignores SHT_LLVM_ADDRSIG [index {position}] with sh_link=0 (likely created using objcopy or ld -r)"
+                                )),
+                        );
+                    }
+                }
                 self.files[index].discarded[position] = true;
                 continue;
             }
@@ -4228,6 +4280,8 @@ impl<'s> Context<'s> {
                 merged_members: Vec::new(),
                 description: usize::MAX,
                 relocated_section: None,
+                keep_unique: false,
+                replacement: None,
                 next_in_group: None,
             };
             map[position] = Some(self.sections.len());
@@ -4714,7 +4768,16 @@ pub fn output_section_name(name: &str) -> String {
 
 const X86_64_DESCRIPTOR_FORM: &str =
     "R_X86_64_GOTPC32_TLSDESC/R_X86_64_CODE_4_GOTPC32_TLSDESC must be used in leaq x@tlsdesc(%rip), %REG";
+const MALFORMED_LEB: &str = "malformed uleb128, extends past end";
 const X86_DESCRIPTOR_FORM: &str = "R_386_TLS_GOTDESC must be used in leal x@tlsdesc(%ebx), %eax";
+
+fn parse_section_address(text: &str) -> Option<u64> {
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    if digits.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(digits, 16).ok()
+}
 
 pub fn section_type_name(architecture: Architecture, kind: u32) -> &'static str {
     let specific = match (architecture, kind) {
@@ -7636,7 +7699,10 @@ impl<'s> Context<'s> {
             }
         }
         if !self.is_shared() && self.symbols[symbol].is_shared() {
-            if self.symbols[symbol].shared_protected {
+            let ignored = (self.symbols[symbol].is_function()
+                && self.options.ignore_function_address_equality)
+                || (self.symbols[symbol].is_object() && self.options.ignore_data_address_equality);
+            if self.symbols[symbol].shared_protected && !ignored {
                 let name = self.symbols[symbol].name.clone();
                 self.error(
                     problem(
@@ -8498,7 +8564,7 @@ impl<'s> Context<'s> {
             return false;
         };
         let symbol = &self.symbols[symbol];
-        if !symbol.is_defined() {
+        if !symbol.is_defined() || symbol.folded {
             return false;
         }
         symbol
@@ -9884,7 +9950,15 @@ impl<'s> Context<'s> {
                 continue;
             }
             let new_flags = self.segment_flags_of(output);
-            let incompatible = flags ^ new_flags;
+            let mut incompatible = flags ^ new_flags;
+            if new_flags & segment_flag::WRITE == 0 {
+                if !self.options.read_only_segment {
+                    incompatible &= !segment_flag::EXECUTE;
+                }
+                if !self.options.execute_only_segment {
+                    incompatible &= !segment_flag::READ;
+                }
+            }
             if incompatible != 0 {
                 load = None;
             }
@@ -12908,6 +12982,17 @@ impl<'s> Context<'s> {
             0
         };
         let base = self.section_address(section, 0);
+        let relocatable = self.is_relocatable();
+        let with_addend = self.sections[section]
+            .relocation_section
+            .zip(
+                self.sections[section]
+                    .file
+                    .filter(|file| *file < self.files.len()),
+            )
+            .is_some_and(|(index, file)| {
+                self.files[file].elf.sections[index].kind == section_type::RELOCATIONS_WITH_ADDENDS
+            });
         for entry in raw {
             let Some(symbol) = self.symbol_of(section, entry.symbol) else {
                 continue;
@@ -12926,7 +13011,14 @@ impl<'s> Context<'s> {
                 .section
                 .is_some_and(|held| !self.sections[held].live)
                 || (self.symbols[symbol].is_undefined()
-                    && self.symbols[symbol].discarded_section != 0);
+                    && self.symbols[symbol].discarded_section != 0)
+                || (self.symbols[symbol].folded && name != ".debug_line");
+            if relocatable
+                && !(defined_dead && debug)
+                && (with_addend || self.symbols[symbol].kind != symbol_type::SECTION)
+            {
+                continue;
+            }
             let value = if defined_dead && debug {
                 tombstone
             } else {
@@ -13374,7 +13466,11 @@ impl<'s> Context<'s> {
             let mut data = self.sections[section].data.clone();
             data.resize(size.max(data.len()), 0);
             if self.is_relocatable() {
-                self.rewrite_section_symbol_addends(section, &mut data);
+                if self.sections[section].flags & section_flag::ALLOCATE != 0 {
+                    self.rewrite_section_symbol_addends(section, &mut data);
+                } else {
+                    self.apply_non_allocated_relocations(section, &mut data);
+                }
                 return data;
             }
             if self.sections[section].flags & section_flag::ALLOCATE != 0 {
@@ -13825,6 +13921,10 @@ impl<'s> Context<'s> {
         if self.failed() {
             return None;
         }
+        if self.options.folding != IdenticalCodeFolding::None {
+            self.find_keep_unique_sections();
+            self.fold_identical_code();
+        }
         if !relocatable {
             self.add_start_end_symbols();
         }
@@ -13993,6 +14093,23 @@ impl<'s> Context<'s> {
         }
         if self.failed() {
             return None;
+        }
+        let explicit_entry = self.options.entry.is_some() || self.script.entry.is_some();
+        if (explicit_entry || (!self.is_shared() && !relocatable))
+            && self.find(&self.entry_name.clone()).is_none()
+            && parse_number(&self.entry_name).is_none()
+        {
+            let entry = self.entry_name.clone();
+            self.warn(
+                problem(
+                    "EI267",
+                    "The entry symbol cannot be found, so no start address is set.",
+                )
+                .with_context(format!("Symbol: {entry}"))
+                .with_context(format!(
+                    "Cause: cannot find entry symbol {entry}; not setting start address"
+                )),
+            );
         }
         let bytes = self.write_output();
         if self.failed() {
@@ -28920,5 +29037,566 @@ impl<'s> Context<'s> {
             }
             self.outputs[output].flags |= section_flag::INFO_LINK;
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FoldingRelocation {
+    pub offset: u64,
+    pub kind: u32,
+    pub addend: i64,
+    pub symbol: Option<SymbolIndex>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FoldingKind {
+    Regular,
+    Synthetic,
+    ExceptionFrame,
+    Merge,
+    Output,
+    Absent,
+}
+
+impl<'s> Context<'s> {
+    fn folding_relocations(&mut self, section: SectionIndex) -> Vec<FoldingRelocation> {
+        let Some(file) = self.sections[section]
+            .file
+            .filter(|file| *file < self.files.len())
+        else {
+            return Vec::new();
+        };
+        let Some(relocation_index) = self.sections[section].relocation_section else {
+            return Vec::new();
+        };
+        let entries = match self.files[file].elf.relocations(relocation_index) {
+            Ok(entries) => entries,
+            Err(diagnostic) => {
+                self.error(diagnostic);
+                return Vec::new();
+            }
+        };
+        let with_addend = self.files[file].elf.sections[relocation_index].kind
+            == section_type::RELOCATIONS_WITH_ADDENDS;
+        entries
+            .iter()
+            .map(|entry| FoldingRelocation {
+                offset: entry.offset,
+                kind: entry.kind,
+                addend: if with_addend { entry.addend } else { 0 },
+                symbol: self.symbol_of(section, entry.symbol),
+            })
+            .collect()
+    }
+
+    fn folding_kind(&self, id: SymbolIndex) -> FoldingKind {
+        let symbol = &self.symbols[id];
+        if symbol.output_section_symbol.is_some() || symbol.header_relative {
+            return FoldingKind::Output;
+        }
+        let Some(section) = symbol.section else {
+            return FoldingKind::Absent;
+        };
+        let data = &self.sections[section];
+        if data.is_exception_frame {
+            FoldingKind::ExceptionFrame
+        } else if data.is_merge && data.merged_into.is_some() {
+            FoldingKind::Merge
+        } else if data.synthetic.is_some() {
+            FoldingKind::Synthetic
+        } else {
+            FoldingKind::Regular
+        }
+    }
+
+    fn folding_target(&self, symbol: Option<SymbolIndex>) -> Option<SectionIndex> {
+        let id = symbol?;
+        if !self.symbols[id].is_defined() {
+            return None;
+        }
+        match self.folding_kind(id) {
+            FoldingKind::Regular | FoldingKind::Synthetic => self.symbols[id].section,
+            _ => None,
+        }
+    }
+
+    fn merge_parent_offset(&self, section: SectionIndex, offset: u64) -> u64 {
+        match self.merge_piece(section, offset) {
+            Some(piece) => piece
+                .output_offset
+                .wrapping_add(offset.wrapping_sub(piece.input_offset)),
+            None => offset,
+        }
+    }
+
+    fn folding_eligible(&self, section: SectionIndex) -> bool {
+        let data = &self.sections[section];
+        if !data.live || data.keep_unique || data.flags & section_flag::ALLOCATE == 0 {
+            return false;
+        }
+        if data.flags & section_flag::WRITE != 0
+            && data.name != ".data.rel.ro"
+            && !data.name.starts_with(".data.rel.ro.")
+        {
+            return false;
+        }
+        if data.flags & section_flag::LINK_ORDER != 0 || data.synthetic.is_some() {
+            return false;
+        }
+        if data.name == ".init" || data.name == ".fini" {
+            return false;
+        }
+        !is_c_identifier(&data.name)
+    }
+
+    fn constant_relocations_equal(
+        &self,
+        left: &[FoldingRelocation],
+        right: &[FoldingRelocation],
+    ) -> bool {
+        if left.len() != right.len() {
+            return false;
+        }
+        for (a, b) in left.iter().zip(right) {
+            if a.offset != b.offset || a.kind != b.kind {
+                return false;
+            }
+            let (Some(sa), Some(sb)) = (a.symbol, b.symbol) else {
+                return false;
+            };
+            if sa == sb {
+                if a.addend == b.addend {
+                    continue;
+                }
+                return false;
+            }
+            let da = &self.symbols[sa];
+            let db = &self.symbols[sb];
+            if !da.is_defined() || !db.is_defined() || da.script_defined || db.script_defined {
+                return false;
+            }
+            if da.preemptible || db.preemptible {
+                return false;
+            }
+            let kind_a = self.folding_kind(sa);
+            let kind_b = self.folding_kind(sb);
+            if kind_a == FoldingKind::Absent
+                && kind_b == FoldingKind::Absent
+                && da.value.wrapping_add(a.addend as u64) == db.value.wrapping_add(b.addend as u64)
+            {
+                continue;
+            }
+            if kind_a == FoldingKind::Absent || kind_b == FoldingKind::Absent || kind_a != kind_b {
+                return false;
+            }
+            if matches!(kind_a, FoldingKind::Regular | FoldingKind::Synthetic) {
+                if da.value.wrapping_add(a.addend as u64) == db.value.wrapping_add(b.addend as u64)
+                {
+                    continue;
+                }
+                return false;
+            }
+            if kind_a != FoldingKind::Merge {
+                return false;
+            }
+            let (Some(x), Some(y)) = (da.section, db.section) else {
+                return false;
+            };
+            if self.sections[x].merged_into != self.sections[y].merged_into {
+                return false;
+            }
+            let offset_a = if da.is_section() {
+                self.merge_parent_offset(x, a.addend as u64)
+            } else {
+                self.merge_parent_offset(x, da.value)
+                    .wrapping_add(a.addend as u64)
+            };
+            let offset_b = if db.is_section() {
+                self.merge_parent_offset(y, b.addend as u64)
+            } else {
+                self.merge_parent_offset(y, db.value)
+                    .wrapping_add(b.addend as u64)
+            };
+            if offset_a != offset_b {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn sections_equal_constant(
+        &self,
+        a: SectionIndex,
+        b: SectionIndex,
+        relocations: &BTreeMap<SectionIndex, Vec<FoldingRelocation>>,
+    ) -> bool {
+        let left = &self.sections[a];
+        let right = &self.sections[b];
+        if left.flags != right.flags || left.size != right.size || left.data != right.data {
+            return false;
+        }
+        if left.output != right.output {
+            return false;
+        }
+        let empty = Vec::new();
+        self.constant_relocations_equal(
+            relocations.get(&a).unwrap_or(&empty),
+            relocations.get(&b).unwrap_or(&empty),
+        )
+    }
+
+    fn sections_equal_variable(
+        &self,
+        a: SectionIndex,
+        b: SectionIndex,
+        relocations: &BTreeMap<SectionIndex, Vec<FoldingRelocation>>,
+        classes: &[u32],
+    ) -> bool {
+        let empty = Vec::new();
+        let left = relocations.get(&a).unwrap_or(&empty);
+        let right = relocations.get(&b).unwrap_or(&empty);
+        for (x, y) in left.iter().zip(right) {
+            if x.symbol == y.symbol {
+                continue;
+            }
+            let Some(target_a) = self.folding_target(x.symbol) else {
+                continue;
+            };
+            let Some(target_b) = self.folding_target(y.symbol) else {
+                continue;
+            };
+            if classes[target_a] == 0 || classes[target_a] != classes[target_b] {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn mark_address_significant(&mut self, id: SymbolIndex, safe: bool) {
+        if !self.symbols[id].is_defined() {
+            return;
+        }
+        let Some(section) = self.symbols[id].section else {
+            return;
+        };
+        if self.sections[section].is_exception_frame {
+            return;
+        }
+        if safe || self.sections[section].flags & section_flag::EXECUTE == 0 {
+            self.sections[section].keep_unique = true;
+        }
+    }
+
+    pub fn find_keep_unique_sections(&mut self) {
+        for name in self.options.keep_unique.clone() {
+            let found = self
+                .find(&name)
+                .filter(|id| self.symbols[*id].is_defined() && self.symbols[*id].section.is_some());
+            match found {
+                Some(id) => {
+                    if let Some(section) = self.symbols[id].section {
+                        self.sections[section].keep_unique = true;
+                    }
+                }
+                None => self.warn(
+                    problem(
+                        "EI265",
+                        "A symbol named to keep its section unique cannot be found.",
+                    )
+                    .with_context(format!("Symbol: {name}"))
+                    .with_context(format!(
+                        "Cause: could not find symbol {name} to keep unique"
+                    )),
+                ),
+            }
+        }
+        if self.options.folding == IdenticalCodeFolding::All
+            && self.options.ignore_data_address_equality
+        {
+            return;
+        }
+        let safe = self.options.folding == IdenticalCodeFolding::Safe;
+        for id in self.global_symbols() {
+            if self.symbols[id].exported {
+                self.mark_address_significant(id, safe);
+            }
+        }
+        for file in self.object_files.clone() {
+            let handles = self.files[file].symbols.clone();
+            match self.files[file].address_significance {
+                Some(position) => {
+                    let data = self.files[file].elf.sections[position].data.clone();
+                    let mut at = 0usize;
+                    while at < data.len() {
+                        let mut value = 0u64;
+                        let mut shift = 0u32;
+                        let mut complete = false;
+                        while at < data.len() {
+                            let byte = data[at];
+                            at += 1;
+                            if shift < 64 {
+                                value |= u64::from(byte & 0x7f) << shift;
+                            }
+                            shift += 7;
+                            if byte & 0x80 == 0 {
+                                complete = true;
+                                break;
+                            }
+                        }
+                        if !complete {
+                            let display = self.file_name(Some(file));
+                            self.error(
+                                problem("EI200", "The object file could not be read.")
+                                    .with_context(format!("File: {display}"))
+                                    .with_context(format!(
+                                        "Cause: {display}: could not decode addrsig section: {MALFORMED_LEB}"
+                                    )),
+                            );
+                            break;
+                        }
+                        if let Some(id) = handles
+                            .get(value as usize)
+                            .copied()
+                            .filter(|id| *id != usize::MAX)
+                        {
+                            self.mark_address_significant(id, safe);
+                        }
+                    }
+                }
+                None => {
+                    for id in handles.into_iter().filter(|id| *id != usize::MAX) {
+                        self.mark_address_significant(id, safe);
+                    }
+                }
+            }
+        }
+    }
+
+    fn sections_with_unwind_data(&self) -> Vec<SectionIndex> {
+        let encoding = self.encoding();
+        let mut found = Vec::new();
+        for (section, pieces) in &self.frame_pieces {
+            let section = *section;
+            let data = &self.sections[section].data;
+            let Some(relocations) = self.frame_relocations.get(&section) else {
+                continue;
+            };
+            let mut with_data: BTreeSet<u64> = BTreeSet::new();
+            for piece in pieces.iter().filter(|piece| piece.is_common_information) {
+                let start = piece.input_offset as usize;
+                let end = (start + piece.size as usize).min(data.len());
+                if frame_augmentation(&data[start..end]).contains(&b'L') {
+                    with_data.insert(piece.input_offset);
+                }
+            }
+            for piece in pieces.iter().filter(|piece| !piece.is_common_information) {
+                let identifier = u64::from(
+                    encoding
+                        .read_u32(data, piece.input_offset as usize + 4)
+                        .unwrap_or(0),
+                );
+                if !with_data.contains(&(piece.input_offset + 4).wrapping_sub(identifier)) {
+                    continue;
+                }
+                let Some(first) = piece.first_relocation else {
+                    continue;
+                };
+                let Some(id) = self.symbol_of(section, relocations[first].symbol) else {
+                    continue;
+                };
+                let symbol = &self.symbols[id];
+                if !symbol.is_defined() || symbol.folded {
+                    continue;
+                }
+                if let Some(target) = symbol.section {
+                    let data = &self.sections[target];
+                    if !data.is_exception_frame && !(data.is_merge && data.merged_into.is_some()) {
+                        found.push(target);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    pub fn fold_identical_code(&mut self) {
+        let mut classes: Vec<u32> = vec![0; self.sections.len()];
+        let mut unique = 0u32;
+        for section in self.sections_with_unwind_data() {
+            unique += 1;
+            classes[section] = unique;
+        }
+        let mut members: Vec<SectionIndex> = Vec::new();
+        for section in self.input_order.clone() {
+            let data = &self.sections[section];
+            if data.is_merge && data.merged_into.is_some() || data.is_exception_frame {
+                continue;
+            }
+            if classes[section] != 0 {
+                continue;
+            }
+            if self.folding_eligible(section) {
+                members.push(section);
+            } else {
+                unique += 1;
+                classes[section] = unique;
+            }
+        }
+        let mut relocations: BTreeMap<SectionIndex, Vec<FoldingRelocation>> = BTreeMap::new();
+        for section in &members {
+            let list = self.folding_relocations(*section);
+            relocations.insert(*section, list);
+        }
+        let mut alternate: Vec<u32> = classes.clone();
+        for section in &members {
+            let size = self.sections[*section].size as usize;
+            let data = &self.sections[*section].data;
+            let content = &data[..size.min(data.len())];
+            classes[*section] = (xxh3_64(content) as u32) | (1 << 31);
+        }
+        for round in 0..2 {
+            let (from, to) = if round == 0 {
+                (&classes, &mut alternate)
+            } else {
+                (&alternate, &mut classes)
+            };
+            let mut updates: Vec<(SectionIndex, u32)> = Vec::new();
+            for section in &members {
+                let mut hash = from[*section];
+                for relocation in &relocations[section] {
+                    if let Some(target) = self.folding_target(relocation.symbol) {
+                        hash = hash.wrapping_add(from[target]);
+                    }
+                }
+                updates.push((*section, hash | (1 << 31)));
+            }
+            for (section, hash) in updates {
+                to[section] = hash;
+            }
+        }
+        let mut keys: Vec<(u32, usize)> = members
+            .iter()
+            .enumerate()
+            .map(|(position, section)| (classes[*section], position))
+            .collect();
+        keys.sort_unstable();
+        let mut sections: Vec<SectionIndex> = keys
+            .iter()
+            .map(|(_, position)| members[*position])
+            .collect();
+        unique += 1;
+        let base = unique;
+        let mut constant = true;
+        loop {
+            let mut repeat = false;
+            let mut begin = 0usize;
+            while begin < sections.len() {
+                let class = classes[sections[begin]];
+                let mut end = begin + 1;
+                while end < sections.len() && classes[sections[end]] == class {
+                    end += 1;
+                }
+                let mut start = begin;
+                while start < end {
+                    let leader = sections[start];
+                    let rest: Vec<SectionIndex> = sections[start + 1..end].to_vec();
+                    let (same, different): (Vec<SectionIndex>, Vec<SectionIndex>) =
+                        rest.into_iter().partition(|section| {
+                            if constant {
+                                self.sections_equal_constant(leader, *section, &relocations)
+                            } else {
+                                self.sections_equal_variable(
+                                    leader,
+                                    *section,
+                                    &relocations,
+                                    &classes,
+                                )
+                            }
+                        });
+                    let middle = start + 1 + same.len();
+                    sections[start + 1..middle].copy_from_slice(&same);
+                    sections[middle..end].copy_from_slice(&different);
+                    for section in &sections[start..middle] {
+                        classes[*section] = base + middle as u32;
+                    }
+                    if middle != end {
+                        repeat = true;
+                    }
+                    start = middle;
+                }
+                begin = end;
+            }
+            if constant {
+                constant = false;
+                continue;
+            }
+            if !repeat {
+                break;
+            }
+        }
+        let mut begin = 0usize;
+        while begin < sections.len() {
+            let class = classes[sections[begin]];
+            let mut end = begin + 1;
+            while end < sections.len() && classes[sections[end]] == class {
+                end += 1;
+            }
+            if end - begin > 1 {
+                let leader = sections[begin];
+                if self.options.print_identical_folding {
+                    let place = self.section_place(leader);
+                    self.messages.push(format!("selected section {place}"));
+                }
+                for section in sections[begin + 1..end].iter().copied() {
+                    if self.options.print_identical_folding {
+                        let place = self.section_place(section);
+                        self.messages
+                            .push(format!("  removing identical section {place}"));
+                    }
+                    let alignment = self.sections[leader]
+                        .alignment
+                        .max(self.sections[section].alignment);
+                    self.sections[leader].alignment = alignment;
+                    self.sections[section].replacement = Some(leader);
+                    self.sections[section].live = false;
+                    for dependent in self.sections[section].dependents.clone() {
+                        self.sections[dependent].live = false;
+                    }
+                }
+            }
+            begin = end;
+        }
+        for id in 0..self.symbols.len() {
+            if !self.symbols[id].is_defined() {
+                continue;
+            }
+            let Some(section) = self.symbols[id].section else {
+                continue;
+            };
+            if let Some(leader) = self.sections[section].replacement {
+                self.symbols[id].section = Some(leader);
+                self.symbols[id].folded = true;
+            }
+        }
+        for output in 0..self.outputs.len() {
+            let sections = &self.sections;
+            self.outputs[output]
+                .members
+                .retain(|member| sections[*member].live);
+        }
+    }
+}
+
+fn frame_augmentation(data: &[u8]) -> Vec<u8> {
+    let Some(version) = data.get(8) else {
+        return Vec::new();
+    };
+    if *version != 1 && *version != 3 {
+        return Vec::new();
+    }
+    let rest = &data[9..];
+    match rest.iter().position(|byte| *byte == 0) {
+        Some(end) => rest[..end].to_vec(),
+        None => Vec::new(),
     }
 }
