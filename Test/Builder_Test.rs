@@ -68929,6 +68929,12 @@ mod linker_lit {
                         };
                         let stderr = clean(output.stderr);
                         let said = String::from_utf8_lossy(&stderr).to_string();
+                        if status != 0 && said.contains("SHT_CREL") {
+                            world.missing_tool.get_or_insert(format!(
+                                "{} on this machine does not know SHT_CREL",
+                                arguments[0]
+                            ));
+                        }
                         if status != 0 {
                             if let Some(rest) = said.split("Unknown command line argument '").nth(1)
                             {
@@ -69210,11 +69216,14 @@ mod linker_lit {
                 ("%python".to_string(), "python3".to_string()),
                 (
                     "%errc_ENOENT".to_string(),
-                    "No such file or directory".to_string(),
+                    "'No such file or directory'".to_string(),
                 ),
-                ("%errc_EISDIR".to_string(), "Is a directory".to_string()),
-                ("%errc_EACCES".to_string(), "Permission denied".to_string()),
-                ("%errc_EINVAL".to_string(), "Invalid argument".to_string()),
+                ("%errc_EISDIR".to_string(), "'Is a directory'".to_string()),
+                (
+                    "%errc_EACCES".to_string(),
+                    "'Permission denied'".to_string(),
+                ),
+                ("%errc_EINVAL".to_string(), "'Invalid argument'".to_string()),
             ],
             tools: lld_tools(),
         };

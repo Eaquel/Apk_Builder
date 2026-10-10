@@ -73,6 +73,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI265", "A symbol named to keep its section unique cannot be found."),
     ("EI266", "The address significance table is ignored for safe folding."),
     ("EI267", "The entry symbol cannot be found, so no start address is set."),
+    ("EI268", "The symbol ordering file names a symbol that cannot be ordered."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

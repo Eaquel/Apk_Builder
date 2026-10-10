@@ -115,6 +115,11 @@ pub struct Options {
     pub section_start: BTreeMap<String, u64>,
     pub emit_relocations: bool,
     pub check_sections: bool,
+    pub symbol_ordering_file: Option<String>,
+    pub call_graph_ordering_file: Option<String>,
+    pub call_graph_sort: CallGraphSort,
+    pub print_symbol_order: Option<String>,
+    pub warn_symbol_ordering: bool,
     pub retain_symbols_file: Option<String>,
     pub print_version: bool,
     pub verbose_version: bool,
@@ -219,6 +224,11 @@ impl Default for Options {
             section_start: BTreeMap::new(),
             emit_relocations: false,
             check_sections: true,
+            symbol_ordering_file: None,
+            call_graph_ordering_file: None,
+            call_graph_sort: CallGraphSort::Cdsort,
+            print_symbol_order: None,
+            warn_symbol_ordering: true,
             retain_symbols_file: None,
             print_version: false,
             verbose_version: false,
@@ -736,6 +746,33 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.map_file = Some(value);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--call-graph-ordering-file"])? {
+            options.call_graph_ordering_file = Some(value);
+            continue;
+        }
+        if let Some(value) = option_value(&mut cursor, argument, &["--print-symbol-order"])? {
+            options.print_symbol_order = Some(value);
+            continue;
+        }
+        if let Some(value) = option_value(&mut cursor, argument, &["--call-graph-profile-sort"])? {
+            options.call_graph_sort = match value.as_str() {
+                "none" => CallGraphSort::None,
+                "hfsort" => CallGraphSort::Hfsort,
+                "cdsort" => CallGraphSort::Cdsort,
+                _ => {
+                    return Err(
+                        invalid_value("--call-graph-profile-sort", &value).with_context(format!(
+                            "Cause: unknown --call-graph-profile-sort= value: {value}"
+                        )),
+                    )
+                }
+            };
+            continue;
+        }
+        if let Some(value) = option_value(&mut cursor, argument, &["--symbol-ordering-file"])? {
+            options.symbol_ordering_file = Some(value);
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--retain-symbols-file"])? {
             options.retain_symbols_file = Some(value);
             continue;
@@ -895,6 +932,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-check-sections" => options.check_sections = false,
             "--print-map" => options.map_file = Some("-".to_string()),
             "--version" => options.print_version = true,
+            "--no-call-graph-profile-sort" => options.call_graph_sort = CallGraphSort::None,
+            "--warn-symbol-ordering" => options.warn_symbol_ordering = true,
+            "--no-warn-symbol-ordering" => options.warn_symbol_ordering = false,
             "-v" => options.verbose_version = true,
             "--demangle" => options.demangle = true,
             "--no-demangle" => options.demangle = false,
@@ -2471,6 +2511,8 @@ pub struct Context<'s> {
     pub identity: String,
     pub extra_outputs: Vec<(String, Vec<u8>)>,
     pub retained_symbols: Option<BTreeSet<String>>,
+    pub section_order: BTreeMap<SectionIndex, i64>,
+    pub call_graph_profile: Vec<(SectionIndex, SectionIndex, u64)>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -2592,6 +2634,8 @@ impl<'s> Context<'s> {
             identity: LINKER_IDENTITY.to_string(),
             extra_outputs: Vec::new(),
             retained_symbols: None,
+            section_order: BTreeMap::new(),
+            call_graph_profile: Vec::new(),
         }
     }
 
@@ -4957,6 +5001,10 @@ pub fn output_section_name(name: &str) -> String {
 
 const X86_64_DESCRIPTOR_FORM: &str =
     "R_X86_64_GOTPC32_TLSDESC/R_X86_64_CODE_4_GOTPC32_TLSDESC must be used in leaq x@tlsdesc(%rip), %REG";
+const ORDERING_CONFLICT: &str =
+    "--symbol-ordering-file and --call-graph-order-file may not be used together";
+const CALL_GRAPH_WITHOUT_RELOCATIONS: &str =
+    "SHT_LLVM_CALL_GRAPH_PROFILE exists, but relocation section doesn't";
 const KEY_FUNCTION_NOTE: &str = "the vtable symbol may be undefined because the class is missing its key function (see https://lld.llvm.org/missingkeyfunction)";
 const START_STOP_NOTE: &str = "the encapsulation symbol needs to be retained under --gc-sections properly; consider -z nostart-stop-gc (see https://lld.llvm.org/ELF/start-stop-gc)";
 
@@ -10064,6 +10112,8 @@ impl<'s> Context<'s> {
     }
 
     pub fn sort_output_sections(&mut self) {
+        self.build_section_order();
+        self.sort_input_sections_by_order();
         for output in self.order.clone() {
             let rank = self.rank_of(output);
             self.outputs[output].rank = rank;
@@ -14177,6 +14227,14 @@ impl<'s> Context<'s> {
 
     pub fn run(&mut self) -> Option<Vec<u8>> {
         self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
+        if self.options.symbol_ordering_file.is_some()
+            && self.options.call_graph_ordering_file.is_some()
+        {
+            self.error_always(
+                problem("EI204", "An option value is not valid.")
+                    .with_context(format!("Cause: {ORDERING_CONFLICT}")),
+            );
+        }
         if let Some(path) = self.options.retain_symbols_file.clone() {
             let mut names = BTreeSet::new();
             match (self.source)(&path) {
@@ -25466,6 +25524,8 @@ impl<'s> Context<'s> {
     }
 
     pub fn sort_script_sections(&mut self) {
+        self.build_section_order();
+        self.sort_input_sections_by_order();
         for output in self.order.clone() {
             if self.outputs[output].script.relocation_read_only {
                 self.outputs[output].relocation_read_only = true;
@@ -31596,5 +31656,987 @@ impl<'s> Context<'s> {
             " to declare ".to_string(),
             " as extern \"C\"?".to_string(),
         ))
+    }
+}
+
+impl<'s> Context<'s> {
+    fn ordering_warning(&mut self, cause: String) {
+        if !self.options.warn_symbol_ordering {
+            return;
+        }
+        self.warn(
+            problem(
+                "EI268",
+                "The symbol ordering file names a symbol that cannot be ordered.",
+            )
+            .with_context(format!("Cause: {cause}")),
+        );
+    }
+
+    fn warn_unorderable(&mut self, id: SymbolIndex) {
+        if !self.options.warn_symbol_ordering {
+            return;
+        }
+        let symbol = &self.symbols[id];
+        if symbol.is_undefined()
+            && symbol.discarded_section == 0
+            && self.unresolved_policy() == UnresolvedPolicy::Ignore
+        {
+            return;
+        }
+        let file = if symbol.script_defined {
+            self.script
+                .assignments
+                .iter()
+                .find(|assignment| assignment.symbol == Some(id))
+                .map(|assignment| assignment.location.clone())
+                .unwrap_or_else(|| self.file_name(symbol.file))
+        } else {
+            self.file_name(symbol.file)
+        };
+        let name = symbol.name.clone();
+        let what = if symbol.is_defined() {
+            if symbol.output_section_symbol.is_some() || symbol.header_relative {
+                "synthetic"
+            } else {
+                match symbol.section {
+                    None => "absolute",
+                    Some(section) if !self.sections[section].live => "discarded",
+                    Some(_) => return,
+                }
+            }
+        } else if symbol.is_undefined() {
+            if symbol.discarded_section != 0 {
+                "discarded"
+            } else {
+                "undefined"
+            }
+        } else if symbol.is_shared() {
+            "shared"
+        } else {
+            return;
+        };
+        self.ordering_warning(format!("{file}: unable to order {what} symbol: {name}"));
+    }
+
+    pub fn build_section_order(&mut self) {
+        self.call_graph_order();
+        let Some(path) = self.options.symbol_ordering_file.clone() else {
+            return;
+        };
+        let Some(bytes) = self.read_script_file(&path) else {
+            self.error(file_missing(&path).with_context(format!(
+                "Cause: cannot open {path}: No such file or directory"
+            )));
+            return;
+        };
+        let mut names: Vec<String> = Vec::new();
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let name = line.split('#').next().unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            if names.contains(&name) {
+                self.ordering_warning(format!("{path}: duplicate ordered symbol: {name}"));
+                continue;
+            }
+            names.push(name);
+        }
+        let base = -(self.section_order.len() as i64) - names.len() as i64;
+        let mut entries: BTreeMap<String, (i64, bool)> = BTreeMap::new();
+        for (position, name) in names.iter().enumerate() {
+            entries.insert(name.clone(), (base + position as i64, false));
+        }
+        let mut candidates: Vec<SymbolIndex> = self.global_symbols();
+        for file in self.object_files.clone() {
+            let first_global = self.files[file].first_global;
+            for (position, id) in self.files[file].symbols.iter().enumerate() {
+                if position > 0 && position < first_global && *id != usize::MAX {
+                    candidates.push(*id);
+                }
+            }
+        }
+        for id in candidates {
+            let name = self.symbols[id].name.clone();
+            let Some(entry) = entries.get_mut(&name) else {
+                continue;
+            };
+            entry.1 = true;
+            let priority = entry.0;
+            self.warn_unorderable(id);
+            if !self.symbols[id].is_defined() {
+                continue;
+            }
+            if let Some(section) = self.symbols[id].section {
+                let held = self.section_order.entry(section).or_insert(priority);
+                *held = (*held).min(priority);
+            }
+        }
+        for name in names {
+            if entries.get(&name).is_some_and(|entry| !entry.1) {
+                self.ordering_warning(format!("symbol ordering file: no such symbol: {name}"));
+            }
+        }
+    }
+
+    fn order_run(&self, run: &[SectionIndex], executable: bool) -> Vec<SectionIndex> {
+        let mut unordered: Vec<SectionIndex> = Vec::new();
+        let mut ordered: Vec<(SectionIndex, i64)> = Vec::new();
+        let mut unordered_size = 0u64;
+        let mut total_size = 0u64;
+        for section in run {
+            if executable {
+                total_size += self.sections[*section].size;
+            }
+            match self.section_order.get(section) {
+                Some(priority) => ordered.push((*section, *priority)),
+                None => {
+                    unordered.push(*section);
+                    unordered_size += self.sections[*section].size;
+                }
+            }
+        }
+        ordered.sort_by_key(|(_, priority)| *priority);
+        let spacing = self.thunk_spacing();
+        let mut insertion = 0usize;
+        if executable && !ordered.is_empty() && spacing != 0 && total_size >= spacing {
+            let mut position = 0u64;
+            while insertion != unordered.len() {
+                position += self.sections[unordered[insertion]].size;
+                if position > unordered_size / 2 {
+                    break;
+                }
+                insertion += 1;
+            }
+        }
+        let mut result: Vec<SectionIndex> = unordered[..insertion].to_vec();
+        result.extend(ordered.iter().map(|(section, _)| *section));
+        result.extend_from_slice(&unordered[insertion..]);
+        result
+    }
+
+    pub fn sort_input_sections_by_order(&mut self) {
+        if self.section_order.is_empty() {
+            return;
+        }
+        for output in self.order.clone() {
+            let name = &self.outputs[output].name;
+            if name == ".init" || name == ".fini" {
+                continue;
+            }
+            let executable = self.outputs[output].flags & section_flag::EXECUTE != 0;
+            let members = self.outputs[output].members.clone();
+            let mut sorted: Vec<SectionIndex> = Vec::with_capacity(members.len());
+            let mut start = 0usize;
+            while start < members.len() {
+                let description = self.sections[members[start]].description;
+                let mut end = start + 1;
+                while end < members.len() && self.sections[members[end]].description == description
+                {
+                    end += 1;
+                }
+                sorted.extend(self.order_run(&members[start..end], executable));
+                start = end;
+            }
+            self.outputs[output].members = sorted;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallGraphSort {
+    None,
+    Hfsort,
+    Cdsort,
+}
+
+const LAYOUT_EPSILON: f64 = 1e-8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutMerge {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LayoutGain {
+    score: f64,
+    kind: LayoutMerge,
+}
+
+impl LayoutGain {
+    fn none() -> LayoutGain {
+        LayoutGain {
+            score: -1.0,
+            kind: LayoutMerge::Forward,
+        }
+    }
+}
+
+struct LayoutNode {
+    index: usize,
+    size: u64,
+    count: u64,
+    chain: usize,
+    outgoing: Vec<usize>,
+    incoming: Vec<usize>,
+}
+
+struct LayoutJump {
+    source: usize,
+    target: usize,
+    count: u64,
+    offset: u64,
+}
+
+struct LayoutChain {
+    identifier: u64,
+    count: f64,
+    size: u64,
+    nodes: Vec<usize>,
+    edges: Vec<(usize, usize)>,
+}
+
+impl LayoutChain {
+    fn density(&self) -> f64 {
+        self.count / self.size as f64
+    }
+
+    fn edge_to(&self, other: usize) -> Option<usize> {
+        self.edges
+            .iter()
+            .find(|(chain, _)| *chain == other)
+            .map(|(_, edge)| *edge)
+    }
+
+    fn remove_edge(&mut self, other: usize) {
+        if let Some(position) = self.edges.iter().position(|(chain, _)| *chain == other) {
+            self.edges.remove(position);
+        }
+    }
+}
+
+struct LayoutEdge {
+    source: usize,
+    target: usize,
+    jumps: Vec<usize>,
+    gain: LayoutGain,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct LayoutKey(f64, u64, u64);
+
+impl Eq for LayoutKey {}
+
+impl PartialOrd for LayoutKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LayoutKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(self.1.cmp(&other.1))
+            .then(self.2.cmp(&other.2))
+    }
+}
+
+struct CacheDirectedLayout {
+    nodes: Vec<LayoutNode>,
+    jumps: Vec<LayoutJump>,
+    chains: Vec<LayoutChain>,
+    edges: Vec<LayoutEdge>,
+    estimated: Vec<u64>,
+    total_samples: u64,
+    total_size: u64,
+}
+
+const LAYOUT_CACHE_ENTRIES: f64 = 16.0;
+const LAYOUT_CACHE_SIZE: f64 = 2048.0;
+const LAYOUT_MAX_CHAIN_SIZE: usize = 128;
+const LAYOUT_DISTANCE_POWER: f64 = 0.25;
+const LAYOUT_FREQUENCY_SCALE: f64 = 0.25;
+
+impl CacheDirectedLayout {
+    fn new(
+        sizes: &[u64],
+        counts: &[u64],
+        calls: &[(usize, usize, u64)],
+        offsets: &[u64],
+    ) -> CacheDirectedLayout {
+        let mut layout = CacheDirectedLayout {
+            nodes: Vec::new(),
+            jumps: Vec::new(),
+            chains: Vec::new(),
+            edges: Vec::new(),
+            estimated: vec![0; sizes.len()],
+            total_samples: 0,
+            total_size: 0,
+        };
+        for (index, size) in sizes.iter().enumerate() {
+            let size = (*size).max(1);
+            let count = counts[index];
+            layout.nodes.push(LayoutNode {
+                index,
+                size,
+                count,
+                chain: index,
+                outgoing: Vec::new(),
+                incoming: Vec::new(),
+            });
+            layout.total_samples = layout.total_samples.wrapping_add(count);
+            if count > 0 {
+                layout.total_size += size;
+            }
+        }
+        for (position, (source, target, count)) in calls.iter().copied().enumerate() {
+            if source == target || count == 0 {
+                continue;
+            }
+            let jump = layout.jumps.len();
+            layout.jumps.push(LayoutJump {
+                source,
+                target,
+                count,
+                offset: offsets[position],
+            });
+            layout.nodes[target].incoming.push(jump);
+            layout.nodes[source].outgoing.push(jump);
+            layout.nodes[source].count = layout.nodes[source].count.max(count);
+            layout.nodes[target].count = layout.nodes[target].count.max(count);
+        }
+        for index in 0..layout.nodes.len() {
+            let incoming: u64 = layout.nodes[index]
+                .incoming
+                .iter()
+                .map(|jump| layout.jumps[*jump].count)
+                .sum();
+            let outgoing: u64 = layout.nodes[index]
+                .outgoing
+                .iter()
+                .map(|jump| layout.jumps[*jump].count)
+                .sum();
+            let node = &mut layout.nodes[index];
+            node.count = node.count.max(incoming).max(outgoing);
+            layout.chains.push(LayoutChain {
+                identifier: index as u64,
+                count: node.count as f64,
+                size: node.size,
+                nodes: vec![index],
+                edges: Vec::new(),
+            });
+        }
+        for source in 0..layout.nodes.len() {
+            for jump in layout.nodes[source].outgoing.clone() {
+                let target = layout.jumps[jump].target;
+                let source_chain = layout.nodes[source].chain;
+                let target_chain = layout.nodes[target].chain;
+                if let Some(edge) = layout.chains[source_chain].edge_to(target_chain) {
+                    layout.edges[edge].jumps.push(jump);
+                    continue;
+                }
+                let edge = layout.edges.len();
+                layout.edges.push(LayoutEdge {
+                    source: source_chain,
+                    target: target_chain,
+                    jumps: vec![jump],
+                    gain: LayoutGain::none(),
+                });
+                layout.chains[source_chain].edges.push((target_chain, edge));
+                layout.chains[target_chain].edges.push((source_chain, edge));
+            }
+        }
+        layout
+    }
+
+    fn key(&self, edge: usize) -> LayoutKey {
+        let held = &self.edges[edge];
+        LayoutKey(
+            -held.gain.score,
+            self.chains[held.source].identifier,
+            self.chains[held.target].identifier,
+        )
+    }
+
+    fn miss_probability(&self, density: f64) -> f64 {
+        let page = density * LAYOUT_CACHE_SIZE;
+        let total = self.total_samples as f64;
+        if page >= total {
+            return 0.0;
+        }
+        (1.0 - page / total).powf(LAYOUT_CACHE_ENTRIES)
+    }
+
+    fn frequency_gain(&self, before: usize, after: usize) -> f64 {
+        let a = &self.chains[before];
+        let b = &self.chains[after];
+        let current = a.count * self.miss_probability(a.density())
+            + b.count * self.miss_probability(b.density());
+        let merged_counts = a.count + b.count;
+        let merged_size = (a.size + b.size) as f64;
+        current - merged_counts * self.miss_probability(merged_counts / merged_size)
+    }
+
+    fn distance_score(source: u64, target: u64, count: u64) -> f64 {
+        let distance = source.abs_diff(target);
+        let value = if distance == 0 { 0.1 } else { distance as f64 };
+        count as f64 * value.powf(-LAYOUT_DISTANCE_POWER)
+    }
+
+    fn merge_gain(
+        &mut self,
+        before: usize,
+        after: usize,
+        edge: usize,
+        kind: LayoutMerge,
+    ) -> LayoutGain {
+        let frequency = self.frequency_gain(before, after);
+        let order: Vec<usize> = match kind {
+            LayoutMerge::Forward => self.chains[before]
+                .nodes
+                .iter()
+                .chain(&self.chains[after].nodes)
+                .copied()
+                .collect(),
+            LayoutMerge::Backward => self.chains[after]
+                .nodes
+                .iter()
+                .chain(&self.chains[before].nodes)
+                .copied()
+                .collect(),
+        };
+        let mut address = 0u64;
+        for node in order {
+            self.estimated[node] = address;
+            address += self.nodes[node].size;
+        }
+        let mut current = 0.0f64;
+        let mut merged = 0.0f64;
+        for jump in &self.edges[edge].jumps {
+            let held = &self.jumps[*jump];
+            let source = self.estimated[held.source] + held.offset;
+            let target = self.estimated[held.target];
+            merged += Self::distance_score(source, target, held.count);
+            current += Self::distance_score(0, self.total_size, held.count);
+        }
+        let mut score = (merged - current) + LAYOUT_FREQUENCY_SCALE * frequency;
+        if score >= 0.0 {
+            score /= self.chains[before].size.min(self.chains[after].size) as f64;
+        }
+        LayoutGain { score, kind }
+    }
+
+    fn best_gain(&mut self, edge: usize) -> LayoutGain {
+        let source = self.edges[edge].source;
+        let target = self.edges[edge].target;
+        let mut gain = LayoutGain::none();
+        for kind in [LayoutMerge::Forward, LayoutMerge::Backward] {
+            let candidate = self.merge_gain(source, target, edge, kind);
+            if (gain.score - candidate.score).abs() < LAYOUT_EPSILON {
+                let source_id = self.chains[source].identifier;
+                let target_id = self.chains[target].identifier;
+                if (kind == LayoutMerge::Forward && source_id < target_id)
+                    || (kind == LayoutMerge::Backward && source_id > target_id)
+                {
+                    gain = candidate;
+                }
+            } else if candidate.score > gain.score + LAYOUT_EPSILON {
+                gain = candidate;
+            }
+        }
+        gain
+    }
+
+    fn merge_chains(&mut self, into: usize, from: usize, kind: LayoutMerge) {
+        let nodes: Vec<usize> = match kind {
+            LayoutMerge::Forward => self.chains[into]
+                .nodes
+                .iter()
+                .chain(&self.chains[from].nodes)
+                .copied()
+                .collect(),
+            LayoutMerge::Backward => self.chains[from]
+                .nodes
+                .iter()
+                .chain(&self.chains[into].nodes)
+                .copied()
+                .collect(),
+        };
+        let count = self.chains[from].count;
+        let size = self.chains[from].size;
+        let chain = &mut self.chains[into];
+        chain.nodes = nodes.clone();
+        chain.count += count;
+        chain.size += size;
+        chain.identifier = self.nodes[nodes[0]].index as u64;
+        for node in nodes {
+            self.nodes[node].chain = into;
+        }
+        for (target_chain, edge) in self.chains[from].edges.clone() {
+            let target = if target_chain == from {
+                into
+            } else {
+                target_chain
+            };
+            match self.chains[into].edge_to(target) {
+                None => {
+                    let held = &mut self.edges[edge];
+                    if held.source == from {
+                        held.source = into;
+                    }
+                    if held.target == from {
+                        held.target = into;
+                    }
+                    self.chains[into].edges.push((target, edge));
+                    if target_chain != into && target_chain != from {
+                        self.chains[target_chain].edges.push((into, edge));
+                    }
+                }
+                Some(current) => {
+                    let moved = std::mem::take(&mut self.edges[edge].jumps);
+                    self.edges[current].jumps.extend(moved);
+                }
+            }
+            if target_chain != from {
+                self.chains[target_chain].remove_edge(from);
+            }
+        }
+        self.chains[from].nodes.clear();
+        self.chains[from].edges.clear();
+    }
+
+    fn run(mut self) -> Vec<usize> {
+        let mut queue: BTreeMap<LayoutKey, usize> = BTreeMap::new();
+        for node in 0..self.nodes.len() {
+            if self.nodes[node].count == 0 {
+                continue;
+            }
+            let chain = self.nodes[node].chain;
+            for (_, edge) in self.chains[chain].edges.clone() {
+                if self.edges[edge].source == self.edges[edge].target
+                    || self.edges[edge].gain.score != -1.0
+                {
+                    continue;
+                }
+                let gain = self.best_gain(edge);
+                self.edges[edge].gain = gain;
+                if gain.score > LAYOUT_EPSILON {
+                    queue.entry(self.key(edge)).or_insert(edge);
+                }
+            }
+        }
+        while let Some((&first, &best)) = queue.iter().next() {
+            queue.remove(&first);
+            let source = self.edges[best].source;
+            let target = self.edges[best].target;
+            for (_, edge) in self.chains[source]
+                .edges
+                .iter()
+                .chain(&self.chains[target].edges)
+            {
+                queue.remove(&self.key(*edge));
+            }
+            let kind = self.edges[best].gain.kind;
+            self.merge_chains(source, target, kind);
+            for (_, edge) in self.chains[source].edges.clone() {
+                let held = &self.edges[edge];
+                if held.source == held.target {
+                    continue;
+                }
+                if self.chains[held.source].nodes.len() + self.chains[held.target].nodes.len()
+                    > LAYOUT_MAX_CHAIN_SIZE
+                {
+                    continue;
+                }
+                let gain = self.best_gain(edge);
+                self.edges[edge].gain = gain;
+                if gain.score > LAYOUT_EPSILON {
+                    queue.entry(self.key(edge)).or_insert(edge);
+                }
+            }
+        }
+        let mut sorted: Vec<(f64, u64, usize)> = Vec::new();
+        for (index, chain) in self.chains.iter().enumerate() {
+            if chain.nodes.is_empty() {
+                continue;
+            }
+            let mut size = 0.0f64;
+            let mut count = 0.0f64;
+            for node in &chain.nodes {
+                size += self.nodes[*node].size as f64;
+                count += self.nodes[*node].count as f64;
+            }
+            sorted.push((-(count / size), chain.identifier, index));
+        }
+        sorted.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        sorted
+            .into_iter()
+            .flat_map(|(_, _, index)| {
+                self.chains[index]
+                    .nodes
+                    .iter()
+                    .map(|node| self.nodes[*node].index)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+}
+
+struct HotCluster {
+    next: usize,
+    previous: usize,
+    size: u64,
+    weight: u64,
+    initial_weight: u64,
+    best_predecessor: Option<(usize, u64)>,
+}
+
+impl HotCluster {
+    fn density(&self) -> f64 {
+        if self.size == 0 {
+            return 0.0;
+        }
+        self.weight as f64 / self.size as f64
+    }
+}
+
+impl<'s> Context<'s> {
+    fn profile_output(&self, section: SectionIndex) -> Option<OutputIndex> {
+        let data = &self.sections[section];
+        let target = data.merged_into.unwrap_or(section);
+        self.sections[target].output
+    }
+
+    pub fn read_call_graph(&mut self) {
+        if self.options.call_graph_sort == CallGraphSort::None {
+            return;
+        }
+        match self.options.call_graph_ordering_file.clone() {
+            Some(path) => self.read_call_graph_file(&path),
+            None => self.read_call_graph_sections(),
+        }
+    }
+
+    fn read_call_graph_file(&mut self, path: &str) {
+        let Some(bytes) = self.read_script_file(path) else {
+            self.error(file_missing(path).with_context(format!(
+                "Cause: cannot open {path}: No such file or directory"
+            )));
+            return;
+        };
+        let mut names: BTreeMap<String, SymbolIndex> = BTreeMap::new();
+        for file in &self.object_files {
+            for id in &self.files[*file].symbols {
+                if *id != usize::MAX {
+                    names.insert(self.symbols[*id].name.clone(), *id);
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(' ').collect();
+            let count = fields.get(2).and_then(|field| parse_number(field));
+            let (true, Some(count)) = (fields.len() == 3, count) else {
+                self.error_always(
+                    problem("EI239", "The linker script could not be read.")
+                        .with_context(format!("File: {path}"))
+                        .with_context(format!("Cause: {path}: parse error")),
+                );
+                return;
+            };
+            let Some(from) = self.call_graph_section(&names, path, fields[0]) else {
+                continue;
+            };
+            let Some(to) = self.call_graph_section(&names, path, fields[1]) else {
+                continue;
+            };
+            self.add_profile(from, to, count);
+        }
+    }
+
+    fn call_graph_section(
+        &mut self,
+        names: &BTreeMap<String, SymbolIndex>,
+        path: &str,
+        name: &str,
+    ) -> Option<SectionIndex> {
+        let Some(id) = names.get(name).copied() else {
+            self.ordering_warning(format!("{path}: no such symbol: {name}"));
+            return None;
+        };
+        self.warn_unorderable(id);
+        if !self.symbols[id].is_defined() {
+            return None;
+        }
+        self.symbols[id].section
+    }
+
+    fn add_profile(&mut self, from: SectionIndex, to: SectionIndex, count: u64) {
+        match self
+            .call_graph_profile
+            .iter_mut()
+            .find(|entry| entry.0 == from && entry.1 == to)
+        {
+            Some(entry) => entry.2 = entry.2.wrapping_add(count),
+            None => self.call_graph_profile.push((from, to, count)),
+        }
+    }
+
+    fn read_call_graph_sections(&mut self) {
+        for file in self.object_files.clone() {
+            let sections = &self.files[file].elf.sections;
+            let Some(profile) = sections
+                .iter()
+                .position(|section| section.kind == section_type::LLVM_CALL_GRAPH_PROFILE)
+            else {
+                continue;
+            };
+            let relocation = sections.iter().position(|section| {
+                section.info as usize == profile
+                    && matches!(
+                        section.kind,
+                        section_type::RELOCATIONS | section_type::RELOCATIONS_WITH_ADDENDS
+                    )
+            });
+            let entries = relocation
+                .map(|index| self.files[file].elf.relocations(index).unwrap_or_default())
+                .unwrap_or_default();
+            let indices: Vec<u32> = entries.iter().map(|entry| entry.symbol).collect();
+            if indices.is_empty() {
+                self.warn(
+                    problem("EI200", "The object file could not be read.")
+                        .with_context(format!("Cause: {CALL_GRAPH_WITHOUT_RELOCATIONS}")),
+                );
+                continue;
+            }
+            let data = self.files[file].elf.sections[profile].data.clone();
+            let weights: Vec<u64> = data
+                .chunks_exact(8)
+                .map(|chunk| self.encoding().read_u64(chunk, 0).unwrap_or(0))
+                .collect();
+            if indices.len() != weights.len() * 2 {
+                self.error_always(
+                    problem("EI200", "The object file could not be read.").with_context(
+                        "Cause: number of relocations doesn't match Weights".to_string(),
+                    ),
+                );
+                return;
+            }
+            for (position, weight) in weights.iter().enumerate() {
+                let from = self.files[file]
+                    .symbols
+                    .get(indices[position * 2] as usize)
+                    .copied();
+                let to = self.files[file]
+                    .symbols
+                    .get(indices[position * 2 + 1] as usize)
+                    .copied();
+                let section_of = |id: Option<SymbolIndex>| {
+                    let id = id.filter(|id| *id != usize::MAX)?;
+                    if !self.symbols[id].is_defined() {
+                        return None;
+                    }
+                    self.symbols[id].section
+                };
+                if let (Some(from), Some(to)) = (section_of(from), section_of(to)) {
+                    self.add_profile(from, to, *weight);
+                }
+            }
+        }
+    }
+
+    fn cache_directed_order(&self) -> BTreeMap<SectionIndex, i64> {
+        let mut sizes: Vec<u64> = Vec::new();
+        let mut counts: Vec<u64> = Vec::new();
+        let mut calls: Vec<(usize, usize, u64)> = Vec::new();
+        let mut offsets: Vec<u64> = Vec::new();
+        let mut sections: Vec<SectionIndex> = Vec::new();
+        let mut node_of: BTreeMap<SectionIndex, usize> = BTreeMap::new();
+        let mut node =
+            |section: SectionIndex, sizes: &mut Vec<u64>, counts: &mut Vec<u64>| -> usize {
+                *node_of.entry(section).or_insert_with(|| {
+                    sections.push(section);
+                    sizes.push(self.sections[section].size);
+                    counts.push(0);
+                    sections.len() - 1
+                })
+            };
+        for (from, to, weight) in &self.call_graph_profile {
+            if self.profile_output(*from) != self.profile_output(*to) || *weight == 0 {
+                continue;
+            }
+            let source = node(*from, &mut sizes, &mut counts);
+            let target = node(*to, &mut sizes, &mut counts);
+            if source == target {
+                continue;
+            }
+            calls.push((source, target, *weight));
+            offsets.push(sizes[source].div_ceil(2));
+            counts[target] = counts[target].wrapping_add(*weight);
+        }
+        let order = CacheDirectedLayout::new(&sizes, &counts, &calls, &offsets).run();
+        let start = -(order.len() as i64);
+        (start..)
+            .zip(order)
+            .map(|(priority, index)| (sections[index], priority))
+            .collect()
+    }
+
+    fn hot_cluster_order(&mut self) -> BTreeMap<SectionIndex, i64> {
+        let mut clusters: Vec<HotCluster> = Vec::new();
+        let mut sections: Vec<SectionIndex> = Vec::new();
+        let mut cluster_of: BTreeMap<SectionIndex, usize> = BTreeMap::new();
+        for (from, to, weight) in self.call_graph_profile.clone() {
+            if self.profile_output(from) != self.profile_output(to) {
+                continue;
+            }
+            let mut node = |section: SectionIndex| -> usize {
+                *cluster_of.entry(section).or_insert_with(|| {
+                    let index = clusters.len();
+                    sections.push(section);
+                    clusters.push(HotCluster {
+                        next: index,
+                        previous: index,
+                        size: self.sections[section].size,
+                        weight: 0,
+                        initial_weight: 0,
+                        best_predecessor: None,
+                    });
+                    index
+                })
+            };
+            let source = node(from);
+            let target = node(to);
+            clusters[target].weight = clusters[target].weight.wrapping_add(weight);
+            if source == target {
+                continue;
+            }
+            let better = match clusters[target].best_predecessor {
+                None => true,
+                Some((_, held)) => held < weight,
+            };
+            if better {
+                clusters[target].best_predecessor = Some((source, weight));
+            }
+        }
+        for cluster in &mut clusters {
+            cluster.initial_weight = cluster.weight;
+        }
+        let mut leaders: Vec<usize> = (0..clusters.len()).collect();
+        let mut sorted: Vec<usize> = (0..clusters.len()).collect();
+        sorted.sort_by(|a, b| {
+            clusters[*b]
+                .density()
+                .partial_cmp(&clusters[*a].density())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        fn leader_of(leaders: &mut [usize], mut value: usize) -> usize {
+            while leaders[value] != value {
+                leaders[value] = leaders[leaders[value]];
+                value = leaders[value];
+            }
+            value
+        }
+        for current in sorted {
+            let Some((predecessor, weight)) = clusters[current].best_predecessor else {
+                continue;
+            };
+            if weight.wrapping_mul(10) <= clusters[current].initial_weight {
+                continue;
+            }
+            let leader = leader_of(&mut leaders, predecessor);
+            if current == leader {
+                continue;
+            }
+            if clusters[current].size + clusters[leader].size > 1024 * 1024 {
+                continue;
+            }
+            let merged_density = (clusters[leader].weight + clusters[current].weight) as f64
+                / (clusters[leader].size + clusters[current].size) as f64;
+            if merged_density < clusters[leader].density() / 8.0 {
+                continue;
+            }
+            leaders[current] = leader;
+            let tail_into = clusters[leader].previous;
+            let tail_from = clusters[current].previous;
+            clusters[leader].previous = tail_from;
+            clusters[tail_from].next = leader;
+            clusters[current].previous = tail_into;
+            clusters[tail_into].next = current;
+            clusters[leader].size += clusters[current].size;
+            clusters[leader].weight += clusters[current].weight;
+            clusters[current].size = 0;
+            clusters[current].weight = 0;
+        }
+        let mut ordered: Vec<usize> = (0..clusters.len())
+            .filter(|index| clusters[*index].size > 0)
+            .collect();
+        ordered.sort_by(|a, b| {
+            clusters[*b]
+                .density()
+                .partial_cmp(&clusters[*a].density())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut result = BTreeMap::new();
+        let mut priority = -(clusters.len() as i64);
+        let mut printed = String::new();
+        for leader in &ordered {
+            let mut index = *leader;
+            loop {
+                result.insert(sections[index], priority);
+                priority += 1;
+                if self.options.print_symbol_order.is_some() {
+                    if let Some(file) = self.sections[sections[index]]
+                        .file
+                        .filter(|file| *file < self.files.len())
+                    {
+                        for id in &self.files[file].symbols {
+                            if *id == usize::MAX {
+                                continue;
+                            }
+                            let symbol = &self.symbols[*id];
+                            if !symbol.is_section()
+                                && symbol.is_defined()
+                                && symbol.section == Some(sections[index])
+                            {
+                                printed.push_str(&symbol.name);
+                                printed.push('\n');
+                            }
+                        }
+                    }
+                }
+                index = clusters[index].next;
+                if index == *leader {
+                    break;
+                }
+            }
+        }
+        if let Some(path) = self.options.print_symbol_order.clone() {
+            self.extra_outputs.push((path, printed.into_bytes()));
+        }
+        result
+    }
+
+    pub fn call_graph_order(&mut self) {
+        self.read_call_graph();
+        if self.call_graph_profile.is_empty() {
+            return;
+        }
+        self.section_order = match self.options.call_graph_sort {
+            CallGraphSort::Cdsort => self.cache_directed_order(),
+            CallGraphSort::Hfsort => self.hot_cluster_order(),
+            CallGraphSort::None => BTreeMap::new(),
+        };
     }
 }
