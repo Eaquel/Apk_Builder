@@ -74,6 +74,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI266", "The address significance table is ignored for safe folding."),
     ("EI267", "The entry symbol cannot be found, so no start address is set."),
     ("EI268", "The symbol ordering file names a symbol that cannot be ordered."),
+    ("EI269", "A section with SHF_LINK_ORDER links to a discarded section."),
+    ("EI270", "A section with SHF_LINK_ORDER links to a section that is not a regular section."),
+    ("EI271", "An option is only supported on other targets."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

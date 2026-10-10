@@ -122,9 +122,11 @@ pub struct Options {
     pub call_graph_sort: CallGraphSort,
     pub print_symbol_order: Option<String>,
     pub warn_symbol_ordering: bool,
+    pub merge_exception_index: bool,
     pub retain_symbols_file: Option<String>,
     pub print_version: bool,
     pub verbose_version: bool,
+    pub byte_invariant_big_endian: bool,
     pub demangle: bool,
     pub map_file: Option<String>,
     pub cross_reference: bool,
@@ -149,6 +151,8 @@ pub struct Options {
     pub warn_common: bool,
     pub optimize: u32,
     pub z_keywords: Vec<String>,
+    pub target_options: BTreeSet<usize>,
+    pub target_option_values: Vec<String>,
     pub copy_relocations: bool,
     pub origin: bool,
     pub no_delete: bool,
@@ -233,9 +237,11 @@ impl Default for Options {
             call_graph_sort: CallGraphSort::Cdsort,
             print_symbol_order: None,
             warn_symbol_ordering: true,
+            merge_exception_index: true,
             retain_symbols_file: None,
             print_version: false,
             verbose_version: false,
+            byte_invariant_big_endian: false,
             demangle: true,
             map_file: None,
             cross_reference: false,
@@ -260,6 +266,8 @@ impl Default for Options {
             warn_common: false,
             optimize: 1,
             z_keywords: Vec::new(),
+            target_options: BTreeSet::new(),
+            target_option_values: Vec::new(),
             copy_relocations: true,
             origin: false,
             no_delete: false,
@@ -316,6 +324,174 @@ fn unknown_option(option: &str) -> Diagnostic {
 
 fn missing_value(option: &str) -> Diagnostic {
     problem("EI203", "An option is missing its value.").with_context(format!("Option: {option}"))
+}
+
+const ARM_ONLY: u8 = 1;
+const AARCH64_ONLY: u8 = 2;
+const ARM_OR_AARCH64: u8 = 3;
+const X86_FAMILY: u8 = 12;
+const NO_TARGET: u8 = 0;
+
+const TARGET_OPTIONS: &[(&str, &str, u8)] = &[
+    (
+        "--cmse-implib",
+        "--cmse-implib is only supported on ARM targets",
+        ARM_ONLY,
+    ),
+    (
+        "--in-implib",
+        "--in-implib is only supported on ARM targets",
+        ARM_ONLY,
+    ),
+    (
+        "--out-implib",
+        "--out-implib is only supported on ARM targets",
+        ARM_ONLY,
+    ),
+    (
+        "--fix-cortex-a8",
+        "--fix-cortex-a8 is only supported on ARM targets",
+        ARM_ONLY,
+    ),
+    ("--be8", "--be8 is only supported on ARM targets", ARM_ONLY),
+    (
+        "--execute-only",
+        "--execute-only is only supported on AArch64 targets",
+        AARCH64_ONLY,
+    ),
+    (
+        "--fix-cortex-a53-843419",
+        "--fix-cortex-a53-843419 is only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    (
+        "-z pac-plt",
+        "-z pac-plt only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    (
+        "-z force-bti",
+        "-z force-bti only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    (
+        "-z bti-report",
+        "-z bti-report only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    (
+        "-z pauth-report",
+        "-z pauth-report only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    (
+        "-z gcs-report",
+        "-z gcs-report only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    (
+        "-z gcs-report-dynamic",
+        "-z gcs-report-dynamic only supported on AArch64",
+        AARCH64_ONLY,
+    ),
+    ("-z gcs", "-z gcs only supported on AArch64", AARCH64_ONLY),
+    (
+        "-z execute-only-report",
+        "-z execute-only-report only supported on AArch64 and ARM",
+        ARM_OR_AARCH64,
+    ),
+    (
+        "--toc-optimize",
+        "--toc-optimize is only supported on PowerPC64 targets",
+        NO_TARGET,
+    ),
+    (
+        "--pcrel-optimize",
+        "--pcrel-optimize is only supported on PowerPC64 targets",
+        NO_TARGET,
+    ),
+    (
+        "--relax-gp",
+        "--relax-gp is only supported on RISC-V targets",
+        NO_TARGET,
+    ),
+    (
+        "-z zicfilp-unlabeled-report",
+        "-z zicfilip-unlabeled-report is only supported on RISC-V targets",
+        NO_TARGET,
+    ),
+    (
+        "-z zicfilp-func-sig-report",
+        "-z zicfilip-func-sig-report is only supported on RISC-V targets",
+        NO_TARGET,
+    ),
+    (
+        "-z zicfiss-report",
+        "-z zicfiss-report is only supported on RISC-V targets",
+        NO_TARGET,
+    ),
+    (
+        "-z zicfilp",
+        "-z zicfilp is only supported on RISC-V targets",
+        NO_TARGET,
+    ),
+    (
+        "-z zicfiss",
+        "-z zicfiss is only supported on RISC-V targets",
+        NO_TARGET,
+    ),
+    (
+        "-z cet-report",
+        "-z cet-report only supported on X86 and X86_64",
+        X86_FAMILY,
+    ),
+];
+
+const REPORT_KEYWORDS: &[&str] = &[
+    "bti-report",
+    "pauth-report",
+    "gcs-report",
+    "gcs-report-dynamic",
+    "execute-only-report",
+    "zicfilp-unlabeled-report",
+    "zicfilp-func-sig-report",
+    "zicfiss-report",
+    "cet-report",
+];
+
+fn record_target_option(options: &mut Options, key: &str) -> bool {
+    match TARGET_OPTIONS.iter().position(|entry| entry.0 == key) {
+        Some(index) => {
+            options.target_options.insert(index);
+            true
+        }
+        None => false,
+    }
+}
+
+fn apply_target_keyword(options: &mut Options, keyword: &str) -> Result<bool, Diagnostic> {
+    let (name, value) = keyword.split_once('=').unwrap_or((keyword, ""));
+    if REPORT_KEYWORDS.contains(&name) {
+        if !matches!(value, "none" | "warning" | "error") {
+            return Err(invalid_value("-z", keyword)
+                .with_context(format!("Cause: unknown -z {name}= value '{value}'")));
+        }
+        if value != "none" {
+            record_target_option(options, &format!("-z {name}"));
+        }
+        return Ok(true);
+    }
+    if matches!(name, "gcs" | "zicfilp" | "zicfiss") && !value.is_empty() {
+        if value != "implicit" {
+            record_target_option(options, &format!("-z {name}"));
+        }
+        return Ok(true);
+    }
+    if value.is_empty() && matches!(name, "pac-plt" | "force-bti") {
+        record_target_option(options, &format!("-z {name}"));
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn invalid_value(option: &str, value: &str) -> Diagnostic {
@@ -603,6 +779,17 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
         }
         if argument == "-o" {
             options.output = cursor.next().ok_or_else(|| missing_value("-o"))?;
+            continue;
+        }
+        if let Some(value) = option_value(&mut cursor, argument, &["--in-implib", "--out-implib"])?
+        {
+            let key = if argument.starts_with("--in-implib") {
+                "--in-implib"
+            } else {
+                "--out-implib"
+            };
+            record_target_option(&mut options, key);
+            options.target_option_values.push(value);
             continue;
         }
         if let Some(value) = argument.strip_prefix("-o") {
@@ -939,6 +1126,12 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-call-graph-profile-sort" => options.call_graph_sort = CallGraphSort::None,
             "--warn-symbol-ordering" => options.warn_symbol_ordering = true,
             "--no-warn-symbol-ordering" => options.warn_symbol_ordering = false,
+            "--merge-exidx-entries" => options.merge_exception_index = true,
+            "--be8" => {
+                options.byte_invariant_big_endian = true;
+                record_target_option(&mut options, "--be8");
+            }
+            "--no-merge-exidx-entries" => options.merge_exception_index = false,
             "-v" => options.verbose_version = true,
             "--demangle" => options.demangle = true,
             "--no-demangle" => options.demangle = false,
@@ -1043,6 +1236,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                 if IGNORED_FLAGS.contains(&argument) {
                     continue;
                 }
+                if record_target_option(&mut options, argument) {
+                    continue;
+                }
                 return Err(not_supported(&raw));
             }
         }
@@ -1131,7 +1327,7 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
             } else if let Some(value) = keyword.strip_prefix("common-page-size=") {
                 options.common_page_size =
                     Some(parse_number(value).ok_or_else(|| invalid_value("-z", keyword))?);
-            } else {
+            } else if !apply_target_keyword(options, keyword)? {
                 return Err(not_supported(&format!("-z {keyword}")));
             }
         }
@@ -2487,6 +2683,11 @@ pub struct Context<'s> {
     pub shared_names_seen: BTreeSet<String>,
     pub dynamic_string_table: StringTable,
     pub input_order: Vec<SectionIndex>,
+    pub exception_index_inputs: Vec<SectionIndex>,
+    pub exception_index_code: Vec<SectionIndex>,
+    pub exception_index_order: Vec<SectionIndex>,
+    pub exception_index_sentinel: Option<SectionIndex>,
+    pub indirect_relocation_bounds: Option<(SymbolIndex, SymbolIndex)>,
     pub exception_frame_inputs: Vec<SectionIndex>,
     pub frame_pieces: BTreeMap<SectionIndex, Vec<FramePiece>>,
     pub version_definitions: Vec<VersionDefinition>,
@@ -2597,6 +2798,11 @@ impl<'s> Context<'s> {
             shared_names_seen: BTreeSet::new(),
             dynamic_string_table: StringTable::new(),
             input_order: Vec::new(),
+            exception_index_inputs: Vec::new(),
+            exception_index_code: Vec::new(),
+            exception_index_order: Vec::new(),
+            exception_index_sentinel: None,
+            indirect_relocation_bounds: None,
             exception_frame_inputs: Vec::new(),
             frame_pieces: BTreeMap::new(),
             version_definitions: vec![
@@ -4586,11 +4792,28 @@ impl<'s> Context<'s> {
                 Some(dependency) => {
                     self.sections[own].link_order_dependency = Some(dependency);
                     self.sections[dependency].dependents.push(own);
+                    if self.sections[dependency].is_merge
+                        || self.sections[dependency].is_exception_frame
+                    {
+                        let name = self.sections[own].name.clone();
+                        let place = self.section_place(dependency);
+                        self.error_always(
+                            problem(
+                                "EI270",
+                                "A section with SHF_LINK_ORDER links to a section that is not a regular section.",
+                            )
+                            .with_context(format!("Section: {name}"))
+                            .with_context(format!("Link: {place}"))
+                            .with_context(format!(
+                                "Cause: a section {name} with SHF_LINK_ORDER should not refer a non-regular section: {place}"
+                            )),
+                        );
+                    }
                 }
                 None => {
                     if link >= count || !self.files[index].discarded[link] {
                         let display = self.file_name(Some(index));
-                        self.error(
+                        self.error_always(
                             problem("EI217", "A section links to a section that does not exist.")
                                 .with_context(format!("File: {display}"))
                                 .with_context(format!("Link: {link}"))
@@ -5551,7 +5774,10 @@ impl<'s> Context<'s> {
             | Synthetic::GnuHash
             | Synthetic::SystemFiveHash
             | Synthetic::Dynamic => self.has_dynamic_symbols,
-            Synthetic::ArmExceptionIndex => false,
+            Synthetic::ArmExceptionIndex => self
+                .exception_index_inputs
+                .iter()
+                .any(|section| self.sections[*section].live),
             _ => true,
         }
     }
@@ -8472,6 +8698,11 @@ impl<'s> Context<'s> {
                 self.scan_section(section, &mut undefined);
             }
         }
+        for section in self.exception_index_inputs.clone() {
+            if self.sections[section].live {
+                self.scan_section(section, &mut undefined);
+            }
+        }
         let frames: Vec<SectionIndex> = self.frame_pieces.keys().copied().collect();
         for section in frames {
             let relocations: Vec<RawRelocation> = self
@@ -8937,6 +9168,296 @@ impl<'s> Context<'s> {
         self.frame_header_size = 12 + descriptions as u64 * 8;
         if let Some(header) = self.synthetic_section(".eh_frame_hdr") {
             self.sections[header].size = self.frame_header_size;
+        }
+    }
+
+    fn valid_exception_index_code(&self, section: SectionIndex) -> bool {
+        let data = &self.sections[section];
+        let wanted = section_flag::ALLOCATE | section_flag::EXECUTE;
+        data.flags & wanted == wanted && data.size > 0
+    }
+
+    pub fn combine_exception_indexes(&mut self) {
+        if self.target.architecture != Architecture::Arm || self.is_relocatable() {
+            return;
+        }
+        let Some(synthetic) = self.synthetic_section(".ARM.exidx") else {
+            return;
+        };
+        let copy = self.copy_relocation_sections;
+        let mut kept: Vec<SectionIndex> = Vec::new();
+        let mut count = 0u64;
+        for section in self.input_order.clone() {
+            let data = &self.sections[section];
+            if !data.live || data.synthetic.is_some() || data.file.is_none() {
+                kept.push(section);
+                continue;
+            }
+            if data.kind == section_type::ARM_EXCEPTION_INDEX {
+                let valid = data
+                    .link_order_dependency
+                    .is_some_and(|dependency| self.valid_exception_index_code(dependency));
+                if valid {
+                    self.sections[section].merged_into = Some(synthetic);
+                    self.exception_index_inputs.push(section);
+                    count += 1;
+                }
+                continue;
+            }
+            let relocates_index = copy
+                && data.relocated_section.is_some_and(|target| {
+                    self.sections[target].kind == section_type::ARM_EXCEPTION_INDEX
+                });
+            if self.valid_exception_index_code(section) {
+                self.exception_index_code.push(section);
+            } else if relocates_index {
+                continue;
+            }
+            kept.push(section);
+        }
+        self.input_order = kept;
+        self.sections[synthetic].size = count * 8;
+    }
+
+    fn exception_index_of(&self, section: SectionIndex) -> Option<SectionIndex> {
+        self.sections[section]
+            .dependents
+            .iter()
+            .copied()
+            .find(|dependent| {
+                let data = &self.sections[*dependent];
+                data.kind == section_type::ARM_EXCEPTION_INDEX && data.live
+            })
+    }
+
+    fn duplicate_exception_index(
+        &self,
+        previous: Option<SectionIndex>,
+        current: Option<SectionIndex>,
+    ) -> bool {
+        let encoding = self.encoding();
+        let read = |section: SectionIndex, offset: usize| {
+            encoding
+                .read_u32(&self.sections[section].data, offset)
+                .unwrap_or(0)
+        };
+        let table_reference = |unwind: u32| unwind & 0x8000_0000 == 0 && unwind != 1;
+        let previous_unwind = match previous {
+            Some(section) => match self.sections[section].data.len().checked_sub(4) {
+                Some(offset) => read(section, offset),
+                None => 1,
+            },
+            None => 1,
+        };
+        if table_reference(previous_unwind) {
+            return false;
+        }
+        let Some(current) = current else {
+            return previous_unwind == 1;
+        };
+        let size = self.sections[current].data.len();
+        let mut offset = 4;
+        while offset < size {
+            let unwind = read(current, offset);
+            if table_reference(unwind) || unwind != previous_unwind {
+                return false;
+            }
+            offset += 8;
+        }
+        true
+    }
+
+    pub fn finalize_exception_index(&mut self) {
+        let Some(synthetic) = self.synthetic_section(".ARM.exidx") else {
+            return;
+        };
+        if self.sections[synthetic].output.is_none()
+            || !self
+                .exception_index_inputs
+                .iter()
+                .any(|section| self.sections[*section].live)
+        {
+            return;
+        }
+        let base = self.section_address(synthetic, 0);
+        let mut code: Vec<SectionIndex> = Vec::new();
+        for section in self.exception_index_code.clone() {
+            let data = &self.sections[section];
+            if !data.live || data.output.is_none() {
+                continue;
+            }
+            if self.exception_index_of(section).is_none() {
+                let distance = self.section_address(section, 0).wrapping_sub(base);
+                if sign_extend(distance, 31) != distance as i64 {
+                    continue;
+                }
+            }
+            code.push(section);
+        }
+        code.sort_by_key(|section| {
+            let output = self.sections[*section].output.unwrap_or(0);
+            (
+                self.outputs[output].address,
+                output,
+                self.sections[*section].offset_in_output,
+            )
+        });
+        let Some(&sentinel) = code.last() else {
+            return;
+        };
+        if self.options.merge_exception_index {
+            let mut selected = vec![code[0]];
+            let mut previous = code[0];
+            for section in code.iter().copied().skip(1) {
+                let left = self.exception_index_of(previous);
+                let right = self.exception_index_of(section);
+                if !self.duplicate_exception_index(left, right) {
+                    selected.push(section);
+                    previous = section;
+                }
+            }
+            code = selected;
+        }
+        let mut offset = 0u64;
+        for section in &code {
+            if let Some(index) = self.exception_index_of(*section) {
+                let size = self.sections[index].size;
+                self.sections[index].pieces = vec![MergePiece {
+                    input_offset: 0,
+                    length: size,
+                    output_offset: offset,
+                    live: true,
+                    hash: 0,
+                }];
+                offset += size;
+            } else {
+                offset += 8;
+            }
+        }
+        self.sections[synthetic].size = offset + 8;
+        self.sections[synthetic].link_order_dependency = Some(code[0]);
+        self.exception_index_order = code;
+        self.exception_index_sentinel = Some(sentinel);
+    }
+
+    fn write_cannot_unwind(&self, buffer: &mut [u8], offset: usize, distance: u64) {
+        if offset + 8 > buffer.len() {
+            return;
+        }
+        self.arm_write32(buffer, offset, distance as u32 & 0x7fff_ffff);
+        self.arm_write32(buffer, offset + 4, 1);
+    }
+
+    fn write_exception_index(&mut self, section: SectionIndex, buffer: &mut [u8]) {
+        let base = self.section_address(section, 0);
+        let mut offset = 0usize;
+        for code in self.exception_index_order.clone() {
+            if let Some(index) = self.exception_index_of(code) {
+                let contents = self.section_contents(index);
+                let end = (offset + contents.len()).min(buffer.len());
+                if offset < end {
+                    buffer[offset..end].copy_from_slice(&contents[..end - offset]);
+                }
+                offset += self.sections[index].size as usize;
+            } else {
+                let target = self.section_address(code, 0);
+                self.write_cannot_unwind(buffer, offset, target.wrapping_sub(base + offset as u64));
+                offset += 8;
+            }
+        }
+        if let Some(sentinel) = self.exception_index_sentinel {
+            let size = self.sections[sentinel].size;
+            let target = self.section_address(sentinel, size);
+            self.write_cannot_unwind(buffer, offset, target.wrapping_sub(base + offset as u64));
+        }
+    }
+
+    pub fn resolve_link_order(&mut self) {
+        let relocatable = self.is_relocatable();
+        let arm = self.target.architecture == Architecture::Arm;
+        for output in self.order.clone() {
+            if self.outputs[output].flags & section_flag::LINK_ORDER == 0 {
+                continue;
+            }
+            if !relocatable && arm && self.outputs[output].kind == section_type::ARM_EXCEPTION_INDEX
+            {
+                continue;
+            }
+            let members = self.outputs[output].members.clone();
+            let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+            for (position, member) in members.iter().enumerate() {
+                groups
+                    .entry(self.sections[*member].description)
+                    .or_default()
+                    .push(position);
+            }
+            let mut sorted = members.clone();
+            for positions in groups.values() {
+                let mut has_link_order = false;
+                for position in positions {
+                    let member = members[*position];
+                    if self.sections[member].flags & section_flag::LINK_ORDER == 0 {
+                        continue;
+                    }
+                    has_link_order = true;
+                    let Some(dependency) = self.sections[member].link_order_dependency else {
+                        continue;
+                    };
+                    if self.sections[dependency].output.is_none()
+                        && self.sections[dependency].merged_into.is_none()
+                    {
+                        let place = self.section_place(member);
+                        let target = self.section_place(dependency);
+                        self.error_always(
+                            problem(
+                                "EI269",
+                                "A section with SHF_LINK_ORDER links to a discarded section.",
+                            )
+                            .with_context(format!("Section: {place}"))
+                            .with_context(format!("Link: {target}"))
+                            .with_context(format!(
+                                "Cause: {place}: sh_link points to discarded section {target}"
+                            )),
+                        );
+                    }
+                }
+                if !has_link_order || self.failed() {
+                    continue;
+                }
+                let mut group: Vec<SectionIndex> = positions
+                    .iter()
+                    .map(|position| members[*position])
+                    .collect();
+                group.sort_by_key(|member| {
+                    let data = &self.sections[*member];
+                    let dependency = if data.flags & section_flag::LINK_ORDER != 0 {
+                        data.link_order_dependency
+                    } else {
+                        None
+                    };
+                    match dependency.and_then(|dependency| {
+                        self.sections[dependency]
+                            .output
+                            .map(|target| (target, self.sections[dependency].offset_in_output))
+                    }) {
+                        Some((target, offset)) => (
+                            0u8,
+                            if relocatable {
+                                0
+                            } else {
+                                self.outputs[target].address
+                            },
+                            self.outputs[target].index,
+                            offset,
+                        ),
+                        None => (1u8, 0, 0, 0),
+                    }
+                });
+                for (position, member) in positions.iter().zip(group) {
+                    sorted[*position] = member;
+                }
+            }
+            self.outputs[output].members = sorted;
         }
     }
 
@@ -10004,6 +10525,7 @@ impl<'s> Context<'s> {
             if self.copy_relocation_sections {
                 self.add_output_section_symbols();
             }
+            self.add_plt_mapping_symbols();
         }
         self.symbol_table_first_global = self.symbol_table.len();
         for id in self.global_symbols() {
@@ -10465,18 +10987,7 @@ impl<'s> Context<'s> {
                 note = None;
             }
         }
-        if self.target.architecture == Architecture::Arm {
-            if let Some(index) = self
-                .order
-                .iter()
-                .copied()
-                .find(|output| self.outputs[*output].kind == section_type::ARM_EXCEPTION_INDEX)
-            {
-                let segment =
-                    self.add_segment(segment_type::ARM_EXCEPTION_INDEX, segment_flag::READ);
-                self.segment_add(segment, index);
-            }
-        }
+        self.add_exception_index_segment();
         let header_size = (self.segments.len() * self.encoding().program_header_size()) as u64;
         self.outputs[programs].size = header_size;
     }
@@ -10527,7 +11038,35 @@ impl<'s> Context<'s> {
         self.segments = segments;
     }
 
+    fn update_indirect_relocation_bounds(&mut self) -> bool {
+        let Some((start, end)) = self.indirect_relocation_bounds else {
+            return false;
+        };
+        let name = if self.target.uses_addends {
+            ".rela.dyn"
+        } else {
+            ".rel.dyn"
+        };
+        let Some(section) = self.synthetic_section(name) else {
+            return false;
+        };
+        if self.dynamic_relocations.is_empty() {
+            return false;
+        }
+        let size = self.sections[section].size;
+        let changed = self.symbols[end].section != Some(section) || self.symbols[end].value != size;
+        for (id, value) in [(start, 0), (end, size)] {
+            let entry = &mut self.symbols[id];
+            entry.header_relative = false;
+            entry.output_relative_end = false;
+            entry.section = Some(section);
+            entry.value = value;
+        }
+        changed
+    }
+
     pub fn set_reserved_symbol_sections(&mut self) {
+        self.update_indirect_relocation_bounds();
         if let Some(id) = self.find("_GLOBAL_OFFSET_TABLE_") {
             if self.reserved.contains_key("_GLOBAL_OFFSET_TABLE_") {
                 let holder = if self.target.got_base_in_got_plt {
@@ -11018,6 +11557,23 @@ impl<'s> Context<'s> {
             }
             if let Some(size) = segment.memory_size_override {
                 header.memory_size = size;
+            }
+            if segment.kind == segment_type::ARM_EXCEPTION_INDEX {
+                if let Some(index) = self
+                    .synthetic_section(".ARM.exidx")
+                    .filter(|index| self.sections[*index].output.is_some())
+                {
+                    let data = &self.sections[index];
+                    let offset = data.offset_in_output;
+                    header.file_size = data.size;
+                    header.memory_size = data.size;
+                    header.alignment = data.alignment;
+                    if let Some(output) = data.output {
+                        header.offset = self.outputs[output].offset.wrapping_add(offset);
+                        header.virtual_address = self.outputs[output].address.wrapping_add(offset);
+                        header.physical_address = self.load_address_of(output).wrapping_add(offset);
+                    }
+                }
             }
             headers.push(header);
         }
@@ -14072,6 +14628,7 @@ impl<'s> Context<'s> {
             Synthetic::IndirectPlt => self.write_indirect_plt(&mut buffer),
             Synthetic::Thunks => self.write_thunks(section, &mut buffer),
             Synthetic::ExceptionFrame => self.write_exception_frame(&mut buffer),
+            Synthetic::ArmExceptionIndex => self.write_exception_index(section, &mut buffer),
             Synthetic::ExceptionFrameHeader => self.write_frame_header(&mut buffer),
             Synthetic::DynamicRelocations => {
                 let entries = self.dynamic_relocations.clone();
@@ -14211,6 +14768,11 @@ impl<'s> Context<'s> {
             let fill = filler != [0; 4];
             let members = self.outputs[output].members.clone();
             let mut cursor = 0usize;
+            let code_states = if executable && self.byte_invariant() {
+                self.arm_code_states()
+            } else {
+                BTreeMap::new()
+            };
             for member in members {
                 let begin = self.sections[member].offset_in_output as usize;
                 if fill {
@@ -14218,7 +14780,11 @@ impl<'s> Context<'s> {
                         out[start + position] = filler[(position - cursor) % 4];
                     }
                 }
-                let contents = self.section_contents(member);
+                let mut contents = self.section_contents(member);
+                if let Some(states) = code_states.get(&member) {
+                    let size = self.sections[member].size;
+                    self.convert_to_byte_invariant(states, &mut contents, size);
+                }
                 let length = contents.len().min(size.saturating_sub(begin));
                 if self.sections[member].kind != section_type::NO_BITS {
                     out[start + begin..start + begin + length].copy_from_slice(&contents[..length]);
@@ -14329,9 +14895,159 @@ impl<'s> Context<'s> {
                     Some(0) | None => 0x200,
                     _ => 0,
                 };
-                0x0500_0000 | float
+                let byte_invariant = if self.byte_invariant() {
+                    0x0080_0000
+                } else {
+                    0
+                };
+                0x0500_0000 | float | byte_invariant
             }
             _ => 0,
+        }
+    }
+
+    fn check_target_options(&mut self) {
+        let bit = match self.target.architecture {
+            Architecture::Arm => ARM_ONLY,
+            Architecture::Aarch64 => AARCH64_ONLY,
+            Architecture::X86 => 4,
+            Architecture::X86_64 => 8,
+        };
+        for index in self.options.target_options.clone() {
+            let (key, message, allowed) = TARGET_OPTIONS[index];
+            if allowed & bit == 0 {
+                self.error_always(
+                    problem("EI271", "An option is only supported on other targets.")
+                        .with_context(format!("Option: {key}"))
+                        .with_context(format!("Cause: {message}")),
+                );
+            } else if key != "--be8" {
+                self.error_always(not_supported(key));
+            }
+        }
+    }
+
+    fn byte_invariant(&self) -> bool {
+        self.target.architecture == Architecture::Arm
+            && self.encoding().endian == Endian::Big
+            && self.options.byte_invariant_big_endian
+    }
+
+    fn arm_code_states(&self) -> BTreeMap<SectionIndex, Vec<(u64, u64)>> {
+        let mut states: BTreeMap<SectionIndex, Vec<(u64, u64)>> = BTreeMap::new();
+        for symbol in &self.symbols {
+            if !symbol.is_defined() || !(symbol.is_local || symbol.binding == symbol_binding::LOCAL)
+            {
+                continue;
+            }
+            let Some(section) = symbol.section else {
+                continue;
+            };
+            if self.sections[section].flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            let mapping = |prefix: &str| {
+                symbol.name == prefix || symbol.name.starts_with(&format!("{prefix}."))
+            };
+            let width = if mapping("$t") {
+                2
+            } else if mapping("$a") {
+                4
+            } else if mapping("$d") {
+                0
+            } else {
+                continue;
+            };
+            states
+                .entry(section)
+                .or_default()
+                .push((symbol.value, width));
+        }
+        for list in states.values_mut() {
+            list.sort_by_key(|entry| entry.0);
+        }
+        states
+    }
+
+    fn to_little_endian_instructions(contents: &mut [u8], start: u64, end: u64, width: u64) {
+        let mut position = start as usize;
+        let width = width as usize;
+        while width > 0 && position + width <= (end as usize).min(contents.len()) {
+            contents[position..position + width].reverse();
+            position += width;
+        }
+    }
+
+    fn convert_to_byte_invariant(&self, states: &[(u64, u64)], contents: &mut [u8], size: u64) {
+        let mut current = 0u64;
+        let mut start = 0u64;
+        for (value, width) in states {
+            if *width == current {
+                continue;
+            }
+            if current != 0 {
+                Self::to_little_endian_instructions(contents, start, *value, current);
+            }
+            start = *value;
+            current = *width;
+        }
+        if current != 0 {
+            Self::to_little_endian_instructions(contents, start, size, current);
+        }
+    }
+
+    fn add_section_local(&mut self, section: SectionIndex, name: &str, value: u64) {
+        let mut data = SymbolData::new(name);
+        data.state = SymbolState::Defined;
+        data.is_local = true;
+        data.binding = symbol_binding::LOCAL;
+        data.kind = symbol_type::NO_TYPE;
+        data.file = Some(INTERNAL);
+        data.section = Some(section);
+        data.value = value;
+        data.used_in_regular_object = true;
+        let id = self.symbols.len();
+        self.symbols.push(data);
+        self.add_to_symbol_table(id);
+    }
+
+    pub fn add_plt_mapping_symbols(&mut self) {
+        if self.target.architecture != Architecture::Arm || self.options.strip == Strip::All {
+            return;
+        }
+        let thumb = self.use_thumb_plt();
+        let entry: &[(&str, u64)] = if thumb {
+            &[("$t", 0)]
+        } else {
+            &[("$a", 0), ("$d", 12)]
+        };
+        if let Some(plt) = self.synthetic_section(".plt") {
+            if !self.plt_entries.is_empty() {
+                let header: &[(&str, u64)] = if thumb {
+                    &[("$t", 0), ("$d", 12)]
+                } else {
+                    &[("$a", 0), ("$d", 16)]
+                };
+                for (name, value) in header {
+                    self.add_section_local(plt, name, *value);
+                }
+                let mut offset = self.target.plt_header_size;
+                for _ in 0..self.plt_entries.len() {
+                    for (name, value) in entry {
+                        self.add_section_local(plt, name, offset + value);
+                    }
+                    offset += self.target.plt_entry_size;
+                }
+            }
+        }
+        if let Some(indirect) = self.synthetic_section(".iplt") {
+            let mut offset = 0;
+            for _ in 0..self.indirect_plt_entries.len() {
+                for (name, value) in entry {
+                    self.add_section_local(indirect, name, offset + value);
+                }
+                offset += self.target.indirect_plt_entry_size;
+            }
         }
     }
 
@@ -14447,6 +15163,7 @@ impl<'s> Context<'s> {
         }
         self.read_version_inputs();
         self.load_inputs();
+        self.check_target_options();
         if self.failed() {
             return None;
         }
@@ -14525,6 +15242,7 @@ impl<'s> Context<'s> {
         self.split_merge_sections();
         self.mark_live();
         self.create_synthetic_sections();
+        self.combine_exception_indexes();
         if let Some(synthetic) = self.synthetic_section(".eh_frame") {
             for section in self.exception_frame_inputs.clone() {
                 let alignment = self.sections[synthetic]
@@ -14562,6 +15280,19 @@ impl<'s> Context<'s> {
                     );
                     self.symbols[id].used_in_regular_object = true;
                 }
+            }
+        }
+        if !relocatable && !self.is_pic() {
+            let (start, end) = if self.target.uses_addends {
+                ("__rela_iplt_start", "__rela_iplt_end")
+            } else {
+                ("__rel_iplt_start", "__rel_iplt_end")
+            };
+            let start =
+                self.add_optional_regular(start, SymbolPlace::Header, 0, visibility::HIDDEN);
+            let end = self.add_optional_regular(end, SymbolPlace::Header, 0, visibility::HIDDEN);
+            if let (Some(start), Some(end)) = (start, end) {
+                self.indirect_relocation_bounds = Some((start, end));
             }
         }
         if self.options.export_dynamic {
@@ -14635,6 +15366,8 @@ impl<'s> Context<'s> {
             self.fix_section_alignments();
         }
         self.layout_addresses();
+        self.finalize_exception_index();
+        self.resolve_link_order();
         let mut pass = 0u32;
         let mut assign_passes = 0u32;
         loop {
@@ -14653,6 +15386,7 @@ impl<'s> Context<'s> {
             }
             self.finalize_synthetic_sizes();
             changed |= self.update_frame_header();
+            changed |= self.update_indirect_relocation_bounds();
             self.changed_output = None;
             self.changed_symbol = None;
             let moved = self.layout_addresses();
@@ -25096,6 +25830,16 @@ impl<'s> Context<'s> {
             for section in list {
                 self.discard_script_section(section);
             }
+            let absorbed = self.exception_index_inputs.clone();
+            if !absorbed.is_empty() {
+                for command in self.outputs[output].script.commands.clone() {
+                    if let OutputCommand::Input(description) = command {
+                        for section in self.compute_input_sections(description, &absorbed) {
+                            self.discard_script_section(section);
+                        }
+                    }
+                }
+            }
             self.outputs[output].script.commands.clear();
             return false;
         }
@@ -25245,7 +25989,9 @@ impl<'s> Context<'s> {
         }
         let kind = self.sections[section].kind;
         let flags = self.sections[section].flags;
-        let is_group = kind == section_type::GROUP || flags & section_flag::GROUP != 0;
+        let is_group = kind == section_type::GROUP
+            || flags & section_flag::GROUP != 0
+            || (self.is_relocatable() && flags & section_flag::LINK_ORDER != 0);
         let existing = if is_group {
             None
         } else {
@@ -26087,6 +26833,7 @@ impl<'s> Context<'s> {
                 }
             }
         }
+        self.add_exception_index_segment();
         for (index, segment) in self.segments.iter().enumerate() {
             if segment.kind == segment_type::THREAD_LOCAL && segment.first.is_some() {
                 self.tls_segment = Some(index);
@@ -26094,6 +26841,21 @@ impl<'s> Context<'s> {
         }
         let size = (self.segments.len() * self.encoding().program_header_size()) as u64;
         self.outputs[programs].size = size;
+    }
+
+    fn add_exception_index_segment(&mut self) {
+        if self.target.architecture != Architecture::Arm {
+            return;
+        }
+        if let Some(index) = self
+            .order
+            .iter()
+            .copied()
+            .find(|output| self.outputs[*output].kind == section_type::ARM_EXCEPTION_INDEX)
+        {
+            let segment = self.add_segment(segment_type::ARM_EXCEPTION_INDEX, segment_flag::READ);
+            self.segment_add(segment, index);
+        }
     }
 
     pub fn allocate_script_headers(&mut self) {
