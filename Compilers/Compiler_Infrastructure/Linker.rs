@@ -2323,6 +2323,7 @@ pub struct Context<'s> {
     pub changed_symbol: Option<SymbolIndex>,
     pub copy_relocation_sections: bool,
     pub output_section_symbols: BTreeMap<OutputIndex, SymbolIndex>,
+    pub relocating_section: Option<SectionIndex>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -2440,6 +2441,7 @@ impl<'s> Context<'s> {
             changed_symbol: None,
             copy_relocation_sections: false,
             output_section_symbols: BTreeMap::new(),
+            relocating_section: None,
         }
     }
 
@@ -2824,6 +2826,7 @@ fn incompatible(file: &str, reference: &str) -> Diagnostic {
     )
     .with_context(format!("File: {file}"))
     .with_context(format!("Reference: {reference}"))
+    .with_context(format!("Cause: {file} is incompatible with {reference}"))
 }
 
 pub fn emulation_target(emulation: &str) -> Option<(Architecture, Endian)> {
@@ -3127,7 +3130,10 @@ impl<'s> Context<'s> {
         if is_shared && state.is_static {
             self.error(
                 problem("EI214", "A shared library cannot be linked statically.")
-                    .with_context(format!("File: {display}")),
+                    .with_context(format!("File: {display}"))
+                    .with_context(format!(
+                        "Cause: attempted static link of dynamic object {display}"
+                    )),
             );
             return;
         }
@@ -3137,7 +3143,8 @@ impl<'s> Context<'s> {
                     "EI215",
                     "The input file is neither an object nor a shared library.",
                 )
-                .with_context(format!("File: {display}")),
+                .with_context(format!("File: {display}"))
+                .with_context(format!("Cause: {display}: unknown file type")),
             );
             return;
         }
@@ -4254,7 +4261,10 @@ impl<'s> Context<'s> {
                                 )
                                 .with_context(format!("File: {display}"))
                                 .with_context(format!("Index: {position}"))
-                                .with_context(format!("Information: {info}")),
+                                .with_context(format!("Information: {info}"))
+                                .with_context(format!(
+                                    "Cause: {display}: relocation section (index {position}) has invalid sh_info ({info})"
+                                )),
                             );
                         }
                         continue;
@@ -4289,7 +4299,10 @@ impl<'s> Context<'s> {
                         self.error(
                             problem("EI217", "A section links to a section that does not exist.")
                                 .with_context(format!("File: {display}"))
-                                .with_context(format!("Link: {link}")),
+                                .with_context(format!("Link: {link}"))
+                                .with_context(format!(
+                                    "Cause: {display}: invalid sh_link index: {link}"
+                                )),
                         );
                     } else {
                         self.sections[own].live = false;
@@ -4407,7 +4420,10 @@ impl<'s> Context<'s> {
                                 "EI236",
                                 "Inputs disagree on how floating point arguments are passed.",
                             )
-                            .with_context(format!("File: {display}")),
+                            .with_context(format!("File: {display}"))
+                            .with_context(format!(
+                                "Cause: {display}: incompatible Tag_ABI_VFP_args"
+                            )),
                         );
                     }
                     _ => {}
@@ -4460,7 +4476,11 @@ impl<'s> Context<'s> {
                 self.error(
                     problem("EI218", "A symbol has a binding the linker does not know.")
                         .with_context(format!("File: {display}"))
-                        .with_context(format!("Index: {position}")),
+                        .with_context(format!("Index: {position}"))
+                        .with_context(format!(
+                            "Cause: {display}: symbol ({position}) has invalid binding: {}",
+                            symbol.binding
+                        )),
                 );
             }
             if !self.symbols[id].is_defined() || symbol.section == section_index::UNDEFINED {
@@ -4479,7 +4499,10 @@ impl<'s> Context<'s> {
                 self.error(
                     problem("EI219", "A symbol points at a section that does not exist.")
                         .with_context(format!("File: {display}"))
-                        .with_context(format!("Index: {section_number}")),
+                        .with_context(format!("Index: {section_number}"))
+                        .with_context(format!(
+                            "Cause: {display}: invalid section index: {section_number}"
+                        )),
                 );
                 continue;
             }
@@ -4687,6 +4710,65 @@ pub fn output_section_name(name: &str) -> String {
         }
     }
     name.to_string()
+}
+
+const X86_64_DESCRIPTOR_FORM: &str =
+    "R_X86_64_GOTPC32_TLSDESC/R_X86_64_CODE_4_GOTPC32_TLSDESC must be used in leaq x@tlsdesc(%rip), %REG";
+const X86_DESCRIPTOR_FORM: &str = "R_386_TLS_GOTDESC must be used in leal x@tlsdesc(%ebx), %eax";
+
+pub fn section_type_name(architecture: Architecture, kind: u32) -> &'static str {
+    let specific = match (architecture, kind) {
+        (Architecture::Arm, 0x7000_0001) => Some("SHT_ARM_EXIDX"),
+        (Architecture::Arm, 0x7000_0002) => Some("SHT_ARM_PREEMPTMAP"),
+        (Architecture::Arm, 0x7000_0003) => Some("SHT_ARM_ATTRIBUTES"),
+        (Architecture::Arm, 0x7000_0004) => Some("SHT_ARM_DEBUGOVERLAY"),
+        (Architecture::Arm, 0x7000_0005) => Some("SHT_ARM_OVERLAYSECTION"),
+        (Architecture::Aarch64, 0x7000_0003) => Some("SHT_AARCH64_ATTRIBUTES"),
+        (Architecture::Aarch64, 0x7000_0004) => Some("SHT_AARCH64_AUTH_RELR"),
+        (Architecture::X86_64, 0x7000_0001) => Some("SHT_X86_64_UNWIND"),
+        _ => None,
+    };
+    if let Some(name) = specific {
+        return name;
+    }
+    match kind {
+        section_type::NULL => "SHT_NULL",
+        section_type::PROGRAM_BITS => "SHT_PROGBITS",
+        section_type::SYMBOL_TABLE => "SHT_SYMTAB",
+        section_type::STRING_TABLE => "SHT_STRTAB",
+        section_type::RELOCATIONS_WITH_ADDENDS => "SHT_RELA",
+        section_type::HASH => "SHT_HASH",
+        section_type::DYNAMIC => "SHT_DYNAMIC",
+        section_type::NOTE => "SHT_NOTE",
+        section_type::NO_BITS => "SHT_NOBITS",
+        section_type::RELOCATIONS => "SHT_REL",
+        section_type::SHARED_LIBRARY => "SHT_SHLIB",
+        section_type::DYNAMIC_SYMBOLS => "SHT_DYNSYM",
+        section_type::INIT_ARRAY => "SHT_INIT_ARRAY",
+        section_type::FINI_ARRAY => "SHT_FINI_ARRAY",
+        section_type::PREINIT_ARRAY => "SHT_PREINIT_ARRAY",
+        section_type::GROUP => "SHT_GROUP",
+        section_type::SYMBOL_TABLE_INDICES => "SHT_SYMTAB_SHNDX",
+        section_type::RELATIVE_RELOCATIONS => "SHT_RELR",
+        0x4000_0014 => "SHT_CREL",
+        section_type::ANDROID_RELOCATIONS => "SHT_ANDROID_REL",
+        section_type::ANDROID_RELOCATIONS_WITH_ADDENDS => "SHT_ANDROID_RELA",
+        section_type::ANDROID_RELATIVE_RELOCATIONS => "SHT_ANDROID_RELR",
+        section_type::LLVM_ODR_TABLE => "SHT_LLVM_ODRTAB",
+        section_type::LLVM_LINKER_OPTIONS => "SHT_LLVM_LINKER_OPTIONS",
+        section_type::LLVM_ADDRESS_SIGNIFICANCE => "SHT_LLVM_ADDRSIG",
+        section_type::LLVM_DEPENDENT_LIBRARIES => "SHT_LLVM_DEPENDENT_LIBRARIES",
+        section_type::LLVM_SYMBOL_PARTITION => "SHT_LLVM_SYMPART",
+        section_type::LLVM_PART_EHDR => "SHT_LLVM_PART_EHDR",
+        section_type::LLVM_PART_PHDR => "SHT_LLVM_PART_PHDR",
+        section_type::LLVM_CALL_GRAPH_PROFILE => "SHT_LLVM_CALL_GRAPH_PROFILE",
+        section_type::GNU_ATTRIBUTES => "SHT_GNU_ATTRIBUTES",
+        section_type::GNU_HASH => "SHT_GNU_HASH",
+        section_type::GNU_VERSION_DEFINITIONS => "SHT_GNU_verdef",
+        section_type::GNU_VERSION_NEEDS => "SHT_GNU_verneed",
+        section_type::GNU_VERSION_SYMBOLS => "SHT_GNU_versym",
+        _ => "Unknown",
+    }
 }
 
 fn is_c_identifier(name: &str) -> bool {
@@ -5765,6 +5847,10 @@ impl<'s> Context<'s> {
                     let name = self.sections[section].name.clone();
                     let place = self.section_place(section);
                     let output_name = self.outputs[output].name.clone();
+                    let input_type =
+                        section_type_name(self.target.architecture, self.sections[section].kind);
+                    let output_type =
+                        section_type_name(self.target.architecture, self.outputs[output].kind);
                     self.error(
                         problem(
                             "EI220",
@@ -5772,7 +5858,10 @@ impl<'s> Context<'s> {
                         )
                         .with_context(format!("Section: {name}"))
                         .with_context(format!("File: {place}"))
-                        .with_context(format!("Output: {output_name}")),
+                        .with_context(format!("Output: {output_name}"))
+                        .with_context(format!(
+                            "Cause: section type mismatch for {name}\n>>> {place}: {input_type}\n>>> output section {output_name}: {output_type}"
+                        )),
                     );
                 }
                 if !type_is_set {
@@ -5789,12 +5878,17 @@ impl<'s> Context<'s> {
             target.flags = flags;
         } else if (target.flags ^ flags) & section_flag::THREAD_LOCAL != 0 {
             let name = target.name.clone();
-            self.error(
+            let output_flags = target.flags;
+            let place = self.section_place(section);
+            self.error_always(
                 problem(
                     "EI221",
                     "Thread-local and ordinary sections are placed in one output section.",
                 )
-                .with_context(format!("Output: {name}")),
+                .with_context(format!("Output: {name}"))
+                .with_context(format!(
+                    "Cause: incompatible section flags for {name}\n>>> {place}: 0x{flags:x}\n>>> output section {name}: 0x{output_flags:x}"
+                )),
             );
         }
         let target = &mut self.outputs[output];
@@ -6081,7 +6175,11 @@ impl<'s> Context<'s> {
                 self.error(
                     problem("EI222", "An input redefines a symbol the linker defines.")
                         .with_context("Symbol: _GLOBAL_OFFSET_TABLE_".to_string())
-                        .with_context(format!("File: {place}")),
+                        .with_context(format!("File: {place}"))
+                        .with_context(format!(
+                            "Cause: {} cannot redefine linker defined symbol '_GLOBAL_OFFSET_TABLE_'",
+                            self.file_name(self.symbols[id].file)
+                        )),
                 );
                 return;
             }
@@ -6280,23 +6378,29 @@ impl<'s> Context<'s> {
     pub fn scan_version_script(&mut self) {
         let definitions = self.version_definitions.clone();
         for definition in &definitions {
-            let exact =
-                |context: &mut Context, pattern: &SymbolPattern, version: u16, label: &str| {
-                    let mut found = context.assign_exact_version(&pattern.name, version);
-                    found |= context
-                        .find_by_version(&format!("{}@{}", pattern.name, definition.name))
-                        .is_some();
-                    if !found && !context.options.undefined_version {
-                        context.error(
+            let exact = |context: &mut Context,
+                         pattern: &SymbolPattern,
+                         version: u16,
+                         label: &str| {
+                let mut found = context.assign_exact_version(&pattern.name, version);
+                found |= context
+                    .find_by_version(&format!("{}@{}", pattern.name, definition.name))
+                    .is_some();
+                if !found && !context.options.undefined_version {
+                    context.error(
                             problem(
                                 "EI242",
                                 "A version script names a symbol that is not defined.",
                             )
                             .with_context(format!("Version: {label}"))
-                            .with_context(format!("Symbol: {}", pattern.name)),
+                            .with_context(format!("Symbol: {}", pattern.name))
+                            .with_context(format!(
+                                "Cause: version script assignment of '{label}' to symbol '{}' failed: symbol not defined",
+                                pattern.name
+                            )),
                         );
-                    }
-                };
+                }
+            };
             for pattern in definition
                 .non_local
                 .iter()
@@ -6436,7 +6540,10 @@ impl<'s> Context<'s> {
                 problem("EI243", "A symbol names a version that is not defined.")
                     .with_context(format!("File: {file}"))
                     .with_context(format!("Symbol: {name}"))
-                    .with_context(format!("Version: {version}")),
+                    .with_context(format!("Version: {version}"))
+                    .with_context(format!(
+                        "Cause: {file}: symbol {name} has undefined version {version}"
+                    )),
             );
         }
     }
@@ -6608,6 +6715,30 @@ impl<'s> Context<'s> {
         format!("{}:({}+0x{:x}){archive}", file_data.name, data.name, offset)
     }
 
+    pub fn location_before(&self, offset: u64, back: u64, fallback: &str) -> String {
+        match self.relocating_section {
+            Some(section) => self.error_location(section, offset.wrapping_sub(back)),
+            None => fallback.to_string(),
+        }
+    }
+
+    pub fn symbol_text(&self, id: SymbolIndex) -> String {
+        self.symbols[id].name.clone()
+    }
+
+    pub fn defined_and_referenced(
+        &self,
+        id: SymbolIndex,
+        section: SectionIndex,
+        offset: u64,
+    ) -> String {
+        format!(
+            "\n>>> defined in {}\n>>> referenced by {}",
+            self.file_name(self.symbols[id].file),
+            self.object_message(section, offset)
+        )
+    }
+
     pub fn error_location(&self, section: SectionIndex, offset: u64) -> String {
         let data = &self.sections[section];
         let file = self.file_name(data.file);
@@ -6691,6 +6822,7 @@ impl<'s> Context<'s> {
         for (id, warning, places) in grouped {
             let symbol = &self.symbols[id];
             let name = symbol.name.clone();
+            let mut discarded_head: Option<String> = None;
             let shown = match symbol.visibility() {
                 visibility::INTERNAL => "internal",
                 visibility::HIDDEN => "hidden",
@@ -6726,6 +6858,12 @@ impl<'s> Context<'s> {
                     }
                     None
                 });
+                let mut head = if symbol.is_section() {
+                    format!("relocation refers to a discarded section: {section_name}")
+                } else {
+                    format!("relocation refers to a symbol in a discarded section: {name}")
+                };
+                head.push_str(&format!("\n>>> defined in {}", self.file_name(Some(file))));
                 let mut diagnostic = problem(
                     "EI223",
                     "A symbol is defined in a section the linker discarded.",
@@ -6734,10 +6872,15 @@ impl<'s> Context<'s> {
                 .with_context(format!("Section: {section_name}"))
                 .with_context(format!("File: {}", self.file_name(Some(file))));
                 if let Some((signature, holder)) = group {
+                    head.push_str(&format!(
+                        "\n>>> section group signature: {signature}\n>>> prevailing definition is in {}",
+                        self.file_name(Some(holder))
+                    ));
                     diagnostic = diagnostic
                         .with_context(format!("Group: {signature}"))
                         .with_context(format!("Prevailing: {}", self.file_name(Some(holder))));
                 }
+                discarded_head = Some(head);
                 diagnostic
             } else {
                 let mut diagnostic = problem("EI207", "A symbol is referenced but never defined.")
@@ -6756,6 +6899,18 @@ impl<'s> Context<'s> {
             if places.len() > 3 {
                 diagnostic =
                     diagnostic.with_context(format!("More references: {}", places.len() - 3));
+            }
+            if let Some(mut head) = discarded_head {
+                for (section, offset) in places.iter().take(3) {
+                    head.push_str(&format!(
+                        "\n>>> referenced by {}",
+                        self.object_message(*section, *offset)
+                    ));
+                }
+                if places.len() > 3 {
+                    head.push_str(&format!("\n>>> referenced {} more times", places.len() - 3));
+                }
+                diagnostic = diagnostic.with_context(format!("Cause: {head}"));
             }
             if name.starts_with("_ZTV") {
                 diagnostic = diagnostic
@@ -7403,7 +7558,12 @@ impl<'s> Context<'s> {
             )
             .with_context(format!("Relocation: {relocation}"))
             .with_context(format!("Symbol: {name}"))
-            .with_context(format!("Reference: {place}")),
+            .with_context(format!("Reference: {place}"))
+            .with_context(format!(
+                "Cause: relocation {relocation} cannot refer to absolute symbol: {}{}",
+                self.symbol_text(symbol),
+                self.defined_and_referenced(symbol, section, offset)
+            )),
         );
         true
     }
@@ -7487,6 +7647,11 @@ impl<'s> Context<'s> {
                     .with_context(format!(
                         "Reference: {}",
                         self.object_message(section, offset)
+                    ))
+                    .with_context(format!(
+                        "Cause: cannot preempt symbol: {}{}",
+                        self.symbol_text(symbol),
+                        self.defined_and_referenced(symbol, section, offset)
                     )),
                 );
                 return;
@@ -7497,7 +7662,13 @@ impl<'s> Context<'s> {
                     self.error(
                         problem("EI226", "A relocation against a shared library object needs a copy relocation, and copy relocations are turned off.")
                             .with_context(format!("Relocation: {}", relocation_name(self.target.architecture, kind)))
-                            .with_context(format!("Symbol: {name}")),
+                            .with_context(format!("Symbol: {name}"))
+                            .with_context(format!(
+                                "Cause: unresolvable relocation {} against symbol '{}'; recompile with -fPIC or remove '-z nocopyreloc'{}",
+                                relocation_name(self.target.architecture, kind),
+                                self.symbol_text(symbol),
+                                self.defined_and_referenced(symbol, section, offset)
+                            )),
                     );
                 }
                 self.symbols[symbol].needs |= needs::COPY;
@@ -7512,7 +7683,12 @@ impl<'s> Context<'s> {
                     self.error(
                         problem("EI227", "A function of a shared library cannot be preempted here; it needs position independent code.")
                             .with_context(format!("Symbol: {name}"))
-                            .with_context(format!("Reference: {}", self.object_message(section, offset))),
+                            .with_context(format!("Reference: {}", self.object_message(section, offset)))
+                            .with_context(format!(
+                                "Cause: symbol '{}' cannot be preempted; recompile with -fPIE{}",
+                                self.symbol_text(symbol),
+                                self.defined_and_referenced(symbol, section, offset)
+                            )),
                     );
                 }
                 self.symbols[symbol].needs |= needs::COPY | needs::PLT;
@@ -7529,11 +7705,21 @@ impl<'s> Context<'s> {
             diagnostic = diagnostic.with_context(format!("Symbol: {name}"));
         }
         let defined_in = self.file_name(self.symbols[symbol].file);
+        let target = if name.is_empty() {
+            "local symbol".to_string()
+        } else {
+            format!("symbol '{}'", self.symbol_text(symbol))
+        };
         diagnostic = diagnostic
             .with_context(format!("Defined: {defined_in}"))
             .with_context(format!(
                 "Reference: {}",
                 self.object_message(section, offset)
+            ))
+            .with_context(format!(
+                "Cause: relocation {} cannot be used against {target}; recompile with -fPIC{}",
+                relocation_name(self.target.architecture, kind),
+                self.defined_and_referenced(symbol, section, offset)
             ));
         self.error(diagnostic);
     }
@@ -7644,6 +7830,12 @@ impl<'s> Context<'s> {
             .with_context(format!(
                 "Reference: {}",
                 self.object_message(section, offset)
+            ))
+            .with_context(format!(
+                "Cause: relocation {} against {} cannot be used with -shared{}",
+                relocation_name(self.target.architecture, kind),
+                self.symbol_text(symbol),
+                self.defined_and_referenced(symbol, section, offset)
             )),
         );
         true
@@ -8513,7 +8705,10 @@ impl<'s> Context<'s> {
             problem("EI210", "The linker does not support this relocation.")
                 .with_context(format!("Relocation: {kind}"))
                 .with_context(format!("Symbol: {name}"))
-                .with_context(format!("Location: {place}")),
+                .with_context(format!("Location: {place}"))
+                .with_context(format!(
+                    "Reason: unknown relocation ({kind}) against symbol {name}"
+                )),
         );
     }
 
@@ -9156,7 +9351,10 @@ impl<'s> Context<'s> {
             let name = self.symbols[id].name.clone();
             self.error(
                 problem("EI241", "A copy relocation cannot be made for this symbol.")
-                    .with_context(format!("Symbol: {name}")),
+                    .with_context(format!("Symbol: {name}"))
+                    .with_context(format!(
+                        "Cause: cannot create a copy relocation for symbol {name}"
+                    )),
             );
         }
         let read_only = self.shared_symbol_read_only(id);
@@ -10745,17 +10943,40 @@ impl<'s> Context<'s> {
         &mut self,
         location: &str,
         relocation: &Relocation,
-        value: i64,
+        value: &str,
         minimum: i64,
         maximum: u64,
     ) {
         let name = relocation_name(self.target.architecture, relocation.kind);
         let symbol = &self.symbols[relocation.symbol];
+        let mut reason =
+            format!("relocation {name} out of range: {value} is not in [{minimum}, {maximum}]");
+        if !symbol.is_section() {
+            reason.push_str(&format!(
+                "; references '{}'",
+                self.symbol_text(relocation.symbol)
+            ));
+        } else if let Some(section) = symbol.section.filter(|_| symbol.is_defined()) {
+            reason.push_str(&format!(
+                "; references section '{}'",
+                self.sections[section].name
+            ));
+        }
+        if !symbol.is_section() {
+            reason.push_str(&format!("\n>>> defined in {}", self.file_name(symbol.file)));
+        }
+        let debug = self
+            .relocating_section
+            .is_some_and(|section| self.sections[section].name.starts_with(".debug"));
+        if debug {
+            reason.push_str("; consider recompiling with -fdebug-types-section to reduce size of debug sections");
+        }
         let mut diagnostic = problem("EI208", "A relocation value does not fit in its field.")
             .with_context(format!("Location: {location}"))
             .with_context(format!("Relocation: {name}"))
             .with_context(format!("Value: {value}"))
-            .with_context(format!("Range: [{minimum}, {maximum}]"));
+            .with_context(format!("Range: [{minimum}, {maximum}]"))
+            .with_context(format!("Reason: {reason}"));
         if !symbol.is_section() {
             diagnostic = diagnostic.with_context(format!("Symbol: {}", symbol.name));
         } else if let Some(section) = symbol.section {
@@ -10774,7 +10995,13 @@ impl<'s> Context<'s> {
         let minimum = -(1i64 << (bits - 1));
         let maximum = (1i64 << (bits - 1)) - 1;
         if signed < minimum || signed > maximum {
-            self.range_error(location, relocation, signed, minimum, maximum as u64);
+            self.range_error(
+                location,
+                relocation,
+                &signed.to_string(),
+                minimum,
+                maximum as u64,
+            );
         }
     }
 
@@ -10791,7 +11018,7 @@ impl<'s> Context<'s> {
             (1u64 << bits) - 1
         };
         if value > maximum {
-            self.range_error(location, relocation, value as i64, 0, maximum);
+            self.range_error(location, relocation, &value.to_string(), 0, maximum);
         }
     }
 
@@ -10800,7 +11027,7 @@ impl<'s> Context<'s> {
         let minimum = -(1i64 << (bits - 1));
         let maximum = (1u64 << bits) - 1;
         if signed < minimum || (signed >= 0 && value > maximum) {
-            self.range_error(location, relocation, signed, minimum, maximum);
+            self.range_error(location, relocation, &signed.to_string(), minimum, maximum);
         }
     }
 
@@ -10922,9 +11149,12 @@ impl<'s> Context<'s> {
                     || buffer[at - 2] != 0x8d
                     || (buffer[at - 1] & 0xc7) != 0x05
                 {
+                    let back = if relocation.kind == 34 { 3 } else { 4 };
+                    let place = self.location_before(relocation.offset, back, location);
                     self.error(
                         problem("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit.")
-                            .with_context(format!("Location: {location}")),
+                            .with_context(format!("Location: {place}"))
+                            .with_context(format!("Reason: {X86_64_DESCRIPTOR_FORM}")),
                     );
                     return;
                 }
@@ -10981,9 +11211,12 @@ impl<'s> Context<'s> {
                 || buffer[at - 2] != 0x8d
                 || (buffer[at - 1] & 0xc7) != 0x05
             {
+                let back = if relocation.kind == 34 { 3 } else { 4 };
+                let place = self.location_before(relocation.offset, back, location);
                 self.error(
                     problem("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit.")
-                        .with_context(format!("Location: {location}")),
+                        .with_context(format!("Location: {place}"))
+                        .with_context(format!("Reason: {X86_64_DESCRIPTOR_FORM}")),
                 );
                 return;
             }
@@ -11051,10 +11284,27 @@ impl<'s> Context<'s> {
             fits = false;
         }
         if !fits {
+            let (back, reason) = if relocation.kind == 44 {
+                if at >= 4 && buffer[at - 4] != 0xd5 {
+                    (4, "invalid prefix with R_X86_64_CODE_4_GOTTPOFF!")
+                } else {
+                    (
+                        4,
+                        "R_X86_64_CODE_4_GOTTPOFF must be used in MOVQ or ADDQ instructions only",
+                    )
+                }
+            } else {
+                (
+                    3,
+                    "R_X86_64_GOTTPOFF must be used in MOVQ or ADDQ instructions only",
+                )
+            };
+            let place = self.location_before(relocation.offset, back, location);
             self.error(
                 problem("EI232", "An initial executable thread-local relocation is used with an instruction it does not fit.")
-                    .with_context(format!("Location: {location}"))
-                    .with_context(format!("Relocation: {}", relocation_name(self.target.architecture, relocation.kind))),
+                    .with_context(format!("Location: {place}"))
+                    .with_context(format!("Relocation: {}", relocation_name(self.target.architecture, relocation.kind)))
+                    .with_context(format!("Reason: {reason}")),
             );
             return;
         }
@@ -11091,7 +11341,14 @@ impl<'s> Context<'s> {
                 "EI233",
                 "A local dynamic thread-local relocation is not followed by the call it needs.",
             )
-            .with_context(format!("Location: {location}")),
+            .with_context(format!(
+                "Location: {}",
+                self.location_before(at as u64, 3, location)
+            ))
+            .with_context(
+                "Reason: expected R_X86_64_PLT32 or R_X86_64_GOTPCRELX after R_X86_64_TLSLD"
+                    .to_string(),
+            ),
         );
     }
 }
@@ -11496,9 +11753,11 @@ impl<'s> Context<'s> {
             }
             39 => {
                 if at < 2 || buffer[at - 2..at] != [0x8d, 0x83] {
-                    self.error(
+                    let place = self.location_before(relocation.offset, 2, location);
+                    self.error_always(
                         problem("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit.")
-                            .with_context(format!("Location: {location}")),
+                            .with_context(format!("Location: {place}"))
+                            .with_context(format!("Reason: {X86_DESCRIPTOR_FORM}")),
                     );
                     return;
                 }
@@ -11534,9 +11793,11 @@ impl<'s> Context<'s> {
             }
         } else if relocation.kind == 39 {
             if at < 2 || buffer[at - 2..at] != [0x8d, 0x83] {
-                self.error(
+                let place = self.location_before(relocation.offset, 2, location);
+                self.error_always(
                     problem("EI231", "A thread-local descriptor relocation is used with an instruction it does not fit.")
-                        .with_context(format!("Location: {location}")),
+                        .with_context(format!("Location: {place}"))
+                        .with_context(format!("Reason: {X86_DESCRIPTOR_FORM}")),
                 );
                 return;
             }
@@ -11848,7 +12109,10 @@ impl<'s> Context<'s> {
                 .with_context(format!("Location: {location}"))
                 .with_context(format!("Relocation: {name}"))
                 .with_context(format!("Value: 0x{value:x}"))
-                .with_context(format!("Alignment: {alignment}")),
+                .with_context(format!("Alignment: {alignment}"))
+                .with_context(format!(
+                    "Reason: improper alignment for relocation {name}: 0x{value:X} is not aligned to {alignment} bytes"
+                )),
             );
         }
     }
@@ -12485,7 +12749,10 @@ impl<'s> Context<'s> {
                         )
                         .with_context(format!("Location: {location}"))
                         .with_context(format!("Value: {value}"))
-                        .with_context(format!("Relocation: {name}")),
+                        .with_context(format!("Relocation: {name}"))
+                        .with_context(format!(
+                            "Reason: unencodeable immediate {value} for relocation {name}"
+                        )),
                     );
                 }
                 let word = self.arm_read32(buffer, at);
@@ -12624,7 +12891,9 @@ impl<'s> Context<'s> {
                 continue;
             }
             let location = self.error_location(section, relocation.offset);
+            self.relocating_section = Some(section);
             self.relocate(buffer, at, relocation, value, &location);
+            self.relocating_section = None;
         }
         self.sections[section].relocations = relocations;
     }
@@ -14412,7 +14681,10 @@ impl<'s> Context<'s> {
                         self.error(
                             problem("EI238", "This branch cannot reach its target on the architecture the inputs describe.")
                                 .with_context(format!("Relocation: {name}"))
-                                .with_context(format!("Symbol: {symbol}")),
+                                .with_context(format!("Symbol: {symbol}"))
+                                .with_context(format!(
+                                    "Cause: relocation {name} to {symbol} not supported for Armv5 or Armv6 targets"
+                                )),
                         );
                         self.sections[member].relocations[position].expression = Expression::None;
                         continue;

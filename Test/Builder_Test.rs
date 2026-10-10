@@ -68963,6 +68963,9 @@ mod linker_lit {
         let value = |label: &str| context_value(diagnostic, label).unwrap_or("");
         let values = |label: &str| context_values(diagnostic, label);
         let coff = program == "lld-link";
+        if let Some(cause) = context_value(diagnostic, "Cause") {
+            return cause.to_string();
+        }
         match diagnostic.code.as_str() {
             "EI207" => {
                 let visibility = context_value(diagnostic, "Visibility")
