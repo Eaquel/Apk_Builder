@@ -114,6 +114,9 @@ pub struct Options {
     pub section_start: BTreeMap<String, u64>,
     pub emit_relocations: bool,
     pub check_sections: bool,
+    pub demangle: bool,
+    pub map_file: Option<String>,
+    pub cross_reference: bool,
     pub folding: IdenticalCodeFolding,
     pub print_identical_folding: bool,
     pub keep_unique: Vec<String>,
@@ -212,6 +215,9 @@ impl Default for Options {
             section_start: BTreeMap::new(),
             emit_relocations: false,
             check_sections: true,
+            demangle: true,
+            map_file: None,
+            cross_reference: false,
             folding: IdenticalCodeFolding::None,
             print_identical_folding: false,
             keep_unique: Vec::new(),
@@ -719,6 +725,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.sysroot = Some(value);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--Map", "-Map"])? {
+            options.map_file = Some(value);
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--keep-unique"])? {
             options.keep_unique.push(value);
             continue;
@@ -872,6 +882,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--emit-relocs" | "-q" => options.emit_relocations = true,
             "--check-sections" => options.check_sections = true,
             "--no-check-sections" => options.check_sections = false,
+            "--print-map" => options.map_file = Some("-".to_string()),
+            "--demangle" => options.demangle = true,
+            "--no-demangle" => options.demangle = false,
+            "--cref" => options.cross_reference = true,
             "--icf=all" => options.folding = IdenticalCodeFolding::All,
             "--icf=safe" => options.folding = IdenticalCodeFolding::Safe,
             "--icf=none" => options.folding = IdenticalCodeFolding::None,
@@ -2361,6 +2375,8 @@ pub struct Context<'s> {
     pub copy_relocation_sections: bool,
     pub output_section_symbols: BTreeMap<OutputIndex, SymbolIndex>,
     pub relocating_section: Option<SectionIndex>,
+    pub identity: String,
+    pub extra_outputs: Vec<(String, Vec<u8>)>,
 }
 
 fn file_display(context: &Context, file: Option<FileIndex>) -> String {
@@ -2479,6 +2495,8 @@ impl<'s> Context<'s> {
             copy_relocation_sections: false,
             output_section_symbols: BTreeMap::new(),
             relocating_section: None,
+            identity: LINKER_IDENTITY.to_string(),
+            extra_outputs: Vec::new(),
         }
     }
 
@@ -4595,7 +4613,7 @@ impl<'s> Context<'s> {
             };
             self.error(
                 problem("EI206", "A symbol is defined more than once.")
-                    .with_context(format!("Symbol: {name}"))
+                    .with_context(format!("Symbol: {}", self.shown_name(&name)))
                     .with_context(format!("Definition: {first}"))
                     .with_context(format!("Definition: {second}")),
             );
@@ -5178,7 +5196,7 @@ impl<'s> Context<'s> {
     }
 
     pub fn create_comment_section(&mut self) {
-        let mut data = LINKER_IDENTITY.as_bytes().to_vec();
+        let mut data = self.identity.as_bytes().to_vec();
         data.push(0);
         let mut section = InputSection::synthetic(
             ".comment",
@@ -6786,7 +6804,21 @@ impl<'s> Context<'s> {
     }
 
     pub fn symbol_text(&self, id: SymbolIndex) -> String {
-        self.symbols[id].name.clone()
+        self.shown_name(&self.symbols[id].name)
+    }
+
+    pub fn shown_name(&self, name: &str) -> String {
+        if !self.options.demangle {
+            return name.to_string();
+        }
+        let (base, suffix) = match name.find('@') {
+            Some(at) => (&name[..at], &name[at..]),
+            None => (name, ""),
+        };
+        match demangle_itanium(base) {
+            Some(text) => format!("{text}{suffix}"),
+            None => name.to_string(),
+        }
     }
 
     pub fn defined_and_referenced(
@@ -6924,7 +6956,10 @@ impl<'s> Context<'s> {
                 let mut head = if symbol.is_section() {
                     format!("relocation refers to a discarded section: {section_name}")
                 } else {
-                    format!("relocation refers to a symbol in a discarded section: {name}")
+                    format!(
+                        "relocation refers to a symbol in a discarded section: {}",
+                        self.shown_name(&name)
+                    )
                 };
                 head.push_str(&format!("\n>>> defined in {}", self.file_name(Some(file))));
                 let mut diagnostic = problem(
@@ -6947,7 +6982,7 @@ impl<'s> Context<'s> {
                 diagnostic
             } else {
                 let mut diagnostic = problem("EI207", "A symbol is referenced but never defined.")
-                    .with_context(format!("Symbol: {name}"));
+                    .with_context(format!("Symbol: {}", self.shown_name(&name)));
                 if !shown.is_empty() {
                     diagnostic = diagnostic.with_context(format!("Visibility: {shown}"));
                 }
@@ -9441,6 +9476,16 @@ impl<'s> Context<'s> {
         );
         data.size = size;
         data.output = Some(output);
+        data.description = self.outputs[output]
+            .script
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                OutputCommand::Input(description) => Some(*description),
+                _ => None,
+            })
+            .unwrap_or(self.sections[parent].description);
         self.sections.push(data);
         self.outputs[output].members.push(section);
         self.commit_section(output, section);
@@ -14088,6 +14133,7 @@ impl<'s> Context<'s> {
         }
         self.remove_empty_loads();
         self.assign_file_offsets();
+        self.write_map_and_cross_references();
         if self.options.check_sections {
             self.check_sections();
         }
@@ -14120,6 +14166,14 @@ impl<'s> Context<'s> {
 }
 
 pub fn link(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>) -> LinkOutcome {
+    link_as(arguments, source, LINKER_IDENTITY)
+}
+
+pub fn link_as(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    identity: &str,
+) -> LinkOutcome {
     let options = match parse_command_line(arguments) {
         Ok(options) => options,
         Err(diagnostic) => {
@@ -14132,9 +14186,10 @@ pub fn link(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>) -> L
     };
     let output = options.output.clone();
     let mut context = Context::new(options, source);
+    context.identity = identity.to_string();
     let bytes = context.run();
     let mut outcome = LinkOutcome {
-        outputs: Vec::new(),
+        outputs: std::mem::take(&mut context.extra_outputs),
         diagnostics: context.diagnostics,
         messages: context.messages,
     };
@@ -22837,13 +22892,13 @@ impl<'s> Context<'s> {
             "QUAD" => 8,
             _ => return None,
         };
-        let start = lexer.buffers.last().map_or(0, |buffer| buffer.at);
+        let start = lexer.previous_start;
         let expression = self.read_paren_expression(lexer);
         let end = lexer.buffers.last().map_or(0, |buffer| buffer.at);
         let text = lexer
             .buffers
             .last()
-            .map(|buffer| format!("{token}{}", &buffer.text[start..end]))
+            .map(|buffer| buffer.text[start.min(end)..end].to_string())
             .unwrap_or_default();
         Some(OutputCommand::Data {
             expression,
@@ -29599,4 +29654,1475 @@ fn frame_augmentation(data: &[u8]) -> Vec<u8> {
         Some(end) => rest[..end].to_vec(),
         None => Vec::new(),
     }
+}
+
+impl<'s> Context<'s> {
+    fn map_header(&self, out: &mut String, address: u64, load: u64, size: u64, alignment: u64) {
+        if self.encoding().is_64() {
+            out.push_str(&format!(
+                "{address:>16x} {load:>16x} {size:>8x} {alignment:>5} "
+            ));
+        } else {
+            out.push_str(&format!(
+                "{address:>8x} {load:>8x} {size:>8x} {alignment:>5} "
+            ));
+        }
+    }
+
+    fn map_symbols(&self) -> BTreeMap<SectionIndex, Vec<(SymbolIndex, u64)>> {
+        let mut by_section: BTreeMap<SectionIndex, Vec<(SymbolIndex, u64)>> = BTreeMap::new();
+        for file in &self.object_files {
+            for (position, id) in self.files[*file].symbols.iter().enumerate() {
+                if position == 0 || *id == usize::MAX {
+                    continue;
+                }
+                let symbol = &self.symbols[*id];
+                if !symbol.is_defined() || symbol.is_section() {
+                    continue;
+                }
+                let Some(section) = symbol.section else {
+                    continue;
+                };
+                if !self.sections[section].live {
+                    continue;
+                }
+                let bss = matches!(
+                    self.sections[section].synthetic,
+                    Some(Synthetic::Bss | Synthetic::BssRelocationReadOnly | Synthetic::Common)
+                );
+                if symbol.file != Some(*file) && symbol.needs & needs::COPY == 0 && !bss {
+                    continue;
+                }
+                let list = by_section.entry(section).or_default();
+                if list.iter().any(|(held, _)| held == id) {
+                    continue;
+                }
+                list.push((*id, self.symbol_address(*id, 0)));
+            }
+        }
+        for list in by_section.values_mut() {
+            list.sort_by_key(|(_, address)| *address);
+        }
+        by_section
+    }
+
+    fn map_symbol_line(&self, out: &mut String, id: SymbolIndex, address: u64) {
+        let symbol = &self.symbols[id];
+        let section = symbol
+            .section
+            .map(|section| self.sections[section].merged_into.unwrap_or(section));
+        let output = section.and_then(|section| self.sections[section].output);
+        let load = output.map_or(0, |output| {
+            self.load_address_of(output)
+                .wrapping_add(address)
+                .wrapping_sub(self.outputs[output].address)
+        });
+        self.map_header(out, address, load, symbol.size, 1);
+        out.push_str("                ");
+        out.push_str(&self.symbol_text(id));
+        out.push('\n');
+    }
+
+    fn map_exception_frame(&self, out: &mut String, output: OutputIndex) {
+        let mut pieces: Vec<(SectionIndex, u64, u64, u64)> = Vec::new();
+        let mut add = |section: SectionIndex, input: u64, output_offset: u64, size: u64| {
+            if let Some(last) = pieces.last_mut() {
+                if last.0 == section && last.1 + last.3 == input && last.2 + last.3 == output_offset
+                {
+                    last.3 += size;
+                    return;
+                }
+            }
+            pieces.push((section, input, output_offset, size));
+        };
+        for record in &self.frame_records {
+            let mut entries = vec![record.common_information];
+            entries.extend(record.descriptions.iter().copied());
+            for (section, index) in entries {
+                if let Some(piece) = self
+                    .frame_pieces
+                    .get(&section)
+                    .and_then(|pieces| pieces.get(index))
+                {
+                    if let Some(output_offset) = piece.output_offset {
+                        add(section, piece.input_offset, output_offset, piece.size);
+                    }
+                }
+            }
+        }
+        let address = self.outputs[output].address;
+        let load = self.load_address_of(output);
+        for (section, input, output_offset, size) in pieces {
+            self.map_header(out, address + output_offset, load + output_offset, size, 1);
+            let file = self.file_name(self.sections[section].file);
+            out.push_str(&format!(
+                "        {file}:({}+0x{input:x})\n",
+                self.sections[section].name
+            ));
+        }
+    }
+
+    fn map_input_section(
+        &self,
+        out: &mut String,
+        output: OutputIndex,
+        section: SectionIndex,
+        symbols: &BTreeMap<SectionIndex, Vec<(SymbolIndex, u64)>>,
+    ) {
+        if self.sections[section].synthetic == Some(Synthetic::ExceptionFrame) {
+            self.map_exception_frame(out, output);
+            return;
+        }
+        let data = &self.sections[section];
+        let load = self
+            .load_address_of(output)
+            .wrapping_add(data.offset_in_output);
+        self.map_header(
+            out,
+            self.section_address(section, 0),
+            load,
+            data.size,
+            data.alignment,
+        );
+        out.push_str("        ");
+        out.push_str(&self.section_place(section));
+        out.push('\n');
+        let listed: Vec<(SymbolIndex, u64)> = symbols.get(&section).cloned().unwrap_or_default();
+        for (id, address) in listed {
+            self.map_symbol_line(out, id, address);
+        }
+    }
+
+    fn map_assignment(
+        &self,
+        out: &mut String,
+        assignment: usize,
+        output: Option<OutputIndex>,
+        indented: bool,
+    ) {
+        let held = &self.script.assignments[assignment];
+        if held.provide && held.symbol.is_none() {
+            return;
+        }
+        let load = output.map_or(0, |output| {
+            self.load_address_of(output)
+                .wrapping_add(held.address)
+                .wrapping_sub(self.outputs[output].address)
+        });
+        self.map_header(out, held.address, load, held.size, 1);
+        if indented {
+            out.push_str("        ");
+        }
+        out.push_str(&held.command_text);
+        out.push('\n');
+    }
+
+    pub fn write_map_file(&self) -> String {
+        let symbols = self.map_symbols();
+        let width = if self.encoding().is_64() { 16 } else { 8 };
+        let mut out = format!(
+            "{:>width$} {:>width$}     Size Align Out     In      Symbol\n",
+            "VMA", "LMA"
+        );
+        let mut current: Option<OutputIndex> = None;
+        for command in &self.script.commands {
+            let output = match command {
+                ScriptCommand::Assignment(assignment) => {
+                    self.map_assignment(&mut out, *assignment, current, false);
+                    continue;
+                }
+                ScriptCommand::Output(output) => *output,
+            };
+            if !self.order.contains(&output) {
+                continue;
+            }
+            current = Some(output);
+            let section = &self.outputs[output];
+            self.map_header(
+                &mut out,
+                section.address,
+                self.load_address_of(output),
+                section.size,
+                section.alignment,
+            );
+            out.push_str(&section.name);
+            out.push('\n');
+            if section.script.commands.is_empty() {
+                for member in section.members.clone() {
+                    self.map_input_section(&mut out, output, member, &symbols);
+                }
+                continue;
+            }
+            for command in &section.script.commands {
+                match command {
+                    OutputCommand::Input(description) => {
+                        for member in &section.members {
+                            if self.sections[*member].description == *description {
+                                self.map_input_section(&mut out, output, *member, &symbols);
+                            }
+                        }
+                    }
+                    OutputCommand::Data {
+                        size, offset, text, ..
+                    } => {
+                        self.map_header(
+                            &mut out,
+                            section.address + offset,
+                            self.load_address_of(output) + offset,
+                            *size,
+                            1,
+                        );
+                        out.push_str("        ");
+                        out.push_str(text);
+                        out.push('\n');
+                    }
+                    OutputCommand::Assignment(assignment) => {
+                        self.map_assignment(&mut out, *assignment, Some(output), true);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn write_cross_references(&self) -> String {
+        let mut order: Vec<SymbolIndex> = Vec::new();
+        let mut files: BTreeMap<SymbolIndex, Vec<FileIndex>> = BTreeMap::new();
+        for file in &self.object_files {
+            for id in &self.files[*file].symbols {
+                if *id == usize::MAX {
+                    continue;
+                }
+                let symbol = &self.symbols[*id];
+                let shared = symbol.is_shared();
+                let defined = symbol.is_defined()
+                    && !symbol.is_local
+                    && symbol.binding != symbol_binding::LOCAL;
+                if !shared && !defined {
+                    continue;
+                }
+                let list = files.entry(*id).or_insert_with(|| {
+                    order.push(*id);
+                    Vec::new()
+                });
+                if !list.contains(file) {
+                    list.push(*file);
+                }
+            }
+        }
+        let mut out = String::from("\nCross Reference Table\n\n");
+        out.push_str(&format!("{:<49} {}\n", "Symbol", "File"));
+        for id in order {
+            let owner = self.symbols[id].file;
+            out.push_str(&format!(
+                "{:<49} {}\n",
+                self.symbol_text(id),
+                self.file_name(owner)
+            ));
+            for file in &files[&id] {
+                if Some(*file) != owner {
+                    out.push_str(&format!("{:<49} {}\n", "", self.file_name(Some(*file))));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn write_map_and_cross_references(&mut self) {
+        let map = self.options.map_file.clone();
+        if map.is_none() && !self.options.cross_reference {
+            return;
+        }
+        let mut text = String::new();
+        if map.is_some() {
+            text.push_str(&self.write_map_file());
+        }
+        if self.options.cross_reference {
+            text.push_str(&self.write_cross_references());
+        }
+        match map.as_deref() {
+            Some("-") | None => self.messages.push(text.trim_end_matches('\n').to_string()),
+            Some(path) => self
+                .extra_outputs
+                .push((path.to_string(), text.into_bytes())),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Mangled {
+    Name(String),
+    Nested(Box<Mangled>, Box<Mangled>),
+    Template(Box<Mangled>, Vec<Mangled>),
+    AbiTag(Box<Mangled>, String),
+    Qualified(Box<Mangled>, String),
+    Pointer(Box<Mangled>),
+    LeftReference(Box<Mangled>),
+    RightReference(Box<Mangled>),
+    Function {
+        result: Box<Mangled>,
+        parameters: Vec<Mangled>,
+        qualifiers: String,
+    },
+    Array(Box<Mangled>, String),
+    MemberPointer(Box<Mangled>, Box<Mangled>),
+    Encoding {
+        result: Option<Box<Mangled>>,
+        name: Box<Mangled>,
+        parameters: Vec<Mangled>,
+        qualifiers: String,
+    },
+    Special(String, Box<Mangled>),
+    Pack(Vec<Mangled>),
+    Suffixed(Box<Mangled>, String),
+    Local(Box<Mangled>, Box<Mangled>),
+}
+
+#[derive(Default)]
+struct NameFacts {
+    record: bool,
+    qualifiers: String,
+    template_ended: bool,
+    constructor_like: bool,
+}
+
+struct Demangler<'a> {
+    text: &'a [u8],
+    at: usize,
+    substitutions: Vec<Mangled>,
+    template_parameters: Vec<Mangled>,
+    depth: usize,
+}
+
+fn mangled_has_right(node: &Mangled) -> bool {
+    match node {
+        Mangled::Function { .. } | Mangled::Array(..) | Mangled::Encoding { .. } => true,
+        Mangled::Pointer(inner)
+        | Mangled::LeftReference(inner)
+        | Mangled::RightReference(inner)
+        | Mangled::Qualified(inner, _) => mangled_has_right(inner),
+        Mangled::MemberPointer(_, member) => mangled_has_right(member),
+        _ => false,
+    }
+}
+
+fn mangled_has_function(node: &Mangled) -> bool {
+    match node {
+        Mangled::Function { .. } => true,
+        Mangled::Qualified(inner, _) => mangled_has_function(inner),
+        _ => false,
+    }
+}
+
+fn mangled_has_array(node: &Mangled) -> bool {
+    match node {
+        Mangled::Array(..) => true,
+        Mangled::Qualified(inner, _) => mangled_has_array(inner),
+        _ => false,
+    }
+}
+
+fn mangled_list(nodes: &[Mangled]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for node in nodes {
+        match node {
+            Mangled::Pack(items) => {
+                let text = mangled_list(items);
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+            other => parts.push(mangled_text(other)),
+        }
+    }
+    parts.join(", ")
+}
+
+fn mangled_left(node: &Mangled, out: &mut String) {
+    match node {
+        Mangled::Name(text) => out.push_str(text),
+        Mangled::Nested(scope, name) => {
+            out.push_str(&mangled_text(scope));
+            out.push_str("::");
+            out.push_str(&mangled_text(name));
+        }
+        Mangled::Template(name, arguments) => {
+            out.push_str(&mangled_text(name));
+            out.push('<');
+            out.push_str(&mangled_list(arguments));
+            out.push('>');
+        }
+        Mangled::AbiTag(name, tag) => {
+            out.push_str(&mangled_text(name));
+            out.push_str(&format!("[abi:{tag}]"));
+        }
+        Mangled::Qualified(inner, qualifiers) => {
+            mangled_left(inner, out);
+            if !mangled_has_function(inner) {
+                out.push_str(qualifiers);
+            }
+        }
+        Mangled::Pointer(inner)
+        | Mangled::LeftReference(inner)
+        | Mangled::RightReference(inner) => {
+            mangled_left(inner, out);
+            if mangled_has_array(inner) {
+                out.push(' ');
+            }
+            if mangled_has_array(inner) || mangled_has_function(inner) {
+                out.push('(');
+            }
+            out.push_str(match node {
+                Mangled::Pointer(_) => "*",
+                Mangled::LeftReference(_) => "&",
+                _ => "&&",
+            });
+        }
+        Mangled::Function { result, .. } => {
+            mangled_left(result, out);
+            out.push(' ');
+        }
+        Mangled::Array(inner, _) => mangled_left(inner, out),
+        Mangled::MemberPointer(class, member) => {
+            mangled_left(member, out);
+            if mangled_has_array(member) || mangled_has_function(member) {
+                out.push('(');
+            } else {
+                out.push(' ');
+            }
+            out.push_str(&mangled_text(class));
+            out.push_str("::*");
+        }
+        Mangled::Encoding { result, name, .. } => {
+            if let Some(result) = result {
+                mangled_left(result, out);
+                if !mangled_has_right(result) {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&mangled_text(name));
+        }
+        Mangled::Special(prefix, inner) => {
+            out.push_str(prefix);
+            out.push_str(&mangled_text(inner));
+        }
+        Mangled::Pack(items) => out.push_str(&mangled_list(items)),
+        Mangled::Suffixed(inner, suffix) => {
+            out.push_str(&mangled_text(inner));
+            out.push_str(&format!(" ({suffix})"));
+        }
+        Mangled::Local(encoding, entity) => {
+            out.push_str(&mangled_text(encoding));
+            out.push_str("::");
+            out.push_str(&mangled_text(entity));
+        }
+    }
+}
+
+fn mangled_right(node: &Mangled, out: &mut String) {
+    match node {
+        Mangled::Qualified(inner, qualifiers) => {
+            mangled_right(inner, out);
+            if mangled_has_function(inner) {
+                out.push_str(qualifiers);
+            }
+        }
+        Mangled::Pointer(inner)
+        | Mangled::LeftReference(inner)
+        | Mangled::RightReference(inner) => {
+            if mangled_has_array(inner) || mangled_has_function(inner) {
+                out.push(')');
+            }
+            mangled_right(inner, out);
+        }
+        Mangled::Function {
+            result,
+            parameters,
+            qualifiers,
+        } => {
+            out.push('(');
+            out.push_str(&mangled_list(parameters));
+            out.push(')');
+            mangled_right(result, out);
+            out.push_str(qualifiers);
+        }
+        Mangled::Array(inner, dimension) => {
+            if !out.ends_with(']') {
+                out.push(' ');
+            }
+            out.push('[');
+            out.push_str(dimension);
+            out.push(']');
+            mangled_right(inner, out);
+        }
+        Mangled::MemberPointer(_, member) => {
+            if mangled_has_array(member) || mangled_has_function(member) {
+                out.push(')');
+            }
+            mangled_right(member, out);
+        }
+        Mangled::Encoding {
+            result,
+            parameters,
+            qualifiers,
+            ..
+        } => {
+            out.push('(');
+            out.push_str(&mangled_list(parameters));
+            out.push(')');
+            if let Some(result) = result {
+                mangled_right(result, out);
+            }
+            out.push_str(qualifiers);
+        }
+        _ => {}
+    }
+}
+
+fn mangled_text(node: &Mangled) -> String {
+    let mut out = String::new();
+    mangled_left(node, &mut out);
+    mangled_right(node, &mut out);
+    out
+}
+
+fn mangled_base_name(node: &Mangled) -> Option<String> {
+    match node {
+        Mangled::Name(text) => Some(text.rsplit("::").next().unwrap_or(text).to_string()),
+        Mangled::Nested(_, name) | Mangled::Template(name, _) | Mangled::AbiTag(name, _) => {
+            mangled_base_name(name)
+        }
+        _ => None,
+    }
+}
+
+fn expanded_standard_name(text: &str) -> Option<Mangled> {
+    let character = Mangled::Name("char".to_string());
+    let traits = Mangled::Name("std::char_traits<char>".to_string());
+    let (name, arguments) = match text {
+        "std::string" => (
+            "std::basic_string",
+            vec![
+                character,
+                traits,
+                Mangled::Name("std::allocator<char>".to_string()),
+            ],
+        ),
+        "std::istream" => ("std::basic_istream", vec![character, traits]),
+        "std::ostream" => ("std::basic_ostream", vec![character, traits]),
+        "std::iostream" => ("std::basic_iostream", vec![character, traits]),
+        _ => return None,
+    };
+    Some(Mangled::Template(
+        Box::new(Mangled::Name(name.to_string())),
+        arguments,
+    ))
+}
+
+fn mangled_reference(inner: Mangled, left: bool) -> Mangled {
+    match inner {
+        Mangled::LeftReference(inner) => Mangled::LeftReference(inner),
+        Mangled::RightReference(inner) if left => Mangled::LeftReference(inner),
+        Mangled::RightReference(inner) => Mangled::RightReference(inner),
+        other if left => Mangled::LeftReference(Box::new(other)),
+        other => Mangled::RightReference(Box::new(other)),
+    }
+}
+
+fn mangled_pack_of(node: &Mangled) -> Option<Vec<Mangled>> {
+    match node {
+        Mangled::Pack(items) => Some(items.clone()),
+        Mangled::Pointer(inner)
+        | Mangled::LeftReference(inner)
+        | Mangled::RightReference(inner)
+        | Mangled::Qualified(inner, _) => mangled_pack_of(inner),
+        Mangled::Template(_, arguments) => arguments.iter().find_map(mangled_pack_of),
+        _ => None,
+    }
+}
+
+fn mangled_substitute_pack(node: &Mangled, element: &Mangled) -> Mangled {
+    match node {
+        Mangled::Pack(_) => element.clone(),
+        Mangled::Pointer(inner) => {
+            Mangled::Pointer(Box::new(mangled_substitute_pack(inner, element)))
+        }
+        Mangled::LeftReference(inner) => {
+            mangled_reference(mangled_substitute_pack(inner, element), true)
+        }
+        Mangled::RightReference(inner) => {
+            mangled_reference(mangled_substitute_pack(inner, element), false)
+        }
+        Mangled::Qualified(inner, qualifiers) => Mangled::Qualified(
+            Box::new(mangled_substitute_pack(inner, element)),
+            qualifiers.clone(),
+        ),
+        Mangled::Template(name, arguments) => Mangled::Template(
+            name.clone(),
+            arguments
+                .iter()
+                .map(|argument| mangled_substitute_pack(argument, element))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+const OPERATOR_NAMES: &[(&str, &str)] = &[
+    ("nw", "operator new"),
+    ("na", "operator new[]"),
+    ("dl", "operator delete"),
+    ("da", "operator delete[]"),
+    ("ps", "operator+"),
+    ("ng", "operator-"),
+    ("ad", "operator&"),
+    ("de", "operator*"),
+    ("co", "operator~"),
+    ("pl", "operator+"),
+    ("mi", "operator-"),
+    ("ml", "operator*"),
+    ("dv", "operator/"),
+    ("rm", "operator%"),
+    ("an", "operator&"),
+    ("or", "operator|"),
+    ("eo", "operator^"),
+    ("aS", "operator="),
+    ("pL", "operator+="),
+    ("mI", "operator-="),
+    ("mL", "operator*="),
+    ("dV", "operator/="),
+    ("rM", "operator%="),
+    ("aN", "operator&="),
+    ("oR", "operator|="),
+    ("eO", "operator^="),
+    ("ls", "operator<<"),
+    ("rs", "operator>>"),
+    ("lS", "operator<<="),
+    ("rS", "operator>>="),
+    ("eq", "operator=="),
+    ("ne", "operator!="),
+    ("lt", "operator<"),
+    ("gt", "operator>"),
+    ("le", "operator<="),
+    ("ge", "operator>="),
+    ("ss", "operator<=>"),
+    ("nt", "operator!"),
+    ("aa", "operator&&"),
+    ("oo", "operator||"),
+    ("pp", "operator++"),
+    ("mm", "operator--"),
+    ("cm", "operator,"),
+    ("pm", "operator->*"),
+    ("pt", "operator->"),
+    ("cl", "operator()"),
+    ("ix", "operator[]"),
+    ("qu", "operator?"),
+    ("aw", "operator co_await"),
+];
+
+const BUILTIN_TYPES: &[(u8, &str)] = &[
+    (b'v', "void"),
+    (b'w', "wchar_t"),
+    (b'b', "bool"),
+    (b'c', "char"),
+    (b'a', "signed char"),
+    (b'h', "unsigned char"),
+    (b's', "short"),
+    (b't', "unsigned short"),
+    (b'i', "int"),
+    (b'j', "unsigned int"),
+    (b'l', "long"),
+    (b'm', "unsigned long"),
+    (b'x', "long long"),
+    (b'y', "unsigned long long"),
+    (b'n', "__int128"),
+    (b'o', "unsigned __int128"),
+    (b'f', "float"),
+    (b'd', "double"),
+    (b'e', "long double"),
+    (b'g', "__float128"),
+    (b'z', "..."),
+];
+
+impl<'a> Demangler<'a> {
+    fn peek(&self) -> u8 {
+        self.text.get(self.at).copied().unwrap_or(0)
+    }
+
+    fn peek_at(&self, offset: usize) -> u8 {
+        self.text.get(self.at + offset).copied().unwrap_or(0)
+    }
+
+    fn eat(&mut self, byte: u8) -> bool {
+        if self.peek() == byte {
+            self.at += 1;
+            return true;
+        }
+        false
+    }
+
+    fn eat_text(&mut self, text: &str) -> bool {
+        if self.text[self.at.min(self.text.len())..].starts_with(text.as_bytes()) {
+            self.at += text.len();
+            return true;
+        }
+        false
+    }
+
+    fn number(&mut self) -> Option<String> {
+        let start = self.at;
+        self.eat(b'n');
+        let digits = self.at;
+        while self.peek().is_ascii_digit() {
+            self.at += 1;
+        }
+        if self.at == digits {
+            return None;
+        }
+        let text = std::str::from_utf8(&self.text[digits..self.at])
+            .ok()?
+            .to_string();
+        Some(if self.text[start] == b'n' {
+            format!("-{text}")
+        } else {
+            text
+        })
+    }
+
+    fn sequence_index(&mut self) -> Option<usize> {
+        if self.eat(b'_') {
+            return Some(0);
+        }
+        let mut value = 0usize;
+        let mut seen = false;
+        while self.peek().is_ascii_digit() || self.peek().is_ascii_uppercase() {
+            let byte = self.peek();
+            let digit = if byte.is_ascii_digit() {
+                byte - b'0'
+            } else {
+                byte - b'A' + 10
+            };
+            value = value.checked_mul(36)?.checked_add(usize::from(digit))?;
+            self.at += 1;
+            seen = true;
+        }
+        if !seen || !self.eat(b'_') {
+            return None;
+        }
+        Some(value + 1)
+    }
+
+    fn source_name(&mut self) -> Option<String> {
+        let start = self.at;
+        while self.peek().is_ascii_digit() {
+            self.at += 1;
+        }
+        let length: usize = std::str::from_utf8(&self.text[start..self.at])
+            .ok()?
+            .parse()
+            .ok()?;
+        if length == 0 || self.at + length > self.text.len() {
+            return None;
+        }
+        let name = std::str::from_utf8(&self.text[self.at..self.at + length])
+            .ok()?
+            .to_string();
+        self.at += length;
+        if name.starts_with("_GLOBAL__N") {
+            return Some("(anonymous namespace)".to_string());
+        }
+        Some(name)
+    }
+
+    fn substitution(&mut self) -> Option<Mangled> {
+        if !self.eat(b'S') {
+            return None;
+        }
+        let standard = match self.peek() {
+            b'a' => Some("std::allocator"),
+            b'b' => Some("std::basic_string"),
+            b's' => Some("std::string"),
+            b'i' => Some("std::istream"),
+            b'o' => Some("std::ostream"),
+            b'd' => Some("std::iostream"),
+            _ => None,
+        };
+        if let Some(name) = standard {
+            self.at += 1;
+            return Some(Mangled::Name(name.to_string()));
+        }
+        let index = self.sequence_index()?;
+        self.substitutions.get(index).cloned()
+    }
+
+    fn template_parameter(&mut self) -> Option<Mangled> {
+        if !self.eat(b'T') {
+            return None;
+        }
+        let index = self.sequence_index()?;
+        self.template_parameters.get(index).cloned()
+    }
+
+    fn abi_tags(&mut self, mut node: Mangled) -> Option<Mangled> {
+        while self.eat(b'B') {
+            let tag = self.source_name()?;
+            node = Mangled::AbiTag(Box::new(node), tag);
+        }
+        Some(node)
+    }
+
+    fn unqualified_name(
+        &mut self,
+        scope: Option<&Mangled>,
+        facts: &mut NameFacts,
+    ) -> Option<Mangled> {
+        self.eat(b'L');
+        let byte = self.peek();
+        let node = if byte.is_ascii_digit() {
+            Mangled::Name(self.source_name()?)
+        } else if byte == b'C' && matches!(self.peek_at(1), b'1'..=b'5' | b'I') {
+            self.at += 1;
+            if self.eat(b'I') {
+                self.at += 1;
+                self.parse_type()?;
+            } else {
+                self.at += 1;
+            }
+            facts.constructor_like = true;
+            Mangled::Name(mangled_base_name(scope?)?)
+        } else if byte == b'D' && matches!(self.peek_at(1), b'0' | b'1' | b'2' | b'4' | b'5') {
+            self.at += 2;
+            facts.constructor_like = true;
+            Mangled::Name(format!("~{}", mangled_base_name(scope?)?))
+        } else if byte == b'U' && self.peek_at(1) == b't' {
+            self.at += 2;
+            let count = if self.peek().is_ascii_digit() {
+                self.number()?
+            } else {
+                String::new()
+            };
+            if !self.eat(b'_') {
+                return None;
+            }
+            Mangled::Name(format!("'unnamed{count}'"))
+        } else if byte == b'U' && self.peek_at(1) == b'l' {
+            self.at += 2;
+            let mut parameters = Vec::new();
+            if !(self.peek() == b'v' && self.peek_at(1) == b'E') {
+                while self.peek() != b'E' {
+                    parameters.push(self.parse_type()?);
+                }
+            } else {
+                self.at += 1;
+            }
+            if !self.eat(b'E') {
+                return None;
+            }
+            let count = if self.peek().is_ascii_digit() {
+                self.number()?
+            } else {
+                String::new()
+            };
+            if !self.eat(b'_') {
+                return None;
+            }
+            Mangled::Name(format!("'lambda{count}'({})", mangled_list(&parameters)))
+        } else if byte.is_ascii_lowercase() {
+            if self.eat_text("cv") {
+                facts.constructor_like = true;
+                let target = self.parse_type()?;
+                Mangled::Name(format!("operator {}", mangled_text(&target)))
+            } else if self.eat_text("li") {
+                Mangled::Name(format!("operator\"\" {}", self.source_name()?))
+            } else {
+                let code = std::str::from_utf8(self.text.get(self.at..self.at + 2)?).ok()?;
+                let found = OPERATOR_NAMES.iter().find(|(held, _)| *held == code)?;
+                self.at += 2;
+                Mangled::Name(found.1.to_string())
+            }
+        } else {
+            return None;
+        };
+        self.abi_tags(node)
+    }
+
+    fn template_arguments(&mut self, record: bool) -> Option<Vec<Mangled>> {
+        if !self.eat(b'I') {
+            return None;
+        }
+        let mut arguments = Vec::new();
+        while !self.eat(b'E') {
+            arguments.push(self.template_argument()?);
+        }
+        if record {
+            self.template_parameters = arguments.clone();
+        }
+        Some(arguments)
+    }
+
+    fn template_argument(&mut self) -> Option<Mangled> {
+        match self.peek() {
+            b'L' => self.literal(),
+            b'J' => {
+                self.at += 1;
+                let mut items = Vec::new();
+                while !self.eat(b'E') {
+                    items.push(self.template_argument()?);
+                }
+                Some(Mangled::Pack(items))
+            }
+            b'X' => None,
+            _ => self.parse_type(),
+        }
+    }
+
+    fn literal(&mut self) -> Option<Mangled> {
+        if !self.eat(b'L') {
+            return None;
+        }
+        if self.eat_text("_Z") {
+            let encoding = self.encoding()?;
+            if !self.eat(b'E') {
+                return None;
+            }
+            return Some(encoding);
+        }
+        let kind = self.parse_type()?;
+        let value = self.number()?;
+        if !self.eat(b'E') {
+            return None;
+        }
+        let shown = match mangled_text(&kind).as_str() {
+            "bool" if value == "0" => "false".to_string(),
+            "bool" if value == "1" => "true".to_string(),
+            "int" => value,
+            "unsigned int" => format!("{value}u"),
+            "long" => format!("{value}l"),
+            "unsigned long" => format!("{value}ul"),
+            "long long" => format!("{value}ll"),
+            "unsigned long long" => format!("{value}ull"),
+            other => format!("({other}){value}"),
+        };
+        Some(Mangled::Name(shown))
+    }
+
+    fn nested_name(&mut self, facts: &mut NameFacts) -> Option<Mangled> {
+        if !self.eat(b'N') {
+            return None;
+        }
+        let mut qualifiers = self.cv_qualifiers();
+        if self.eat(b'R') {
+            qualifiers.push_str(" &");
+        } else if self.eat(b'O') {
+            qualifiers.push_str(" &&");
+        }
+        facts.qualifiers = qualifiers;
+        let mut so_far: Option<Mangled> = None;
+        let mut pushed = 0usize;
+        while !self.eat(b'E') {
+            facts.template_ended = false;
+            if self.peek() == b'S' && self.peek_at(1) == b't' {
+                if so_far.is_some() {
+                    return None;
+                }
+                self.at += 2;
+                so_far = Some(Mangled::Name("std".to_string()));
+                continue;
+            }
+            if self.peek() == b'S' {
+                if so_far.is_some() {
+                    return None;
+                }
+                so_far = Some(self.substitution()?);
+                continue;
+            }
+            let next = if self.peek() == b'T' {
+                if so_far.is_some() {
+                    return None;
+                }
+                self.template_parameter()?
+            } else if self.peek() == b'I' {
+                let base = so_far.take()?;
+                let arguments = self.template_arguments(facts.record)?;
+                facts.template_ended = true;
+                Mangled::Template(Box::new(base), arguments)
+            } else if self.peek() == b'D' && matches!(self.peek_at(1), b't' | b'T') {
+                return None;
+            } else {
+                facts.constructor_like = false;
+                if matches!(self.peek(), b'C' | b'D') {
+                    if let Some(Mangled::Name(text)) = &so_far {
+                        if let Some(expanded) = expanded_standard_name(text) {
+                            so_far = Some(expanded);
+                        }
+                    }
+                }
+                let name = self.unqualified_name(so_far.as_ref(), facts)?;
+                match so_far.take() {
+                    Some(scope) => Mangled::Nested(Box::new(scope), Box::new(name)),
+                    None => name,
+                }
+            };
+            self.substitutions.push(next.clone());
+            pushed += 1;
+            so_far = Some(next);
+        }
+        if pushed == 0 {
+            return None;
+        }
+        self.substitutions.pop();
+        so_far
+    }
+
+    fn discriminator(&mut self) {
+        if self.peek() == b'_' && self.peek_at(1).is_ascii_digit() {
+            self.at += 2;
+        } else if self.peek() == b'_' && self.peek_at(1) == b'_' {
+            let saved = self.at;
+            self.at += 2;
+            while self.peek().is_ascii_digit() {
+                self.at += 1;
+            }
+            if !self.eat(b'_') {
+                self.at = saved;
+            }
+        }
+    }
+
+    fn local_name(&mut self, facts: &mut NameFacts) -> Option<Mangled> {
+        if !self.eat(b'Z') {
+            return None;
+        }
+        let encoding = self.encoding()?;
+        if !self.eat(b'E') {
+            return None;
+        }
+        if self.eat(b's') {
+            self.discriminator();
+            return Some(Mangled::Local(
+                Box::new(encoding),
+                Box::new(Mangled::Name("string literal".to_string())),
+            ));
+        }
+        if self.peek() == b'd' {
+            return None;
+        }
+        let entity = self.name(facts)?;
+        self.discriminator();
+        Some(Mangled::Local(Box::new(encoding), Box::new(entity)))
+    }
+
+    fn name(&mut self, facts: &mut NameFacts) -> Option<Mangled> {
+        self.depth += 1;
+        if self.depth > 256 {
+            return None;
+        }
+        let result = self.name_inner(facts);
+        self.depth -= 1;
+        result
+    }
+
+    fn name_inner(&mut self, facts: &mut NameFacts) -> Option<Mangled> {
+        match self.peek() {
+            b'N' => self.nested_name(facts),
+            b'Z' => self.local_name(facts),
+            b'S' if self.peek_at(1) == b't' => {
+                self.at += 2;
+                let name = self.unqualified_name(None, facts)?;
+                let mut node =
+                    Mangled::Nested(Box::new(Mangled::Name("std".to_string())), Box::new(name));
+                if self.peek() == b'I' {
+                    self.substitutions.push(node.clone());
+                    let arguments = self.template_arguments(facts.record)?;
+                    facts.template_ended = true;
+                    node = Mangled::Template(Box::new(node), arguments);
+                }
+                Some(node)
+            }
+            b'S' => {
+                let base = self.substitution()?;
+                if self.peek() != b'I' {
+                    return None;
+                }
+                let arguments = self.template_arguments(facts.record)?;
+                facts.template_ended = true;
+                Some(Mangled::Template(Box::new(base), arguments))
+            }
+            _ => {
+                let mut node = self.unqualified_name(None, facts)?;
+                if self.peek() == b'I' {
+                    self.substitutions.push(node.clone());
+                    let arguments = self.template_arguments(facts.record)?;
+                    facts.template_ended = true;
+                    node = Mangled::Template(Box::new(node), arguments);
+                }
+                Some(node)
+            }
+        }
+    }
+
+    fn cv_qualifiers(&mut self) -> String {
+        let mut restrict = false;
+        let mut volatile = false;
+        let mut constant = false;
+        if self.eat(b'r') {
+            restrict = true;
+        }
+        if self.eat(b'V') {
+            volatile = true;
+        }
+        if self.eat(b'K') {
+            constant = true;
+        }
+        let mut text = String::new();
+        if constant {
+            text.push_str(" const");
+        }
+        if volatile {
+            text.push_str(" volatile");
+        }
+        if restrict {
+            text.push_str(" restrict");
+        }
+        text
+    }
+
+    fn function_type(&mut self) -> Option<Mangled> {
+        if !self.eat(b'F') {
+            return None;
+        }
+        self.eat(b'Y');
+        let result = self.parse_type()?;
+        let mut parameters = Vec::new();
+        let mut qualifiers = String::new();
+        loop {
+            if self.eat(b'E') {
+                break;
+            }
+            if self.peek() == b'v' && self.peek_at(1) == b'E' {
+                self.at += 1;
+                continue;
+            }
+            if self.peek() == b'R' && self.peek_at(1) == b'E' {
+                self.at += 1;
+                qualifiers.push_str(" &");
+                continue;
+            }
+            if self.peek() == b'O' && self.peek_at(1) == b'E' {
+                self.at += 1;
+                qualifiers.push_str(" &&");
+                continue;
+            }
+            parameters.push(self.parse_type()?);
+        }
+        Some(Mangled::Function {
+            result: Box::new(result),
+            parameters,
+            qualifiers,
+        })
+    }
+
+    fn parse_type(&mut self) -> Option<Mangled> {
+        self.depth += 1;
+        if self.depth > 256 {
+            return None;
+        }
+        let result = self.parse_type_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_type_inner(&mut self) -> Option<Mangled> {
+        let byte = self.peek();
+        if let Some((_, name)) = BUILTIN_TYPES.iter().find(|(code, _)| *code == byte) {
+            self.at += 1;
+            return Some(Mangled::Name((*name).to_string()));
+        }
+        let node = match byte {
+            b'u' => {
+                self.at += 1;
+                Mangled::Name(self.source_name()?)
+            }
+            b'D' => {
+                let second = self.peek_at(1);
+                let fixed = match second {
+                    b'n' => Some("std::nullptr_t"),
+                    b'i' => Some("char32_t"),
+                    b's' => Some("char16_t"),
+                    b'u' => Some("char8_t"),
+                    b'a' => Some("auto"),
+                    b'c' => Some("decltype(auto)"),
+                    b'h' => Some("half"),
+                    b'd' => Some("decimal64"),
+                    b'e' => Some("decimal128"),
+                    b'f' => Some("decimal32"),
+                    _ => None,
+                };
+                if let Some(name) = fixed {
+                    self.at += 2;
+                    return Some(Mangled::Name(name.to_string()));
+                }
+                if second == b'p' {
+                    self.at += 2;
+                    let inner = self.parse_type()?;
+                    let node = match mangled_pack_of(&inner) {
+                        Some(items) => Mangled::Pack(
+                            items
+                                .iter()
+                                .map(|element| mangled_substitute_pack(&inner, element))
+                                .collect(),
+                        ),
+                        None => inner,
+                    };
+                    self.substitutions.push(node.clone());
+                    return Some(node);
+                }
+                if second == b'F' {
+                    self.at += 2;
+                    let bits = self.number()?;
+                    if !self.eat(b'_') {
+                        return None;
+                    }
+                    return Some(Mangled::Name(format!("_Float{bits}")));
+                }
+                return None;
+            }
+            b'r' | b'V' | b'K' => {
+                let qualifiers = self.cv_qualifiers();
+                let inner = self.parse_type()?;
+                match inner {
+                    Mangled::Function {
+                        result,
+                        parameters,
+                        qualifiers: own,
+                    } => Mangled::Function {
+                        result,
+                        parameters,
+                        qualifiers: format!("{qualifiers}{own}"),
+                    },
+                    other => Mangled::Qualified(Box::new(other), qualifiers),
+                }
+            }
+            b'P' => {
+                self.at += 1;
+                Mangled::Pointer(Box::new(self.parse_type()?))
+            }
+            b'R' | b'O' => {
+                self.at += 1;
+                let inner = self.parse_type()?;
+                mangled_reference(inner, byte == b'R')
+            }
+            b'F' => self.function_type()?,
+            b'A' => {
+                self.at += 1;
+                let dimension = if self.peek().is_ascii_digit() {
+                    self.number()?
+                } else {
+                    String::new()
+                };
+                if !self.eat(b'_') {
+                    return None;
+                }
+                Mangled::Array(Box::new(self.parse_type()?), dimension)
+            }
+            b'M' => {
+                self.at += 1;
+                let class = self.parse_type()?;
+                let member = self.parse_type()?;
+                Mangled::MemberPointer(Box::new(class), Box::new(member))
+            }
+            b'T' => {
+                let parameter = self.template_parameter()?;
+                if self.peek() == b'I' {
+                    self.substitutions.push(parameter.clone());
+                    let arguments = self.template_arguments(false)?;
+                    Mangled::Template(Box::new(parameter), arguments)
+                } else {
+                    parameter
+                }
+            }
+            b'S' if self.peek_at(1) != b't' => {
+                let base = self.substitution()?;
+                if self.peek() != b'I' {
+                    return Some(base);
+                }
+                let arguments = self.template_arguments(false)?;
+                Mangled::Template(Box::new(base), arguments)
+            }
+            b'N' | b'Z' | b'S' | b'0'..=b'9' => {
+                let mut facts = NameFacts::default();
+                self.name(&mut facts)?
+            }
+            _ => return None,
+        };
+        self.substitutions.push(node.clone());
+        Some(node)
+    }
+
+    fn call_offset(&mut self) -> Option<()> {
+        if self.eat(b'h') {
+            self.number()?;
+            return if self.eat(b'_') { Some(()) } else { None };
+        }
+        if self.eat(b'v') {
+            self.number()?;
+            if !self.eat(b'_') {
+                return None;
+            }
+            self.number()?;
+            return if self.eat(b'_') { Some(()) } else { None };
+        }
+        None
+    }
+
+    fn special_name(&mut self) -> Option<Mangled> {
+        if self.eat_text("TV") {
+            return Some(Mangled::Special(
+                "vtable for ".to_string(),
+                Box::new(self.parse_type()?),
+            ));
+        }
+        if self.eat_text("TT") {
+            return Some(Mangled::Special(
+                "VTT for ".to_string(),
+                Box::new(self.parse_type()?),
+            ));
+        }
+        if self.eat_text("TI") {
+            return Some(Mangled::Special(
+                "typeinfo for ".to_string(),
+                Box::new(self.parse_type()?),
+            ));
+        }
+        if self.eat_text("TS") {
+            return Some(Mangled::Special(
+                "typeinfo name for ".to_string(),
+                Box::new(self.parse_type()?),
+            ));
+        }
+        if self.eat_text("TH") {
+            let mut facts = NameFacts::default();
+            return Some(Mangled::Special(
+                "thread-local initialization routine for ".to_string(),
+                Box::new(self.name(&mut facts)?),
+            ));
+        }
+        if self.eat_text("TW") {
+            let mut facts = NameFacts::default();
+            return Some(Mangled::Special(
+                "thread-local wrapper routine for ".to_string(),
+                Box::new(self.name(&mut facts)?),
+            ));
+        }
+        if self.eat_text("TC") {
+            let first = self.parse_type()?;
+            self.number()?;
+            if !self.eat(b'_') {
+                return None;
+            }
+            let second = self.parse_type()?;
+            return Some(Mangled::Name(format!(
+                "construction vtable for {}-in-{}",
+                mangled_text(&second),
+                mangled_text(&first)
+            )));
+        }
+        if self.eat_text("Tc") {
+            self.call_offset()?;
+            self.call_offset()?;
+            return Some(Mangled::Special(
+                "covariant return thunk to ".to_string(),
+                Box::new(self.encoding()?),
+            ));
+        }
+        if self.peek() == b'T' && matches!(self.peek_at(1), b'h' | b'v') {
+            self.at += 1;
+            let prefix = if self.peek() == b'v' {
+                "virtual thunk to "
+            } else {
+                "non-virtual thunk to "
+            };
+            self.call_offset()?;
+            return Some(Mangled::Special(
+                prefix.to_string(),
+                Box::new(self.encoding()?),
+            ));
+        }
+        if self.eat_text("GV") {
+            let mut facts = NameFacts::default();
+            return Some(Mangled::Special(
+                "guard variable for ".to_string(),
+                Box::new(self.name(&mut facts)?),
+            ));
+        }
+        if self.eat_text("GR") {
+            let mut facts = NameFacts::default();
+            let name = self.name(&mut facts)?;
+            while self.peek().is_ascii_alphanumeric() {
+                self.at += 1;
+            }
+            self.eat(b'_');
+            return Some(Mangled::Special(
+                "reference temporary for ".to_string(),
+                Box::new(name),
+            ));
+        }
+        None
+    }
+
+    fn encoding(&mut self) -> Option<Mangled> {
+        if matches!(self.peek(), b'T' | b'G') {
+            return self.special_name();
+        }
+        let mut facts = NameFacts {
+            record: true,
+            ..NameFacts::default()
+        };
+        let name = self.name(&mut facts)?;
+        if self.at >= self.text.len() || matches!(self.peek(), b'E' | b'.') {
+            return Some(name);
+        }
+        let result = if facts.template_ended && !facts.constructor_like {
+            Some(Box::new(self.parse_type()?))
+        } else {
+            None
+        };
+        let mut parameters = Vec::new();
+        if self.peek() == b'v' && matches!(self.peek_at(1), 0 | b'E' | b'.') {
+            self.at += 1;
+        } else {
+            while self.at < self.text.len() && !matches!(self.peek(), b'E' | b'.') {
+                parameters.push(self.parse_type()?);
+            }
+        }
+        Some(Mangled::Encoding {
+            result,
+            name: Box::new(name),
+            parameters,
+            qualifiers: facts.qualifiers,
+        })
+    }
+}
+
+pub fn demangle_itanium(name: &str) -> Option<String> {
+    let body = name.strip_prefix("_Z")?;
+    let mut demangler = Demangler {
+        text: body.as_bytes(),
+        at: 0,
+        substitutions: Vec::new(),
+        template_parameters: Vec::new(),
+        depth: 0,
+    };
+    let mut node = demangler.encoding()?;
+    if demangler.peek() == b'.' {
+        let suffix = std::str::from_utf8(&demangler.text[demangler.at..])
+            .ok()?
+            .to_string();
+        demangler.at = demangler.text.len();
+        node = Mangled::Suffixed(Box::new(node), suffix);
+    }
+    if demangler.at != demangler.text.len() {
+        return None;
+    }
+    Some(mangled_text(&node))
 }

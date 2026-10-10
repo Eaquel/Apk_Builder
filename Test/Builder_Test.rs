@@ -68695,7 +68695,7 @@ mod linker_lit {
         catalogue, lit_tests, run_parallel, standard_tools, LitSuite, SuiteReport, ToolFunction,
         ToolOutcome, Tree, World,
     };
-    use crate::compilers::linker::{link, link_coff, LinkOutcome};
+    use crate::compilers::linker::{link_as, link_coff, LinkOutcome};
     use crate::diag::Severity;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -69100,9 +69100,14 @@ mod linker_lit {
         if oracle() {
             return tool_host(arguments, input, world);
         }
+        let identity = world
+            .environment
+            .get("LLD_VERSION")
+            .cloned()
+            .unwrap_or_else(|| "LLD 1.0".to_string());
         let outcome = {
             let reader = |path: &str| world.read(path);
-            link(&arguments[1..], &reader)
+            link_as(&arguments[1..], &reader, &identity)
         };
         finish_link(outcome, "ld.lld", world)
     }
@@ -69227,6 +69232,27 @@ mod linker_lit {
             outcomes,
         };
         report.publish();
+    }
+
+    #[test]
+    fn the_demangler_reads_itanium_names_the_way_llvm_does() {
+        use crate::compilers::linker::demangle_itanium;
+        for (mangled, expected) in [
+            ("_Z1fi", "f(int)"),
+            ("_ZNK2ns1A3getEv", "ns::A::get() const"),
+            ("_ZN2ns1AC2Ev", "ns::A::A()"),
+            ("_ZNSsD1Ev", "std::basic_string<char, std::char_traits<char>, std::allocator<char>>::~basic_string()"),
+            ("_Z3fooIiEvT_", "void foo<int>(int)"),
+            ("_ZplRK1AS1_", "operator+(A const&, A const&)"),
+            ("_Z1gPFviEPA3_c", "g(void (*)(int), char (*) [3])"),
+            ("_ZTV1A", "vtable for A"),
+            ("_ZZ4mainE1x", "main::x"),
+            ("_Z1fv.cold", "f() (.cold)"),
+        ] {
+            assert_eq!(demangle_itanium(mangled).as_deref(), Some(expected), "{mangled}");
+        }
+        assert_eq!(demangle_itanium("_Z"), None);
+        assert_eq!(demangle_itanium("main"), None);
     }
 
     #[test]
