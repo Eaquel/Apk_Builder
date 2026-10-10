@@ -69197,6 +69197,7 @@ mod linker_lit {
             "non-root-user",
             "thread_support",
             "gnutar",
+            "zlib",
         ];
         let suite = LitSuite {
             tree: &tree,

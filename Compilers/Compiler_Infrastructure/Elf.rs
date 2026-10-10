@@ -1803,3 +1803,267 @@ pub fn segment_permissions(flags: u64) -> u32 {
     }
     permissions
 }
+
+struct InflateBits<'a> {
+    data: &'a [u8],
+    at: usize,
+    buffer: u64,
+    count: u32,
+}
+
+impl InflateBits<'_> {
+    fn need(&mut self, bits: u32) -> Result<(), &'static str> {
+        while self.count < bits {
+            let byte = *self.data.get(self.at).ok_or("Z_DATA_ERROR")?;
+            self.at += 1;
+            self.buffer |= u64::from(byte) << self.count;
+            self.count += 8;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, bits: u32) -> Result<u32, &'static str> {
+        if bits == 0 {
+            return Ok(0);
+        }
+        self.need(bits)?;
+        let value = (self.buffer & ((1u64 << bits) - 1)) as u32;
+        self.buffer >>= bits;
+        self.count -= bits;
+        Ok(value)
+    }
+
+    fn align(&mut self) {
+        let drop = self.count % 8;
+        self.buffer >>= drop;
+        self.count -= drop;
+    }
+}
+
+struct HuffmanTable {
+    counts: [u16; 16],
+    symbols: Vec<u16>,
+}
+
+impl HuffmanTable {
+    fn build(lengths: &[u8]) -> Result<HuffmanTable, &'static str> {
+        let mut counts = [0u16; 16];
+        for length in lengths {
+            counts[usize::from(*length)] += 1;
+        }
+        counts[0] = 0;
+        let mut left = 1i32;
+        for count in counts.iter().skip(1) {
+            left <<= 1;
+            left -= i32::from(*count);
+            if left < 0 {
+                return Err("Z_DATA_ERROR");
+            }
+        }
+        let mut offsets = [0u16; 16];
+        for length in 1..15 {
+            offsets[length + 1] = offsets[length] + counts[length];
+        }
+        let mut symbols = vec![0u16; lengths.len()];
+        for (symbol, length) in lengths.iter().enumerate() {
+            if *length != 0 {
+                symbols[usize::from(offsets[usize::from(*length)])] = symbol as u16;
+                offsets[usize::from(*length)] += 1;
+            }
+        }
+        Ok(HuffmanTable { counts, symbols })
+    }
+
+    fn decode(&self, bits: &mut InflateBits) -> Result<u16, &'static str> {
+        let mut code = 0i32;
+        let mut first = 0i32;
+        let mut index = 0i32;
+        for length in 1..16 {
+            code |= bits.take(1)? as i32;
+            let count = i32::from(self.counts[length]);
+            if code - count < first {
+                return self
+                    .symbols
+                    .get((index + (code - first)) as usize)
+                    .copied()
+                    .ok_or("Z_DATA_ERROR");
+            }
+            index += count;
+            first += count;
+            first <<= 1;
+            code <<= 1;
+        }
+        Err("Z_DATA_ERROR")
+    }
+}
+
+const LENGTH_BASES: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
+];
+const LENGTH_EXTRA: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const DISTANCE_BASES: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+const DISTANCE_EXTRA: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
+const CODE_LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+fn inflate_block(
+    bits: &mut InflateBits,
+    out: &mut Vec<u8>,
+    literals: &HuffmanTable,
+    distances: &HuffmanTable,
+    limit: usize,
+) -> Result<(), &'static str> {
+    loop {
+        let symbol = literals.decode(bits)?;
+        if symbol < 256 {
+            if out.len() >= limit {
+                return Err("Z_BUF_ERROR");
+            }
+            out.push(symbol as u8);
+            continue;
+        }
+        if symbol == 256 {
+            return Ok(());
+        }
+        let index = usize::from(symbol - 257);
+        if index >= LENGTH_BASES.len() {
+            return Err("Z_DATA_ERROR");
+        }
+        let length =
+            usize::from(LENGTH_BASES[index]) + bits.take(u32::from(LENGTH_EXTRA[index]))? as usize;
+        let code = usize::from(distances.decode(bits)?);
+        if code >= DISTANCE_BASES.len() {
+            return Err("Z_DATA_ERROR");
+        }
+        let distance = usize::from(DISTANCE_BASES[code])
+            + bits.take(u32::from(DISTANCE_EXTRA[code]))? as usize;
+        if distance > out.len() {
+            return Err("Z_DATA_ERROR");
+        }
+        if out.len() + length > limit {
+            return Err("Z_BUF_ERROR");
+        }
+        let start = out.len() - distance;
+        for offset in 0..length {
+            let byte = out[start + offset];
+            out.push(byte);
+        }
+    }
+}
+
+pub fn inflate_zlib(data: &[u8], limit: usize) -> Result<Vec<u8>, &'static str> {
+    if data.len() < 2 {
+        return Err("Z_BUF_ERROR");
+    }
+    let method = data[0];
+    if method & 0x0f != 8
+        || (u16::from(data[0]) << 8 | u16::from(data[1])) % 31 != 0
+        || data[1] & 0x20 != 0
+    {
+        return Err("Z_DATA_ERROR");
+    }
+    let mut bits = InflateBits {
+        data,
+        at: 2,
+        buffer: 0,
+        count: 0,
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(limit.min(1 << 26));
+    loop {
+        let last = bits.take(1)?;
+        match bits.take(2)? {
+            0 => {
+                bits.align();
+                let length = bits.take(16)?;
+                let complement = bits.take(16)?;
+                if length != !complement & 0xffff {
+                    return Err("Z_DATA_ERROR");
+                }
+                for _ in 0..length {
+                    if out.len() >= limit {
+                        return Err("Z_BUF_ERROR");
+                    }
+                    out.push(bits.take(8)? as u8);
+                }
+            }
+            1 => {
+                let mut lengths = [0u8; 288];
+                for (symbol, length) in lengths.iter_mut().enumerate() {
+                    *length = match symbol {
+                        0..=143 => 8,
+                        144..=255 => 9,
+                        256..=279 => 7,
+                        _ => 8,
+                    };
+                }
+                let literals = HuffmanTable::build(&lengths)?;
+                let distances = HuffmanTable::build(&[5u8; 30])?;
+                inflate_block(&mut bits, &mut out, &literals, &distances, limit)?;
+            }
+            2 => {
+                let literal_count = bits.take(5)? as usize + 257;
+                let distance_count = bits.take(5)? as usize + 1;
+                let code_count = bits.take(4)? as usize + 4;
+                let mut code_lengths = [0u8; 19];
+                for position in CODE_LENGTH_ORDER.iter().take(code_count) {
+                    code_lengths[*position] = bits.take(3)? as u8;
+                }
+                let codes = HuffmanTable::build(&code_lengths)?;
+                let mut lengths: Vec<u8> = Vec::with_capacity(literal_count + distance_count);
+                while lengths.len() < literal_count + distance_count {
+                    let symbol = codes.decode(&mut bits)?;
+                    match symbol {
+                        0..=15 => lengths.push(symbol as u8),
+                        16 => {
+                            let previous = *lengths.last().ok_or("Z_DATA_ERROR")?;
+                            let count = 3 + bits.take(2)? as usize;
+                            lengths.extend(std::iter::repeat_n(previous, count));
+                        }
+                        17 => {
+                            let count = 3 + bits.take(3)? as usize;
+                            lengths.extend(std::iter::repeat_n(0, count));
+                        }
+                        _ => {
+                            let count = 11 + bits.take(7)? as usize;
+                            lengths.extend(std::iter::repeat_n(0, count));
+                        }
+                    }
+                }
+                if lengths.len() != literal_count + distance_count || lengths[256] == 0 {
+                    return Err("Z_DATA_ERROR");
+                }
+                let literals = HuffmanTable::build(&lengths[..literal_count])?;
+                let distances = HuffmanTable::build(&lengths[literal_count..])?;
+                inflate_block(&mut bits, &mut out, &literals, &distances, limit)?;
+            }
+            _ => return Err("Z_DATA_ERROR"),
+        }
+        if last == 1 {
+            break;
+        }
+    }
+    bits.align();
+    if let (Ok(high), Ok(low)) = (bits.take(16), bits.take(16)) {
+        let stored = ((high & 0xff) << 24) | ((high >> 8) << 16) | ((low & 0xff) << 8) | (low >> 8);
+        let mut first = 1u32;
+        let mut second = 0u32;
+        for byte in &out {
+            first = (first + u32::from(*byte)) % 65521;
+            second = (second + first) % 65521;
+        }
+        if stored != (second << 16) | first {
+            return Err("Z_DATA_ERROR");
+        }
+    }
+    Ok(out)
+}

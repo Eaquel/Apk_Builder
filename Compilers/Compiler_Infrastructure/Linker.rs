@@ -4227,6 +4227,71 @@ pub fn is_debug_section(name: &str) -> bool {
 
 impl<'s> Context<'s> {
     #[allow(clippy::needless_range_loop)]
+    fn decompress_input(&mut self, index: FileIndex, header: &mut elf::Section) {
+        let place = format!("{}:({})", self.file_name(Some(index)), header.name);
+        let encoding = self.encoding();
+        let header_size = if encoding.is_64() { 24 } else { 12 };
+        let fail = |context: &mut Context, cause: String| {
+            context.error_always(
+                problem("EI200", "The object file could not be read.")
+                    .with_context(format!("File: {place}"))
+                    .with_context(format!("Cause: {cause}")),
+            );
+        };
+        if header.data.len() < header_size {
+            fail(self, format!("{place}: corrupted compressed section"));
+            return;
+        }
+        let kind = encoding.read_u32(&header.data, 0).unwrap_or(0);
+        let (size, alignment) = if encoding.is_64() {
+            (
+                encoding.read_u64(&header.data, 8).unwrap_or(0),
+                encoding.read_u64(&header.data, 16).unwrap_or(0),
+            )
+        } else {
+            (
+                u64::from(encoding.read_u32(&header.data, 4).unwrap_or(0)),
+                u64::from(encoding.read_u32(&header.data, 8).unwrap_or(0)),
+            )
+        };
+        match kind {
+            1 => {}
+            2 => {
+                fail(
+                    self,
+                    format!("{place} is compressed with ELFCOMPRESS_ZSTD, but lld is not built with zstd support"),
+                );
+                return;
+            }
+            other => {
+                fail(
+                    self,
+                    format!("{place}: unsupported compression type ({other})"),
+                );
+                return;
+            }
+        }
+        let limit = size as usize;
+        let mut data = match elf::inflate_zlib(&header.data[header_size..], limit) {
+            Ok(data) => data,
+            Err(code) => {
+                self.error(
+                    problem("EI200", "The object file could not be read.")
+                        .with_context(format!("File: {place}"))
+                        .with_context(format!(
+                            "Cause: {place}: decompress failed: zlib error: {code}"
+                        )),
+                );
+                Vec::new()
+            }
+        };
+        data.resize(limit, 0);
+        header.data = data;
+        header.size = size;
+        header.alignment = alignment.max(1);
+    }
+
+    #[allow(clippy::needless_range_loop)]
     pub fn initialize_sections(&mut self, index: FileIndex) {
         let count = self.files[index].elf.sections.len();
         let mut map: Vec<Option<SectionIndex>> = vec![None; count];
@@ -4331,6 +4396,12 @@ impl<'s> Context<'s> {
                     }
                     _ => {}
                 }
+            }
+            let mut header = header;
+            if header.flags & section_flag::COMPRESSED != 0 && header.kind != section_type::NO_BITS
+            {
+                header.flags &= !section_flag::COMPRESSED;
+                self.decompress_input(index, &mut header);
             }
             let is_exception_frame = header.name == ".eh_frame" && !relocatable;
             let is_merge = header.flags & section_flag::MERGE != 0
