@@ -18207,6 +18207,7 @@ pub struct CoffOptions {
     pub help: bool,
     pub align_given: bool,
     pub section_layout: Option<String>,
+    pub optional_includes: Vec<String>,
     pub call_graph_file: Option<String>,
     pub call_graph_sort: bool,
     pub print_symbol_order: Option<String>,
@@ -18313,6 +18314,7 @@ impl Default for CoffOptions {
             help: false,
             align_given: false,
             section_layout: None,
+            optional_includes: Vec::new(),
             call_graph_file: None,
             call_graph_sort: true,
             print_symbol_order: None,
@@ -18770,6 +18772,7 @@ pub fn parse_coff_command_line(
             }
             "order" => options.order_file = Some(need(&value)?),
             "sectionlayout" => options.section_layout = Some(need(&value)?),
+            "includeoptional" => options.optional_includes.push(need(&value)?),
             "call-graph-ordering-file" => options.call_graph_file = Some(need(&value)?),
             "call-graph-profile-sort" => {
                 options.call_graph_sort = !value
@@ -19491,6 +19494,7 @@ pub struct CoffContext<'s> {
     pub safe_seh: bool,
     pub incremental: bool,
     pub prevailing_comdat: Option<usize>,
+    pub merge_cycle_reported: bool,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19585,6 +19589,7 @@ impl<'s> CoffContext<'s> {
             safe_seh: false,
             incremental: false,
             prevailing_comdat: None,
+            merge_cycle_reported: false,
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -20728,10 +20733,19 @@ impl<'s> CoffContext<'s> {
         let number = symbol.section_number as usize;
         if number >= sparse.len() {
             let label = self.file_label(Some(file));
+            let kind = if symbol.section_number < 0 {
+                "special"
+            } else {
+                "non-existent"
+            };
             self.error(
                 problem("EI230", "A relocation names a symbol that does not exist.")
                     .with_context(format!("File: {label}"))
-                    .with_context(format!("Symbol: {}", symbol.name)),
+                    .with_context(format!("Symbol: {}", symbol.name))
+                    .with_context(format!(
+                        "Cause: {label}: {} should not refer to {kind} section {}",
+                        symbol.name, symbol.section_number
+                    )),
             );
             return Some(None);
         }
@@ -21003,6 +21017,17 @@ impl<'s> CoffContext<'s> {
                 match parse_coff_export(&value) {
                     Ok(mut export) => {
                         export.source = export_source::DIRECTIVES;
+                        if self.machine == crate::compilers::pe::machine::I386 && self.options.mingw
+                        {
+                            if !is_coff_decorated(&export.name, true) {
+                                export.name = format!("_{}", export.name);
+                            }
+                            if !export.external_name.is_empty()
+                                && !is_coff_decorated(&export.external_name, true)
+                            {
+                                export.external_name = format!("_{}", export.external_name);
+                            }
+                        }
                         self.exports.push(export);
                     }
                     Err(diagnostic) => self.error(diagnostic),
@@ -21146,28 +21171,32 @@ impl<'s> CoffContext<'s> {
     }
 
     pub fn parse_merge(&mut self, value: &str) {
-        let Some((from, to)) = value.split_once('=') else {
-            self.error(invalid_value("/merge", value));
+        let (from, to) = value.split_once('=').unwrap_or((value, ""));
+        if from.is_empty() || to.is_empty() {
+            self.error(
+                invalid_value("/merge", value)
+                    .with_context(format!("Cause: /merge: invalid argument: {value}")),
+            );
             return;
-        };
-        if from.is_empty()
-            || to.is_empty()
-            || from == ".rsrc"
-            || to == ".rsrc"
-            || from == ".reloc"
-            || to == ".reloc"
-        {
-            self.error(invalid_value("/merge", value));
-            return;
+        }
+        for reserved in [".rsrc", ".reloc"] {
+            if from == reserved || to == reserved {
+                self.error(invalid_value("/merge", value).with_context(format!(
+                    "Cause: /merge: cannot merge '{reserved}' with any section"
+                )));
+                return;
+            }
         }
         if let Some(existing) = self.merges.get(from) {
             if existing != to {
+                let existing = existing.clone();
                 self.warn(
                     caution(
                         "EI247",
                         "The linker ignores an option it does not recognize.",
                     )
-                    .with_context(format!("Option: /merge:{value}")),
+                    .with_context(format!("Option: /merge:{value}"))
+                    .with_context(format!("Cause: {value}: already merged into {existing}")),
                 );
             }
             return;
@@ -21294,12 +21323,18 @@ impl<'s> CoffContext<'s> {
         self.search_paths.push(String::new());
         self.search_paths.extend(self.options.library_paths.clone());
         let debug_collect = self.options.debug_collect;
-        self.collect = self.options.collect.unwrap_or(debug_collect);
-        self.folding = self.options.folding.unwrap_or(if self.collect {
-            IdenticalCodeFolding::All
-        } else {
-            IdenticalCodeFolding::None
-        });
+        self.collect = self
+            .options
+            .collect
+            .unwrap_or(self.options.profile || debug_collect);
+        self.folding = self
+            .options
+            .folding
+            .unwrap_or(if self.collect && !self.options.profile {
+                IdenticalCodeFolding::All
+            } else {
+                IdenticalCodeFolding::None
+            });
         self.tail_merge = (self.options.tail_merge == 1
             && self.folding != IdenticalCodeFolding::None)
             || self.options.tail_merge == 2;
@@ -21600,6 +21635,13 @@ impl<'s> CoffContext<'s> {
                 }
             }
             self.resolve_alternate_names();
+            for name in self.options.optional_includes.clone() {
+                if let Some(id) = self.find(&name) {
+                    if matches!(self.symbols[id].kind, CoffSymbolKind::LazyArchive { .. }) {
+                        self.add_gc_root(&name);
+                    }
+                }
+            }
             if self.find_underscore("_load_config_used").is_some() {
                 let name = self.mangle("_load_config_used");
                 self.add_gc_root(&name);
@@ -21632,6 +21674,20 @@ impl<'s> CoffContext<'s> {
             return None;
         }
         self.initialize_load_config();
+        if self.collect && self.options.mingw {
+            for name in [
+                "__gxx_personality_v0",
+                "__gcc_personality_v0",
+                "rust_eh_personality",
+            ] {
+                if let Some(id) = self.find_underscore(name) {
+                    if self.symbols[id].is_defined() && !self.symbols[id].gc_root {
+                        self.symbols[id].gc_root = true;
+                        self.gc_roots.push(id);
+                    }
+                }
+            }
+        }
         if self.collect {
             self.mark_live();
         }
@@ -23028,9 +23084,30 @@ impl<'s> CoffContext<'s> {
                     if priority(existing.source) > priority(export.source) {
                         continue;
                     }
+                    let source_name = |source: u8| match source {
+                        export_source::DIRECTIVES => "source file (directives)",
+                        export_source::EXPORT => "/export",
+                        export_source::MODULE_DEFINITION => "/def",
+                        _ => "/export-all-symbols",
+                    };
+                    let cause = if existing.source == export.source {
+                        format!(
+                            "duplicate {} option: {}",
+                            source_name(existing.source),
+                            export.name
+                        )
+                    } else {
+                        format!(
+                            "duplicate export: {} first seen in {}{EXPORT_NOW_IN}{}",
+                            export.name,
+                            source_name(existing.source),
+                            source_name(export.source)
+                        )
+                    };
                     self.warn(
                         caution("EI256", "A symbol is exported more than once.")
-                            .with_context(format!("Symbol: {}", export.name)),
+                            .with_context(format!("Symbol: {}", export.name))
+                            .with_context(format!("Cause: {cause}")),
                     );
                 }
             }
@@ -23320,6 +23397,8 @@ const INCREMENTAL_REFERENCE: &str = "because REF is enabled; use '/opt:noref' to
 const INCREMENTAL_FOLDING: &str = "because ICF is enabled; use '/opt:noicf' to disable";
 
 const LAYOUT_DUPLICATE: &str = ", ignoring";
+
+const EXPORT_NOW_IN: &str = ", now in ";
 
 const TOO_MANY_ERRORS: &str = ", stopping now";
 
@@ -26097,10 +26176,11 @@ impl<'s> CoffContext<'s> {
             let last = *self.outputs[edata].chunks.last().unwrap_or(&first);
             self.export_range = Some((first, last));
             if self.had_explicit_exports {
-                self.warn(caution(
-                    "EI257",
-                    "Literal .edata sections override the exports.",
-                ));
+                self.warn(
+                    caution("EI257", "Literal .edata sections override the exports.").with_context(
+                        "Cause: literal .edata sections override exports".to_string(),
+                    ),
+                );
             }
         } else if !self.exports.is_empty() {
             let chunks = self.create_export_chunks();
@@ -26140,6 +26220,26 @@ impl<'s> CoffContext<'s> {
             self.apply_section_layout(&layout);
         }
         self.assign_addresses();
+        let oversized: Vec<String> = self
+            .outputs
+            .iter()
+            .filter(|output| output.virtual_size > u64::from(u32::MAX))
+            .map(|output| output.name.clone())
+            .collect();
+        let too_large = !oversized.is_empty();
+        for name in oversized {
+            self.error(
+                problem(
+                    "EI212",
+                    "The linker does not support what this input asks for yet.",
+                )
+                .with_context("Feature: an image larger than 4 GiB".to_string())
+                .with_context(format!("Cause: section larger than 4 GiB: {name}")),
+            );
+        }
+        if too_large {
+            return None;
+        }
         self.outputs.retain(|output| output.virtual_size != 0);
         for (position, output) in self.outputs.iter_mut().enumerate() {
             output.index = position + 1;
@@ -26222,16 +26322,26 @@ impl<'s> CoffContext<'s> {
         }
     }
 
-    fn merge_destination(&self, from: &str, to: &str) -> String {
+    fn merge_destination(&mut self, from: &str, to: &str) -> String {
         let mut seen = BTreeSet::new();
         let mut current = to.to_string();
-        while seen.insert(current.clone()) {
+        loop {
+            if !seen.insert(current.clone()) {
+                if !self.merge_cycle_reported {
+                    self.merge_cycle_reported = true;
+                    self.error(
+                        invalid_value("/merge", from).with_context(format!(
+                            "Cause: /merge: cycle found for section '{from}'"
+                        )),
+                    );
+                }
+                break;
+            }
             match self.merges.get(&current) {
                 Some(next) => current = next.clone(),
                 None => break,
             }
         }
-        let _ = from;
         current
     }
 
@@ -27559,7 +27669,7 @@ impl<'s> CoffContext<'s> {
                     amd64::SECTION => add16(out, section_index),
                     amd64::SECTION_RELATIVE => match section_relative(self) {
                         Some(value) => add32(out, value),
-                        None => self.section_relative_failure(chunk),
+                        None => self.section_relative_failure(chunk, output.is_none()),
                     },
                     other => self.unsupported_coff_relocation(file, other),
                 },
@@ -27571,7 +27681,7 @@ impl<'s> CoffContext<'s> {
                     i386::SECTION => add16(out, section_index),
                     i386::SECTION_RELATIVE => match section_relative(self) {
                         Some(value) => add32(out, value),
-                        None => self.section_relative_failure(chunk),
+                        None => self.section_relative_failure(chunk, output.is_none()),
                     },
                     other => self.unsupported_coff_relocation(file, other),
                 },
@@ -27580,15 +27690,21 @@ impl<'s> CoffContext<'s> {
         }
     }
 
-    fn section_relative_failure(&mut self, chunk: usize) {
+    fn section_relative_failure(&mut self, chunk: usize, absolute: bool) {
         let name = self.chunks[chunk].name.clone();
         if name.starts_with(".debug$") {
             return;
         }
+        let cause = if absolute {
+            "SECREL relocation cannot be applied to absolute symbols".to_string()
+        } else {
+            format!("overflow in SECREL relocation in section: {name}")
+        };
         self.error(
             problem("EI208", "A relocation value does not fit in its field.")
                 .with_context(format!("Section: {name}"))
-                .with_context("Relocation: SECREL".to_string()),
+                .with_context("Relocation: SECREL".to_string())
+                .with_context(format!("Cause: {cause}")),
         );
     }
 

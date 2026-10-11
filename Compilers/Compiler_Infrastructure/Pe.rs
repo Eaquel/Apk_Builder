@@ -580,6 +580,10 @@ impl CoffObject {
                     .and_then(string_at)
                     .ok_or_else(|| {
                         unreadable(at, "a section name points outside the string table")
+                            .with_context(format!(
+                                "Cause: getSectionName failed: #{}: invalid string table offset",
+                                index + 1
+                            ))
                     })?
             } else if let Some(rest) = raw_name.strip_prefix('/') {
                 rest.parse::<u32>()
@@ -587,6 +591,10 @@ impl CoffObject {
                     .and_then(string_at)
                     .ok_or_else(|| {
                         unreadable(at, "a section name points outside the string table")
+                            .with_context(format!(
+                                "Cause: getSectionName failed: #{}: invalid string table offset",
+                                index + 1
+                            ))
                     })?
             } else {
                 raw_name
