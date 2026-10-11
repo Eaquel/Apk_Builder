@@ -68695,7 +68695,7 @@ mod linker_lit {
         catalogue, lit_tests, run_parallel, standard_tools, LitSuite, SuiteReport, ToolFunction,
         ToolOutcome, Tree, World,
     };
-    use crate::compilers::linker::{link_as, link_coff, LinkOutcome};
+    use crate::compilers::linker::{link_as, link_coff_in, LinkOutcome};
     use crate::diag::Severity;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -68718,6 +68718,8 @@ mod linker_lit {
         "llvm-dwarfdump",
         "llvm-cvtres",
         "llvm-strings",
+        "llvm-pdbutil",
+        "llvm-symbolizer",
         "llvm-cxxfilt",
         "grep",
         "wc",
@@ -69330,9 +69332,10 @@ mod linker_lit {
         if oracle() {
             return tool_host(arguments, input, world);
         }
+        let directory = world.directory.clone();
         let outcome = {
             let reader = |path: &str| world.read(path);
-            link_coff(&arguments[1..], &reader)
+            link_coff_in(&arguments[1..], &reader, &directory)
         };
         finish_link(outcome, "lld-link", world, false)
     }

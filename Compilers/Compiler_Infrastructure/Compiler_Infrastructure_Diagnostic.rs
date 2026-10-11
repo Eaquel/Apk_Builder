@@ -82,6 +82,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI274", "A section name is longer than eight characters and uses a non-standard string table."),
     ("EI275", "The load configuration does not match what the linker writes."),
     ("EI276", "A runtime pseudo relocation is narrower than an address."),
+    ("EI277", "The PDB alternate path uses a variable the linker does not expand."),
+    ("EI278", "The linker cannot open a file that the PDB should contain."),
+    ("EI279", "The linker cannot write the PDB file."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

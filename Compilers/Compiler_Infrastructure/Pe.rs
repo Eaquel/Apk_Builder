@@ -2257,3 +2257,1188 @@ pub fn write_coff_archive(members: &[ArchiveMember]) -> Vec<u8> {
     }
     out
 }
+
+pub mod program_database {
+    use super::{put_u16, put_u32};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    pub const INVALID_STREAM: u16 = 0xffff;
+    pub const STREAM_INFORMATION: usize = 1;
+    pub const STREAM_TYPES: usize = 2;
+    pub const STREAM_DEBUG_INFORMATION: usize = 3;
+    pub const STREAM_IDENTIFIERS: usize = 4;
+    pub const SPECIAL_STREAM_COUNT: usize = 5;
+    pub const FIRST_TYPE_INDEX: u32 = 0x1000;
+    pub const DEBUG_STREAM_SECTION_HEADERS: usize = 5;
+    pub const DEBUG_STREAM_FRAME_OLD: usize = 0;
+    pub const DEBUG_STREAM_FRAME_NEW: usize = 9;
+    pub const DEBUG_STREAM_COUNT: usize = 11;
+    const HASH_BUCKET_COUNT: usize = 4096;
+    const TYPE_HASH_BUCKETS: u32 = 0x3ffff;
+    const MAGIC: &[u8; 32] = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0";
+
+    pub fn hash_string_first(text: &[u8]) -> u32 {
+        let mut result = 0u32;
+        let whole = text.len() / 4;
+        for index in 0..whole {
+            result ^= u32::from_le_bytes([
+                text[index * 4],
+                text[index * 4 + 1],
+                text[index * 4 + 2],
+                text[index * 4 + 3],
+            ]);
+        }
+        let mut at = whole * 4;
+        let mut remaining = text.len() % 4;
+        if remaining >= 2 {
+            result ^= u32::from(u16::from_le_bytes([text[at], text[at + 1]]));
+            at += 2;
+            remaining -= 2;
+        }
+        if remaining == 1 {
+            result ^= u32::from(text[at]);
+        }
+        result |= 0x2020_2020;
+        result ^= result >> 11;
+        result ^ (result >> 16)
+    }
+
+    pub fn hash_string_second(text: &[u8]) -> u32 {
+        let mut hash = 0xb170_a1bfu32;
+        let whole = text.len() / 4;
+        for index in 0..whole {
+            let item = u32::from_le_bytes([
+                text[index * 4],
+                text[index * 4 + 1],
+                text[index * 4 + 2],
+                text[index * 4 + 3],
+            ]);
+            hash = hash.wrapping_add(item);
+            hash = hash.wrapping_add(hash << 10);
+            hash ^= hash >> 6;
+        }
+        for byte in &text[whole * 4..] {
+            hash = hash.wrapping_add(u32::from(*byte));
+            hash = hash.wrapping_add(hash << 10);
+            hash ^= hash >> 6;
+        }
+        hash.wrapping_mul(1_664_525).wrapping_add(1_013_904_223)
+    }
+
+    pub fn jam_checksum(data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (index, slot) in table.iter_mut().enumerate() {
+            let mut value = index as u32;
+            for _ in 0..8 {
+                value = if value & 1 != 0 {
+                    0xedb8_8320 ^ (value >> 1)
+                } else {
+                    value >> 1
+                };
+            }
+            *slot = value;
+        }
+        let mut state = 0u32;
+        for byte in data {
+            state = table[((state ^ u32::from(*byte)) & 0xff) as usize] ^ (state >> 8);
+        }
+        state
+    }
+
+    fn align_four(out: &mut Vec<u8>) {
+        while !out.len().is_multiple_of(4) {
+            out.push(0);
+        }
+    }
+
+    fn put_c_string(out: &mut Vec<u8>, text: &[u8]) {
+        out.extend_from_slice(text);
+        out.push(0);
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct StringTable {
+        pub data: Vec<u8>,
+        pub offsets: BTreeMap<Vec<u8>, u32>,
+        pub order: Vec<Vec<u8>>,
+    }
+
+    impl Default for StringTable {
+        fn default() -> StringTable {
+            StringTable::new()
+        }
+    }
+
+    impl StringTable {
+        pub fn new() -> StringTable {
+            StringTable {
+                data: vec![0],
+                offsets: BTreeMap::new(),
+                order: Vec::new(),
+            }
+        }
+
+        pub fn insert(&mut self, text: &[u8]) -> u32 {
+            if let Some(offset) = self.offsets.get(text) {
+                return *offset;
+            }
+            let offset = self.data.len() as u32;
+            self.data.extend_from_slice(text);
+            self.data.push(0);
+            self.offsets.insert(text.to_vec(), offset);
+            self.order.push(text.to_vec());
+            offset
+        }
+
+        pub fn len(&self) -> usize {
+            self.order.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.order.is_empty()
+        }
+
+        pub fn serialized(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            put_u32(&mut out, 0xeffe_effe);
+            put_u32(&mut out, 1);
+            put_u32(&mut out, self.data.len() as u32);
+            out.extend_from_slice(&self.data);
+            let bucket_count = string_bucket_count(self.order.len() as u32);
+            put_u32(&mut out, bucket_count);
+            let mut buckets = vec![0u32; bucket_count as usize];
+            for text in &self.order {
+                let offset = self.offsets[text];
+                let hash = hash_string_first(text);
+                for step in 0..bucket_count {
+                    let slot = (hash.wrapping_add(step) % bucket_count) as usize;
+                    if buckets[slot] != 0 {
+                        continue;
+                    }
+                    buckets[slot] = offset;
+                    break;
+                }
+            }
+            for bucket in buckets {
+                put_u32(&mut out, bucket);
+            }
+            put_u32(&mut out, self.order.len() as u32);
+            out
+        }
+    }
+
+    fn string_bucket_count(count: u32) -> u32 {
+        let mut strings = 0u32;
+        let mut buckets = 1u32;
+        let mut table: Vec<(u32, u32)> = vec![(0, 1)];
+        while buckets <= u32::MAX / 3 {
+            strings += 1;
+            if buckets * 3 / 4 < strings {
+                buckets = buckets * 3 / 2 + 1;
+                table.push((strings, buckets));
+            }
+        }
+        table
+            .iter()
+            .find(|(threshold, _)| *threshold >= count)
+            .map(|(_, buckets)| *buckets)
+            .unwrap_or(buckets)
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct NamedStreams {
+        names: Vec<u8>,
+        buckets: Vec<Option<(u32, u32)>>,
+    }
+
+    impl Default for NamedStreams {
+        fn default() -> NamedStreams {
+            NamedStreams {
+                names: Vec::new(),
+                buckets: vec![None],
+            }
+        }
+    }
+
+    impl NamedStreams {
+        fn name_at(&self, offset: u32) -> &[u8] {
+            let start = offset as usize;
+            let end = self.names[start..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|length| start + length)
+                .unwrap_or(self.names.len());
+            &self.names[start..end]
+        }
+
+        fn locate(&self, name: &[u8]) -> (usize, bool) {
+            let capacity = self.buckets.len();
+            let start = (u32::from(hash_string_first(name) as u16) as usize) % capacity;
+            let mut index = start;
+            loop {
+                match self.buckets[index] {
+                    Some((offset, _)) => {
+                        if self.name_at(offset) == name {
+                            return (index, true);
+                        }
+                    }
+                    None => return (index, false),
+                }
+                index = (index + 1) % capacity;
+                if index == start {
+                    return (index, false);
+                }
+            }
+        }
+
+        pub fn get(&self, name: &str) -> Option<u32> {
+            let (index, found) = self.locate(name.as_bytes());
+            if found {
+                self.buckets[index].map(|(_, stream)| stream)
+            } else {
+                None
+            }
+        }
+
+        pub fn set(&mut self, name: &str, stream: u32) {
+            let (index, found) = self.locate(name.as_bytes());
+            if found {
+                if let Some(bucket) = self.buckets[index].as_mut() {
+                    bucket.1 = stream;
+                }
+                return;
+            }
+            let offset = self.names.len() as u32;
+            self.names.extend_from_slice(name.as_bytes());
+            self.names.push(0);
+            self.buckets[index] = Some((offset, stream));
+            self.grow();
+        }
+
+        fn grow(&mut self) {
+            let size = self
+                .buckets
+                .iter()
+                .filter(|bucket| bucket.is_some())
+                .count() as u32;
+            let capacity = self.buckets.len() as u32;
+            let maximum = capacity * 2 / 3 + 1;
+            if size < maximum {
+                return;
+            }
+            let entries: Vec<(u32, u32)> = self.buckets.iter().flatten().copied().collect();
+            self.buckets = vec![None; (maximum * 2) as usize];
+            for (offset, stream) in entries {
+                let name = self.name_at(offset).to_vec();
+                let (index, _) = self.locate(&name);
+                self.buckets[index] = Some((offset, stream));
+            }
+        }
+
+        pub fn serialized(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            put_u32(&mut out, self.names.len() as u32);
+            out.extend_from_slice(&self.names);
+            let size = self
+                .buckets
+                .iter()
+                .filter(|bucket| bucket.is_some())
+                .count();
+            put_u32(&mut out, size as u32);
+            put_u32(&mut out, self.buckets.len() as u32);
+            let last = self.buckets.iter().rposition(|bucket| bucket.is_some());
+            let words = last.map(|position| position / 32 + 1).unwrap_or(0);
+            put_u32(&mut out, words as u32);
+            for word in 0..words {
+                let mut value = 0u32;
+                for bit in 0..32 {
+                    let index = word * 32 + bit;
+                    if index < self.buckets.len() && self.buckets[index].is_some() {
+                        value |= 1 << bit;
+                    }
+                }
+                put_u32(&mut out, value);
+            }
+            put_u32(&mut out, 0);
+            for (offset, stream) in self.buckets.iter().flatten() {
+                put_u32(&mut out, *offset);
+                put_u32(&mut out, *stream);
+            }
+            put_u32(&mut out, 0);
+            out
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct StreamFile {
+        pub block_size: u32,
+        free: Vec<bool>,
+        pub sizes: Vec<u32>,
+        pub blocks: Vec<Vec<u32>>,
+    }
+
+    impl StreamFile {
+        pub fn new(block_size: u32) -> StreamFile {
+            StreamFile {
+                block_size,
+                free: vec![false, false, false, false],
+                sizes: Vec::new(),
+                blocks: Vec::new(),
+            }
+        }
+
+        fn block_count(&self, size: u32) -> u32 {
+            size.div_ceil(self.block_size)
+        }
+
+        fn allocate(&mut self, count: u32) -> Vec<u32> {
+            if count == 0 {
+                return Vec::new();
+            }
+            let free_count = self.free.iter().filter(|free| **free).count() as u32;
+            if free_count < count {
+                let old = self.free.len() as u32;
+                let mut new = old + (count - free_count);
+                let mut next = old.div_ceil(self.block_size) * self.block_size + 1;
+                self.free.resize(new as usize, true);
+                while next < new {
+                    new += 2;
+                    self.free.resize(new as usize, true);
+                    self.free[next as usize] = false;
+                    self.free[next as usize + 1] = false;
+                    next += self.block_size;
+                }
+            }
+            let mut result = Vec::new();
+            for index in 0..self.free.len() {
+                if result.len() as u32 == count {
+                    break;
+                }
+                if self.free[index] {
+                    self.free[index] = false;
+                    result.push(index as u32);
+                }
+            }
+            result
+        }
+
+        pub fn add_stream(&mut self, size: u32) -> usize {
+            let count = self.block_count(size);
+            let blocks = self.allocate(count);
+            self.sizes.push(size);
+            self.blocks.push(blocks);
+            self.sizes.len() - 1
+        }
+
+        pub fn set_stream_size(&mut self, index: usize, size: u32) {
+            let old = self.sizes[index];
+            if old == size {
+                return;
+            }
+            let new_count = self.block_count(size);
+            let old_count = self.block_count(old);
+            if new_count > old_count {
+                let added = self.allocate(new_count - old_count);
+                self.blocks[index].extend(added);
+            } else if old_count > new_count {
+                for block in self.blocks[index].split_off(new_count as usize) {
+                    self.free[block as usize] = true;
+                }
+            }
+            self.sizes[index] = size;
+        }
+
+        pub fn commit(&mut self, contents: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+            let mut directory_size = 4 + 4 * self.sizes.len() as u32;
+            for size in &self.sizes {
+                directory_size += 4 * self.block_count(*size);
+            }
+            let directory_count = self.block_count(directory_size);
+            let directory_blocks = self.allocate(directory_count);
+            let block_count = self.free.len() as u32;
+            let block_size = self.block_size;
+            let file_size = u64::from(block_size) * u64::from(block_count);
+            let limit = match block_size {
+                8192 => u64::from(u32::MAX) * 2,
+                16384 => u64::from(u32::MAX) * 3,
+                32768 => u64::from(u32::MAX) * 4,
+                _ => u64::from(u32::MAX),
+            };
+            if file_size > limit {
+                return Err(format!(
+                    "File size {} too large for current PDB page size {block_size}",
+                    group_digits(file_size)
+                ));
+            }
+            if u64::from(directory_count) * 4 > u64::from(block_size) {
+                return Err(format!(
+                    "The directory block map ({} bytes) doesn't fit in a block ({block_size} bytes)",
+                    directory_count * 4
+                ));
+            }
+            let mut out = vec![0u8; file_size as usize];
+            out[..32].copy_from_slice(MAGIC);
+            let header = [block_size, 2, block_count, directory_size, 0, 3];
+            for (index, value) in header.iter().enumerate() {
+                out[32 + index * 4..36 + index * 4].copy_from_slice(&value.to_le_bytes());
+            }
+            for map in [1u32, 2] {
+                let intervals = (block_count - map).div_ceil(block_size);
+                for interval in 0..intervals {
+                    let block = (map + interval * block_size) as usize;
+                    let start = block * block_size as usize;
+                    if start < out.len() {
+                        let end = (start + block_size as usize).min(out.len());
+                        out[start..end].fill(0xff);
+                    }
+                }
+            }
+            let map_bytes = block_count.div_ceil(8) as usize;
+            for byte_index in 0..map_bytes {
+                let mut value = 0u8;
+                for bit in 0..8 {
+                    let block = byte_index * 8 + bit;
+                    let free = block >= block_count as usize || self.free[block];
+                    if free {
+                        value |= 1 << bit;
+                    }
+                }
+                let interval = byte_index / block_size as usize;
+                let within = byte_index % block_size as usize;
+                let block = 2 + interval * block_size as usize;
+                out[block * block_size as usize + within] = value;
+            }
+            let map_at = 3 * block_size as usize;
+            for (index, block) in directory_blocks.iter().enumerate() {
+                out[map_at + index * 4..map_at + index * 4 + 4]
+                    .copy_from_slice(&block.to_le_bytes());
+            }
+            let mut directory = Vec::new();
+            put_u32(&mut directory, self.sizes.len() as u32);
+            for size in &self.sizes {
+                put_u32(&mut directory, *size);
+            }
+            for blocks in &self.blocks {
+                for block in blocks {
+                    put_u32(&mut directory, *block);
+                }
+            }
+            write_blocks(&mut out, block_size, &directory_blocks, &directory);
+            for (index, data) in contents.iter().enumerate() {
+                if index >= self.blocks.len() {
+                    break;
+                }
+                let length = (self.sizes[index] as usize).min(data.len());
+                write_blocks(&mut out, block_size, &self.blocks[index], &data[..length]);
+            }
+            Ok(out)
+        }
+    }
+
+    fn group_digits(value: u64) -> String {
+        let text = value.to_string();
+        let mut out = String::new();
+        for (index, character) in text.chars().enumerate() {
+            if index > 0 && (text.len() - index).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(character);
+        }
+        out
+    }
+
+    fn write_blocks(out: &mut [u8], block_size: u32, blocks: &[u32], data: &[u8]) {
+        for (index, chunk) in data.chunks(block_size as usize).enumerate() {
+            if index >= blocks.len() {
+                break;
+            }
+            let start = blocks[index] as usize * block_size as usize;
+            out[start..start + chunk.len()].copy_from_slice(chunk);
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct SectionContribution {
+        pub section: u16,
+        pub offset: i32,
+        pub size: i32,
+        pub characteristics: u32,
+        pub module: u16,
+        pub data_checksum: u32,
+        pub relocation_checksum: u32,
+    }
+
+    impl SectionContribution {
+        pub fn encode(&self, out: &mut Vec<u8>) {
+            put_u16(out, self.section);
+            put_u16(out, 0);
+            put_u32(out, self.offset as u32);
+            put_u32(out, self.size as u32);
+            put_u32(out, self.characteristics);
+            put_u16(out, self.module);
+            put_u16(out, 0);
+            put_u32(out, self.data_checksum);
+            put_u32(out, self.relocation_checksum);
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Module {
+        pub name: String,
+        pub object_name: String,
+        pub first_contribution: SectionContribution,
+        pub symbols: Vec<u8>,
+        pub subsections: Vec<u8>,
+        pub source_files: Vec<String>,
+        pub path_name_index: u32,
+        pub stream: u16,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct SectionMapEntry {
+        pub flags: u16,
+        pub frame: u16,
+        pub length: u32,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct DebugInformation {
+        pub age: u32,
+        pub build_number: u16,
+        pub machine: u16,
+        pub modules: Vec<Module>,
+        pub contributions: Vec<SectionContribution>,
+        pub section_map: Vec<SectionMapEntry>,
+        pub source_names: Vec<String>,
+        pub edit_names: StringTable,
+        pub debug_streams: Vec<Option<Vec<u8>>>,
+        pub debug_stream_numbers: Vec<u16>,
+    }
+
+    impl Default for DebugInformation {
+        fn default() -> DebugInformation {
+            DebugInformation {
+                age: 1,
+                build_number: 0,
+                machine: 0x14c,
+                modules: Vec::new(),
+                contributions: Vec::new(),
+                section_map: Vec::new(),
+                source_names: Vec::new(),
+                edit_names: StringTable::new(),
+                debug_streams: vec![None; DEBUG_STREAM_COUNT],
+                debug_stream_numbers: vec![INVALID_STREAM; DEBUG_STREAM_COUNT],
+            }
+        }
+    }
+
+    impl DebugInformation {
+        pub fn add_module(&mut self, name: &str) -> usize {
+            self.modules.push(Module {
+                name: name.to_string(),
+                stream: INVALID_STREAM,
+                ..Module::default()
+            });
+            self.modules.len() - 1
+        }
+
+        pub fn add_source_file(&mut self, module: usize, path: &str) {
+            if !self.source_names.iter().any(|name| name == path) {
+                self.source_names.push(path.to_string());
+            }
+            self.modules[module].source_files.push(path.to_string());
+        }
+
+        pub fn create_section_map(&mut self, headers: &[(u32, u32)]) {
+            self.section_map.clear();
+            for (index, (characteristics, virtual_size)) in headers.iter().enumerate() {
+                let mut flags = 0u16;
+                if characteristics & 0x4000_0000 != 0 {
+                    flags |= 1;
+                }
+                if characteristics & 0x8000_0000 != 0 {
+                    flags |= 2;
+                }
+                if characteristics & 0x2000_0000 != 0 {
+                    flags |= 4;
+                }
+                if characteristics & 0x0002_0000 == 0 {
+                    flags |= 8;
+                }
+                flags |= 0x100;
+                self.section_map.push(SectionMapEntry {
+                    flags,
+                    frame: index as u16 + 1,
+                    length: *virtual_size,
+                });
+            }
+            self.section_map.push(SectionMapEntry {
+                flags: 8 | 0x200,
+                frame: headers.len() as u16 + 1,
+                length: u32::MAX,
+            });
+        }
+
+        fn module_stream(module: &Module) -> Vec<u8> {
+            let mut out = Vec::new();
+            put_u32(&mut out, 4);
+            out.extend_from_slice(&module.symbols);
+            align_four(&mut out);
+            out.extend_from_slice(&module.subsections);
+            put_u32(&mut out, 0);
+            out
+        }
+
+        fn file_information(&self) -> Vec<u8> {
+            let module_count = self.modules.len().min(usize::from(u16::MAX));
+            let mut out = Vec::new();
+            put_u16(&mut out, module_count as u16);
+            put_u16(
+                &mut out,
+                self.source_names.len().min(usize::from(u16::MAX)) as u16,
+            );
+            for index in 0..module_count {
+                put_u16(&mut out, index as u16);
+            }
+            for module in &self.modules {
+                put_u16(&mut out, module.source_files.len() as u16);
+            }
+            let mut name_offsets: BTreeMap<&str, u32> = BTreeMap::new();
+            let mut names = Vec::new();
+            for name in &self.source_names {
+                name_offsets.insert(name.as_str(), names.len() as u32);
+                put_c_string(&mut names, name.as_bytes());
+            }
+            for module in &self.modules {
+                for name in &module.source_files {
+                    put_u32(
+                        &mut out,
+                        name_offsets.get(name.as_str()).copied().unwrap_or(0),
+                    );
+                }
+            }
+            out.extend_from_slice(&names);
+            align_four(&mut out);
+            out
+        }
+
+        fn serialized(&self, globals: u16, publics: u16, records: u16) -> Vec<u8> {
+            let mut modules = Vec::new();
+            for (index, module) in self.modules.iter().enumerate() {
+                put_u32(&mut modules, index as u32);
+                module.first_contribution.encode(&mut modules);
+                put_u16(&mut modules, 0);
+                put_u16(&mut modules, module.stream);
+                let symbol_bytes = if module.stream == INVALID_STREAM {
+                    0
+                } else {
+                    4 + module.symbols.len().div_ceil(4) * 4
+                };
+                put_u32(&mut modules, symbol_bytes as u32);
+                put_u32(&mut modules, 0);
+                put_u32(&mut modules, module.subsections.len() as u32);
+                put_u16(&mut modules, module.source_files.len() as u16);
+                put_u16(&mut modules, 0);
+                put_u32(&mut modules, 0);
+                put_u32(&mut modules, 0);
+                put_u32(&mut modules, module.path_name_index);
+                put_c_string(&mut modules, module.name.as_bytes());
+                put_c_string(&mut modules, module.object_name.as_bytes());
+                align_four(&mut modules);
+            }
+            let mut contributions = Vec::new();
+            if !self.contributions.is_empty() {
+                put_u32(&mut contributions, 0xeffe_0000u32.wrapping_add(19_970_605));
+                for contribution in &self.contributions {
+                    contribution.encode(&mut contributions);
+                }
+            }
+            let mut section_map = Vec::new();
+            if !self.section_map.is_empty() {
+                put_u16(&mut section_map, self.section_map.len() as u16);
+                put_u16(&mut section_map, self.section_map.len() as u16);
+                for entry in &self.section_map {
+                    put_u16(&mut section_map, entry.flags);
+                    put_u16(&mut section_map, 0);
+                    put_u16(&mut section_map, 0);
+                    put_u16(&mut section_map, entry.frame);
+                    put_u16(&mut section_map, u16::MAX);
+                    put_u16(&mut section_map, u16::MAX);
+                    put_u32(&mut section_map, 0);
+                    put_u32(&mut section_map, entry.length);
+                }
+            }
+            let files = self.file_information();
+            let edit_names = self.edit_names.serialized();
+            let mut out = Vec::new();
+            put_u32(&mut out, u32::MAX);
+            put_u32(&mut out, 19_990_903);
+            put_u32(&mut out, self.age);
+            put_u16(&mut out, globals);
+            put_u16(&mut out, self.build_number);
+            put_u16(&mut out, publics);
+            put_u16(&mut out, 0);
+            put_u16(&mut out, records);
+            put_u16(&mut out, 0);
+            put_u32(&mut out, modules.len() as u32);
+            put_u32(&mut out, contributions.len() as u32);
+            put_u32(&mut out, section_map.len() as u32);
+            put_u32(&mut out, files.len() as u32);
+            put_u32(&mut out, 0);
+            put_u32(&mut out, 0);
+            put_u32(&mut out, (DEBUG_STREAM_COUNT * 2) as u32);
+            put_u32(&mut out, edit_names.len() as u32);
+            put_u16(&mut out, 0);
+            put_u16(&mut out, self.machine);
+            put_u32(&mut out, 0);
+            out.extend_from_slice(&modules);
+            out.extend_from_slice(&contributions);
+            out.extend_from_slice(&section_map);
+            out.extend_from_slice(&files);
+            out.extend_from_slice(&edit_names);
+            for number in &self.debug_stream_numbers {
+                put_u16(&mut out, *number);
+            }
+            out
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct TypeStream {
+        pub records: Vec<Vec<u8>>,
+        pub hashes: Vec<u32>,
+    }
+
+    impl TypeStream {
+        pub fn add(&mut self, record: Vec<u8>, hash: u32) {
+            self.records.push(record);
+            self.hashes.push(hash);
+        }
+
+        fn index_offsets(&self) -> Vec<(u32, u32)> {
+            let mut out = Vec::new();
+            let mut bytes = 0usize;
+            for (count, record) in self.records.iter().enumerate() {
+                let next = bytes + record.len();
+                if next / 8192 > bytes / 8192 || count == 0 {
+                    out.push((FIRST_TYPE_INDEX + count as u32, bytes as u32));
+                }
+                bytes = next;
+            }
+            out
+        }
+
+        fn hash_stream(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            for hash in &self.hashes {
+                put_u32(&mut out, hash % TYPE_HASH_BUCKETS);
+            }
+            for (index, offset) in self.index_offsets() {
+                put_u32(&mut out, index);
+                put_u32(&mut out, offset);
+            }
+            out
+        }
+
+        fn serialized(&self, hash_stream: u16) -> Vec<u8> {
+            let bytes: usize = self.records.iter().map(|record| record.len()).sum();
+            let hashes = (self.hashes.len() * 4) as u32;
+            let offsets = (self.index_offsets().len() * 8) as u32;
+            let mut out = Vec::new();
+            put_u32(&mut out, 20_040_203);
+            put_u32(&mut out, 56);
+            put_u32(&mut out, FIRST_TYPE_INDEX);
+            put_u32(&mut out, FIRST_TYPE_INDEX + self.records.len() as u32);
+            put_u32(&mut out, bytes as u32);
+            put_u16(&mut out, hash_stream);
+            put_u16(&mut out, INVALID_STREAM);
+            put_u32(&mut out, 4);
+            put_u32(&mut out, TYPE_HASH_BUCKETS);
+            put_u32(&mut out, 0);
+            put_u32(&mut out, hashes);
+            put_u32(&mut out, hashes);
+            put_u32(&mut out, offsets);
+            put_u32(&mut out, hashes);
+            put_u32(&mut out, 0);
+            for record in &self.records {
+                out.extend_from_slice(record);
+            }
+            out
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Public {
+        pub name: Vec<u8>,
+        pub flags: u32,
+        pub offset: u32,
+        pub segment: u16,
+        pub record_offset: u32,
+    }
+
+    fn public_size(public: &Public) -> usize {
+        let length = public.name.len().min(0xff00 - 14 - 1);
+        (14 + length + 1).div_ceil(4) * 4
+    }
+
+    fn compare_hash_names(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+        if left.len() != right.len() {
+            return left.len().cmp(&right.len());
+        }
+        if !left.is_ascii() || !right.is_ascii() {
+            return left.cmp(right);
+        }
+        left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+    }
+
+    fn hash_table(records: &[(Vec<u8>, u32)]) -> Vec<u8> {
+        let buckets: Vec<usize> = records
+            .iter()
+            .map(|(name, _)| hash_string_first(name) as usize % HASH_BUCKET_COUNT)
+            .collect();
+        let mut starts = vec![0u32; HASH_BUCKET_COUNT];
+        for bucket in &buckets {
+            starts[*bucket] += 1;
+        }
+        let mut sum = 0u32;
+        for start in starts.iter_mut() {
+            let size = *start;
+            *start = sum;
+            sum += size;
+        }
+        let mut cursors = starts.clone();
+        let mut entries = vec![0usize; records.len()];
+        for (index, bucket) in buckets.iter().enumerate() {
+            entries[cursors[*bucket] as usize] = index;
+            cursors[*bucket] += 1;
+        }
+        for bucket in 0..HASH_BUCKET_COUNT {
+            let begin = starts[bucket] as usize;
+            let end = cursors[bucket] as usize;
+            entries[begin..end].sort_by(|left, right| {
+                compare_hash_names(&records[*left].0, &records[*right].0)
+                    .then(records[*left].1.cmp(&records[*right].1))
+            });
+        }
+        let mut bitmap = vec![0u32; (HASH_BUCKET_COUNT + 32) / 32];
+        let mut chains = Vec::new();
+        for (word, slot) in bitmap.iter_mut().enumerate() {
+            for bit in 0..32 {
+                let bucket = word * 32 + bit;
+                if bucket >= HASH_BUCKET_COUNT || starts[bucket] == cursors[bucket] {
+                    continue;
+                }
+                *slot |= 1 << bit;
+                chains.push(starts[bucket] * 12);
+            }
+        }
+        let mut out = Vec::new();
+        put_u32(&mut out, u32::MAX);
+        put_u32(&mut out, 0xeffe_0000u32.wrapping_add(19_990_810));
+        put_u32(&mut out, (entries.len() * 8) as u32);
+        put_u32(&mut out, ((bitmap.len() + chains.len()) * 4) as u32);
+        for entry in entries {
+            put_u32(&mut out, records[entry].1 + 1);
+            put_u32(&mut out, 1);
+        }
+        for word in bitmap {
+            put_u32(&mut out, word);
+        }
+        for chain in chains {
+            put_u32(&mut out, chain);
+        }
+        out
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct InjectedSource {
+        pub stream_name: String,
+        pub content: Vec<u8>,
+        pub name_index: u32,
+        pub virtual_name_index: u32,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct ProgramDatabase {
+        pub block_size: u32,
+        pub named_data: Vec<(String, Vec<u8>)>,
+        pub information: DebugInformation,
+        pub types: TypeStream,
+        pub identifiers: TypeStream,
+        pub strings: StringTable,
+        pub publics: Vec<Public>,
+        pub globals: Vec<(Vec<u8>, Vec<u8>)>,
+        globals_seen: BTreeSet<Vec<u8>>,
+        pub injected: Vec<InjectedSource>,
+    }
+
+    impl ProgramDatabase {
+        pub fn new(block_size: u32) -> ProgramDatabase {
+            ProgramDatabase {
+                block_size,
+                named_data: Vec::new(),
+                information: DebugInformation::default(),
+                types: TypeStream::default(),
+                identifiers: TypeStream::default(),
+                strings: StringTable::new(),
+                publics: Vec::new(),
+                globals: Vec::new(),
+                globals_seen: BTreeSet::new(),
+                injected: Vec::new(),
+            }
+        }
+
+        pub fn add_global(&mut self, record: Vec<u8>, name: Vec<u8>) {
+            let kind = u16::from_le_bytes([record[2], record[3]]);
+            if (kind == 0x1108 || kind == 0x1107) && !self.globals_seen.insert(record.clone()) {
+                return;
+            }
+            self.globals.push((record, name));
+        }
+
+        pub fn set_publics(&mut self, mut publics: Vec<Public>) {
+            publics.sort_by(|left, right| left.name.cmp(&right.name));
+            let mut offset = 0u32;
+            for public in publics.iter_mut() {
+                public.record_offset = offset;
+                offset += public_size(public) as u32;
+            }
+            self.publics = publics;
+        }
+
+        pub fn commit(&mut self) -> Result<(Vec<u8>, usize), String> {
+            let mut file = StreamFile::new(self.block_size);
+            for _ in 0..SPECIAL_STREAM_COUNT {
+                file.add_stream(0);
+            }
+            let mut named = NamedStreams::default();
+            let mut contents: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+            for (name, data) in &self.named_data {
+                let stream = file.add_stream(data.len() as u32);
+                named.set(name, stream as u32);
+                contents.insert(stream, data.clone());
+            }
+            let mut features = Vec::new();
+            if !self.identifiers.records.is_empty() {
+                features.push(20_140_508u32);
+            }
+            let link_information = file.add_stream(0);
+            named.set("/LinkInfo", link_information as u32);
+            let public_bytes: u32 = self
+                .publics
+                .iter()
+                .map(|public| public_size(public) as u32)
+                .sum();
+            let mut global_records = Vec::new();
+            let mut global_offset = public_bytes;
+            for (record, name) in &self.globals {
+                global_records.push((name.clone(), global_offset));
+                global_offset += record.len() as u32;
+            }
+            let globals_hash = hash_table(&global_records);
+            let public_records: Vec<(Vec<u8>, u32)> = self
+                .publics
+                .iter()
+                .map(|public| (public.name.clone(), public.record_offset))
+                .collect();
+            let publics_hash = hash_table(&public_records);
+            let globals_stream = file.add_stream(globals_hash.len() as u32);
+            let publics_size = 28 + publics_hash.len() + self.publics.len() * 4;
+            let publics_stream = file.add_stream(publics_size as u32);
+            let records_stream = file.add_stream(global_offset);
+            let type_stream = self.types.serialized(INVALID_STREAM);
+            file.set_stream_size(STREAM_TYPES, type_stream.len() as u32);
+            let type_hashes = self.types.hash_stream();
+            let mut type_hash_stream = INVALID_STREAM;
+            if !type_hashes.is_empty() {
+                type_hash_stream = file.add_stream(type_hashes.len() as u32) as u16;
+                contents.insert(type_hash_stream as usize, type_hashes);
+            }
+            for index in 0..DEBUG_STREAM_COUNT {
+                if let Some(data) = self.information.debug_streams[index].clone() {
+                    let stream = file.add_stream(data.len() as u32);
+                    self.information.debug_stream_numbers[index] = stream as u16;
+                    contents.insert(stream, data);
+                }
+            }
+            for module in 0..self.information.modules.len() {
+                self.information.modules[module].stream = INVALID_STREAM;
+                if self.information.modules[module].symbols.is_empty()
+                    && self.information.modules[module].subsections.is_empty()
+                {
+                    continue;
+                }
+                let data = DebugInformation::module_stream(&self.information.modules[module]);
+                let stream = file.add_stream(data.len() as u32);
+                self.information.modules[module].stream = stream as u16;
+                contents.insert(stream, data);
+            }
+            let debug_stream = self.information.serialized(
+                globals_stream as u16,
+                publics_stream as u16,
+                records_stream as u16,
+            );
+            file.set_stream_size(STREAM_DEBUG_INFORMATION, debug_stream.len() as u32);
+            let names = self.strings.serialized();
+            let names_stream = file.add_stream(names.len() as u32);
+            named.set("/names", names_stream as u32);
+            contents.insert(names_stream, names);
+            let identifier_stream_hashes = self.identifiers.hash_stream();
+            let mut identifier_hash_stream = INVALID_STREAM;
+            let identifier_size = self.identifiers.serialized(INVALID_STREAM).len();
+            file.set_stream_size(STREAM_IDENTIFIERS, identifier_size as u32);
+            if !identifier_stream_hashes.is_empty() {
+                identifier_hash_stream =
+                    file.add_stream(identifier_stream_hashes.len() as u32) as u16;
+                contents.insert(identifier_hash_stream as usize, identifier_stream_hashes);
+            }
+            let information_size =
+                |named: &NamedStreams| 28 + named.serialized().len() + features.len() * 4;
+            file.set_stream_size(STREAM_INFORMATION, information_size(&named) as u32);
+            if !self.injected.is_empty() {
+                let mut table: Vec<Option<(u32, Vec<u8>)>> = vec![None; 2];
+                let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
+                for source in &self.injected {
+                    let mut entry = Vec::new();
+                    put_u32(&mut entry, 40);
+                    put_u32(&mut entry, 19_980_827);
+                    put_u32(&mut entry, jam_checksum(&source.content));
+                    put_u32(&mut entry, source.content.len() as u32);
+                    put_u32(&mut entry, source.name_index);
+                    put_u32(&mut entry, 1);
+                    put_u32(&mut entry, source.virtual_name_index);
+                    entry.extend_from_slice(&[0u8; 12]);
+                    entries.push((source.virtual_name_index, entry));
+                }
+                for (key, entry) in entries {
+                    let capacity = table.len();
+                    let mut index = (u32::from(key as u16) as usize) % capacity;
+                    while let Some((existing, _)) = &table[index] {
+                        if *existing == key {
+                            break;
+                        }
+                        index = (index + 1) % capacity;
+                    }
+                    table[index] = Some((key, entry));
+                    let size = table.iter().filter(|slot| slot.is_some()).count() as u32;
+                    let maximum = table.len() as u32 * 2 / 3 + 1;
+                    if size >= maximum {
+                        let old: Vec<(u32, Vec<u8>)> = table.iter().flatten().cloned().collect();
+                        table = vec![None; (maximum * 2) as usize];
+                        for (old_key, old_entry) in old {
+                            let capacity = table.len();
+                            let mut slot = (u32::from(old_key as u16) as usize) % capacity;
+                            while table[slot].is_some() {
+                                slot = (slot + 1) % capacity;
+                            }
+                            table[slot] = Some((old_key, old_entry));
+                        }
+                    }
+                }
+                let mut body = Vec::new();
+                let size = table.iter().filter(|slot| slot.is_some()).count();
+                put_u32(&mut body, size as u32);
+                put_u32(&mut body, table.len() as u32);
+                let last = table.iter().rposition(|slot| slot.is_some());
+                let words = last.map(|position| position / 32 + 1).unwrap_or(0);
+                put_u32(&mut body, words as u32);
+                for word in 0..words {
+                    let mut value = 0u32;
+                    for bit in 0..32 {
+                        let index = word * 32 + bit;
+                        if index < table.len() && table[index].is_some() {
+                            value |= 1 << bit;
+                        }
+                    }
+                    put_u32(&mut body, value);
+                }
+                put_u32(&mut body, 0);
+                for (key, entry) in table.iter().flatten() {
+                    put_u32(&mut body, *key);
+                    body.extend_from_slice(entry);
+                }
+                let mut header_block = Vec::new();
+                put_u32(&mut header_block, 19_980_827);
+                put_u32(&mut header_block, (64 + body.len()) as u32);
+                header_block.extend_from_slice(&[0u8; 56]);
+                header_block.extend_from_slice(&body);
+                let header_stream = file.add_stream(header_block.len() as u32);
+                named.set("/src/headerblock", header_stream as u32);
+                contents.insert(header_stream, header_block);
+                for source in &self.injected {
+                    let stream = file.add_stream(source.content.len() as u32);
+                    named.set(&source.stream_name, stream as u32);
+                    contents.insert(stream, source.content.clone());
+                }
+                file.set_stream_size(STREAM_INFORMATION, information_size(&named) as u32);
+            }
+            let mut information = Vec::new();
+            put_u32(&mut information, 20_000_404);
+            information.extend_from_slice(&[0u8; 24]);
+            information.extend_from_slice(&named.serialized());
+            for feature in &features {
+                put_u32(&mut information, *feature);
+            }
+            contents.insert(STREAM_INFORMATION, information);
+            contents.insert(STREAM_DEBUG_INFORMATION, debug_stream);
+            contents.insert(STREAM_TYPES, self.types.serialized(type_hash_stream));
+            contents.insert(
+                STREAM_IDENTIFIERS,
+                self.identifiers.serialized(identifier_hash_stream),
+            );
+            let mut record_bytes = Vec::new();
+            for public in &self.publics {
+                let length = public.name.len().min(0xff00 - 14 - 1);
+                let size = public_size(public);
+                put_u16(&mut record_bytes, (size - 2) as u16);
+                put_u16(&mut record_bytes, 0x110e);
+                put_u32(&mut record_bytes, public.flags);
+                put_u32(&mut record_bytes, public.offset);
+                put_u16(&mut record_bytes, public.segment);
+                record_bytes.extend_from_slice(&public.name[..length]);
+                record_bytes.extend(std::iter::repeat_n(0u8, size - 14 - length));
+            }
+            for (record, _) in &self.globals {
+                record_bytes.extend_from_slice(record);
+            }
+            contents.insert(records_stream, record_bytes);
+            contents.insert(globals_stream, globals_hash);
+            let mut publics_data = Vec::new();
+            put_u32(&mut publics_data, publics_hash.len() as u32);
+            put_u32(&mut publics_data, (self.publics.len() * 4) as u32);
+            put_u32(&mut publics_data, 0);
+            put_u32(&mut publics_data, 0);
+            put_u16(&mut publics_data, 0);
+            put_u16(&mut publics_data, 0);
+            put_u32(&mut publics_data, 0);
+            put_u32(&mut publics_data, 0);
+            publics_data.extend_from_slice(&publics_hash);
+            let mut address_order: Vec<usize> = (0..self.publics.len()).collect();
+            address_order.sort_by(|left, right| {
+                let left = &self.publics[*left];
+                let right = &self.publics[*right];
+                left.segment
+                    .cmp(&right.segment)
+                    .then(left.offset.cmp(&right.offset))
+                    .then(left.name.cmp(&right.name))
+            });
+            for index in address_order {
+                put_u32(&mut publics_data, self.publics[index].record_offset);
+            }
+            contents.insert(publics_stream, publics_data);
+            let stream_count = file.sizes.len();
+            let mut ordered = vec![Vec::new(); stream_count];
+            for (index, data) in contents {
+                if index < stream_count {
+                    ordered[index] = data;
+                }
+            }
+            let bytes = file.commit(&ordered)?;
+            let information_offset = file.blocks[STREAM_INFORMATION]
+                .first()
+                .map(|block| *block as usize * self.block_size as usize)
+                .unwrap_or(0);
+            Ok((bytes, information_offset))
+        }
+    }
+}

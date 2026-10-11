@@ -18135,6 +18135,15 @@ pub struct CoffOptions {
     pub include_dwarf_chunks: bool,
     pub create_program_database: bool,
     pub debug_collect: bool,
+    pub pdb_path: Option<String>,
+    pub pdb_alternate_path: Option<String>,
+    pub pdb_page_size: u32,
+    pub pdb_source_path: Option<String>,
+    pub pdb_streams: Vec<(String, String)>,
+    pub natvis_files: Vec<String>,
+    pub merge_debug_directory: bool,
+    pub debug_global_hashes: bool,
+    pub command_arguments: Vec<String>,
     pub exports: Vec<String>,
     pub definition_file: Option<String>,
     pub import_library: Option<String>,
@@ -18218,6 +18227,15 @@ impl Default for CoffOptions {
             include_dwarf_chunks: false,
             create_program_database: false,
             debug_collect: true,
+            pdb_path: None,
+            pdb_alternate_path: None,
+            pdb_page_size: 4096,
+            pdb_source_path: None,
+            pdb_streams: Vec::new(),
+            natvis_files: Vec::new(),
+            merge_debug_directory: true,
+            debug_global_hashes: false,
+            command_arguments: Vec::new(),
             exports: Vec::new(),
             definition_file: None,
             import_library: None,
@@ -18544,12 +18562,14 @@ pub fn parse_coff_command_line(
                             options.include_dwarf_chunks = false;
                             options.write_symbol_table = false;
                             options.create_program_database = false;
+                            options.debug_global_hashes = false;
                             options.debug_collect = true;
                         }
                         "full" | "ghash" | "noghash" | "fastlink" => {
                             options.debug = true;
                             options.include_dwarf_chunks = true;
                             options.create_program_database = true;
+                            options.debug_global_hashes = part != "noghash";
                             options.debug_collect = false;
                         }
                         "dwarf" => {
@@ -18601,6 +18621,39 @@ pub fn parse_coff_command_line(
                         .as_deref()
                         .is_some_and(|text| text.eq_ignore_ascii_case("no")),
                 )
+            }
+            "pdb" => options.pdb_path = Some(need(&value)?),
+            "pdbaltpath" => options.pdb_alternate_path = Some(need(&value)?),
+            "pdbsourcepath" => options.pdb_source_path = Some(need(&value)?),
+            "natvis" => options.natvis_files.push(need(&value)?),
+            "nodbgdirmerge" => options.merge_debug_directory = false,
+            "pdbstream" => {
+                let text = need(&value)?;
+                let (name, path) = text.split_once('=').unwrap_or((text.as_str(), ""));
+                options.pdb_streams.retain(|(existing, _)| existing != name);
+                options
+                    .pdb_streams
+                    .push((name.to_string(), path.to_string()));
+            }
+            "pdbpagesize" => {
+                let text = need(&value)?;
+                let parsed = if let Some(hex) =
+                    text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                {
+                    u32::from_str_radix(hex, 16).ok()
+                } else if text.len() > 1 && text.starts_with('0') {
+                    u32::from_str_radix(&text[1..], 8).ok()
+                } else {
+                    text.parse::<u32>().ok()
+                };
+                match parsed {
+                    Some(size @ (4096 | 8192 | 16384 | 32768)) => options.pdb_page_size = size,
+                    _ => {
+                        return Err(invalid_value("/pdbpagesize", &text).with_context(format!(
+                            "Cause: /pdbpagesize: invalid argument: {text}"
+                        )))
+                    }
+                }
             }
             "export-all-symbols" => options.export_all_symbols = true,
             "exclude-all-symbols" => options.exclude_all_symbols = true,
@@ -18691,15 +18744,10 @@ pub fn parse_coff_command_line(
             | "guardsym"
             | "assemblydebug"
             | "lldignoreenv"
-            | "nodbgdirmerge"
             | "manifest"
             | "manifestuac"
             | "manifestfile"
             | "manifestdependency"
-            | "pdb"
-            | "pdbaltpath"
-            | "pdbsourcepath"
-            | "natvis"
             | "mllvm"
             | "errorlimit"
             | "cetcompat"
@@ -18721,6 +18769,19 @@ pub fn parse_coff_command_line(
             }
         }
     }
+    let input_names: BTreeSet<String> = options
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            CoffInput::File(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    options.command_arguments = expanded
+        .iter()
+        .filter(|argument| !input_names.contains(*argument))
+        .cloned()
+        .collect();
     Ok(options)
 }
 
@@ -19174,6 +19235,7 @@ pub struct CoffOutputSection {
     pub raw_size: u64,
     pub file_offset: u64,
     pub index: usize,
+    pub contributions: Vec<usize>,
 }
 
 pub struct CoffContext<'s> {
@@ -19238,6 +19300,9 @@ pub struct CoffContext<'s> {
     pub thread_local_alignment: u64,
     pub import_name: String,
     pub extra_outputs: Vec<(String, Vec<u8>)>,
+    pub directory: String,
+    pub partial_sections: Vec<(String, u32, Vec<usize>)>,
+    pub code_view_path: String,
 }
 
 pub fn coff_display(object: &CoffObjectInput) -> String {
@@ -19317,6 +19382,9 @@ impl<'s> CoffContext<'s> {
             thread_local_alignment: 0,
             import_name: String::new(),
             extra_outputs: Vec::new(),
+            directory: String::new(),
+            partial_sections: Vec::new(),
+            code_view_path: String::new(),
         }
     }
 
@@ -20783,10 +20851,6 @@ impl<'s> CoffContext<'s> {
         }
         self.search_paths.push(String::new());
         self.search_paths.extend(self.options.library_paths.clone());
-        if self.options.create_program_database {
-            self.error(not_supported("/debug"));
-            return None;
-        }
         let debug_collect = self.options.debug_collect;
         self.collect = self.options.collect.unwrap_or(debug_collect);
         self.folding = self.options.folding.unwrap_or(if self.collect {
@@ -22591,6 +22655,8 @@ const LOAD_CONFIG_GOT: &str = ", got";
 
 const PSEUDO_RELOCATION_NARROW: &str = "; this can fail at runtime depending on memory layout";
 
+const PDB_ALTERNATE_VARIABLES: &str = "only %_PDB% and %_EXT% supported in /pdbaltpath:, keeping";
+
 const PSEUDO_RELOCATOR_MISSING: &str = "output image has runtime pseudo relocations, but the function _pei386_runtime_relocator is missing; it is needed for fixing the relocations at runtime";
 
 const LIBRARY_MODE_OPTIONS: &[&str] = &[
@@ -22697,6 +22763,14 @@ fn archive_coff_inputs(
 }
 
 pub fn link_coff(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>) -> LinkOutcome {
+    link_coff_in(arguments, source, "")
+}
+
+pub fn link_coff_in(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    directory: &str,
+) -> LinkOutcome {
     if arguments.first().is_some_and(|first| {
         first.eq_ignore_ascii_case("/lib") || first.eq_ignore_ascii_case("-lib")
     }) {
@@ -22713,6 +22787,7 @@ pub fn link_coff(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>)
         }
     };
     let mut context = CoffContext::new(options, source);
+    context.directory = directory.to_string();
     let bytes = context.run();
     let mut outcome = LinkOutcome {
         outputs: Vec::new(),
@@ -22726,6 +22801,589 @@ pub fn link_coff(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>)
     }
     outcome.outputs.append(&mut context.extra_outputs);
     outcome
+}
+
+fn code_view_symbol(kind: u16, body: &[u8]) -> Vec<u8> {
+    use crate::compilers::pe::put_u16;
+    let total = (body.len() + 4).div_ceil(4) * 4;
+    let mut out = Vec::with_capacity(total);
+    put_u16(&mut out, (total - 2) as u16);
+    put_u16(&mut out, kind);
+    out.extend_from_slice(body);
+    out.resize(total, 0);
+    out
+}
+
+fn code_view_machine(machine_number: u16) -> u16 {
+    use crate::compilers::pe::machine;
+    match machine_number {
+        machine::AMD64 => 0xd0,
+        machine::I386 => 0x03,
+        machine::ARM64 => 0xf6,
+        0x01c4 => 0xf4,
+        0x01c0 => 0x68,
+        0xa641 => 0xf8,
+        0xa64e => 0xf9,
+        _ => 0xff,
+    }
+}
+
+fn linker_version_symbol(machine_number: u16) -> Vec<u8> {
+    use crate::compilers::pe::{put_u16, put_u32};
+    let mut body = Vec::new();
+    put_u32(&mut body, 7);
+    put_u16(&mut body, code_view_machine(machine_number));
+    for value in [0u16, 0, 0, 0, 14, 10, 25019, 0] {
+        put_u16(&mut body, value);
+    }
+    body.extend_from_slice(b"LLVM Linker\0");
+    code_view_symbol(0x113c, &body)
+}
+
+fn object_name_symbol(name: &str) -> Vec<u8> {
+    use crate::compilers::pe::put_u32;
+    let mut body = Vec::new();
+    put_u32(&mut body, 0);
+    body.extend_from_slice(name.as_bytes());
+    body.push(0);
+    code_view_symbol(0x1101, &body)
+}
+
+fn quote_windows_arguments(arguments: &[String]) -> String {
+    let mut out = String::new();
+    for argument in arguments {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let spaced = argument.contains(' ');
+        let quoted = argument.contains('"');
+        if spaced || quoted {
+            out.push('"');
+        }
+        out.push_str(&argument.replace('"', "\"\""));
+        if spaced || quoted {
+            out.push('"');
+        }
+    }
+    out
+}
+
+fn is_windows_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/'))
+        || ((path.starts_with("\\\\") || path.starts_with("//")) && bytes.len() > 2)
+}
+
+fn remove_path_dots(path: &str, parents: bool, windows: bool) -> String {
+    let separator = if windows { '\\' } else { '/' };
+    let (root, rest) = if windows {
+        let bytes = path.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            let after = &path[2..];
+            if after.starts_with(['\\', '/']) {
+                (format!("{}\\", &path[..2]), &after[1..])
+            } else {
+                (path[..2].to_string(), after)
+            }
+        } else if path.starts_with(['\\', '/']) {
+            ("\\".to_string(), &path[1..])
+        } else {
+            (String::new(), path)
+        }
+    } else if let Some(rest) = path.strip_prefix('/') {
+        ("/".to_string(), rest)
+    } else {
+        (String::new(), path)
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    let pieces: Vec<&str> = if windows {
+        rest.split(['\\', '/']).collect()
+    } else {
+        rest.split('/').collect()
+    };
+    for piece in pieces {
+        if piece.is_empty() || piece == "." {
+            continue;
+        }
+        if piece == ".." && parents {
+            if parts.last().is_some_and(|last| *last != "..") {
+                parts.pop();
+                continue;
+            }
+            if !root.is_empty() {
+                continue;
+            }
+        }
+        parts.push(piece);
+    }
+    format!("{root}{}", parts.join(&separator.to_string()))
+}
+
+fn replace_path_extension(path: &str, extension: &str) -> String {
+    let file_start = path.rfind('/').map(|position| position + 1).unwrap_or(0);
+    match path[file_start..].rfind('.') {
+        Some(position) if position > 0 || path[file_start..].len() > 1 => {
+            if &path[file_start..] == "." || &path[file_start..] == ".." {
+                format!("{path}{extension}")
+            } else {
+                format!("{}{extension}", &path[..file_start + position])
+            }
+        }
+        _ => format!("{path}{extension}"),
+    }
+}
+
+impl<'s> CoffContext<'s> {
+    fn make_absolute(&self, path: &str) -> String {
+        if path.starts_with('/') || self.directory.is_empty() {
+            return path.to_string();
+        }
+        format!("{}/{path}", self.directory.trim_end_matches('/'))
+    }
+
+    fn program_database_absolute(&self, path: &str) -> String {
+        if is_windows_absolute(path) || path.starts_with('/') {
+            return path.to_string();
+        }
+        match &self.options.pdb_source_path {
+            None => {
+                let native = path.replace('\\', "/");
+                remove_path_dots(&self.make_absolute(&native), true, false)
+            }
+            Some(source) => {
+                let windows = !source.starts_with('/');
+                let separator = if windows { "\\" } else { "/" };
+                let joined = if source.ends_with(['\\', '/']) {
+                    format!("{source}{path}")
+                } else {
+                    format!("{source}{separator}{path}")
+                };
+                let native = if windows {
+                    joined.replace('/', "\\")
+                } else {
+                    joined.replace('\\', "/")
+                };
+                remove_path_dots(&native, true, windows)
+            }
+        }
+    }
+
+    pub fn program_database_path(&self) -> String {
+        match &self.options.pdb_path {
+            Some(path) => path.clone(),
+            None => replace_path_extension(&self.options.output, ".pdb"),
+        }
+    }
+
+    fn program_database_alternate_path(&mut self) -> String {
+        if !self.options.create_program_database {
+            return String::new();
+        }
+        let pdb = self.program_database_path();
+        let Some(pattern) = self.options.pdb_alternate_path.clone() else {
+            return remove_path_dots(&self.make_absolute(&pdb), false, false);
+        };
+        let base_name = pdb.rsplit(['/', '\\']).next().unwrap_or(&pdb).to_string();
+        let output = self.options.output.clone();
+        let output_name = output.rsplit(['/', '\\']).next().unwrap_or(&output);
+        let extension = match output_name.rfind('.') {
+            Some(position) => output_name[position + 1..].to_string(),
+            None => String::new(),
+        };
+        let mut out = String::new();
+        let mut cursor = 0usize;
+        while cursor < pattern.len() {
+            let Some(first) = pattern[cursor..].find('%').map(|at| at + cursor) else {
+                out.push_str(&pattern[cursor..]);
+                break;
+            };
+            let Some(second) = pattern[first + 1..].find('%').map(|at| at + first + 1) else {
+                out.push_str(&pattern[cursor..]);
+                break;
+            };
+            out.push_str(&pattern[cursor..first]);
+            let variable = &pattern[first..=second];
+            if variable.eq_ignore_ascii_case("%_pdb%") {
+                out.push_str(&base_name);
+            } else if variable.eq_ignore_ascii_case("%_ext%") {
+                out.push_str(&extension);
+            } else {
+                self.warn(
+                    caution(
+                        "EI277",
+                        "The PDB alternate path uses a variable the linker does not expand.",
+                    )
+                    .with_context(format!("Variable: {variable}"))
+                    .with_context(format!(
+                        "Cause: {PDB_ALTERNATE_VARIABLES} {variable} as literal"
+                    )),
+                );
+                out.push_str(variable);
+            }
+            cursor = second + 1;
+        }
+        out
+    }
+
+    fn section_contribution(
+        &self,
+        chunk: Option<usize>,
+        module: u16,
+        modules: &BTreeMap<usize, u16>,
+    ) -> crate::compilers::pe::program_database::SectionContribution {
+        let output = chunk.and_then(|chunk| self.chunk_output(chunk));
+        let mut contribution = crate::compilers::pe::program_database::SectionContribution {
+            section: output
+                .map(|output| self.outputs[output].index as u16)
+                .unwrap_or(0xffff),
+            size: chunk
+                .map(|chunk| self.chunks[chunk].size as i32)
+                .unwrap_or(-1),
+            ..Default::default()
+        };
+        if let (Some(chunk), Some(output)) = (chunk, output) {
+            contribution.offset =
+                (self.chunk_rva(chunk) as i64 - self.outputs[output].virtual_address as i64) as i32;
+        }
+        match chunk {
+            Some(chunk)
+                if self.chunks[chunk].kind == CoffChunkKind::Section
+                    && self.chunks[chunk].file.is_some() =>
+            {
+                let file = self.chunks[chunk].file.unwrap_or(0);
+                contribution.characteristics = self.chunks[chunk].characteristics;
+                contribution.module = modules.get(&file).copied().unwrap_or(module);
+                contribution.data_checksum =
+                    crate::compilers::pe::program_database::jam_checksum(self.section_data(chunk));
+            }
+            _ => {
+                contribution.characteristics = output
+                    .map(|output| self.outputs[output].characteristics)
+                    .unwrap_or(0);
+                contribution.module = module;
+            }
+        }
+        contribution
+    }
+
+    fn create_program_database(&mut self, image: &mut [u8]) {
+        use crate::compilers::pe::program_database::{ProgramDatabase, Public};
+        use crate::compilers::pe::{put_u16, put_u32, read_u16};
+        let pdb_path = self.program_database_path();
+        let mut database = ProgramDatabase::new(self.options.pdb_page_size);
+        database.strings.insert(b"");
+        database.information.age = 1;
+        database.information.build_number = 0x8000 | (14 << 8) | 11;
+        database.information.machine = self.machine;
+        let mut modules: BTreeMap<usize, u16> = BTreeMap::new();
+        for file in self.object_order.clone() {
+            let parent = self.objects[file].parent.clone();
+            let name = self.objects[file].name.clone();
+            let in_archive = !parent.is_empty();
+            let object_name =
+                self.program_database_absolute(if in_archive { &parent } else { &name });
+            let module_name = if in_archive {
+                name.clone()
+            } else {
+                object_name.clone()
+            };
+            let module = database.information.add_module(&module_name);
+            database.information.modules[module].object_name = object_name;
+            modules.insert(file, module as u16);
+        }
+        for file in self.object_order.clone() {
+            let module = modules[&file];
+            let first = self.objects[file].chunks.iter().copied().find(|chunk| {
+                self.chunks[*chunk].kind == CoffChunkKind::Section && self.chunks[*chunk].live
+            });
+            if let Some(chunk) = first {
+                let contribution = self.section_contribution(Some(chunk), module, &modules);
+                database.information.modules[module as usize].first_contribution = contribution;
+            }
+        }
+        self.add_program_database_debug_information(&mut database, &modules);
+        self.add_import_modules(&mut database, &modules);
+        let native = self.program_database_absolute(&pdb_path);
+        let path_index = database.information.edit_names.insert(native.as_bytes());
+        let linker = database.information.add_module("* Linker *");
+        database.information.modules[linker].path_name_index = path_index;
+        let mut symbols = Vec::new();
+        symbols.extend(object_name_symbol("* Linker *"));
+        let common_machine = if self.machine == 0xa641 {
+            0xa64e
+        } else {
+            self.machine
+        };
+        symbols.extend(linker_version_symbol(common_machine));
+        let mut environment = vec![0u8];
+        let directory = match &self.options.pdb_source_path {
+            Some(source) => source.clone(),
+            None => self.directory.clone(),
+        };
+        let executable = self.program_database_absolute("lld-link");
+        let command = quote_windows_arguments(&self.options.command_arguments);
+        for field in [
+            "cwd",
+            &directory,
+            "exe",
+            &executable,
+            "pdb",
+            &native,
+            "cmd",
+            &command,
+        ] {
+            environment.extend_from_slice(field.as_bytes());
+            environment.push(0);
+        }
+        environment.push(0);
+        symbols.extend(code_view_symbol(0x113d, &environment));
+        let mut contributions = Vec::new();
+        for position in 0..self.outputs.len() {
+            let output = self.outputs[position].clone();
+            let mut body = Vec::new();
+            put_u16(&mut body, output.index as u16);
+            body.push(12);
+            body.push(0);
+            put_u32(&mut body, output.virtual_address as u32);
+            put_u32(&mut body, output.virtual_size as u32);
+            put_u32(&mut body, output.characteristics);
+            body.extend_from_slice(output.name.as_bytes());
+            body.push(0);
+            symbols.extend(code_view_symbol(0x1136, &body));
+            if !self.options.mingw {
+                for contribution in output.contributions.clone() {
+                    let (name, characteristics, list) = self.partial_sections[contribution].clone();
+                    let Some(first) = list.first().copied() else {
+                        continue;
+                    };
+                    let last = *list.last().unwrap_or(&first);
+                    let start = self.chunk_rva(first);
+                    let end = self.chunk_rva(last) + self.chunks[last].size;
+                    let mut flags = characteristics;
+                    if name.starts_with(".idata") {
+                        flags |= crate::compilers::pe::section_characteristic::WRITE;
+                    }
+                    let mut body = Vec::new();
+                    put_u32(&mut body, (end - start) as u32);
+                    put_u32(&mut body, flags);
+                    put_u32(&mut body, (start - output.virtual_address) as u32);
+                    put_u16(&mut body, output.index as u16);
+                    body.extend_from_slice(name.as_bytes());
+                    body.push(0);
+                    symbols.extend(code_view_symbol(0x1137, &body));
+                }
+            }
+            for chunk in output.chunks.clone() {
+                contributions.push(self.section_contribution(Some(chunk), linker as u16, &modules));
+            }
+        }
+        database.information.modules[linker].symbols = symbols;
+        database.information.modules[linker].first_contribution =
+            self.section_contribution(None, 0xffff, &modules);
+        database.information.contributions = contributions;
+        let header_offset = self.coff_header_offset();
+        let optional_size = read_u16(image, header_offset + 16).unwrap_or(0) as usize;
+        let table_start = header_offset + 20 + optional_size;
+        let table_end = (table_start + 40 * self.outputs.len()).min(image.len());
+        let table = image[table_start..table_end].to_vec();
+        let headers: Vec<(u32, u32)> = self
+            .outputs
+            .iter()
+            .map(|output| (output.characteristics, output.virtual_size as u32))
+            .collect();
+        database.information.create_section_map(&headers);
+        database.information.debug_streams
+            [crate::compilers::pe::program_database::DEBUG_STREAM_SECTION_HEADERS] = Some(table);
+        for (name, path) in self.options.pdb_streams.clone() {
+            match (self.source)(&path) {
+                Some(data) => database.named_data.push((name, data)),
+                None => self.warn(
+                    caution(
+                        "EI278",
+                        "The linker cannot open a file that the PDB should contain.",
+                    )
+                    .with_context(format!("Path: {path}"))
+                    .with_context(format!("Cause: Cannot open input file: {path}")),
+                ),
+            }
+        }
+        let mut publics = Vec::new();
+        let names: Vec<(String, SymbolIndex)> = self
+            .names
+            .iter()
+            .map(|(name, id)| (name.clone(), *id))
+            .collect();
+        for (name, id) in names {
+            if !self.symbols[id].is_defined() {
+                continue;
+            }
+            let Some(chunk) = self.symbol_chunk(id) else {
+                continue;
+            };
+            if !self.chunks[chunk].live {
+                continue;
+            }
+            if name.starts_with("__") {
+                let checked = if self.machine == crate::compilers::pe::machine::I386 {
+                    &name[1..]
+                } else {
+                    &name[..]
+                };
+                if checked.starts_with("__profd_")
+                    || checked.starts_with("__profc_")
+                    || checked.starts_with("__covrec_")
+                {
+                    continue;
+                }
+            }
+            let function = match self.symbols[id].kind {
+                CoffSymbolKind::Regular { kind, external, .. } => {
+                    external && kind >> 4 == 2 && kind & 0xf == 0
+                }
+                CoffSymbolKind::ImportThunk { .. } => true,
+                _ => false,
+            };
+            let mut public = Public {
+                name: name.as_bytes().to_vec(),
+                flags: if function { 2 } else { 0 },
+                ..Public::default()
+            };
+            if let Some(output) = self.chunk_output(chunk) {
+                public.offset = (self.symbol_rva(id) as i64
+                    - self.outputs[output].virtual_address as i64)
+                    as u32;
+                public.segment = self.outputs[output].index as u16;
+            }
+            publics.push(public);
+        }
+        if !publics.is_empty() {
+            database.set_publics(publics);
+        }
+        let (mut bytes, information) = match database.commit() {
+            Ok(result) => result,
+            Err(message) => {
+                self.error(
+                    problem("EI279", "The linker cannot write the PDB file.")
+                        .with_context(format!("Path: {pdb_path}"))
+                        .with_context(format!("Cause: {message}")),
+                );
+                if message.contains("too large for current PDB page size") {
+                    self.error(
+                        problem("EI279", "The linker cannot write the PDB file.")
+                            .with_context(format!("Path: {pdb_path}"))
+                            .with_context("Cause: try setting a larger /pdbpagesize".to_string()),
+                    );
+                }
+                self.error(
+                    problem("EI279", "The linker cannot write the PDB file.")
+                        .with_context(format!("Path: {pdb_path}"))
+                        .with_context(format!("Cause: failed to write PDB file {pdb_path}")),
+                );
+                return;
+            }
+        };
+        let digest = xxh3_64(&bytes);
+        let mut guid = [0u8; 16];
+        guid[..8].copy_from_slice(&digest.to_le_bytes());
+        guid[8..].copy_from_slice(b"LLD PDB.");
+        bytes[information + 4..information + 8].copy_from_slice(&(digest as u32).to_le_bytes());
+        bytes[information + 8..information + 12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[information + 12..information + 28].copy_from_slice(&guid);
+        self.extra_outputs.push((pdb_path, bytes));
+        if let Some(record) = self
+            .chunks
+            .iter()
+            .position(|chunk| chunk.kind == CoffChunkKind::CodeViewRecord)
+        {
+            if let Some(output) = self.chunk_output(record) {
+                let at = (self.outputs[output].file_offset + self.chunk_rva(record)
+                    - self.outputs[output].virtual_address) as usize;
+                if at + 24 <= image.len() {
+                    image[at..at + 4].copy_from_slice(b"RSDS");
+                    image[at + 4..at + 20].copy_from_slice(&guid);
+                    image[at + 20..at + 24].copy_from_slice(&1u32.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    fn add_program_database_debug_information(
+        &mut self,
+        _database: &mut crate::compilers::pe::program_database::ProgramDatabase,
+        _modules: &BTreeMap<usize, u16>,
+    ) {
+    }
+
+    fn add_import_modules(
+        &mut self,
+        database: &mut crate::compilers::pe::program_database::ProgramDatabase,
+        modules: &BTreeMap<usize, u16>,
+    ) {
+        use crate::compilers::pe::{put_u16, put_u32};
+        let mut libraries: BTreeMap<String, usize> = BTreeMap::new();
+        for import in 0..self.imports.len() {
+            if !self.imports[import].live {
+                continue;
+            }
+            let (Some(thunk), Some(chunk)) = (
+                self.imports[import].thunk_symbol,
+                self.imports[import].thunk_chunk,
+            ) else {
+                continue;
+            };
+            if !self.chunks[chunk].live || self.chunk_output(chunk).is_none() {
+                continue;
+            }
+            let library = self.imports[import].library.clone();
+            let key = library.to_ascii_lowercase();
+            let module = match libraries.get(&key) {
+                Some(module) => *module,
+                None => {
+                    let path = self
+                        .program_database_absolute(&self.imports[import].parent.clone())
+                        .replace('\\', "/");
+                    let first = database.information.add_module(&library);
+                    database.information.modules[first].object_name = path.clone();
+                    database.information.modules[first].first_contribution =
+                        self.section_contribution(None, 0xffff, modules);
+                    let module = database
+                        .information
+                        .add_module(&format!("Import:{library}"));
+                    database.information.modules[module].object_name = path;
+                    libraries.insert(key, module);
+                    module
+                }
+            };
+            let output = self.chunk_output(chunk).unwrap_or(0);
+            let mut symbols = std::mem::take(&mut database.information.modules[module].symbols);
+            symbols.extend(object_name_symbol(&library));
+            symbols.extend(linker_version_symbol(self.machine));
+            let thunk_at = symbols.len();
+            let mut body = Vec::new();
+            put_u32(&mut body, 0);
+            put_u32(&mut body, 0);
+            put_u32(&mut body, 0);
+            put_u32(
+                &mut body,
+                (self.chunk_rva(chunk) - self.outputs[output].virtual_address) as u32,
+            );
+            put_u16(&mut body, self.outputs[output].index as u16);
+            put_u16(&mut body, self.chunks[chunk].size as u16);
+            body.push(0);
+            body.extend_from_slice(self.symbols[thunk].name.as_bytes());
+            body.push(0);
+            symbols.extend(code_view_symbol(0x1102, &body));
+            let end = (4 + symbols.len()) as u32;
+            symbols[thunk_at + 8..thunk_at + 12].copy_from_slice(&end.to_le_bytes());
+            symbols.extend(code_view_symbol(0x0006, &[]));
+            database.information.modules[module].symbols = symbols;
+            database.information.modules[module].first_contribution =
+                self.section_contribution(Some(chunk), module as u16, modules);
+        }
+    }
 }
 
 impl<'s> CoffContext<'s> {
@@ -23055,6 +23713,8 @@ impl<'s> CoffContext<'s> {
             }
         }
         for ((name, characteristics), list) in partial {
+            self.partial_sections
+                .push((name.clone(), characteristics, list.clone()));
             let base = name.split('$').next().unwrap_or("").to_string();
             let base = if self.options.mingw {
                 match base[1.min(base.len())..].find('.') {
@@ -23079,6 +23739,8 @@ impl<'s> CoffContext<'s> {
             }
             let output = self.create_output(&base, characteristics, &mut keys);
             self.outputs[output].chunks.extend(list);
+            let contribution = self.partial_sections.len() - 1;
+            self.outputs[output].contributions.push(contribution);
         }
         let order_of = |output: &CoffOutputSection| -> u8 {
             if output.characteristics & discardable != 0 {
@@ -23129,7 +23791,10 @@ impl<'s> CoffContext<'s> {
         if self.options.repro || self.options.build_identifier || self.options.debug {
             let records: Vec<(u32, usize)> = if self.options.build_identifier || self.options.debug
             {
-                let record = self.new_chunk(CoffChunkKind::CodeViewRecord, 25, 4, data | read);
+                let alternate = self.program_database_alternate_path();
+                let size = 25 + alternate.len() as u64;
+                let record = self.new_chunk(CoffChunkKind::CodeViewRecord, size, 4, data | read);
+                self.code_view_path = alternate;
                 vec![(2, record)]
             } else {
                 Vec::new()
@@ -23146,6 +23811,8 @@ impl<'s> CoffContext<'s> {
             );
             let holder = if self.options.mingw {
                 ".buildid"
+            } else if !self.options.merge_debug_directory {
+                ".cvinfo"
             } else {
                 ".rdata"
             };
@@ -23251,6 +23918,12 @@ impl<'s> CoffContext<'s> {
         if self.thread_local_alignment != 0 {
             self.fix_thread_local_alignment(&mut bytes);
         }
+        if self.options.create_program_database {
+            self.create_program_database(&mut bytes);
+            if self.failed() {
+                return None;
+            }
+        }
         self.write_time_stamp(&mut bytes);
         if self.write_check_sum {
             let offset = self.coff_header_offset() + 20 + 64;
@@ -23315,6 +23988,8 @@ impl<'s> CoffContext<'s> {
         }
         let moved = std::mem::take(&mut self.outputs[source].chunks);
         self.outputs[target].chunks.extend(moved);
+        let contributions = std::mem::take(&mut self.outputs[source].contributions);
+        self.outputs[target].contributions.extend(contributions);
         use crate::compilers::pe::section_characteristic as character;
         if self.outputs[source].characteristics & character::CODE != 0 {
             let output = &mut self.outputs[target];
@@ -24134,7 +24809,12 @@ impl<'s> CoffContext<'s> {
                 let length = word.min(out.len() as u64) as usize;
                 out[..length].copy_from_slice(&bytes[..length]);
             }
-            CoffChunkKind::CodeViewRecord | CoffChunkKind::Common { .. } => {}
+            CoffChunkKind::CodeViewRecord => {
+                let path = self.code_view_path.as_bytes();
+                let end = (24 + path.len()).min(out.len());
+                out[24..end].copy_from_slice(&path[..end - 24]);
+            }
+            CoffChunkKind::Common { .. } => {}
         }
         out
     }
@@ -24653,7 +25333,7 @@ impl<'s> CoffContext<'s> {
             if self.options.repro {
                 stamp = hash as u32;
             }
-            if self.options.build_identifier {
+            if self.options.build_identifier && !self.options.create_program_database {
                 if let Some(record) = self
                     .chunks
                     .iter()
