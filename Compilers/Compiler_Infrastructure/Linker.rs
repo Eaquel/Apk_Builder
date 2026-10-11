@@ -325,6 +325,12 @@ pub fn caution(code: &str, message: &str) -> Diagnostic {
     diagnostic
 }
 
+pub fn remark(code: &str, message: &str) -> Diagnostic {
+    let mut diagnostic = fail(code, message).with_class(FailureClass::UserError);
+    diagnostic.severity = Severity::Info;
+    diagnostic
+}
+
 fn unknown_option(option: &str) -> Diagnostic {
     problem("EI202", "The linker does not recognize this option.")
         .with_context(format!("Option: {option}"))
@@ -8609,6 +8615,214 @@ fn decompressed_debug(encoding: Encoding, data: &[u8]) -> Option<Vec<u8>> {
     Some(inflated)
 }
 
+fn coff_debug_relocation_width(target: u16, kind: u16) -> usize {
+    use crate::compilers::pe::machine;
+    match (target, kind) {
+        (machine::AMD64, 0x0001) | (machine::ARM64, 0x000e) => 8,
+        (machine::AMD64, 0x0002 | 0x000b)
+        | (machine::I386, 0x0006 | 0x000b)
+        | (machine::ARM64, 0x0001 | 0x0008)
+        | (0x01c4, 0x0001 | 0x000f) => 4,
+        _ => 0,
+    }
+}
+
+fn read_debug_lines(
+    sections: &BTreeMap<String, DebugSection>,
+    encoding: Encoding,
+    lines: &mut SourceLines,
+) {
+    let empty = DebugSection::default();
+    let info = sections.get(".debug_info").unwrap_or(&empty);
+    let abbreviations = sections.get(".debug_abbrev").unwrap_or(&empty);
+    let line_section = sections.get(".debug_line").unwrap_or(&empty);
+    let strings = &sections.get(".debug_str").unwrap_or(&empty).data;
+    let line_strings = &sections.get(".debug_line_str").unwrap_or(&empty).data;
+    let offsets = &sections.get(".debug_str_offsets").unwrap_or(&empty).data;
+    let mut unit_start = 0usize;
+    while unit_start < info.data.len() {
+        let mut reader = DwarfReader {
+            data: &info.data,
+            at: unit_start,
+            encoding,
+        };
+        let Some(mut length) = reader.sized(4) else {
+            break;
+        };
+        let mut offset_size = 4;
+        if length == 0xffff_ffff {
+            let Some(long) = reader.sized(8) else {
+                break;
+            };
+            length = long;
+            offset_size = 8;
+        }
+        let unit_end = (reader.at as u64).saturating_add(length) as usize;
+        unit_start = unit_end;
+        if length == 0 {
+            continue;
+        }
+        let _ = read_unit_variables(
+            &mut reader,
+            unit_end.min(info.data.len()),
+            offset_size,
+            abbreviations,
+            line_section,
+            strings,
+            line_strings,
+            offsets,
+            lines,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_unit_variables(
+    reader: &mut DwarfReader,
+    unit_end: usize,
+    offset_size: usize,
+    abbreviations: &DebugSection,
+    line_section: &DebugSection,
+    strings: &[u8],
+    line_strings: &[u8],
+    offsets: &[u8],
+    lines: &mut SourceLines,
+) -> Option<()> {
+    let encoding = reader.encoding;
+    let version = reader.sized(2)? as u16;
+    let (abbreviation_offset, address_size) = if version >= 5 {
+        let unit_type = reader.byte()?;
+        let address_size = reader.byte()? as usize;
+        let abbreviation_offset = reader.sized(offset_size)?;
+        match unit_type {
+            1 | 3 => {}
+            4 | 5 => {
+                reader.skip(8)?;
+            }
+            _ => return None,
+        }
+        (abbreviation_offset, address_size)
+    } else {
+        let abbreviation_offset = reader.sized(offset_size)?;
+        (abbreviation_offset, reader.byte()? as usize)
+    };
+    let mut table_reader = DwarfReader {
+        data: &abbreviations.data,
+        at: abbreviation_offset as usize,
+        encoding,
+    };
+    let mut table: BTreeMap<u64, Abbreviation> = BTreeMap::new();
+    loop {
+        let code = table_reader.unsigned()?;
+        if code == 0 {
+            break;
+        }
+        let tag = table_reader.unsigned()?;
+        table_reader.byte()?;
+        let mut attributes = Vec::new();
+        loop {
+            let name = table_reader.unsigned()?;
+            let form = table_reader.unsigned()?;
+            if name == 0 && form == 0 {
+                break;
+            }
+            let implicit = if form == 0x21 {
+                table_reader.signed()?
+            } else {
+                0
+            };
+            attributes.push((name, form, implicit));
+        }
+        table.insert(code, Abbreviation { tag, attributes });
+    }
+    let mut line_table: Option<usize> = None;
+    let mut string_base = 0u64;
+    let mut first = true;
+    while reader.at < unit_end {
+        let code = reader.unsigned()?;
+        if code == 0 {
+            continue;
+        }
+        let abbreviation = table.get(&code)?.clone();
+        let mut values: Vec<(u64, FormValue)> = Vec::new();
+        for (name, form, implicit) in &abbreviation.attributes {
+            let value = read_form(reader, *form, offset_size, address_size, version, *implicit)?;
+            values.push((*name, value));
+        }
+        if first {
+            first = false;
+            let mut statement_list = None;
+            for (name, value) in &values {
+                match (name, value) {
+                    (0x10, FormValue::Number(offset)) => statement_list = Some(*offset),
+                    (0x72, FormValue::Number(base)) => string_base = *base,
+                    _ => {}
+                }
+            }
+            let offset = statement_list?;
+            let parsed = LineTable::parse(
+                line_section,
+                offset as usize,
+                strings,
+                line_strings,
+                encoding,
+            )?;
+            lines.tables.push(parsed);
+            line_table = Some(lines.tables.len() - 1);
+            continue;
+        }
+        if abbreviation.tag != 0x34 {
+            continue;
+        }
+        let resolve = |value: &FormValue| -> Option<String> {
+            match value {
+                FormValue::Text(text) => Some(text.clone()),
+                FormValue::StringOffset(at) => text_at(strings, *at),
+                FormValue::LineStringOffset(at) => text_at(line_strings, *at),
+                FormValue::StringIndex(index) => {
+                    let at = string_base as usize + *index as usize * offset_size;
+                    let mut offset_reader = DwarfReader {
+                        data: offsets,
+                        at,
+                        encoding,
+                    };
+                    text_at(strings, offset_reader.sized(offset_size)?)
+                }
+                _ => None,
+            }
+        };
+        let number = |wanted: u64| {
+            values.iter().find_map(|(name, value)| match value {
+                FormValue::Number(number) if *name == wanted => Some(*number),
+                _ => None,
+            })
+        };
+        if number(0x3f).unwrap_or(0) == 0 {
+            continue;
+        }
+        let index = line_table?;
+        let file = number(0x3a).unwrap_or(0);
+        if !lines.tables[index].has_file(file) {
+            continue;
+        }
+        let line = number(0x3b).unwrap_or(0);
+        let text = |wanted: u64| {
+            values
+                .iter()
+                .find(|(name, _)| *name == wanted)
+                .and_then(|(_, value)| resolve(value))
+        };
+        let name = text(0x6e)
+            .or_else(|| text(0x2007))
+            .or_else(|| text(0x03))
+            .unwrap_or_default();
+        if !name.is_empty() {
+            lines.variables.entry(name).or_insert((index, file, line));
+        }
+    }
+    Some(())
+}
+
 impl<'s> Context<'s> {
     fn debug_sections(&self, file: FileIndex) -> BTreeMap<String, DebugSection> {
         let elf = &self.files[file].elf;
@@ -8684,199 +8898,8 @@ impl<'s> Context<'s> {
             }
         }
         let sections = self.debug_sections(file);
-        let empty = DebugSection::default();
-        let info = sections.get(".debug_info").unwrap_or(&empty);
-        let abbreviations = sections.get(".debug_abbrev").unwrap_or(&empty);
-        let line_section = sections.get(".debug_line").unwrap_or(&empty);
-        let strings = &sections.get(".debug_str").unwrap_or(&empty).data;
-        let line_strings = &sections.get(".debug_line_str").unwrap_or(&empty).data;
-        let offsets = &sections.get(".debug_str_offsets").unwrap_or(&empty).data;
-        let encoding = self.files[file].elf.encoding();
-        let mut unit_start = 0usize;
-        while unit_start < info.data.len() {
-            let mut reader = DwarfReader {
-                data: &info.data,
-                at: unit_start,
-                encoding,
-            };
-            let Some(mut length) = reader.sized(4) else {
-                break;
-            };
-            let mut offset_size = 4;
-            if length == 0xffff_ffff {
-                let Some(long) = reader.sized(8) else {
-                    break;
-                };
-                length = long;
-                offset_size = 8;
-            }
-            let unit_end = (reader.at as u64).saturating_add(length) as usize;
-            unit_start = unit_end;
-            if length == 0 {
-                continue;
-            }
-            let _ = self.read_unit_variables(
-                &mut reader,
-                unit_end.min(info.data.len()),
-                offset_size,
-                abbreviations,
-                line_section,
-                strings,
-                line_strings,
-                offsets,
-                &mut lines,
-            );
-        }
+        read_debug_lines(&sections, self.files[file].elf.encoding(), &mut lines);
         lines
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn read_unit_variables(
-        &self,
-        reader: &mut DwarfReader,
-        unit_end: usize,
-        offset_size: usize,
-        abbreviations: &DebugSection,
-        line_section: &DebugSection,
-        strings: &[u8],
-        line_strings: &[u8],
-        offsets: &[u8],
-        lines: &mut SourceLines,
-    ) -> Option<()> {
-        let encoding = reader.encoding;
-        let version = reader.sized(2)? as u16;
-        let (abbreviation_offset, address_size) = if version >= 5 {
-            let unit_type = reader.byte()?;
-            let address_size = reader.byte()? as usize;
-            let abbreviation_offset = reader.sized(offset_size)?;
-            match unit_type {
-                1 | 3 => {}
-                4 | 5 => {
-                    reader.skip(8)?;
-                }
-                _ => return None,
-            }
-            (abbreviation_offset, address_size)
-        } else {
-            let abbreviation_offset = reader.sized(offset_size)?;
-            (abbreviation_offset, reader.byte()? as usize)
-        };
-        let mut table_reader = DwarfReader {
-            data: &abbreviations.data,
-            at: abbreviation_offset as usize,
-            encoding,
-        };
-        let mut table: BTreeMap<u64, Abbreviation> = BTreeMap::new();
-        loop {
-            let code = table_reader.unsigned()?;
-            if code == 0 {
-                break;
-            }
-            let tag = table_reader.unsigned()?;
-            table_reader.byte()?;
-            let mut attributes = Vec::new();
-            loop {
-                let name = table_reader.unsigned()?;
-                let form = table_reader.unsigned()?;
-                if name == 0 && form == 0 {
-                    break;
-                }
-                let implicit = if form == 0x21 {
-                    table_reader.signed()?
-                } else {
-                    0
-                };
-                attributes.push((name, form, implicit));
-            }
-            table.insert(code, Abbreviation { tag, attributes });
-        }
-        let mut line_table: Option<usize> = None;
-        let mut string_base = 0u64;
-        let mut first = true;
-        while reader.at < unit_end {
-            let code = reader.unsigned()?;
-            if code == 0 {
-                continue;
-            }
-            let abbreviation = table.get(&code)?.clone();
-            let mut values: Vec<(u64, FormValue)> = Vec::new();
-            for (name, form, implicit) in &abbreviation.attributes {
-                let value =
-                    read_form(reader, *form, offset_size, address_size, version, *implicit)?;
-                values.push((*name, value));
-            }
-            if first {
-                first = false;
-                let mut statement_list = None;
-                for (name, value) in &values {
-                    match (name, value) {
-                        (0x10, FormValue::Number(offset)) => statement_list = Some(*offset),
-                        (0x72, FormValue::Number(base)) => string_base = *base,
-                        _ => {}
-                    }
-                }
-                let offset = statement_list?;
-                let parsed = LineTable::parse(
-                    line_section,
-                    offset as usize,
-                    strings,
-                    line_strings,
-                    encoding,
-                )?;
-                lines.tables.push(parsed);
-                line_table = Some(lines.tables.len() - 1);
-                continue;
-            }
-            if abbreviation.tag != 0x34 {
-                continue;
-            }
-            let resolve = |value: &FormValue| -> Option<String> {
-                match value {
-                    FormValue::Text(text) => Some(text.clone()),
-                    FormValue::StringOffset(at) => text_at(strings, *at),
-                    FormValue::LineStringOffset(at) => text_at(line_strings, *at),
-                    FormValue::StringIndex(index) => {
-                        let at = string_base as usize + *index as usize * offset_size;
-                        let mut offset_reader = DwarfReader {
-                            data: offsets,
-                            at,
-                            encoding,
-                        };
-                        text_at(strings, offset_reader.sized(offset_size)?)
-                    }
-                    _ => None,
-                }
-            };
-            let number = |wanted: u64| {
-                values.iter().find_map(|(name, value)| match value {
-                    FormValue::Number(number) if *name == wanted => Some(*number),
-                    _ => None,
-                })
-            };
-            if number(0x3f).unwrap_or(0) == 0 {
-                continue;
-            }
-            let index = line_table?;
-            let file = number(0x3a).unwrap_or(0);
-            if !lines.tables[index].has_file(file) {
-                continue;
-            }
-            let line = number(0x3b).unwrap_or(0);
-            let text = |wanted: u64| {
-                values
-                    .iter()
-                    .find(|(name, _)| *name == wanted)
-                    .and_then(|(_, value)| resolve(value))
-            };
-            let name = text(0x6e)
-                .or_else(|| text(0x2007))
-                .or_else(|| text(0x03))
-                .unwrap_or_default();
-            if !name.is_empty() {
-                lines.variables.entry(name).or_insert((index, file, line));
-            }
-        }
-        Some(())
     }
 
     fn source_lines(&self, file: FileIndex) -> Rc<SourceLines> {
@@ -19495,6 +19518,7 @@ pub struct CoffContext<'s> {
     pub incremental: bool,
     pub prevailing_comdat: Option<usize>,
     pub merge_cycle_reported: bool,
+    pub dwarf_lines: BTreeMap<usize, Rc<SourceLines>>,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19590,6 +19614,7 @@ impl<'s> CoffContext<'s> {
             incremental: false,
             prevailing_comdat: None,
             merge_cycle_reported: false,
+            dwarf_lines: BTreeMap::new(),
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -19708,9 +19733,32 @@ impl<'s> CoffContext<'s> {
     }
 
     pub fn report_duplicate(&mut self, existing: SymbolIndex, new_file: Option<usize>) {
-        let name = self.symbols[existing].name.clone();
-        let old = self.file_label(self.symbol_file(existing));
-        let new = self.file_label(new_file);
+        self.report_duplicate_at(existing, new_file, None);
+    }
+
+    pub fn report_duplicate_at(
+        &mut self,
+        existing: SymbolIndex,
+        new_file: Option<usize>,
+        new_place: Option<(usize, u32)>,
+    ) {
+        let raw_name = self.symbols[existing].name.clone();
+        let name = self.display_symbol_name(&raw_name);
+        let old = match self.symbols[existing].kind {
+            CoffSymbolKind::Regular {
+                file: Some(file),
+                chunk,
+                value,
+                ..
+            } => self.object_location(file, chunk.map(|chunk| (chunk, value)), &raw_name),
+            _ => self.file_label(self.symbol_file(existing)),
+        };
+        let new = match new_file {
+            Some(file) if file < self.objects.len() => {
+                self.object_location(file, new_place, &raw_name)
+            }
+            _ => self.file_label(new_file),
+        };
         let diagnostic = problem("EI206", "A symbol is defined more than once.")
             .with_context(format!("Symbol: {name}"))
             .with_context(format!("Definition: {old}"))
@@ -19924,7 +19972,7 @@ impl<'s> CoffContext<'s> {
                 kind,
             };
         } else if !weak {
-            self.report_duplicate(id, Some(file));
+            self.report_duplicate_at(id, Some(file), Some((chunk, value)));
         }
         id
     }
@@ -20874,6 +20922,17 @@ impl<'s> CoffContext<'s> {
             *selection = comdat_selection::SAME_SIZE;
         }
         if *selection != leader_selection {
+            if self.options.verbose {
+                let name = self.display_symbol_name(&self.symbols[leader].name);
+                let leader_file = self.defining_file_label(leader);
+                let file_label = self.file_label(Some(file));
+                self.diagnostics.push(
+                    remark("EI291", "The linker found conflicting comdat selection types.")
+                        .with_context(format!(
+                            "Cause: conflicting comdat type for {name}: {leader_selection} in {leader_file} and {selection} in {file_label}"
+                        )),
+                );
+            }
             self.report_duplicate(leader, Some(file));
             return;
         }
@@ -22121,7 +22180,102 @@ impl<'s> CoffContext<'s> {
         (locations, count)
     }
 
+    fn object_location(&mut self, file: usize, place: Option<(usize, u32)>, name: &str) -> String {
+        let label = self.file_label(Some(file));
+        let mut line = place.and_then(|(chunk, offset)| self.source_line(file, chunk, offset));
+        if line.is_none() {
+            line = self.variable_location(file, name);
+        }
+        match line {
+            Some((path, number)) => format!("{path}:{number}\n>>>            {label}"),
+            None => label,
+        }
+    }
+
+    fn variable_location(&mut self, file: usize, name: &str) -> Option<(String, u32)> {
+        let name = if self.machine == crate::compilers::pe::machine::I386 {
+            name.strip_prefix('_').unwrap_or(name)
+        } else {
+            name
+        };
+        let lines = self.dwarf_lines(file);
+        let (table, index, line) = *lines.variables.get(name)?;
+        let path = lines.tables.get(table)?.file_path(index)?;
+        Some((path, line as u32))
+    }
+
+    fn dwarf_lines(&mut self, file: usize) -> Rc<SourceLines> {
+        use crate::compilers::pe::machine;
+        if let Some(found) = self.dwarf_lines.get(&file) {
+            return found.clone();
+        }
+        let wide = matches!(self.machine, machine::AMD64 | machine::ARM64);
+        let encoding = if wide {
+            Encoding::LITTLE_64
+        } else {
+            Encoding::LITTLE_32
+        };
+        let object = &self.objects[file].object;
+        let places: BTreeMap<u32, (u32, i32)> = object
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.index, (symbol.value, symbol.section_number)))
+            .collect();
+        let mut sections: BTreeMap<String, DebugSection> = BTreeMap::new();
+        for section in &object.sections {
+            if !section.name.starts_with(".debug_") || sections.contains_key(&section.name) {
+                continue;
+            }
+            let mut debug = DebugSection {
+                data: section.data.clone(),
+                targets: BTreeMap::new(),
+            };
+            for relocation in &section.relocations {
+                let width = coff_debug_relocation_width(self.machine, relocation.kind);
+                let at = relocation.virtual_address as usize;
+                if width == 0 || at + width > debug.data.len() {
+                    continue;
+                }
+                let Some(&(value, number)) = places.get(&relocation.symbol_index) else {
+                    continue;
+                };
+                if width == 8 {
+                    let addend = encoding.read_u64(&debug.data, at).unwrap_or(0);
+                    encoding.write_u64(&mut debug.data, at, u64::from(value).wrapping_add(addend));
+                } else {
+                    let addend = encoding.read_u32(&debug.data, at).unwrap_or(0);
+                    encoding.write_u32(&mut debug.data, at, value.wrapping_add(addend));
+                }
+                if number > 0 {
+                    debug.targets.insert(at, number as u32);
+                }
+            }
+            sections.insert(section.name.clone(), debug);
+        }
+        let mut lines = SourceLines::default();
+        read_debug_lines(&sections, encoding, &mut lines);
+        let lines = Rc::new(lines);
+        self.dwarf_lines.insert(file, lines.clone());
+        lines
+    }
+
     fn source_line(&mut self, file: usize, chunk: usize, address: u32) -> Option<(String, u32)> {
+        if let Some(found) = self.code_view_line(file, chunk, address) {
+            return Some(found);
+        }
+        if !self.options.mingw {
+            return None;
+        }
+        let lines = self.dwarf_lines(file);
+        let section = self.chunks[chunk].section as u32;
+        lines.tables.iter().find_map(|table| {
+            table
+                .lookup(u64::from(address), section)
+                .map(|(path, line)| (path, line as u32))
+        })
+    }
+
+    fn code_view_line(&mut self, file: usize, chunk: usize, address: u32) -> Option<(String, u32)> {
         use crate::compilers::pe::machine;
         let secrel_kind = match self.machine {
             machine::AMD64 => 0x000b,
@@ -26155,8 +26309,16 @@ impl<'s> CoffContext<'s> {
             };
             let target = self.output_named(holder).unwrap_or(rdata);
             self.outputs[target].chunks.push(directory);
-            for (_, record) in records {
-                self.outputs[target].chunks.push(record);
+            for (_, record) in records.iter() {
+                self.outputs[target].chunks.push(*record);
+            }
+            if let Some(&(_, record)) = records.first() {
+                if let Some(id) = self.find_underscore("__buildid") {
+                    self.symbols[id].kind = CoffSymbolKind::Synthetic {
+                        chunk: Some(record),
+                        offset: 4,
+                    };
+                }
             }
             self.debug_directory = Some(directory);
         }

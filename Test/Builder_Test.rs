@@ -69257,10 +69257,12 @@ mod linker_lit {
         color: bool,
     ) -> (Vec<u8>, Vec<u8>, i32) {
         let mut stderr = String::new();
+        let mut separator = "";
         for diagnostic in &outcome.diagnostics {
             let level = match diagnostic.severity {
                 Severity::Error | Severity::Fatal => "error",
                 Severity::Warning => "warning",
+                Severity::Info => "",
                 _ => "message",
             };
             let message = lld_message(diagnostic, program);
@@ -69293,9 +69295,11 @@ mod linker_lit {
                 let shown = match (color, level) {
                     (true, "warning") => "\u{1b}[0;35mwarning: \u{1b}[0m".to_string(),
                     (true, "error") => "\u{1b}[0;31merror: \u{1b}[0m".to_string(),
+                    (_, "") => String::new(),
                     _ => format!("{level}: "),
                 };
-                stderr.push_str(&format!("{location}: {shown}{part}\n"));
+                stderr.push_str(&format!("{separator}{location}: {shown}{part}\n"));
+                separator = if part.contains('\n') { "\n" } else { "" };
             }
         }
         let mut stdout = String::new();
