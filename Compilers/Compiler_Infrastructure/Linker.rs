@@ -107,7 +107,9 @@ pub struct Options {
     pub undefined: Vec<String>,
     pub defined_symbols: Vec<(String, String)>,
     pub wrapped: Vec<String>,
-    pub unresolved_symbols: Option<UnresolvedPolicy>,
+    pub diagnose_regular: Option<bool>,
+    pub diagnose_shared: Option<bool>,
+    pub warn_unresolved: bool,
     pub no_undefined: bool,
     pub allow_shared_library_undefined: Option<bool>,
     pub fatal_warnings: bool,
@@ -123,6 +125,7 @@ pub struct Options {
     pub print_symbol_order: Option<String>,
     pub warn_symbol_ordering: bool,
     pub merge_exception_index: bool,
+    pub visual_studio_diagnostics: bool,
     pub retain_symbols_file: Option<String>,
     pub print_version: bool,
     pub verbose_version: bool,
@@ -222,7 +225,9 @@ impl Default for Options {
             undefined: Vec::new(),
             defined_symbols: Vec::new(),
             wrapped: Vec::new(),
-            unresolved_symbols: None,
+            diagnose_regular: None,
+            diagnose_shared: None,
+            warn_unresolved: false,
             no_undefined: false,
             allow_shared_library_undefined: None,
             fatal_warnings: false,
@@ -238,6 +243,7 @@ impl Default for Options {
             print_symbol_order: None,
             warn_symbol_ordering: true,
             merge_exception_index: true,
+            visual_studio_diagnostics: false,
             retain_symbols_file: None,
             print_version: false,
             verbose_version: false,
@@ -989,13 +995,19 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--unresolved-symbols"])? {
-            options.unresolved_symbols = Some(match value.as_str() {
-                "ignore-all" | "ignore-in-object-files" | "ignore-in-shared-libs" => {
-                    UnresolvedPolicy::Ignore
+            let (regular, shared) = match value.as_str() {
+                "ignore-all" => (false, false),
+                "ignore-in-object-files" => (false, true),
+                "ignore-in-shared-libs" => (true, false),
+                "report-all" => (true, true),
+                _ => {
+                    return Err(invalid_value("--unresolved-symbols", &value).with_context(
+                        format!("Cause: unknown --unresolved-symbols value: {value}"),
+                    ))
                 }
-                "report-all" => UnresolvedPolicy::ReportError,
-                _ => return Err(invalid_value("--unresolved-symbols", &value)),
-            });
+            };
+            options.diagnose_regular = Some(regular);
+            options.diagnose_shared = Some(shared);
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--section-start"])? {
@@ -1127,6 +1139,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--warn-symbol-ordering" => options.warn_symbol_ordering = true,
             "--no-warn-symbol-ordering" => options.warn_symbol_ordering = false,
             "--merge-exidx-entries" => options.merge_exception_index = true,
+            "--vs-diagnostics" => options.visual_studio_diagnostics = true,
             "--be8" => {
                 options.byte_invariant_big_endian = true;
                 record_target_option(&mut options, "--be8");
@@ -1150,9 +1163,20 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--noinhibit-exec" => options.no_inhibit_executable = true,
             "--fatal-warnings" => options.fatal_warnings = true,
             "--no-fatal-warnings" => options.fatal_warnings = false,
-            "--no-undefined" => options.no_undefined = true,
-            "--allow-shlib-undefined" => options.allow_shared_library_undefined = Some(true),
-            "--no-allow-shlib-undefined" => options.allow_shared_library_undefined = Some(false),
+            "--no-undefined" => {
+                options.no_undefined = true;
+                options.diagnose_regular = Some(true);
+            }
+            "--allow-shlib-undefined" => {
+                options.allow_shared_library_undefined = Some(true);
+                options.diagnose_shared = Some(false);
+            }
+            "--no-allow-shlib-undefined" => {
+                options.allow_shared_library_undefined = Some(false);
+                options.diagnose_shared = Some(true);
+            }
+            "--warn-unresolved-symbols" => options.warn_unresolved = true,
+            "--error-unresolved-symbols" => options.warn_unresolved = false,
             "--relax" => options.relax = true,
             "--no-relax" => options.relax = false,
             "--no-dynamic-linker" => options.no_dynamic_linker = true,
@@ -1315,8 +1339,14 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "nocombreloc" => options.combine_relocations = false,
         "start-stop-gc" => options.start_stop_garbage_collection = true,
         "nostart-stop-gc" => options.start_stop_garbage_collection = false,
-        "defs" => options.no_undefined = true,
-        "undefs" => options.no_undefined = false,
+        "defs" => {
+            options.no_undefined = true;
+            options.diagnose_regular = Some(true);
+        }
+        "undefs" => {
+            options.no_undefined = false;
+            options.diagnose_regular = Some(false);
+        }
         "nognustack" | "noexecstack-ignored" => {}
         "pack-relative-relocs" => options.pack_relative_relocations = true,
         "nopack-relative-relocs" => options.pack_relative_relocations = false,
@@ -1461,11 +1491,7 @@ impl Target {
                 plt_header_size: 32,
                 plt_entry_size: 16,
                 indirect_plt_entry_size: 16,
-                trap: if endian == Endian::Little {
-                    [0x00, 0x00, 0x20, 0xd4]
-                } else {
-                    [0xd4, 0x20, 0x00, 0x00]
-                },
+                trap: [0; 4],
                 symbolic_relocation: 257,
                 relative_relocation: 1027,
                 global_data_relocation: 1025,
@@ -1911,6 +1937,7 @@ pub struct InputFile {
     pub elf_symbols: Vec<elf::Symbol>,
     pub executable_stack_requested: bool,
     pub and_features: u32,
+    pub required_symbols: Vec<SymbolIndex>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2716,6 +2743,8 @@ pub struct Context<'s> {
     pub copy_relocation_sections: bool,
     pub output_section_symbols: BTreeMap<OutputIndex, SymbolIndex>,
     pub relocating_section: Option<SectionIndex>,
+    pub relocating_offset: u64,
+    pub source_lines: std::cell::RefCell<BTreeMap<FileIndex, Rc<SourceLines>>>,
     pub identity: String,
     pub extra_outputs: Vec<(String, Vec<u8>)>,
     pub retained_symbols: Option<BTreeSet<String>>,
@@ -2844,6 +2873,8 @@ impl<'s> Context<'s> {
             copy_relocation_sections: false,
             output_section_symbols: BTreeMap::new(),
             relocating_section: None,
+            relocating_offset: 0,
+            source_lines: std::cell::RefCell::new(BTreeMap::new()),
             identity: LINKER_IDENTITY.to_string(),
             extra_outputs: Vec::new(),
             retained_symbols: None,
@@ -3594,6 +3625,7 @@ impl<'s> Context<'s> {
             elf_symbols: Vec::new(),
             executable_stack_requested: false,
             and_features: 0,
+            required_symbols: Vec::new(),
         });
         if is_shared {
             self.parse_shared(index);
@@ -3803,6 +3835,11 @@ impl<'s> Context<'s> {
                 handles[position] = id;
                 self.resolve_undefined(id, index, symbol.binding, symbol.other, symbol.kind, 0);
                 self.symbols[id].exported = true;
+                if symbol.binding != symbol_binding::WEAK
+                    && self.shared_unresolved_policy() != UnresolvedPolicy::Ignore
+                {
+                    self.files[index].required_symbols.push(id);
+                }
                 continue;
             }
             if version == elf::version_index::LOCAL {
@@ -5046,21 +5083,44 @@ impl<'s> Context<'s> {
                 continue;
             }
             let name = self.symbols[id].name.clone();
-            let first = self.definition_place(id);
-            let second = match section {
-                Some(section) => format!(
-                    "{}:({}+0x{:x})",
-                    self.file_name(Some(index)),
-                    self.sections[section].name,
-                    symbol.value
-                ),
-                None => self.file_name(Some(index)),
+            let held = self.symbols[id].section;
+            if held.is_none()
+                && section.is_none()
+                && symbol.value != 0
+                && self.symbols[id].value == symbol.value
+            {
+                continue;
+            }
+            let shown = self.shown_name(&name);
+            let (first, second, cause) = match (held, section) {
+                (Some(held), Some(section)) => {
+                    let separator = "\n>>>            ";
+                    let first = self.object_message(held, self.symbols[id].value);
+                    let second = self.object_message(section, symbol.value);
+                    let first_place =
+                        self.place_with_source(held, &name, self.symbols[id].value, separator);
+                    let second_place =
+                        self.place_with_source(section, &name, symbol.value, separator);
+                    let cause = format!(
+                        "duplicate symbol: {shown}\n>>> defined at {first_place}\n>>> defined at {second_place}"
+                    );
+                    (first, second, cause)
+                }
+                _ => {
+                    let first = self.file_name(self.symbols[id].file);
+                    let second = self.file_name(Some(index));
+                    let cause = format!(
+                        "duplicate symbol: {shown}\n>>> defined in {first}\n>>> defined in {second}"
+                    );
+                    (first, second, cause)
+                }
             };
             self.error(
                 problem("EI206", "A symbol is defined more than once.")
-                    .with_context(format!("Symbol: {}", self.shown_name(&name)))
+                    .with_context(format!("Symbol: {shown}"))
                     .with_context(format!("Definition: {first}"))
-                    .with_context(format!("Definition: {second}")),
+                    .with_context(format!("Definition: {second}"))
+                    .with_context(format!("Cause: {cause}")),
             );
         }
     }
@@ -6688,6 +6748,82 @@ impl<'s> Context<'s> {
         id
     }
 
+    fn add_unused_undefined_bound(&mut self, name: &str, binding: u8) -> SymbolIndex {
+        let id = self.insert(name);
+        match self.symbols[id].state.clone() {
+            SymbolState::Placeholder => {
+                let entry = &mut self.symbols[id];
+                entry.state = SymbolState::Undefined;
+                entry.file = Some(INTERNAL);
+                entry.binding = binding;
+            }
+            SymbolState::Lazy { source } if binding != symbol_binding::WEAK => {
+                self.extract(source);
+            }
+            _ => {}
+        }
+        id
+    }
+
+    fn add_wrapped_symbols(&mut self) -> Vec<(SymbolIndex, SymbolIndex, SymbolIndex)> {
+        let mut wrapped = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for name in self.options.wrapped.clone() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(symbol) = self.find(&name) else {
+                continue;
+            };
+            let binding = self.symbols[symbol].binding;
+            let wrap = self.add_unused_undefined_bound(&format!("__wrap_{name}"), binding);
+            let real_name = format!("__real_{name}");
+            if let Some(real) = self.find(&real_name) {
+                self.add_unused_undefined_bound(&name, binding);
+                self.symbols[symbol].binding = self.symbols[real].binding;
+            }
+            let real = self.add_unused_undefined_bound(&real_name, symbol_binding::GLOBAL);
+            wrapped.push((symbol, real, wrap));
+        }
+        wrapped
+    }
+
+    fn redirect_wrapped_symbols(&mut self, wrapped: &[(SymbolIndex, SymbolIndex, SymbolIndex)]) {
+        if wrapped.is_empty() {
+            return;
+        }
+        let mut map: BTreeMap<SymbolIndex, SymbolIndex> = BTreeMap::new();
+        for (symbol, real, wrap) in wrapped {
+            map.insert(*symbol, *wrap);
+            map.insert(*real, *symbol);
+        }
+        for file in self.object_files.clone() {
+            let first_global = self.files[file].first_global;
+            for slot in self.files[file].symbols.iter_mut().skip(first_global) {
+                if let Some(target) = map.get(slot) {
+                    *slot = *target;
+                }
+            }
+        }
+        for (symbol, real, wrap) in wrapped.iter().copied() {
+            let name = self.symbols[symbol].name.clone();
+            let real_name = self.symbols[real].name.clone();
+            self.names.insert(real_name, symbol);
+            self.names.insert(name, wrap);
+            if self.symbols[symbol].used_in_regular_object {
+                self.symbols[wrap].used_in_regular_object = true;
+            }
+            if self.symbols[real].used_in_regular_object {
+                self.symbols[symbol].used_in_regular_object = true;
+            } else if !self.symbols[symbol].is_defined() {
+                self.symbols[symbol].used_in_regular_object = false;
+            }
+            let mut copy = self.symbols[symbol].clone();
+            copy.used_in_regular_object = false;
+            self.symbols[real] = copy;
+        }
+    }
+
     pub fn handle_undefined(&mut self, id: SymbolIndex) {
         self.symbols[id].used_in_regular_object = true;
         if let SymbolState::Lazy { source } = self.symbols[id].state.clone() {
@@ -7339,7 +7475,11 @@ impl<'s> Context<'s> {
                 && offset < symbol.value + symbol.size
                 && !symbol.is_section()
             {
-                return format!("{}:({}){archive}", file_data.name, symbol.name);
+                return format!(
+                    "{}:({}){archive}",
+                    file_data.name,
+                    self.shown_name(&symbol.name)
+                );
             }
         }
         format!("{}:({}+0x{:x}){archive}", file_data.name, data.name, offset)
@@ -7379,7 +7519,12 @@ impl<'s> Context<'s> {
         format!(
             "\n>>> defined in {}\n>>> referenced by {}",
             self.file_name(self.symbols[id].file),
-            self.object_message(section, offset)
+            self.place_with_source(
+                section,
+                &self.symbols[id].name,
+                offset,
+                "\n>>>               "
+            )
         )
     }
 
@@ -7413,14 +7558,69 @@ impl<'s> Context<'s> {
         None
     }
 
-    pub fn unresolved_policy(&self) -> UnresolvedPolicy {
-        if let Some(policy) = self.options.unresolved_symbols {
-            return policy;
-        }
-        if self.is_shared() && !self.options.no_undefined {
+    fn policy_for(&self, diagnose: Option<bool>) -> UnresolvedPolicy {
+        if !diagnose.unwrap_or(!self.is_shared()) {
             UnresolvedPolicy::Ignore
+        } else if self.options.warn_unresolved {
+            UnresolvedPolicy::Warn
         } else {
             UnresolvedPolicy::ReportError
+        }
+    }
+
+    pub fn unresolved_policy(&self) -> UnresolvedPolicy {
+        self.policy_for(self.options.diagnose_regular)
+    }
+
+    pub fn shared_unresolved_policy(&self) -> UnresolvedPolicy {
+        self.policy_for(self.options.diagnose_shared)
+    }
+
+    pub fn report_shared_library_undefined(&mut self) {
+        let policy = self.shared_unresolved_policy();
+        if policy == UnresolvedPolicy::Ignore {
+            return;
+        }
+        let warning = policy == UnresolvedPolicy::Warn || self.options.no_inhibit_executable;
+        for file in self.shared_files.clone() {
+            let known = self.files[file]
+                .needed_libraries
+                .iter()
+                .all(|needed| self.shared_names_seen.contains(needed));
+            if !known {
+                continue;
+            }
+            let library = self.file_name(Some(file));
+            for id in self.files[file].required_symbols.clone() {
+                let symbol = &self.symbols[id];
+                if symbol.defined_in_shared {
+                    continue;
+                }
+                let shown = self.symbol_text(id);
+                let diagnostic = if symbol.is_undefined() && !symbol.is_weak() {
+                    problem("EI272", "A shared library references a symbol that is not defined.")
+                        .with_context(format!("Symbol: {shown}"))
+                        .with_context(format!("Library: {library}"))
+                        .with_context(format!(
+                            "Cause: undefined reference: {shown}\n>>> referenced by {library} (disallowed by --no-allow-shlib-undefined)"
+                        ))
+                } else if symbol.is_defined() && self.compute_binding(id) == symbol_binding::LOCAL {
+                    let owner = self.file_name(symbol.file);
+                    problem("EI273", "A shared library references a symbol that is not exported.")
+                        .with_context(format!("Symbol: {shown}"))
+                        .with_context(format!("Library: {library}"))
+                        .with_context(format!(
+                            "Cause: non-exported symbol '{shown}' in '{owner}' is referenced by DSO '{library}'"
+                        ))
+                } else {
+                    continue;
+                };
+                if warning {
+                    self.warn(diagnostic);
+                } else {
+                    self.error(diagnostic);
+                }
+            }
         }
     }
 
@@ -7561,9 +7761,12 @@ impl<'s> Context<'s> {
                 format!("undefined {visible}symbol: {}", self.shown_name(&name))
             });
             for (section, offset) in places.iter().take(3) {
+                let enclosing = self
+                    .enclosing_symbol_name(*section, *offset)
+                    .unwrap_or_else(|| name.clone());
                 head.push_str(&format!(
                     "\n>>> referenced by {}",
-                    self.object_message(*section, *offset)
+                    self.place_with_source(*section, &enclosing, *offset, "\n>>>               ")
                 ));
             }
             if places.len() > 3 {
@@ -7617,6 +7820,844 @@ pub enum SymbolPlace {
     Section(SectionIndex),
     OutputStart(OutputIndex),
     OutputEnd(OutputIndex),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LineSequence {
+    pub low: u64,
+    pub high: u64,
+    pub section: u32,
+    pub rows: Vec<(u64, u64, u64)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LineTable {
+    pub version: u16,
+    pub directories: Vec<String>,
+    pub files: Vec<(String, u64)>,
+    pub sequences: Vec<LineSequence>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceLines {
+    pub tables: Vec<LineTable>,
+    pub variables: BTreeMap<String, (usize, u64, u64)>,
+    pub source_file: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DebugSection {
+    pub data: Vec<u8>,
+    pub targets: BTreeMap<usize, u32>,
+}
+
+#[derive(Clone, Debug)]
+enum FormValue {
+    Number(u64),
+    Text(String),
+    StringOffset(u64),
+    LineStringOffset(u64),
+    StringIndex(u64),
+    Other,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Abbreviation {
+    tag: u64,
+    attributes: Vec<(u64, u64, i64)>,
+}
+
+struct DwarfReader<'d> {
+    data: &'d [u8],
+    at: usize,
+    encoding: Encoding,
+}
+
+impl<'d> DwarfReader<'d> {
+    fn byte(&mut self) -> Option<u8> {
+        let value = *self.data.get(self.at)?;
+        self.at += 1;
+        Some(value)
+    }
+
+    fn sized(&mut self, size: usize) -> Option<u64> {
+        let value = match size {
+            1 => u64::from(*self.data.get(self.at)?),
+            2 => u64::from(self.encoding.read_u16(self.data, self.at)?),
+            4 => u64::from(self.encoding.read_u32(self.data, self.at)?),
+            8 => self.encoding.read_u64(self.data, self.at)?,
+            3 => {
+                let bytes = self.data.get(self.at..self.at + 3)?;
+                if self.encoding.endian == Endian::Little {
+                    u64::from(bytes[0]) | u64::from(bytes[1]) << 8 | u64::from(bytes[2]) << 16
+                } else {
+                    u64::from(bytes[2]) | u64::from(bytes[1]) << 8 | u64::from(bytes[0]) << 16
+                }
+            }
+            _ => return None,
+        };
+        self.at += size;
+        Some(value)
+    }
+
+    fn unsigned(&mut self) -> Option<u64> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let byte = self.byte()?;
+            if shift < 64 {
+                value |= u64::from(byte & 0x7f) << shift;
+            }
+            shift += 7;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+    }
+
+    fn signed(&mut self) -> Option<i64> {
+        let mut value = 0i64;
+        let mut shift = 0u32;
+        loop {
+            let byte = self.byte()?;
+            if shift < 64 {
+                value |= i64::from(byte & 0x7f) << shift;
+            }
+            shift += 7;
+            if byte & 0x80 == 0 {
+                if shift < 64 && byte & 0x40 != 0 {
+                    value |= -1i64 << shift;
+                }
+                return Some(value);
+            }
+        }
+    }
+
+    fn text(&mut self) -> Option<String> {
+        let rest = self.data.get(self.at..)?;
+        let end = rest.iter().position(|byte| *byte == 0)?;
+        self.at += end + 1;
+        Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+    }
+
+    fn skip(&mut self, count: usize) -> Option<()> {
+        if self.at + count > self.data.len() {
+            return None;
+        }
+        self.at += count;
+        Some(())
+    }
+}
+
+fn text_at(data: &[u8], offset: u64) -> Option<String> {
+    let rest = data.get(offset as usize..)?;
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+}
+
+fn append_path(path: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if path.ends_with('/') {
+        path.push_str(part.trim_start_matches('/'));
+        return;
+    }
+    if !path.is_empty() && !part.starts_with('/') {
+        path.push('/');
+    }
+    path.push_str(part);
+}
+
+fn file_line_text(path: &str, line: u64) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name == path {
+        format!("{name}:{line}")
+    } else {
+        format!("{name}:{line} ({path}:{line})")
+    }
+}
+
+fn read_form(
+    reader: &mut DwarfReader,
+    form: u64,
+    offset_size: usize,
+    address_size: usize,
+    version: u16,
+    implicit: i64,
+) -> Option<FormValue> {
+    Some(match form {
+        0x01 => FormValue::Number(reader.sized(address_size)?),
+        0x03 => {
+            let length = reader.sized(2)? as usize;
+            reader.skip(length)?;
+            FormValue::Other
+        }
+        0x04 => {
+            let length = reader.sized(4)? as usize;
+            reader.skip(length)?;
+            FormValue::Other
+        }
+        0x05 => FormValue::Number(reader.sized(2)?),
+        0x06 => FormValue::Number(reader.sized(4)?),
+        0x07 => FormValue::Number(reader.sized(8)?),
+        0x08 => FormValue::Text(reader.text()?),
+        0x09 | 0x18 => {
+            let length = reader.unsigned()? as usize;
+            reader.skip(length)?;
+            FormValue::Other
+        }
+        0x0a => {
+            let length = reader.sized(1)? as usize;
+            reader.skip(length)?;
+            FormValue::Other
+        }
+        0x0b | 0x0c | 0x11 => FormValue::Number(reader.sized(1)?),
+        0x0d => FormValue::Number(reader.signed()? as u64),
+        0x0e => FormValue::StringOffset(reader.sized(offset_size)?),
+        0x0f | 0x15 | 0x1b | 0x22 | 0x23 | 0x1f01 => FormValue::Number(reader.unsigned()?),
+        0x10 => {
+            let size = if version <= 2 {
+                address_size
+            } else {
+                offset_size
+            };
+            FormValue::Number(reader.sized(size)?)
+        }
+        0x12 => FormValue::Number(reader.sized(2)?),
+        0x13 | 0x1c => FormValue::Number(reader.sized(4)?),
+        0x14 | 0x20 => FormValue::Number(reader.sized(8)?),
+        0x16 => {
+            let actual = reader.unsigned()?;
+            return read_form(reader, actual, offset_size, address_size, version, implicit);
+        }
+        0x17 | 0x1d | 0x1f20 | 0x1f21 => FormValue::Number(reader.sized(offset_size)?),
+        0x19 => FormValue::Number(1),
+        0x1a | 0x1f02 => FormValue::StringIndex(reader.unsigned()?),
+        0x1e => {
+            reader.skip(16)?;
+            FormValue::Other
+        }
+        0x1f => FormValue::LineStringOffset(reader.sized(offset_size)?),
+        0x21 => FormValue::Number(implicit as u64),
+        0x25 => FormValue::StringIndex(reader.sized(1)?),
+        0x26 => FormValue::StringIndex(reader.sized(2)?),
+        0x27 => FormValue::StringIndex(reader.sized(3)?),
+        0x28 => FormValue::StringIndex(reader.sized(4)?),
+        0x29 => FormValue::Number(reader.sized(1)?),
+        0x2a => FormValue::Number(reader.sized(2)?),
+        0x2b => FormValue::Number(reader.sized(3)?),
+        0x2c => FormValue::Number(reader.sized(4)?),
+        _ => return None,
+    })
+}
+
+impl LineTable {
+    fn has_file(&self, index: u64) -> bool {
+        if self.version >= 5 {
+            (index as usize) < self.files.len()
+        } else {
+            index >= 1 && index as usize <= self.files.len()
+        }
+    }
+
+    fn file_path(&self, index: u64) -> Option<String> {
+        if !self.has_file(index) {
+            return None;
+        }
+        let (name, directory) = if self.version >= 5 {
+            &self.files[index as usize]
+        } else {
+            &self.files[index as usize - 1]
+        };
+        if name.starts_with('/') {
+            return Some(name.clone());
+        }
+        let include = if self.version >= 5 {
+            self.directories
+                .get(*directory as usize)
+                .cloned()
+                .unwrap_or_default()
+        } else if *directory > 0 {
+            self.directories
+                .get(*directory as usize - 1)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let mut path = String::new();
+        append_path(&mut path, &include);
+        append_path(&mut path, name);
+        Some(path)
+    }
+
+    fn lookup(&self, address: u64, section: u32) -> Option<(String, u64)> {
+        let sequence = self.sequences.iter().find(|sequence| {
+            sequence.section == section && sequence.low <= address && address < sequence.high
+        })?;
+        let rows = &sequence.rows;
+        let end = rows.len().saturating_sub(1);
+        let mut position = 1;
+        while position < end && rows[position].0 <= address {
+            position += 1;
+        }
+        let row = rows.get(position - 1)?;
+        self.file_path(row.1).map(|path| (path, row.2))
+    }
+
+    fn parse(
+        section: &DebugSection,
+        offset: usize,
+        strings: &[u8],
+        line_strings: &[u8],
+        encoding: Encoding,
+    ) -> Option<LineTable> {
+        let data = &section.data;
+        let mut reader = DwarfReader {
+            data,
+            at: offset,
+            encoding,
+        };
+        let mut length = reader.sized(4)?;
+        let mut offset_size = 4;
+        if length == 0xffff_ffff {
+            length = reader.sized(8)?;
+            offset_size = 8;
+        }
+        let end = (reader.at as u64)
+            .saturating_add(length)
+            .min(data.len() as u64) as usize;
+        let version = reader.sized(2)? as u16;
+        if !(2..=5).contains(&version) {
+            return None;
+        }
+        if version >= 5 {
+            reader.byte()?;
+            reader.byte()?;
+        }
+        let header_length = reader.sized(offset_size)? as usize;
+        let program = reader.at + header_length;
+        let minimum_instruction = u64::from(reader.byte()?);
+        if version >= 4 {
+            reader.byte()?;
+        }
+        reader.byte()?;
+        let line_base = i64::from(reader.byte()? as i8);
+        let line_range = u64::from(reader.byte()?).max(1);
+        let opcode_base = reader.byte()?;
+        let mut lengths = Vec::new();
+        for _ in 1..opcode_base {
+            lengths.push(reader.byte()?);
+        }
+        let mut table = LineTable {
+            version,
+            ..LineTable::default()
+        };
+        if version >= 5 {
+            for pass in 0..2 {
+                let format_count = reader.byte()?;
+                let mut formats = Vec::new();
+                for _ in 0..format_count {
+                    formats.push((reader.unsigned()?, reader.unsigned()?));
+                }
+                let count = reader.unsigned()?;
+                for _ in 0..count {
+                    let mut path = String::new();
+                    let mut directory = 0u64;
+                    for (content, form) in &formats {
+                        let value = read_form(&mut reader, *form, offset_size, 8, version, 0)?;
+                        match (content, value) {
+                            (1, FormValue::Text(text)) => path = text,
+                            (1, FormValue::StringOffset(at)) => {
+                                path = text_at(strings, at).unwrap_or_default()
+                            }
+                            (1, FormValue::LineStringOffset(at)) => {
+                                path = text_at(line_strings, at).unwrap_or_default()
+                            }
+                            (2, FormValue::Number(number)) => directory = number,
+                            _ => {}
+                        }
+                    }
+                    if pass == 0 {
+                        table.directories.push(path);
+                    } else {
+                        table.files.push((path, directory));
+                    }
+                }
+            }
+        } else {
+            loop {
+                let directory = reader.text()?;
+                if directory.is_empty() {
+                    break;
+                }
+                table.directories.push(directory);
+            }
+            loop {
+                let name = reader.text()?;
+                if name.is_empty() {
+                    break;
+                }
+                let directory = reader.unsigned()?;
+                reader.unsigned()?;
+                reader.unsigned()?;
+                table.files.push((name, directory));
+            }
+        }
+        reader.at = program;
+        let mut rows: Vec<(u64, u64, u64)> = Vec::new();
+        let mut address = 0u64;
+        let mut file = 1u64;
+        let mut line = 1i64;
+        let mut target = u32::MAX;
+        let row = |address: u64, file: u64, line: i64| (address, file, line as u64 & 0xffff_ffff);
+        while reader.at < end {
+            let opcode = reader.byte()?;
+            if opcode >= opcode_base {
+                let adjusted = u64::from(opcode - opcode_base);
+                address = address.wrapping_add((adjusted / line_range) * minimum_instruction);
+                line += line_base + (adjusted % line_range) as i64;
+                rows.push(row(address, file, line));
+                continue;
+            }
+            match opcode {
+                0 => {
+                    let length = reader.unsigned()? as usize;
+                    let start = reader.at;
+                    if length == 0 {
+                        continue;
+                    }
+                    match reader.byte()? {
+                        1 => {
+                            rows.push(row(address, file, line));
+                            let low = rows[0].0;
+                            if low < address {
+                                table.sequences.push(LineSequence {
+                                    low,
+                                    high: address,
+                                    section: target,
+                                    rows: std::mem::take(&mut rows),
+                                });
+                            } else {
+                                rows.clear();
+                            }
+                            address = 0;
+                            file = 1;
+                            line = 1;
+                            target = u32::MAX;
+                        }
+                        2 => {
+                            let at = reader.at;
+                            address = reader.sized(length - 1)?;
+                            if let Some(index) = section.targets.get(&at) {
+                                target = *index;
+                            }
+                        }
+                        3 => {
+                            let name = reader.text()?;
+                            let directory = reader.unsigned()?;
+                            table.files.push((name, directory));
+                        }
+                        _ => {}
+                    }
+                    reader.at = start + length;
+                }
+                1 => rows.push(row(address, file, line)),
+                2 => {
+                    address =
+                        address.wrapping_add(reader.unsigned()?.wrapping_mul(minimum_instruction))
+                }
+                3 => line += reader.signed()?,
+                4 => file = reader.unsigned()?,
+                5 | 12 => {
+                    reader.unsigned()?;
+                }
+                6 | 7 | 10 | 11 => {}
+                8 => {
+                    address = address.wrapping_add(
+                        ((255 - u64::from(opcode_base)) / line_range) * minimum_instruction,
+                    )
+                }
+                9 => address = address.wrapping_add(reader.sized(2)?),
+                _ => {
+                    for _ in 0..lengths[opcode as usize - 1] {
+                        reader.unsigned()?;
+                    }
+                }
+            }
+        }
+        Some(table)
+    }
+}
+
+fn debug_relocation_width(architecture: Architecture, kind: u32) -> usize {
+    match (architecture, kind) {
+        (Architecture::X86_64, 1) => 8,
+        (Architecture::X86_64, 10 | 11) => 4,
+        (Architecture::X86, 1) => 4,
+        (Architecture::Aarch64, 257) => 8,
+        (Architecture::Aarch64, 258) => 4,
+        (Architecture::Arm, 2) => 4,
+        _ => 0,
+    }
+}
+
+fn decompressed_debug(encoding: Encoding, data: &[u8]) -> Option<Vec<u8>> {
+    let header_size = if encoding.is_64() { 24 } else { 12 };
+    if encoding.read_u32(data, 0)? != 1 {
+        return None;
+    }
+    let size = if encoding.is_64() {
+        encoding.read_u64(data, 8)?
+    } else {
+        u64::from(encoding.read_u32(data, 4)?)
+    };
+    let mut inflated = elf::inflate_zlib(data.get(header_size..)?, size as usize).ok()?;
+    inflated.resize(size as usize, 0);
+    Some(inflated)
+}
+
+impl<'s> Context<'s> {
+    fn debug_sections(&self, file: FileIndex) -> BTreeMap<String, DebugSection> {
+        let elf = &self.files[file].elf;
+        let encoding = elf.encoding();
+        let symbols = &self.files[file].elf_symbols;
+        let mut result = BTreeMap::new();
+        for (index, header) in elf.sections.iter().enumerate() {
+            if !header.name.starts_with(".debug_") {
+                continue;
+            }
+            let data = if header.flags & section_flag::COMPRESSED != 0 {
+                match decompressed_debug(encoding, &header.data) {
+                    Some(data) => data,
+                    None => continue,
+                }
+            } else {
+                header.data.clone()
+            };
+            let mut section = DebugSection {
+                data,
+                targets: BTreeMap::new(),
+            };
+            for (position, holder) in elf.sections.iter().enumerate() {
+                let with_addend = match holder.kind {
+                    section_type::RELOCATIONS_WITH_ADDENDS => true,
+                    section_type::RELOCATIONS => false,
+                    _ => continue,
+                };
+                if holder.info as usize != index {
+                    continue;
+                }
+                let Ok(entries) = elf.relocations(position) else {
+                    continue;
+                };
+                for entry in entries {
+                    let width = debug_relocation_width(self.target.architecture, entry.kind);
+                    let at = entry.offset as usize;
+                    if width == 0 || at + width > section.data.len() {
+                        continue;
+                    }
+                    let Some(symbol) = symbols.get(entry.symbol as usize) else {
+                        continue;
+                    };
+                    let addend = if with_addend {
+                        entry.addend as u64
+                    } else if width == 8 {
+                        encoding.read_u64(&section.data, at).unwrap_or(0)
+                    } else {
+                        u64::from(encoding.read_u32(&section.data, at).unwrap_or(0))
+                    };
+                    let value = symbol.value.wrapping_add(addend);
+                    if width == 8 {
+                        encoding.write_u64(&mut section.data, at, value);
+                    } else {
+                        encoding.write_u32(&mut section.data, at, value as u32);
+                    }
+                    if symbol.section != 0 && symbol.section < section_index::RESERVED_LOW {
+                        section.targets.insert(at, symbol.section);
+                    }
+                }
+            }
+            result.insert(header.name.clone(), section);
+        }
+        result
+    }
+
+    fn read_source_lines(&self, file: FileIndex) -> SourceLines {
+        let mut lines = SourceLines::default();
+        let first_global = self.files[file].first_global;
+        for symbol in self.files[file].elf_symbols.iter().take(first_global) {
+            if symbol.kind == symbol_type::FILE {
+                lines.source_file = symbol.name.clone();
+            }
+        }
+        let sections = self.debug_sections(file);
+        let empty = DebugSection::default();
+        let info = sections.get(".debug_info").unwrap_or(&empty);
+        let abbreviations = sections.get(".debug_abbrev").unwrap_or(&empty);
+        let line_section = sections.get(".debug_line").unwrap_or(&empty);
+        let strings = &sections.get(".debug_str").unwrap_or(&empty).data;
+        let line_strings = &sections.get(".debug_line_str").unwrap_or(&empty).data;
+        let offsets = &sections.get(".debug_str_offsets").unwrap_or(&empty).data;
+        let encoding = self.files[file].elf.encoding();
+        let mut unit_start = 0usize;
+        while unit_start < info.data.len() {
+            let mut reader = DwarfReader {
+                data: &info.data,
+                at: unit_start,
+                encoding,
+            };
+            let Some(mut length) = reader.sized(4) else {
+                break;
+            };
+            let mut offset_size = 4;
+            if length == 0xffff_ffff {
+                let Some(long) = reader.sized(8) else {
+                    break;
+                };
+                length = long;
+                offset_size = 8;
+            }
+            let unit_end = (reader.at as u64).saturating_add(length) as usize;
+            unit_start = unit_end;
+            if length == 0 {
+                continue;
+            }
+            let _ = self.read_unit_variables(
+                &mut reader,
+                unit_end.min(info.data.len()),
+                offset_size,
+                abbreviations,
+                line_section,
+                strings,
+                line_strings,
+                offsets,
+                &mut lines,
+            );
+        }
+        lines
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_unit_variables(
+        &self,
+        reader: &mut DwarfReader,
+        unit_end: usize,
+        offset_size: usize,
+        abbreviations: &DebugSection,
+        line_section: &DebugSection,
+        strings: &[u8],
+        line_strings: &[u8],
+        offsets: &[u8],
+        lines: &mut SourceLines,
+    ) -> Option<()> {
+        let encoding = reader.encoding;
+        let version = reader.sized(2)? as u16;
+        let (abbreviation_offset, address_size) = if version >= 5 {
+            let unit_type = reader.byte()?;
+            let address_size = reader.byte()? as usize;
+            let abbreviation_offset = reader.sized(offset_size)?;
+            match unit_type {
+                1 | 3 => {}
+                4 | 5 => {
+                    reader.skip(8)?;
+                }
+                _ => return None,
+            }
+            (abbreviation_offset, address_size)
+        } else {
+            let abbreviation_offset = reader.sized(offset_size)?;
+            (abbreviation_offset, reader.byte()? as usize)
+        };
+        let mut table_reader = DwarfReader {
+            data: &abbreviations.data,
+            at: abbreviation_offset as usize,
+            encoding,
+        };
+        let mut table: BTreeMap<u64, Abbreviation> = BTreeMap::new();
+        loop {
+            let code = table_reader.unsigned()?;
+            if code == 0 {
+                break;
+            }
+            let tag = table_reader.unsigned()?;
+            table_reader.byte()?;
+            let mut attributes = Vec::new();
+            loop {
+                let name = table_reader.unsigned()?;
+                let form = table_reader.unsigned()?;
+                if name == 0 && form == 0 {
+                    break;
+                }
+                let implicit = if form == 0x21 {
+                    table_reader.signed()?
+                } else {
+                    0
+                };
+                attributes.push((name, form, implicit));
+            }
+            table.insert(code, Abbreviation { tag, attributes });
+        }
+        let mut line_table: Option<usize> = None;
+        let mut string_base = 0u64;
+        let mut first = true;
+        while reader.at < unit_end {
+            let code = reader.unsigned()?;
+            if code == 0 {
+                continue;
+            }
+            let abbreviation = table.get(&code)?.clone();
+            let mut values: Vec<(u64, FormValue)> = Vec::new();
+            for (name, form, implicit) in &abbreviation.attributes {
+                let value =
+                    read_form(reader, *form, offset_size, address_size, version, *implicit)?;
+                values.push((*name, value));
+            }
+            if first {
+                first = false;
+                let mut statement_list = None;
+                for (name, value) in &values {
+                    match (name, value) {
+                        (0x10, FormValue::Number(offset)) => statement_list = Some(*offset),
+                        (0x72, FormValue::Number(base)) => string_base = *base,
+                        _ => {}
+                    }
+                }
+                let offset = statement_list?;
+                let parsed = LineTable::parse(
+                    line_section,
+                    offset as usize,
+                    strings,
+                    line_strings,
+                    encoding,
+                )?;
+                lines.tables.push(parsed);
+                line_table = Some(lines.tables.len() - 1);
+                continue;
+            }
+            if abbreviation.tag != 0x34 {
+                continue;
+            }
+            let resolve = |value: &FormValue| -> Option<String> {
+                match value {
+                    FormValue::Text(text) => Some(text.clone()),
+                    FormValue::StringOffset(at) => text_at(strings, *at),
+                    FormValue::LineStringOffset(at) => text_at(line_strings, *at),
+                    FormValue::StringIndex(index) => {
+                        let at = string_base as usize + *index as usize * offset_size;
+                        let mut offset_reader = DwarfReader {
+                            data: offsets,
+                            at,
+                            encoding,
+                        };
+                        text_at(strings, offset_reader.sized(offset_size)?)
+                    }
+                    _ => None,
+                }
+            };
+            let number = |wanted: u64| {
+                values.iter().find_map(|(name, value)| match value {
+                    FormValue::Number(number) if *name == wanted => Some(*number),
+                    _ => None,
+                })
+            };
+            if number(0x3f).unwrap_or(0) == 0 {
+                continue;
+            }
+            let index = line_table?;
+            let file = number(0x3a).unwrap_or(0);
+            if !lines.tables[index].has_file(file) {
+                continue;
+            }
+            let line = number(0x3b).unwrap_or(0);
+            let text = |wanted: u64| {
+                values
+                    .iter()
+                    .find(|(name, _)| *name == wanted)
+                    .and_then(|(_, value)| resolve(value))
+            };
+            let name = text(0x6e)
+                .or_else(|| text(0x2007))
+                .or_else(|| text(0x03))
+                .unwrap_or_default();
+            if !name.is_empty() {
+                lines.variables.entry(name).or_insert((index, file, line));
+            }
+        }
+        Some(())
+    }
+
+    fn source_lines(&self, file: FileIndex) -> Rc<SourceLines> {
+        if let Some(found) = self.source_lines.borrow().get(&file) {
+            return found.clone();
+        }
+        let lines = Rc::new(self.read_source_lines(file));
+        self.source_lines.borrow_mut().insert(file, lines.clone());
+        lines
+    }
+
+    pub fn source_message(&self, section: SectionIndex, name: &str, offset: u64) -> String {
+        let Some(file) = self.sections[section]
+            .file
+            .filter(|file| *file < self.files.len())
+        else {
+            return String::new();
+        };
+        if !matches!(self.files[file].state, FileState::Object) {
+            return String::new();
+        }
+        let lines = self.source_lines(file);
+        let index = self.sections[section].elf_index as u32;
+        for table in &lines.tables {
+            if let Some((path, line)) = table.lookup(offset, index) {
+                return file_line_text(&path, line);
+            }
+        }
+        if let Some((table, file_index, line)) = lines.variables.get(name) {
+            if let Some(path) = lines.tables[*table].file_path(*file_index) {
+                return file_line_text(&path, *line);
+            }
+        }
+        lines.source_file.clone()
+    }
+
+    pub fn enclosing_symbol_name(&self, section: SectionIndex, offset: u64) -> Option<String> {
+        let file = self.sections[section]
+            .file
+            .filter(|file| *file < self.files.len())?;
+        self.files[file]
+            .symbols
+            .iter()
+            .filter(|id| **id != usize::MAX)
+            .map(|id| &self.symbols[*id])
+            .find(|symbol| {
+                symbol.is_defined()
+                    && symbol.section == Some(section)
+                    && symbol.value <= offset
+                    && offset < symbol.value + symbol.size
+            })
+            .map(|symbol| symbol.name.clone())
+    }
+
+    pub fn place_with_source(
+        &self,
+        section: SectionIndex,
+        name: &str,
+        offset: u64,
+        separator: &str,
+    ) -> String {
+        let source = self.source_message(section, name, offset);
+        let object = self.object_message(section, offset);
+        if source.is_empty() {
+            object
+        } else {
+            format!("{source}{separator}{object}")
+        }
+    }
 }
 
 fn sign_extend(value: u64, bits: u32) -> i64 {
@@ -11995,6 +13036,13 @@ impl<'s> Context<'s> {
                 self.sections[section].name
             ));
         }
+        if let Some(section) = self.relocating_section {
+            let source = self.source_message(section, "", self.relocating_offset);
+            if !source.is_empty() {
+                reason.push_str(&format!("\n>>> referenced by {source}"));
+            }
+        }
+        let symbol = &self.symbols[relocation.symbol];
         if !symbol.is_section() {
             reason.push_str(&format!("\n>>> defined in {}", self.file_name(symbol.file)));
         }
@@ -13925,6 +14973,7 @@ impl<'s> Context<'s> {
             }
             let location = self.error_location(section, relocation.offset);
             self.relocating_section = Some(section);
+            self.relocating_offset = relocation.offset;
             self.relocate(buffer, at, relocation, value, &location);
             self.relocating_section = None;
         }
@@ -15191,12 +16240,14 @@ impl<'s> Context<'s> {
                 }
             }
         }
+        let wrapped = self.add_wrapped_symbols();
         for file in self.object_files.clone() {
             self.initialize_sections(file);
         }
         for file in self.object_files.clone() {
             self.post_parse(file);
         }
+        self.redirect_wrapped_symbols(&wrapped);
         if self.failed() {
             return None;
         }
@@ -15312,6 +16363,7 @@ impl<'s> Context<'s> {
                 return None;
             }
             self.post_scan_relocations();
+            self.report_shared_library_undefined();
         }
         self.build_symbol_tables();
         self.remove_unused_synthetic_sections();
@@ -16335,7 +17387,11 @@ impl<'s> Context<'s> {
                     (Some(member), Some(thunk)) => {
                         let thunk_offset = self.sections[*thunk].offset_in_output;
                         let member_offset = self.sections[*member].offset_in_output;
-                        if thunk_offset < member_offset {
+                        let member_is_thunk =
+                            self.sections[*member].synthetic == Some(Synthetic::Thunks);
+                        if thunk_offset < member_offset
+                            || (thunk_offset == member_offset && !member_is_thunk)
+                        {
                             merged.push(right.next().unwrap_or(0));
                         } else {
                             merged.push(left.next().unwrap_or(0));

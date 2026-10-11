@@ -69094,7 +69094,141 @@ mod linker_lit {
         }
     }
 
-    fn render(outcome: &LinkOutcome, program: &str) -> (Vec<u8>, Vec<u8>, i32) {
+    fn parenthesized_place(line: &str) -> Option<String> {
+        let positions: Vec<usize> = line
+            .char_indices()
+            .filter(|(at, character)| *character == '(' && *at > 0)
+            .map(|(at, _)| at)
+            .collect();
+        for open in positions.into_iter().rev() {
+            let token: String = line[open + 1..]
+                .chars()
+                .take_while(|character| !character.is_whitespace())
+                .collect();
+            let mut found = None;
+            for (at, character) in token.char_indices() {
+                if character != ':' || at == 0 {
+                    continue;
+                }
+                let digits: String = token[at + 1..]
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect();
+                if !digits.is_empty() && token[at + 1 + digits.len()..].starts_with(')') {
+                    found = Some(format!("{}({digits})", &token[..at]));
+                }
+            }
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    fn plain_place(line: &str) -> Option<String> {
+        let token: String = line
+            .chars()
+            .take_while(|character| !character.is_whitespace())
+            .collect();
+        let mut found = None;
+        for (at, character) in token.char_indices() {
+            if character != ':' || at == 0 {
+                continue;
+            }
+            let digits: String = token[at + 1..]
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                found = Some(format!("{}({digits})", &token[..at]));
+            }
+        }
+        found
+    }
+
+    fn visual_location(message: &str) -> Option<String> {
+        let lines: Vec<&str> = message.split('\n').collect();
+        let first = lines.first().copied().unwrap_or("");
+        let second = lines.get(1).copied().unwrap_or("");
+        let undefined = first.starts_with("undefined ")
+            && first["undefined ".len()..]
+                .split_once("symbol:")
+                .is_some_and(|(word, _)| {
+                    word.is_empty()
+                        || (word.ends_with(' ')
+                            && !word.trim_end().is_empty()
+                            && !word.trim_end().contains(char::is_whitespace))
+                });
+        if undefined {
+            if let Some(rest) = second.strip_prefix(">>> referenced by ") {
+                if let Some(place) = parenthesized_place(rest) {
+                    return Some(place);
+                }
+                if let Some(place) = plain_place(rest) {
+                    return Some(place);
+                }
+                if first.starts_with("undefined symbol:") {
+                    if let Some(at) = rest.rfind(':') {
+                        return Some(rest[..at].to_string());
+                    }
+                }
+            }
+        }
+        if first.starts_with("duplicate symbol: ") {
+            if let Some(rest) = second.strip_prefix(">>> defined in ") {
+                let third = lines.get(2).copied().unwrap_or("");
+                if !rest.is_empty()
+                    && !rest.contains(char::is_whitespace)
+                    && third.starts_with(">>> defined in")
+                {
+                    return Some(rest.to_string());
+                }
+            }
+            if let Some(rest) = second.strip_prefix(">>> defined at ") {
+                if let Some(place) = parenthesized_place(rest) {
+                    return Some(place);
+                }
+                if let Some(place) = plain_place(rest) {
+                    return Some(place);
+                }
+            }
+        }
+        for window in lines.windows(3) {
+            if !window[1].starts_with(">>> defined in ") {
+                continue;
+            }
+            if let Some(rest) = window[2].strip_prefix(">>> referenced by ") {
+                if let Some(place) = parenthesized_place(rest) {
+                    return Some(place);
+                }
+            }
+        }
+        for window in lines.windows(3) {
+            if !window[1].starts_with(">>> defined in ") {
+                continue;
+            }
+            if let Some(rest) = window[2].strip_prefix(">>> referenced by ") {
+                if let Some(place) = plain_place(rest) {
+                    return Some(place);
+                }
+            }
+        }
+        for line in &lines {
+            if let Some(at) = line.find(": unclosed quote") {
+                let head = &line[..at];
+                let start = head
+                    .rfind(char::is_whitespace)
+                    .map(|position| position + 1)
+                    .unwrap_or(0);
+                if let Some(place) = plain_place(&head[start..]) {
+                    return Some(place);
+                }
+            }
+        }
+        None
+    }
+
+    fn render(outcome: &LinkOutcome, program: &str, visual: bool) -> (Vec<u8>, Vec<u8>, i32) {
         let mut stderr = String::new();
         for diagnostic in &outcome.diagnostics {
             let level = match diagnostic.severity {
@@ -69102,10 +69236,35 @@ mod linker_lit {
                 Severity::Warning => "warning",
                 _ => "message",
             };
-            stderr.push_str(&format!(
-                "{program}: {level}: {}\n",
-                lld_message(diagnostic, program)
-            ));
+            let message = lld_message(diagnostic, program);
+            let lines: Vec<&str> = message.split('\n').collect();
+            let source_line = |line: &str| {
+                line.strip_prefix(">>> defined at ")
+                    .is_some_and(|rest| plain_place(rest).is_some())
+            };
+            let split = visual
+                && lines.len() == 5
+                && lines[0].starts_with("duplicate symbol: ")
+                && source_line(lines[1])
+                && lines[2].starts_with(">>>")
+                && source_line(lines[3])
+                && lines[4].starts_with(">>>");
+            let parts = if split {
+                vec![
+                    format!("{}\n{}\n{}", lines[0], lines[1], lines[2]),
+                    format!("{}\n{}\n{}", lines[0], lines[3], lines[4]),
+                ]
+            } else {
+                vec![message]
+            };
+            for part in parts {
+                let location = if visual {
+                    visual_location(&part).unwrap_or_else(|| program.to_string())
+                } else {
+                    program.to_string()
+                };
+                stderr.push_str(&format!("{location}: {level}: {part}\n"));
+            }
         }
         let mut stdout = String::new();
         for message in &outcome.messages {
@@ -69118,8 +69277,13 @@ mod linker_lit {
         (stdout.into_bytes(), stderr.into_bytes(), status)
     }
 
-    fn finish_link(outcome: LinkOutcome, program: &str, world: &mut World) -> ToolOutcome {
-        let (mut stdout, stderr, status) = render(&outcome, program);
+    fn finish_link(
+        outcome: LinkOutcome,
+        program: &str,
+        world: &mut World,
+        visual: bool,
+    ) -> ToolOutcome {
+        let (mut stdout, stderr, status) = render(&outcome, program, visual);
         for (path, bytes) in outcome.outputs {
             if path == "-" {
                 stdout.extend_from_slice(&bytes);
@@ -69151,7 +69315,10 @@ mod linker_lit {
             let reader = |path: &str| world.read(path);
             link_as(&arguments[1..], &reader, &identity)
         };
-        finish_link(outcome, "ld.lld", world)
+        let visual = arguments
+            .iter()
+            .any(|argument| argument == "--vs-diagnostics" || argument == "-vs-diagnostics");
+        finish_link(outcome, "ld.lld", world, visual)
     }
 
     fn tool_lld_link(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
@@ -69162,7 +69329,7 @@ mod linker_lit {
             let reader = |path: &str| world.read(path);
             link_coff(&arguments[1..], &reader)
         };
-        finish_link(outcome, "lld-link", world)
+        finish_link(outcome, "lld-link", world, false)
     }
 
     fn lld_tools() -> BTreeMap<String, ToolFunction> {

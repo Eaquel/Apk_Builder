@@ -77,6 +77,8 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI269", "A section with SHF_LINK_ORDER links to a discarded section."),
     ("EI270", "A section with SHF_LINK_ORDER links to a section that is not a regular section."),
     ("EI271", "An option is only supported on other targets."),
+    ("EI272", "A shared library references a symbol that is not defined."),
+    ("EI273", "A shared library references a symbol that is not exported."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
