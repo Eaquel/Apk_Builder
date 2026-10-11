@@ -18282,6 +18282,8 @@ pub struct CoffOptions {
     pub swap_run_cd: bool,
     pub swap_run_net: bool,
     pub function_pad_minimum: Option<u32>,
+    pub extended_characteristics: u32,
+    pub dependent_load_flags: u16,
     pub build_identifier: bool,
     pub ignored_warnings: Vec<String>,
     pub verbose: bool,
@@ -18403,6 +18405,8 @@ impl Default for CoffOptions {
             swap_run_cd: false,
             swap_run_net: false,
             function_pad_minimum: None,
+            extended_characteristics: 0,
+            dependent_load_flags: 0,
             build_identifier: false,
             ignored_warnings: Vec::new(),
             verbose: false,
@@ -18566,6 +18570,25 @@ pub fn parse_coff_command_line(
             "out" => options.output = need(&value)?,
             "libpath" => options.library_paths.push(need(&value)?),
             "winsysroot" => options.system_root = Some(need(&value)?),
+            "dependentloadflag" => {
+                let Some(text) = value.clone().filter(|text| !text.is_empty()) else {
+                    return Err(problem("EI204", "An option value is not valid.")
+                        .with_context("Option: /dependentloadflag".to_string())
+                        .with_context(
+                            "Cause: /dependentloadflag: no argument specified".to_string(),
+                        ));
+                };
+                options.dependent_load_flags = coff_number(&text)
+                    .filter(|number| *number <= u64::from(u16::MAX))
+                    .map(|number| number as u16)
+                    .ok_or_else(|| {
+                        problem("EI204", "An option value is not valid.")
+                            .with_context("Option: /dependentloadflag".to_string())
+                            .with_context(format!(
+                                "Cause: /dependentloadflag: invalid argument: {text}"
+                            ))
+                    })?;
+            }
             "vctoolsdir" => options.tools_directory = Some(need(&value)?),
             "vctoolsversion" => options.tools_version = Some(need(&value)?),
             "winsdkdir" => options.kit_directory = Some(need(&value)?),
@@ -18652,6 +18675,26 @@ pub fn parse_coff_command_line(
             "nxcompat" => {
                 options.nx_compatible =
                     flag_pair(&value).ok_or_else(|| invalid_value(&argument, &value_text))?
+            }
+            "cetcompat"
+            | "cetcompatstrict"
+            | "cetipvalidationrelaxed"
+            | "cetdynamicapisinproc"
+            | "hotpatchcompatible" => {
+                let enabled =
+                    flag_pair(&value).ok_or_else(|| invalid_value(&argument, &value_text))?;
+                let bit = match name.as_str() {
+                    "cetcompat" => 1,
+                    "cetcompatstrict" => 2,
+                    "cetipvalidationrelaxed" => 4,
+                    "cetdynamicapisinproc" => 8,
+                    _ => 0x80,
+                };
+                if enabled {
+                    options.extended_characteristics |= bit;
+                } else {
+                    options.extended_characteristics &= !bit;
+                }
             }
             "appcontainer" => {
                 options.application_container =
@@ -19028,7 +19071,6 @@ pub fn parse_coff_command_line(
             | "manifestfile"
             | "manifestdependency"
             | "mllvm"
-            | "cetcompat"
             | "summary"
             | "time"
             | "prefetch-inputs"
@@ -19193,6 +19235,30 @@ pub enum CoffChunkKind {
         address: usize,
     },
     Null,
+    ExtendedCharacteristics {
+        flags: u32,
+    },
+    DelayDirectory {
+        name: usize,
+        module_handle: usize,
+        address: usize,
+        names: usize,
+    },
+    DelayThunk {
+        import: usize,
+        tail: usize,
+    },
+    DelayTailMerge {
+        directory: usize,
+    },
+    DelayTailMergeExceptionData {
+        tail: usize,
+        unwind: usize,
+    },
+    DelayUnwindInformation,
+    DelayAddress {
+        thunk: usize,
+    },
     Text {
         text: String,
     },
@@ -19565,6 +19631,10 @@ pub struct CoffContext<'s> {
     pub system_paths: Option<SystemPaths>,
     pub map_exports: bool,
     pub relocation_redirects: BTreeMap<(usize, usize), u32>,
+    pub delayed_imports: Vec<SymbolIndex>,
+    pub delay_load_helper: Option<SymbolIndex>,
+    pub delay_directory: Option<(usize, u64)>,
+    pub delay_thunks: BTreeMap<usize, usize>,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19582,6 +19652,8 @@ pub struct CoffContext<'s> {
     pub debug_directory: Option<usize>,
     pub output_symbols: Vec<[u8; 18]>,
     pub output_strings: Vec<u8>,
+    pub pending_strings: BTreeMap<String, u8>,
+    pub long_symbol_names: Vec<(usize, String)>,
     pub long_section_names: BTreeMap<usize, usize>,
     pub symbol_table_offset: u64,
     pub set_no_seh: bool,
@@ -19664,6 +19736,10 @@ impl<'s> CoffContext<'s> {
             system_paths: None,
             map_exports: false,
             relocation_redirects: BTreeMap::new(),
+            delayed_imports: Vec::new(),
+            delay_load_helper: None,
+            delay_directory: None,
+            delay_thunks: BTreeMap::new(),
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -19681,6 +19757,8 @@ impl<'s> CoffContext<'s> {
             debug_directory: None,
             output_symbols: Vec::new(),
             output_strings: Vec::new(),
+            pending_strings: BTreeMap::new(),
+            long_symbol_names: Vec::new(),
             long_section_names: BTreeMap::new(),
             symbol_table_offset: 0,
             set_no_seh: false,
@@ -20211,7 +20289,39 @@ impl<'s> CoffContext<'s> {
             let index = self.archives.len();
             let symbols = archive.symbols.clone();
             self.archives.push(archive);
+            let dll_main = if self.machine != 0 && !self.archives[index].members.is_empty() {
+                Some(self.mangle("DllMain"))
+            } else {
+                None
+            };
+            let mut skip_dll_main = false;
             for (name, member) in symbols {
+                if let Some(mangled) = &dll_main {
+                    if name == *mangled || name == format!("__imp_{mangled}") {
+                        if skip_dll_main {
+                            continue;
+                        }
+                        let bytes = &self.archives[index].members[member].bytes;
+                        if crate::compilers::pe::is_import_object(bytes) {
+                            let warn = !self
+                                .options
+                                .ignored_warnings
+                                .iter()
+                                .any(|code| code == "importeddllmain");
+                            if warn {
+                                self.warn(
+                                    caution("EI295", "The linker skips an imported DllMain symbol.")
+                                        .with_context(format!("File: {path}"))
+                                        .with_context(format!(
+                                            "Cause: {path}: skipping imported DllMain symbol [importeddllmain]\nNOTE: this might be a mistake when the DLL/library was produced."
+                                        )),
+                                );
+                            }
+                            skip_dll_main = true;
+                            continue;
+                        }
+                    }
+                }
                 self.add_lazy_archive(index, &name, member);
             }
             return;
@@ -20507,7 +20617,10 @@ impl<'s> CoffContext<'s> {
                 )
                 .with_context(format!("File: {label}"))
                 .with_context(format!("Machine: {found}"))
-                .with_context(format!("Expected: {expected}")),
+                .with_context(format!("Expected: {expected}"))
+                .with_context(format!(
+                    "Cause: {label}: machine type {found} conflicts with {expected}"
+                )),
             );
         }
     }
@@ -20671,15 +20784,19 @@ impl<'s> CoffContext<'s> {
                 weak_aliases.push((id, tag, characteristics == 4));
             } else if symbol.storage_class == crate::compilers::pe::storage_class::SECTION
                 && symbol.section_number == 0
-                && symbol.value != 0
             {
                 let name: String = symbol.name.chars().take(8).collect();
+                let characteristics = if symbol.value != 0 {
+                    symbol.value | 0x0030_0000
+                } else {
+                    character::INITIALIZED_DATA | character::READ | character::WRITE | 0x0030_0000
+                };
                 self.objects[file]
                     .object
                     .sections
                     .push(crate::compilers::pe::CoffSection {
                         name,
-                        characteristics: symbol.value | 0x0030_0000,
+                        characteristics,
                         ..crate::compilers::pe::CoffSection::default()
                     });
                 let number = self.objects[file].object.sections.len();
@@ -21111,7 +21228,29 @@ impl<'s> CoffContext<'s> {
             comdat_selection::ANY => {}
             comdat_selection::SAME_SIZE => {
                 if self.chunks[leader_chunk].size != new_size {
-                    self.report_duplicate(leader, Some(file));
+                    let big = self.objects[file].object.big;
+                    let new_length = self.objects[file]
+                        .object
+                        .symbols
+                        .iter()
+                        .filter(|candidate| candidate.section_number == symbol.section_number)
+                        .find_map(|candidate| candidate.section_definition(big))
+                        .map(|definition| definition.length);
+                    let leader_length = self.chunks[leader_chunk].file.and_then(|owner| {
+                        let section = self.chunks[leader_chunk].section as i32;
+                        let big = self.objects[owner].object.big;
+                        self.objects[owner]
+                            .object
+                            .symbols
+                            .iter()
+                            .filter(|candidate| candidate.section_number == section)
+                            .find_map(|candidate| candidate.section_definition(big))
+                            .map(|definition| definition.length)
+                    });
+                    if !self.options.mingw || leader_length.is_none() || leader_length != new_length
+                    {
+                        self.report_duplicate(leader, Some(file));
+                    }
                 }
             }
             comdat_selection::EXACT_MATCH => {
@@ -21222,7 +21361,12 @@ impl<'s> CoffContext<'s> {
                     )
                     .with_context(format!("File: {parent}({name})"))
                     .with_context(format!("Machine: {found}"))
-                    .with_context(format!("Expected: {expected}")),
+                    .with_context(format!("Expected: {expected}"))
+                    .with_context(format!(
+                        "Cause: {}({}): machine type {found} conflicts with {expected}",
+                        parent.rsplit(['/', '\\']).next().unwrap_or(parent),
+                        name.rsplit(['/', '\\']).next().unwrap_or(name)
+                    )),
                 );
             }
         }
@@ -21235,6 +21379,10 @@ impl<'s> CoffContext<'s> {
         let text = self.objects[file].directives.clone();
         if text.is_empty() {
             return;
+        }
+        if self.options.verbose {
+            let label = self.file_label(Some(file));
+            self.messages.push(format!("Directives: {label}: {text}"));
         }
         for token in tokenize_windows_command_line(&text) {
             let lowered = token.to_ascii_lowercase();
@@ -21707,6 +21855,26 @@ impl<'s> CoffContext<'s> {
             self.machine = machine::AMD64;
             self.add_system_root_paths();
         }
+        if !self.options.delay_loads.is_empty() {
+            let name = if self.machine == machine::I386 {
+                "___delayLoadHelper2@8"
+            } else {
+                "__delayLoadHelper2"
+            };
+            self.delay_load_helper = Some(self.add_gc_root(name));
+        }
+        if self.options.extended_characteristics & 0x80 != 0
+            && self.options.function_pad_minimum.unwrap_or(0) < 6
+        {
+            self.error(
+                problem("EI204", "An option value is not valid.")
+                    .with_context("Option: /hotpatchcompatible".to_string())
+                    .with_context(
+                        "Cause: /hotpatchcompatible: requires at least 6 bytes of /functionpadmin"
+                            .to_string(),
+                    ),
+            );
+        }
         if !self.dynamic_base && matches!(self.machine, 0x01c4 | machine::ARM64 | 0xa641 | 0xa64e) {
             let name = match self.machine {
                 machine::ARM64 => "arm64",
@@ -22059,7 +22227,7 @@ impl<'s> CoffContext<'s> {
         subsystem::UNKNOWN
     }
 
-    fn find_default_entry(&self) -> String {
+    fn find_default_entry(&mut self) -> String {
         use crate::compilers::pe::subsystem;
         if self.options.mingw {
             return self.mangle(if self.subsystem == subsystem::WINDOWS_GRAPHICAL {
@@ -22068,16 +22236,22 @@ impl<'s> CoffContext<'s> {
                 "mainCRTStartup"
             });
         }
-        if self.subsystem == subsystem::WINDOWS_GRAPHICAL {
-            if self.find_underscore_mangle("wWinMain") && !self.find_underscore_mangle("WinMain") {
-                return self.mangle("wWinMainCRTStartup");
+        let (wide, narrow) = if self.subsystem == subsystem::WINDOWS_GRAPHICAL {
+            ("wWinMain", "WinMain")
+        } else {
+            ("wmain", "main")
+        };
+        if self.find_underscore_mangle(wide) {
+            if !self.find_underscore_mangle(narrow) {
+                return self.mangle(&format!("{wide}CRTStartup"));
             }
-            return self.mangle("WinMainCRTStartup");
+            self.warn(
+                caution("EI294", "The linker found two candidate entry points.").with_context(
+                    format!("Cause: found both {wide} and {narrow}; using latter"),
+                ),
+            );
         }
-        if self.find_underscore_mangle("wmain") && !self.find_underscore_mangle("main") {
-            return self.mangle("wmainCRTStartup");
-        }
-        self.mangle("mainCRTStartup")
+        self.mangle(&format!("{narrow}CRTStartup"))
     }
 
     fn find_mangle(&self, name: &str) -> Option<SymbolIndex> {
@@ -22146,16 +22320,7 @@ impl<'s> CoffContext<'s> {
                     }
                     current = *alias;
                 }
-                _ => {
-                    if let CoffSymbolKind::Undefined {
-                        anti_dependency: true,
-                        ..
-                    } = self.symbols[id].kind
-                    {
-                        return None;
-                    }
-                    return Some(candidate);
-                }
+                _ => return Some(candidate),
             }
         }
         None
@@ -22358,6 +22523,16 @@ impl<'s> CoffContext<'s> {
             if shown < total {
                 text.push_str(&format!("\n>>> referenced {} more times", total - shown));
                 diagnostic = diagnostic.with_context(format!("More references: {}", total - shown));
+            }
+            if let Some(base) = name.strip_prefix("__imp_") {
+                if let Some(found) = self.find(base) {
+                    if let CoffSymbolKind::LazyArchive { archive, .. } = self.symbols[found].kind {
+                        let library = self.archives[archive].name.clone();
+                        text.push_str(&format!(
+                            "\nNOTE: a relevant symbol '{base}' is available in {library} but cannot be used because it is not an import library."
+                        ));
+                    }
+                }
             }
             diagnostic = diagnostic.with_context(format!("Cause: {text}"));
             if self.options.force_unresolved {
@@ -22698,6 +22873,12 @@ impl<'s> CoffContext<'s> {
                     "Control Flow Guard is enabled but '_load_config_used' is missing".to_string(),
                 );
             }
+            if self.options.dependent_load_flags != 0 {
+                self.load_config_warning(
+                    "_load_config_used not found, /dependentloadflag will have no effect"
+                        .to_string(),
+                );
+            }
             return;
         };
         let CoffSymbolKind::Regular {
@@ -22767,6 +22948,32 @@ impl<'s> CoffContext<'s> {
         }
         self.load_config_size = size;
         self.load_config_symbol = Some(id);
+    }
+
+    fn apply_dependent_load_flags(&mut self, bytes: &mut [u8]) -> bool {
+        let flags = self.options.dependent_load_flags;
+        if flags == 0 {
+            return true;
+        }
+        let Some(id) = self.load_config_symbol else {
+            return true;
+        };
+        let rva = self.symbol_rva(id);
+        let Some(output) = self.outputs.iter().find(|output| {
+            output.virtual_address <= rva && rva < output.virtual_address + output.virtual_size
+        }) else {
+            return true;
+        };
+        let base = (output.file_offset + rva - output.virtual_address) as usize;
+        let at = if self.is_64() { 78 } else { 54 };
+        if (self.load_config_size as usize) < at + 2 {
+            self.load_config_warning(
+                "'_load_config_used' structure too small to include DependentLoadFlags".to_string(),
+            );
+            return false;
+        }
+        bytes[base + at..base + at + 2].copy_from_slice(&flags.to_le_bytes());
+        true
     }
 
     fn check_load_config(&mut self, bytes: &[u8]) {
@@ -24064,6 +24271,33 @@ fn compatible_machine(configured: u16, found: u16) -> bool {
         _ => configured == found,
     }
 }
+
+const DELAY_TAIL_MERGE_AMD64: [u8; 119] = [
+    0x48, 0x89, 0x4c, 0x24, 0x08, 0x48, 0x89, 0x54, 0x24, 0x10, 0x4c, 0x89, 0x44, 0x24, 0x18, 0x4c,
+    0x89, 0x4c, 0x24, 0x20, 0x48, 0x83, 0xec, 0x68, 0x66, 0x0f, 0x7f, 0x44, 0x24, 0x20, 0x66, 0x0f,
+    0x7f, 0x4c, 0x24, 0x30, 0x66, 0x0f, 0x7f, 0x54, 0x24, 0x40, 0x66, 0x0f, 0x7f, 0x5c, 0x24, 0x50,
+    0x48, 0x8b, 0xd0, 0x48, 0x8d, 0x0d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x66, 0x0f, 0x6f, 0x44, 0x24,
+    0x20, 0x66, 0x0f, 0x6f, 0x4c, 0x24, 0x30, 0x66, 0x0f, 0x6f, 0x54, 0x24, 0x40, 0x66, 0x0f, 0x6f,
+    0x5c, 0x24, 0x50, 0x48, 0x8b, 0x4c, 0x24, 0x70, 0x48, 0x8b, 0x54, 0x24, 0x78, 0x4c, 0x8b, 0x84,
+    0x24, 0x80, 0, 0, 0, 0x4c, 0x8b, 0x8c, 0x24, 0x88, 0, 0, 0, 0x48, 0x83, 0xc4, 0x68, 0xff, 0xe0,
+];
+
+const DELAY_TAIL_MERGE_ARM: [u8; 38] = [
+    0x2d, 0xe9, 0x0f, 0x48, 0x0d, 0xf2, 0x10, 0x0b, 0x2d, 0xed, 0x10, 0x0b, 0x61, 0x46, 0x40, 0xf2,
+    0x00, 0x00, 0xc0, 0xf2, 0x00, 0x00, 0x00, 0xf0, 0x00, 0xd0, 0x84, 0x46, 0xbd, 0xec, 0x10, 0x0b,
+    0xbd, 0xe8, 0x0f, 0x48, 0x60, 0x47,
+];
+
+const DELAY_TAIL_MERGE_ARM64: [u8; 116] = [
+    0xfd, 0x7b, 0xb2, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0xe0, 0x07, 0x01, 0xa9, 0xe2, 0x0f, 0x02, 0xa9,
+    0xe4, 0x17, 0x03, 0xa9, 0xe6, 0x1f, 0x04, 0xa9, 0xe8, 0x2b, 0x00, 0xf9, 0xe0, 0x07, 0x03, 0xad,
+    0xe2, 0x0f, 0x04, 0xad, 0xe4, 0x17, 0x05, 0xad, 0xe6, 0x1f, 0x06, 0xad, 0xe1, 0x03, 0x11, 0xaa,
+    0x00, 0x00, 0x00, 0x90, 0x00, 0x00, 0x00, 0x91, 0x02, 0x00, 0x00, 0x90, 0x42, 0x00, 0x00, 0x91,
+    0x40, 0x00, 0x3f, 0xd6, 0xf0, 0x03, 0x00, 0xaa, 0xe6, 0x1f, 0x46, 0xad, 0xe4, 0x17, 0x45, 0xad,
+    0xe2, 0x0f, 0x44, 0xad, 0xe0, 0x07, 0x43, 0xad, 0xe8, 0x2b, 0x40, 0xf9, 0xe6, 0x1f, 0x44, 0xa9,
+    0xe4, 0x17, 0x43, 0xa9, 0xe2, 0x0f, 0x42, 0xa9, 0xe0, 0x07, 0x41, 0xa9, 0xfd, 0x7b, 0xce, 0xa8,
+    0x00, 0x02, 0x1f, 0xd6,
+];
 
 fn kill_at(symbol: &str, prefix: bool) -> String {
     if symbol.is_empty() {
@@ -26645,12 +26879,225 @@ impl<'s> CoffContext<'s> {
             }
             let library = self.imports[import].library.to_ascii_lowercase();
             let next = self.library_order.len();
-            self.library_order.entry(library).or_insert(next);
-            if let Some(symbol) = self.imports[import].import_symbol {
+            self.library_order.entry(library.clone()).or_insert(next);
+            let Some(symbol) = self.imports[import].import_symbol else {
+                continue;
+            };
+            if self.options.delay_loads.contains(&library) {
+                if self.imports[import].thunk_symbol.is_none() {
+                    let label = format!(
+                        "{}({})",
+                        self.imports[import].parent, self.imports[import].name
+                    );
+                    let shown = self.display_symbol_name(&self.symbols[symbol].name.clone());
+                    self.error(
+                        problem(
+                            "EI212",
+                            "The linker does not support what this input asks for yet.",
+                        )
+                        .with_context("Feature: delay-loading imported data".to_string())
+                        .with_context(format!(
+                            "Cause: cannot delay-load {label} due to import of data: {shown}"
+                        )),
+                    );
+                    continue;
+                }
+                self.delayed_imports.push(symbol);
+            } else {
                 symbols.push(symbol);
             }
         }
         symbols
+    }
+
+    fn create_delay_load_chunks(
+        &mut self,
+        text: usize,
+        data_output: usize,
+        pdata: usize,
+        rdata: usize,
+    ) {
+        use crate::compilers::pe::{machine, section_characteristic as character};
+        if self.delayed_imports.is_empty() {
+            return;
+        }
+        let read_data = character::INITIALIZED_DATA | character::READ;
+        let write_data = read_data | character::WRITE;
+        let code = character::CODE | character::READ | character::EXECUTE;
+        let word = self.word_size();
+        let mut bins: BTreeMap<usize, Vec<SymbolIndex>> = BTreeMap::new();
+        for symbol in self.delayed_imports.clone() {
+            let CoffSymbolKind::ImportData { import } = self.symbols[symbol].kind else {
+                continue;
+            };
+            let library = self.imports[import].library.to_ascii_lowercase();
+            let order = self.library_order.get(&library).copied().unwrap_or(0);
+            bins.entry(order).or_default().push(symbol);
+        }
+        let (thunk_size, tail_size, alignment) = match self.machine {
+            machine::AMD64 => (12, 119, 1),
+            machine::I386 => (10, 17, 1),
+            0x01c4 => (12, 38, 2),
+            _ => (12, 116, 4),
+        };
+        let mut directories = Vec::new();
+        let mut names = Vec::new();
+        let mut hints = Vec::new();
+        let mut libraries = Vec::new();
+        let mut handles = Vec::new();
+        let mut addresses = Vec::new();
+        let mut thunks = Vec::new();
+        let mut exception_data = Vec::new();
+        let mut unwind: Option<usize> = None;
+        for (_, mut list) in bins {
+            list.sort_by(|left, right| {
+                let base = |id: &SymbolIndex| {
+                    let name = &self.symbols[*id].name;
+                    name.strip_prefix("__imp_").unwrap_or(name).to_string()
+                };
+                base(left).cmp(&base(right))
+            });
+            let library = match self.symbols[list[0]].kind {
+                CoffSymbolKind::ImportData { import } => self.imports[import].library.clone(),
+                _ => String::new(),
+            };
+            let library_chunk = self.new_chunk(
+                CoffChunkKind::Text {
+                    text: library.clone(),
+                },
+                library.len() as u64 + 1,
+                1,
+                read_data,
+            );
+            libraries.push(library_chunk);
+            let base = addresses.len();
+            let directory = self.new_chunk(
+                CoffChunkKind::DelayDirectory {
+                    name: library_chunk,
+                    module_handle: 0,
+                    address: 0,
+                    names: 0,
+                },
+                32,
+                4,
+                read_data,
+            );
+            let tail = self.new_chunk(
+                CoffChunkKind::DelayTailMerge { directory },
+                tail_size,
+                alignment,
+                code,
+            );
+            if self.machine == machine::AMD64 {
+                let unwind_chunk = *unwind.get_or_insert_with(|| {
+                    self.chunks.push(CoffChunk::synthetic(
+                        CoffChunkKind::DelayUnwindInformation,
+                        8,
+                        4,
+                        read_data,
+                    ));
+                    self.chunks.len() - 1
+                });
+                exception_data.push(self.new_chunk(
+                    CoffChunkKind::DelayTailMergeExceptionData {
+                        tail,
+                        unwind: unwind_chunk,
+                    },
+                    12,
+                    4,
+                    read_data,
+                ));
+            }
+            for symbol in &list {
+                let CoffSymbolKind::ImportData { import } = self.symbols[*symbol].kind else {
+                    continue;
+                };
+                let thunk = self.new_chunk(
+                    CoffChunkKind::DelayThunk { import, tail },
+                    thunk_size,
+                    alignment,
+                    code,
+                );
+                let address = self.new_chunk(
+                    CoffChunkKind::DelayAddress { thunk },
+                    word,
+                    word,
+                    write_data,
+                );
+                addresses.push(address);
+                self.imports[import].location = Some(address);
+                thunks.push(thunk);
+                let external = self.imports[import].external_name.clone();
+                if external.is_empty() {
+                    let ordinal = self.imports[import].object.ordinal_or_hint;
+                    names.push(self.new_chunk(
+                        CoffChunkKind::OrdinalOnly { ordinal },
+                        word,
+                        word,
+                        read_data,
+                    ));
+                } else {
+                    let size = ((external.len() + 3) as u64).div_ceil(2) * 2;
+                    let hint = self.new_chunk(
+                        CoffChunkKind::HintName {
+                            name: external.clone(),
+                            hint: 0,
+                        },
+                        size,
+                        1,
+                        read_data,
+                    );
+                    names.push(self.new_chunk(
+                        CoffChunkKind::Lookup { target: hint },
+                        word,
+                        word,
+                        read_data,
+                    ));
+                    hints.push(hint);
+                    self.add_synthetic(&format!("__imp___load_{external}"), Some(thunk));
+                    self.delay_thunks.insert(import, thunk);
+                }
+            }
+            thunks.push(tail);
+            self.add_synthetic(
+                &format!("__tailMerge_{}", library.to_ascii_lowercase()),
+                Some(tail),
+            );
+            addresses.push(self.new_chunk(CoffChunkKind::Null, 8, word, write_data));
+            names.push(self.new_chunk(CoffChunkKind::Null, 8, word, read_data));
+            let handle = self.new_chunk(CoffChunkKind::Null, 8, 8, write_data);
+            handles.push(handle);
+            self.chunks[directory].kind = CoffChunkKind::DelayDirectory {
+                name: library_chunk,
+                module_handle: handle,
+                address: addresses[base],
+                names: names[base],
+            };
+            directories.push(directory);
+        }
+        directories.push(self.new_chunk(CoffChunkKind::Null, 32, 4, read_data));
+        self.delay_directory = Some((directories[0], directories.len() as u64 * 32));
+        let didat = self.output_named(".didat").unwrap_or(rdata);
+        for chunk in directories
+            .into_iter()
+            .chain(names)
+            .chain(hints)
+            .chain(libraries)
+        {
+            self.outputs[didat].chunks.push(chunk);
+        }
+        for chunk in handles.into_iter().chain(addresses) {
+            self.outputs[data_output].chunks.push(chunk);
+        }
+        for chunk in thunks {
+            self.outputs[text].chunks.push(chunk);
+        }
+        for chunk in exception_data {
+            self.outputs[pdata].chunks.push(chunk);
+        }
+        if let Some(chunk) = unwind {
+            self.outputs[rdata].chunks.push(chunk);
+        }
     }
 
     fn create_import_chunks(&mut self, symbols: &[SymbolIndex]) -> [Vec<usize>; 5] {
@@ -27003,6 +27450,7 @@ impl<'s> CoffContext<'s> {
                 }
             }
         }
+        self.create_delay_load_chunks(text, data_output, pdata, rdata);
         let merge_chunks: Vec<usize> = self.merge_chunks.iter().flatten().copied().collect();
         for merge in merge_chunks {
             self.finalize_merge_chunk(merge);
@@ -27011,8 +27459,14 @@ impl<'s> CoffContext<'s> {
         for chunk in self.local_import_chunks.clone() {
             self.outputs[rdata].chunks.push(chunk);
         }
-        if self.options.repro || self.options.build_identifier || self.options.debug {
-            let records: Vec<(u32, usize)> = if self.options.build_identifier || self.options.debug
+        let extended = self.options.extended_characteristics;
+        if self.options.repro
+            || self.options.build_identifier
+            || self.options.debug
+            || extended != 0
+        {
+            let mut records: Vec<(u32, usize)> = if self.options.build_identifier
+                || self.options.debug
             {
                 let alternate = self.program_database_alternate_path();
                 let size = 25 + alternate.len() as u64;
@@ -27022,6 +27476,15 @@ impl<'s> CoffContext<'s> {
             } else {
                 Vec::new()
             };
+            if extended != 0 {
+                let record = self.new_chunk(
+                    CoffChunkKind::ExtendedCharacteristics { flags: extended },
+                    4,
+                    4,
+                    data | read,
+                );
+                records.push((20, record));
+            }
             let size = (records.len() as u64 + u64::from(self.options.repro)) * 28;
             let directory = self.new_chunk(
                 CoffChunkKind::DebugDirectory {
@@ -27044,7 +27507,7 @@ impl<'s> CoffContext<'s> {
             for (_, record) in records.iter() {
                 self.outputs[target].chunks.push(*record);
             }
-            if let Some(&(_, record)) = records.first() {
+            if let Some(&(_, record)) = records.iter().find(|(kind, _)| *kind == 2) {
                 if let Some(id) = self.find_underscore("__buildid") {
                     self.symbols[id].kind = CoffSymbolKind::Synthetic {
                         chunk: Some(record),
@@ -27178,7 +27641,9 @@ impl<'s> CoffContext<'s> {
         let mut bytes = self.write_headers();
         self.write_sections(&mut bytes);
         self.write_symbol_and_string_table(&mut bytes);
-        self.check_load_config(&bytes);
+        if self.apply_dependent_load_flags(&mut bytes) {
+            self.check_load_config(&bytes);
+        }
         if self.failed() {
             return None;
         }
@@ -27553,11 +28018,40 @@ impl<'s> CoffContext<'s> {
         }
     }
 
-    fn add_output_string(&mut self, text: &str) -> usize {
-        let offset = self.output_strings.len() + 4;
-        self.output_strings.extend_from_slice(text.as_bytes());
-        self.output_strings.push(0);
-        offset
+    fn add_output_string(&mut self, text: &str, priority: u8) {
+        let held = self.pending_strings.entry(text.to_string()).or_insert(0);
+        *held = (*held).max(priority);
+    }
+
+    fn finalize_output_strings(&mut self) -> BTreeMap<String, u32> {
+        let mut strings: Vec<(String, u8)> = self
+            .pending_strings
+            .iter()
+            .map(|(text, priority)| (text.clone(), *priority))
+            .collect();
+        strings.sort_by(|left, right| {
+            right.1.cmp(&left.1).then_with(|| {
+                let left_reversed: Vec<u8> = left.0.bytes().rev().collect();
+                let right_reversed: Vec<u8> = right.0.bytes().rev().collect();
+                right_reversed.cmp(&left_reversed)
+            })
+        });
+        let mut offsets: BTreeMap<String, u32> = BTreeMap::new();
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut previous = String::new();
+        for (text, _) in strings {
+            let size = bytes.len() + 4;
+            if previous.ends_with(&text) {
+                offsets.insert(text.clone(), (size - text.len() - 1) as u32);
+                continue;
+            }
+            offsets.insert(text.clone(), size as u32);
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.push(0);
+            previous = text;
+        }
+        self.output_strings = bytes;
+        offsets
     }
 
     fn output_symbol(&mut self, id: SymbolIndex) -> Option<[u8; 18]> {
@@ -27592,8 +28086,9 @@ impl<'s> CoffContext<'s> {
         let name = self.symbols[id].name.clone();
         let mut record = [0u8; 18];
         if name.len() > 8 {
-            let offset = self.add_output_string(&name) as u32;
-            record[4..8].copy_from_slice(&offset.to_le_bytes());
+            self.add_output_string(&name, 0);
+            self.long_symbol_names
+                .push((self.output_symbols.len(), name.clone()));
         } else {
             record[..name.len()].copy_from_slice(name.as_bytes());
         }
@@ -27606,6 +28101,7 @@ impl<'s> CoffContext<'s> {
 
     fn create_symbol_and_string_table(&mut self) {
         use crate::compilers::pe::{section_characteristic as character, storage_class};
+        let mut section_names: Vec<(usize, String)> = Vec::new();
         let warn = !self.options.mingw
             && !self
                 .options
@@ -27631,8 +28127,8 @@ impl<'s> CoffContext<'s> {
                         )),
                 );
             }
-            let offset = self.add_output_string(&name);
-            self.long_section_names.insert(position, offset);
+            self.add_output_string(&name, u8::MAX);
+            section_names.push((position, name));
         }
         if self.options.write_symbol_table {
             let mut written: BTreeSet<SymbolIndex> = BTreeSet::new();
@@ -27667,6 +28163,17 @@ impl<'s> CoffContext<'s> {
                         }
                     }
                 }
+            }
+        }
+        let offsets = self.finalize_output_strings();
+        for (position, name) in section_names {
+            if let Some(offset) = offsets.get(&name) {
+                self.long_section_names.insert(position, *offset as usize);
+            }
+        }
+        for (record, name) in std::mem::take(&mut self.long_symbol_names) {
+            if let Some(offset) = offsets.get(&name) {
+                self.output_symbols[record][4..8].copy_from_slice(&offset.to_le_bytes());
             }
         }
         if self.output_symbols.is_empty() && self.output_strings.is_empty() {
@@ -27787,8 +28294,26 @@ impl<'s> CoffContext<'s> {
                             base_relocation::THUMB_MOVE_32,
                         ));
                     }
-                    CoffChunkKind::LocalImport { .. } => {
+                    CoffChunkKind::LocalImport { .. } | CoffChunkKind::DelayAddress { .. } => {
                         entries.push((self.chunks[chunk].rva as u32, default_kind));
+                    }
+                    CoffChunkKind::DelayThunk { .. } if self.machine == machine::I386 => {
+                        entries.push(((self.chunks[chunk].rva + 1) as u32, default_kind));
+                    }
+                    CoffChunkKind::DelayTailMerge { .. } if self.machine == machine::I386 => {
+                        entries.push(((self.chunks[chunk].rva + 4) as u32, default_kind));
+                    }
+                    CoffChunkKind::DelayThunk { .. } if self.machine == 0x01c4 => {
+                        entries.push((
+                            self.chunks[chunk].rva as u32,
+                            base_relocation::THUMB_MOVE_32,
+                        ));
+                    }
+                    CoffChunkKind::DelayTailMerge { .. } if self.machine == 0x01c4 => {
+                        entries.push((
+                            (self.chunks[chunk].rva + 14) as u32,
+                            base_relocation::THUMB_MOVE_32,
+                        ));
                     }
                     _ => {}
                 }
@@ -27920,6 +28445,12 @@ impl<'s> CoffContext<'s> {
         }
         if let Some((first, size)) = self.import_address_table {
             directories[data_directory::IMPORT_ADDRESS_TABLE] = DataDirectory {
+                address: self.chunk_rva(first) as u32,
+                size: size as u32,
+            };
+        }
+        if let Some((first, size)) = self.delay_directory {
+            directories[data_directory::DELAY_IMPORT] = DataDirectory {
                 address: self.chunk_rva(first) as u32,
                 size: size as u32,
             };
@@ -28190,7 +28721,13 @@ impl<'s> CoffContext<'s> {
                 if word == 8 {
                     out[..8].copy_from_slice(&value.to_le_bytes());
                 } else {
-                    out[..4].copy_from_slice(&(value as u32).to_le_bytes());
+                    let executable = self.symbol_chunk(symbol).is_some_and(|target| {
+                        self.chunks[target].output_characteristics()
+                            & crate::compilers::pe::section_characteristic::EXECUTE
+                            != 0
+                    });
+                    let bit = u32::from(self.machine == 0x01c4 && executable);
+                    out[..4].copy_from_slice(&((value as u32) | bit).to_le_bytes());
                 }
             }
             CoffChunkKind::HintName { name, hint } => {
@@ -28313,6 +28850,168 @@ impl<'s> CoffContext<'s> {
                     if stride == 5 {
                         out[position * stride + 4] = *flag;
                     }
+                }
+            }
+            CoffChunkKind::ExtendedCharacteristics { flags } => {
+                out[..4].copy_from_slice(&flags.to_le_bytes());
+            }
+            CoffChunkKind::DelayDirectory {
+                name,
+                module_handle,
+                address,
+                names,
+            } => {
+                let fields = [
+                    1u32,
+                    self.chunk_rva(name) as u32,
+                    self.chunk_rva(module_handle) as u32,
+                    self.chunk_rva(address) as u32,
+                    self.chunk_rva(names) as u32,
+                    0,
+                    0,
+                    0,
+                ];
+                for (position, value) in fields.iter().enumerate() {
+                    out[position * 4..position * 4 + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            CoffChunkKind::DelayThunk { import, tail } => {
+                let place = self.chunks[chunk].rva;
+                let target = self.imports[import]
+                    .import_symbol
+                    .map(|symbol| self.symbol_rva(symbol))
+                    .unwrap_or(0);
+                let tail_rva = self.chunks[tail].rva;
+                match self.machine {
+                    crate::compilers::pe::machine::AMD64 => {
+                        out[..12]
+                            .copy_from_slice(&[0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0]);
+                        let first = target.wrapping_sub(place).wrapping_sub(7) as u32;
+                        let second = tail_rva.wrapping_sub(place).wrapping_sub(12) as u32;
+                        out[3..7].copy_from_slice(&first.to_le_bytes());
+                        out[8..12].copy_from_slice(&second.to_le_bytes());
+                    }
+                    crate::compilers::pe::machine::I386 => {
+                        out[..10].copy_from_slice(&[0xb8, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0]);
+                        let first = target.wrapping_add(self.image_base) as u32;
+                        let second = tail_rva.wrapping_sub(place).wrapping_sub(10) as u32;
+                        out[1..5].copy_from_slice(&first.to_le_bytes());
+                        out[6..10].copy_from_slice(&second.to_le_bytes());
+                    }
+                    0x01c4 => {
+                        out[..12].copy_from_slice(&[
+                            0x40, 0xf2, 0x00, 0x0c, 0xc0, 0xf2, 0x00, 0x0c, 0x00, 0xf0, 0x00, 0xb8,
+                        ]);
+                        let _ = crate::compilers::pe::apply_thumb_move_32(
+                            &mut out,
+                            0,
+                            target.wrapping_add(self.image_base) as u32,
+                        );
+                        let branch = tail_rva.wrapping_sub(place).wrapping_sub(12) as i32;
+                        let _ = crate::compilers::pe::apply_thumb_branch_24(&mut out, 8, branch);
+                    }
+                    _ => {
+                        out[..12].copy_from_slice(&[
+                            0x11, 0x00, 0x00, 0x90, 0x31, 0x02, 0x00, 0x91, 0x00, 0x00, 0x00, 0x14,
+                        ]);
+                        crate::compilers::pe::apply_arm64_address(&mut out, 0, target, place, 12);
+                        crate::compilers::pe::apply_arm64_immediate(&mut out, 4, target & 0xfff, 0);
+                        let branch = tail_rva.wrapping_sub(place).wrapping_sub(8);
+                        crate::compilers::pe::or_u32(
+                            &mut out,
+                            8,
+                            ((branch as u32) & 0x0fff_fffc) >> 2,
+                        );
+                    }
+                }
+            }
+            CoffChunkKind::DelayTailMerge { directory } => {
+                let place = self.chunks[chunk].rva;
+                let descriptor = self.chunks[directory].rva;
+                let helper = self
+                    .delay_load_helper
+                    .and_then(|symbol| self.defined_target(symbol))
+                    .map(|symbol| self.symbol_rva(symbol));
+                let helper_rva = helper.unwrap_or(0);
+                match self.machine {
+                    crate::compilers::pe::machine::AMD64 => {
+                        out[..119].copy_from_slice(&DELAY_TAIL_MERGE_AMD64);
+                        let first = descriptor.wrapping_sub(place).wrapping_sub(58) as u32;
+                        let second = helper_rva.wrapping_sub(place).wrapping_sub(63) as u32;
+                        out[54..58].copy_from_slice(&first.to_le_bytes());
+                        out[59..63].copy_from_slice(&second.to_le_bytes());
+                    }
+                    crate::compilers::pe::machine::I386 => {
+                        out[..17].copy_from_slice(&[
+                            0x51, 0x52, 0x50, 0x68, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x5a, 0x59, 0xff,
+                            0xe0,
+                        ]);
+                        let first = descriptor.wrapping_add(self.image_base) as u32;
+                        let second = helper_rva.wrapping_sub(place).wrapping_sub(13) as u32;
+                        out[4..8].copy_from_slice(&first.to_le_bytes());
+                        out[9..13].copy_from_slice(&second.to_le_bytes());
+                    }
+                    0x01c4 => {
+                        out[..38].copy_from_slice(&DELAY_TAIL_MERGE_ARM);
+                        let _ = crate::compilers::pe::apply_thumb_move_32(
+                            &mut out,
+                            14,
+                            descriptor.wrapping_add(self.image_base) as u32,
+                        );
+                        let branch = helper_rva.wrapping_sub(place).wrapping_sub(26) as i32;
+                        let _ = crate::compilers::pe::apply_thumb_branch_24(&mut out, 22, branch);
+                    }
+                    _ => {
+                        out[..116].copy_from_slice(&DELAY_TAIL_MERGE_ARM64);
+                        crate::compilers::pe::apply_arm64_address(
+                            &mut out,
+                            48,
+                            descriptor,
+                            place + 48,
+                            12,
+                        );
+                        crate::compilers::pe::apply_arm64_immediate(
+                            &mut out,
+                            52,
+                            descriptor & 0xfff,
+                            0,
+                        );
+                        if helper.is_some() {
+                            crate::compilers::pe::apply_arm64_address(
+                                &mut out,
+                                56,
+                                helper_rva,
+                                place + 56,
+                                12,
+                            );
+                            crate::compilers::pe::apply_arm64_immediate(
+                                &mut out,
+                                60,
+                                helper_rva & 0xfff,
+                                0,
+                            );
+                        }
+                    }
+                }
+            }
+            CoffChunkKind::DelayTailMergeExceptionData { tail, unwind } => {
+                let start = self.chunks[tail].rva as u32;
+                let end = start + self.chunks[tail].size as u32;
+                let information = self.chunks[unwind].rva as u32;
+                out[0..4].copy_from_slice(&start.to_le_bytes());
+                out[4..8].copy_from_slice(&end.to_le_bytes());
+                out[8..12].copy_from_slice(&information.to_le_bytes());
+            }
+            CoffChunkKind::DelayUnwindInformation => {
+                out[..8].copy_from_slice(&[0x01, 0x18, 0x01, 0x00, 0x18, 0xc2, 0x00, 0x00]);
+            }
+            CoffChunkKind::DelayAddress { thunk } => {
+                let value = self.chunks[thunk].rva.wrapping_add(self.image_base);
+                if self.is_64() {
+                    out[..8].copy_from_slice(&value.to_le_bytes());
+                } else {
+                    let bit = u32::from(self.machine == 0x01c4);
+                    out[..4].copy_from_slice(&((value as u32) | bit).to_le_bytes());
                 }
             }
             CoffChunkKind::DebugDirectory { records, repro } => {
@@ -29473,6 +30172,11 @@ impl<'s> CoffContext<'s> {
                 for symbol in self.symbols_from_index_sections(file, &chunks) {
                     if let Some(entry) = self.rva_set_entry(symbol) {
                         import_table.insert(entry);
+                    }
+                    if let CoffSymbolKind::ImportData { import } = self.symbols[symbol].kind {
+                        if let Some(thunk) = self.delay_thunks.get(&import) {
+                            address_taken.insert((*thunk, 0));
+                        }
                     }
                 }
                 let chunks = self.objects[file].guard_long_jump_chunks.clone();

@@ -99,6 +99,8 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI291", "The linker found conflicting comdat selection types."),
     ("EI292", "An export names a deleting destructor."),
     ("EI293", "A relocation does not match the instruction it patches."),
+    ("EI294", "The linker found two candidate entry points."),
+    ("EI295", "The linker skips an imported DllMain symbol."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
