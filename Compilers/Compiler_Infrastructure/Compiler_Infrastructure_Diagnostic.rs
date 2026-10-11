@@ -79,6 +79,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI271", "An option is only supported on other targets."),
     ("EI272", "A shared library references a symbol that is not defined."),
     ("EI273", "A shared library references a symbol that is not exported."),
+    ("EI274", "A section name is longer than eight characters and uses a non-standard string table."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
