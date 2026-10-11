@@ -97,6 +97,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI289", "A symbol named in the order file does not exist."),
     ("EI290", "An undecorated symbol resolves a decorated reference."),
     ("EI291", "The linker found conflicting comdat selection types."),
+    ("EI292", "An export names a deleting destructor."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

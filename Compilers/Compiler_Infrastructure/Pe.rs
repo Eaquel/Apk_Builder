@@ -493,6 +493,10 @@ pub fn is_coff_object(bytes: &[u8]) -> bool {
     if is_big_object(bytes) {
         return true;
     }
+    if bytes.len() >= COFF_HEADER_SIZE && bytes[0] == 0 && bytes[1] == 0 && !is_import_object(bytes)
+    {
+        return read_u16(bytes, 16) == Some(0);
+    }
     matches!(
         read_u16(bytes, 0),
         Some(

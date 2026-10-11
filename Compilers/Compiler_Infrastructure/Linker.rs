@@ -18174,6 +18174,17 @@ pub struct CoffOptions {
     pub output: String,
     pub inputs: Vec<CoffInput>,
     pub library_paths: Vec<String>,
+    pub system_root: Option<String>,
+    pub tools_directory: Option<String>,
+    pub tools_version: Option<String>,
+    pub kit_directory: Option<String>,
+    pub kit_version: Option<String>,
+    pub interface_directory: Option<String>,
+    pub ignore_environment: bool,
+    pub library_environment: Option<String>,
+    pub tools_environment: Option<String>,
+    pub install_environment: Option<String>,
+    pub print_search_paths: bool,
     pub default_libraries: Vec<String>,
     pub no_default_libraries: Vec<String>,
     pub no_default_all: bool,
@@ -18227,6 +18238,8 @@ pub struct CoffOptions {
     pub profile: bool,
     pub order_file: Option<String>,
     pub map_path: Option<String>,
+    pub program_map_path: Option<String>,
+    pub map_information: Vec<String>,
     pub help: bool,
     pub align_given: bool,
     pub section_layout: Option<String>,
@@ -18263,6 +18276,7 @@ pub struct CoffOptions {
     pub delay_loads: Vec<String>,
     pub discard_sections: Vec<String>,
     pub driver: bool,
+    pub driver_plain: bool,
     pub driver_unprocessor_only: bool,
     pub driver_wdm: bool,
     pub swap_run_cd: bool,
@@ -18281,6 +18295,17 @@ impl Default for CoffOptions {
             output: String::new(),
             inputs: Vec::new(),
             library_paths: Vec::new(),
+            system_root: None,
+            tools_directory: None,
+            tools_version: None,
+            kit_directory: None,
+            kit_version: None,
+            interface_directory: None,
+            ignore_environment: false,
+            library_environment: None,
+            tools_environment: None,
+            install_environment: None,
+            print_search_paths: false,
             default_libraries: Vec::new(),
             no_default_libraries: Vec::new(),
             no_default_all: false,
@@ -18334,6 +18359,8 @@ impl Default for CoffOptions {
             profile: false,
             order_file: None,
             map_path: None,
+            program_map_path: None,
+            map_information: Vec::new(),
             help: false,
             align_given: false,
             section_layout: None,
@@ -18370,6 +18397,7 @@ impl Default for CoffOptions {
             delay_loads: Vec::new(),
             discard_sections: Vec::new(),
             driver: false,
+            driver_plain: false,
             driver_unprocessor_only: false,
             driver_wdm: false,
             swap_run_cd: false,
@@ -18537,6 +18565,14 @@ pub fn parse_coff_command_line(
         match name.as_str() {
             "out" => options.output = need(&value)?,
             "libpath" => options.library_paths.push(need(&value)?),
+            "winsysroot" => options.system_root = Some(need(&value)?),
+            "vctoolsdir" => options.tools_directory = Some(need(&value)?),
+            "vctoolsversion" => options.tools_version = Some(need(&value)?),
+            "winsdkdir" => options.kit_directory = Some(need(&value)?),
+            "winsdkversion" => options.kit_version = Some(need(&value)?),
+            "diasdkdir" => options.interface_directory = Some(need(&value)?),
+            "print-search-paths" => options.print_search_paths = true,
+            "lldignoreenv" => options.ignore_environment = true,
             "defaultlib" => options.default_libraries.push(need(&value)?),
             "nodefaultlib" => match value {
                 Some(library) => options.no_default_libraries.push(library),
@@ -18804,6 +18840,8 @@ pub fn parse_coff_command_line(
             }
             "print-symbol-order" => options.print_symbol_order = Some(need(&value)?),
             "lldmap" => options.map_path = Some(value.clone().unwrap_or_default()),
+            "map" => options.program_map_path = Some(value.clone().unwrap_or_default()),
+            "mapinfo" => options.map_information.push(need(&value)?),
             "help" | "?" => options.help = true,
             "pdbstripped" => options.warnings.push(
                 caution(
@@ -18896,16 +18934,19 @@ pub fn parse_coff_command_line(
             "end-lib" => options.inputs.push(CoffInput::EndLibrary),
             "delayload" => options.delay_loads.push(need(&value)?.to_ascii_lowercase()),
             "discard-section" => options.discard_sections.push(need(&value)?),
-            "driver" => match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
-                None => options.driver = true,
-                Some("wdm") => options.driver_wdm = true,
-                Some("uponly") => options.driver_unprocessor_only = true,
-                Some("wdm,uponly") | Some("uponly,wdm") => {
-                    options.driver_wdm = true;
-                    options.driver_unprocessor_only = true;
+            "driver" => {
+                match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                    None => options.driver_plain = true,
+                    Some("wdm") => options.driver_wdm = true,
+                    Some("uponly") => options.driver_unprocessor_only = true,
+                    Some("wdm,uponly") | Some("uponly,wdm") => {
+                        options.driver_wdm = true;
+                        options.driver_unprocessor_only = true;
+                    }
+                    _ => return Err(invalid_value("/driver", &value_text)),
                 }
-                _ => return Err(invalid_value("/driver", &value_text)),
-            },
+                options.driver = true;
+            }
             "swaprun" => {
                 let mut rest = value_text.clone();
                 loop {
@@ -18982,7 +19023,6 @@ pub fn parse_coff_command_line(
             | "tlbout"
             | "guardsym"
             | "assemblydebug"
-            | "lldignoreenv"
             | "manifest"
             | "manifestuac"
             | "manifestfile"
@@ -19519,6 +19559,8 @@ pub struct CoffContext<'s> {
     pub prevailing_comdat: Option<usize>,
     pub merge_cycle_reported: bool,
     pub dwarf_lines: BTreeMap<usize, Rc<SourceLines>>,
+    pub system_paths: Option<SystemPaths>,
+    pub map_exports: bool,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19615,6 +19657,8 @@ impl<'s> CoffContext<'s> {
             prevailing_comdat: None,
             merge_cycle_reported: false,
             dwarf_lines: BTreeMap::new(),
+            system_paths: None,
+            map_exports: false,
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -20320,12 +20364,131 @@ impl<'s> CoffContext<'s> {
         self.parse_directives(Some(file));
     }
 
+    fn detect_system_root(&mut self) {
+        let options = &self.options;
+        let (tools, older_layout) = if let Some(root) = &options.system_root {
+            let version = options.tools_version.clone().unwrap_or_default();
+            (
+                Some(join_system_path(&format!("{root}/VC/Tools/MSVC"), &version)),
+                false,
+            )
+        } else if let Some(directory) = &options.tools_directory {
+            (Some(directory.clone()), false)
+        } else if options.ignore_environment {
+            (None, false)
+        } else if let Some(directory) = options.tools_environment.clone() {
+            (Some(directory), false)
+        } else if let Some(directory) = options.install_environment.clone() {
+            (Some(directory), true)
+        } else {
+            (None, false)
+        };
+        let Some(tools) = tools else {
+            return;
+        };
+        let mut paths = SystemPaths {
+            tools,
+            older_layout,
+            ..SystemPaths::default()
+        };
+        if let Some(directory) = &options.interface_directory {
+            paths.interface = Some(directory.clone());
+        } else if let Some(root) = &options.system_root {
+            paths.interface = Some(format!("{root}/DIA SDK"));
+        }
+        let library_unset = options.library_environment.is_none();
+        paths.use_tools = library_unset
+            || options.ignore_environment
+            || options.tools_directory.is_some()
+            || options.tools_version.is_some()
+            || options.system_root.is_some();
+        let use_kit = library_unset
+            || options.ignore_environment
+            || options.kit_directory.is_some()
+            || options.kit_version.is_some()
+            || options.system_root.is_some();
+        if use_kit && (options.kit_directory.is_some() || options.system_root.is_some()) {
+            let version = options.kit_version.as_deref().and_then(parse_version_tuple);
+            let kit = if let Some(root) = &options.system_root {
+                let major = version
+                    .as_ref()
+                    .map(|parts| parts[0].to_string())
+                    .unwrap_or_default();
+                join_system_path(&format!("{root}/Windows Kits"), &major)
+            } else {
+                options.kit_directory.clone().unwrap_or_default()
+            };
+            let text = version
+                .as_ref()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<String>>()
+                        .join(".")
+                })
+                .unwrap_or_default();
+            paths.kit_major = version.as_ref().map(|parts| parts[0]).unwrap_or(0);
+            let include = format!("{}/include/stdlib.h", paths.tools);
+            if (self.source)(&include).is_none() {
+                let crt = join_system_path(&join_system_path(&kit, "Lib"), &text);
+                paths.crt = Some(join_system_path(&crt, "ucrt"));
+            }
+            let mut library = join_system_path(&kit, "Lib");
+            if paths.kit_major >= 8 {
+                library = join_system_path(&join_system_path(&library, &text), "um");
+            }
+            paths.kit_library = Some(library);
+        }
+        self.system_paths = Some(paths);
+    }
+
+    fn add_system_root_paths(&mut self) {
+        use crate::compilers::pe::machine;
+        let Some(paths) = self.system_paths.take() else {
+            return;
+        };
+        let (legacy, modern) = match self.machine {
+            machine::I386 => ("", "x86"),
+            machine::AMD64 => ("amd64", "x64"),
+            0x01c4 => ("arm", "arm"),
+            machine::ARM64 => ("arm64", "arm64"),
+            _ => ("", ""),
+        };
+        if let Some(interface) = &paths.interface {
+            let library = join_system_path(&format!("{interface}/lib"), legacy);
+            self.search_paths.push(library);
+        }
+        if paths.use_tools {
+            let architecture = if paths.older_layout { legacy } else { modern };
+            let library = join_system_path(&format!("{}/lib", paths.tools), architecture);
+            let atlmfc = join_system_path(&format!("{}/atlmfc/lib", paths.tools), architecture);
+            self.search_paths.push(library);
+            self.search_paths.push(atlmfc);
+        }
+        if let Some(crt) = &paths.crt {
+            if !modern.is_empty() {
+                self.search_paths.push(join_system_path(crt, modern));
+            }
+        }
+        if let Some(library) = &paths.kit_library {
+            if paths.kit_major >= 8 {
+                self.search_paths.push(join_system_path(library, modern));
+            } else if self.machine == machine::I386 {
+                self.search_paths.push(library.clone());
+            } else if self.machine == machine::AMD64 {
+                self.search_paths.push(join_system_path(library, "x64"));
+            }
+        }
+    }
+
     fn check_machine(&mut self, machine_number: u16, file: usize) {
         if machine_number == 0 {
             return;
         }
         if self.machine == 0 {
             self.machine = machine_number;
+            self.add_system_root_paths();
             return;
         }
         if self.machine != machine_number {
@@ -21042,6 +21205,7 @@ impl<'s> CoffContext<'s> {
         if machine_number != 0 {
             if self.machine == 0 {
                 self.machine = machine_number;
+                self.add_system_root_paths();
             } else if self.machine != machine_number {
                 let found = crate::compilers::pe::machine_name(machine_number);
                 let expected = crate::compilers::pe::machine_name(self.machine);
@@ -21381,6 +21545,36 @@ impl<'s> CoffContext<'s> {
         }
         self.search_paths.push(String::new());
         self.search_paths.extend(self.options.library_paths.clone());
+        if !self.options.mingw {
+            self.search_paths.extend([
+                format!("lib/clang/{CLANG_RUNTIME_VERSION}/lib/windows"),
+                format!("lib/clang/{CLANG_RUNTIME_VERSION}/lib"),
+                "lib".to_string(),
+            ]);
+            self.detect_system_root();
+            let options = &self.options;
+            if !(options.ignore_environment
+                || options.system_root.is_some()
+                || options.tools_directory.is_some()
+                || options.tools_version.is_some()
+                || options.kit_directory.is_some()
+                || options.kit_version.is_some())
+            {
+                if let Some(text) = options.library_environment.clone() {
+                    self.search_paths
+                        .extend(text.split(';').map(str::to_string));
+                }
+            }
+        } else if self.options.tools_directory.is_some() || self.options.system_root.is_some() {
+            self.warn(
+                caution("EI287", "An option has no effect in this link.")
+                    .with_context("Option: /winsysroot".to_string())
+                    .with_context(format!("Cause: {SYSTEM_ROOT_IGNORED}")),
+            );
+        }
+        if self.machine != 0 {
+            self.add_system_root_paths();
+        }
         let debug_collect = self.options.debug_collect;
         self.collect = self
             .options
@@ -21505,6 +21699,15 @@ impl<'s> CoffContext<'s> {
                 "The target machine was not given, so x64 is assumed.",
             ));
             self.machine = machine::AMD64;
+            self.add_system_root_paths();
+        }
+        if self.options.print_search_paths {
+            let mut text = "Library search paths:\n".to_string();
+            for path in &self.search_paths {
+                let shown = if path.is_empty() { "(cwd)" } else { path };
+                text.push_str(&format!("  {shown}\n"));
+            }
+            self.messages.push(text);
         }
         for library in self.options.default_libraries.clone() {
             if let Some(path) = self.find_library_if_new(&library) {
@@ -21622,6 +21825,7 @@ impl<'s> CoffContext<'s> {
             };
             self.options.output = format!("{stem}{extension}");
         }
+        self.check_map_options();
         self.image_base = self.options.image_base.unwrap_or(if self.is_64() {
             if self.options.dll {
                 0x1_8000_0000
@@ -21752,6 +21956,16 @@ impl<'s> CoffContext<'s> {
         }
         for alias in aliases {
             self.resolve_weak_alias(alias);
+        }
+        if self.options.mingw {
+            let found = self
+                .object_order
+                .iter()
+                .position(|file| is_runtime_end(&self.objects[*file].name));
+            if let Some(position) = found {
+                let file = self.object_order.remove(position);
+                self.object_order.push(file);
+            }
         }
         if self.options.dll || !self.exports.is_empty() {
             self.fix_exports();
@@ -23207,6 +23421,14 @@ impl<'s> CoffContext<'s> {
             }
             export.export_name = symbol;
         }
+        if self.options.kill_at && self.machine == machine::I386 {
+            for export in self.exports.iter_mut() {
+                export.name = kill_at(&export.name, true);
+                export.export_name = kill_at(&export.export_name, false);
+                export.external_name = kill_at(&export.external_name, true);
+                export.symbol_name = kill_at(&export.symbol_name, true);
+            }
+        }
         let priority = |source: u8| match source {
             export_source::DIRECTIVES => 1,
             export_source::EXPORT_ALL => 2,
@@ -23543,6 +23765,8 @@ const STRING_TABLE_MISSING: &str =
     "No StringTable subsection was encountered, but there are string table references";
 
 const ALIGN_WITHOUT_DRIVER: &str = "/align specified without /driver; image may not run";
+const SYSTEM_ROOT_IGNORED: &str = "ignoring /vctoolsdir or /winsysroot flags in MinGW mode";
+const CLANG_RUNTIME_VERSION: &str = "1";
 
 const INFER_SANITIZER_IGNORED: &str = "ignoring '/inferasanlibs', this flag is not supported";
 
@@ -23667,6 +23891,112 @@ pub fn link_coff(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>)
     link_coff_in(arguments, source, "", &[])
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SystemPaths {
+    pub tools: String,
+    pub older_layout: bool,
+    pub interface: Option<String>,
+    pub use_tools: bool,
+    pub crt: Option<String>,
+    pub kit_library: Option<String>,
+    pub kit_major: u32,
+}
+
+fn join_system_path(base: &str, part: &str) -> String {
+    if part.is_empty() {
+        return base.to_string();
+    }
+    if base.is_empty() {
+        return part.to_string();
+    }
+    if base.ends_with('/') {
+        format!("{base}{part}")
+    } else {
+        format!("{base}/{part}")
+    }
+}
+
+fn parse_version_tuple(text: &str) -> Option<Vec<u32>> {
+    let parts: Vec<&str> = text.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    parts
+        .iter()
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                None
+            } else {
+                part.parse::<u32>().ok()
+            }
+        })
+        .collect()
+}
+
+fn is_runtime_end(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".o") else {
+        return false;
+    };
+    if stem.ends_with("crtend") {
+        return true;
+    }
+    let mut letters = stem.chars();
+    letters.next_back().is_some() && letters.as_str().ends_with("crtend")
+}
+
+fn format_map_time(seconds: u64) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = (seconds / 86400) as i64;
+    let rest = seconds % 86400;
+    let weekday = ((days + 4) % 7) as usize;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{} {} {:2} {:02}:{:02}:{:02} {}",
+        DAYS[weekday],
+        MONTHS[(month - 1) as usize],
+        day,
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60,
+        year
+    )
+}
+
+fn kill_at(symbol: &str, prefix: bool) -> String {
+    if symbol.is_empty() {
+        return String::new();
+    }
+    let end = symbol
+        .char_indices()
+        .skip(1)
+        .find(|(_, letter)| *letter == '@')
+        .map(|(position, _)| position)
+        .unwrap_or(symbol.len());
+    let trimmed = &symbol[..end];
+    match trimmed.strip_prefix('@') {
+        Some(rest) if prefix => format!("_{rest}"),
+        Some(rest) => rest.to_string(),
+        None if prefix && !trimmed.starts_with('_') => format!("_{trimmed}"),
+        None => trimmed.to_string(),
+    }
+}
+
 pub fn link_coff_in(
     arguments: &[String],
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
@@ -23720,6 +24050,9 @@ pub fn link_coff_in(
         };
     }
     let mut options = options;
+    options.library_environment = variable("LIB");
+    options.tools_environment = variable("VCToolsInstallDir");
+    options.install_environment = variable("VCINSTALLDIR");
     let mut epoch_problem = None;
     if options.timestamp.is_none() {
         if let Some(epoch) = variable("SOURCE_DATE_EPOCH") {
@@ -24774,7 +25107,7 @@ impl<'s> CoffContext<'s> {
     }
 
     fn report_ignored_options(&mut self) {
-        if self.options.align_given && !self.options.driver {
+        if self.options.align_given && !self.options.driver_plain {
             self.warn(
                 caution("EI287", "An option has no effect in this link.")
                     .with_context("Option: /align".to_string())
@@ -25187,10 +25520,306 @@ impl<'s> CoffContext<'s> {
         } else {
             rest
         };
-        match demangle_itanium(input) {
+        let demangled = if input.starts_with('?') {
+            demangle_microsoft(input)
+        } else {
+            demangle_itanium(input)
+        };
+        match demangled {
             Some(demangled) if demangled != input => format!("{prefix}{demangled}"),
             _ => format!("{prefix}{rest}"),
         }
+    }
+
+    fn map_path_for(&self, requested: &str) -> String {
+        if !requested.is_empty() {
+            return requested.to_string();
+        }
+        let output = &self.options.output;
+        match output.rfind('.') {
+            Some(position) => format!("{}.map", &output[..position]),
+            None => format!("{output}.map"),
+        }
+    }
+
+    fn check_map_options(&mut self) {
+        let Some(requested) = self.options.program_map_path.clone() else {
+            return;
+        };
+        for value in self.options.map_information.clone() {
+            let lowered = value.to_ascii_lowercase();
+            if lowered == "exports" {
+                self.map_exports = true;
+            } else {
+                self.error(
+                    problem("EI202", "The linker does not recognize this option.")
+                        .with_context(format!("Option: /mapinfo:{lowered}"))
+                        .with_context(format!("Cause: unknown option: /mapinfo:{lowered}")),
+                );
+            }
+        }
+        if let Some(linker) = self.options.map_path.clone() {
+            let program = self.map_path_for(&requested);
+            if self.map_path_for(&linker) == program {
+                self.warn(
+                    caution("EI287", "An option has no effect in this link.")
+                        .with_context("Option: /lldmap".to_string())
+                        .with_context(format!(
+                            "Cause: /lldmap and /map have the same output file '{program}'.\n>>> ignoring /lldmap"
+                        )),
+                );
+                self.options.map_path = None;
+            }
+        }
+    }
+
+    fn map_symbol_file(&self, id: SymbolIndex) -> String {
+        let (name, parent) = match &self.symbols[id].kind {
+            CoffSymbolKind::ImportData { import } | CoffSymbolKind::ImportThunk { import, .. } => (
+                self.imports[*import].name.clone(),
+                self.imports[*import].parent.clone(),
+            ),
+            CoffSymbolKind::Regular {
+                file: Some(file), ..
+            }
+            | CoffSymbolKind::Common { file, .. } => (
+                self.objects[*file].name.clone(),
+                self.objects[*file].parent.clone(),
+            ),
+            _ => return String::new(),
+        };
+        let base = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+        let mut text = String::new();
+        if !parent.is_empty() {
+            let parent = base(&parent);
+            let stem = match parent.rfind('.') {
+                Some(position) if position > 0 => parent[..position].to_string(),
+                _ => parent,
+            };
+            text.push_str(&stem);
+            text.push(':');
+        }
+        text.push_str(&base(&name));
+        text
+    }
+
+    fn map_symbol_line(&self, id: SymbolIndex) -> String {
+        let rva = self.symbol_rva(id);
+        let (section, address, file) = match &self.symbols[id].kind {
+            CoffSymbolKind::Absolute { address } => (0, *address, "<absolute>".to_string()),
+            CoffSymbolKind::Synthetic { .. } => (0, 0, "<linker-defined>".to_string()),
+            CoffSymbolKind::Common { .. } => (0, 0, "<common>".to_string()),
+            _ => {
+                let output = self
+                    .symbol_chunk(id)
+                    .and_then(|chunk| self.chunk_output(chunk));
+                let (section, base) = output
+                    .map(|output| {
+                        (
+                            self.outputs[output].index,
+                            self.outputs[output].virtual_address,
+                        )
+                    })
+                    .unwrap_or((0, 0));
+                (section, rva.wrapping_sub(base), self.map_symbol_file(id))
+            }
+        };
+        let mut line = format!(
+            " {section:04x}:{address:08x}       {:<26} {:016x}",
+            self.symbols[id].name,
+            self.image_base.wrapping_add(rva)
+        );
+        if !file.is_empty() {
+            line.push_str("     ");
+            line.push_str(&file);
+        }
+        line
+    }
+
+    fn sorted_map_symbols(&self, symbols: Vec<SymbolIndex>) -> Vec<SymbolIndex> {
+        let mut seen: BTreeSet<SymbolIndex> = BTreeSet::new();
+        let mut unique: Vec<(u64, usize, SymbolIndex)> = Vec::new();
+        for (position, id) in symbols.into_iter().enumerate() {
+            if seen.insert(id) {
+                unique.push((
+                    self.image_base.wrapping_add(self.symbol_rva(id)),
+                    position,
+                    id,
+                ));
+            }
+        }
+        unique.sort_by_key(|(address, position, _)| (*address, *position));
+        unique.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    fn write_program_map(&mut self, stamp: u32) {
+        use crate::compilers::pe::{section_characteristic as character, storage_class};
+        let mut publics: Vec<SymbolIndex> = Vec::new();
+        let mut statics: Vec<SymbolIndex> = Vec::new();
+        for file in self.object_order.clone() {
+            let raw: BTreeMap<usize, (u8, u8, i32)> = self.objects[file]
+                .object
+                .symbols
+                .iter()
+                .map(|symbol| {
+                    (
+                        symbol.index as usize,
+                        (
+                            symbol.storage_class,
+                            symbol.auxiliary_count,
+                            symbol.section_number,
+                        ),
+                    )
+                })
+                .collect();
+            for (index, slot) in self.objects[file].symbols.clone().into_iter().enumerate() {
+                let Some(id) = slot else {
+                    continue;
+                };
+                let live = match &self.symbols[id].kind {
+                    CoffSymbolKind::Regular {
+                        chunk: Some(chunk), ..
+                    } => self.chunks[*chunk].live,
+                    CoffSymbolKind::Regular { chunk: None, .. } => false,
+                    CoffSymbolKind::ImportData { import } => self.imports[*import].live,
+                    CoffSymbolKind::ImportThunk { chunk, .. } => self.chunks[*chunk].live,
+                    kind => {
+                        self.symbols[id].is_defined()
+                            && !matches!(kind, CoffSymbolKind::Undefined { .. })
+                    }
+                };
+                if !live || !self.symbols[id].is_defined() {
+                    continue;
+                }
+                let regular_here = matches!(
+                    &self.symbols[id].kind,
+                    CoffSymbolKind::Regular { file: Some(owner), .. } if *owner == file
+                ) || matches!(
+                    &self.symbols[id].kind,
+                    CoffSymbolKind::Common { file: owner, .. } if *owner == file
+                );
+                match raw.get(&index) {
+                    Some(&(class, auxiliary, section)) if regular_here => {
+                        let section_definition = auxiliary > 0
+                            && (class == storage_class::STATIC
+                                || (class == storage_class::EXTERNAL && section == -1));
+                        if section_definition || class == storage_class::LABEL {
+                            continue;
+                        }
+                        if class == storage_class::STATIC {
+                            statics.push(id);
+                        } else {
+                            publics.push(id);
+                        }
+                    }
+                    _ => publics.push(id),
+                }
+            }
+        }
+        for import in &self.imports {
+            if !import.live {
+                continue;
+            }
+            if let Some(id) = import.import_symbol {
+                publics.push(id);
+            }
+            if let (Some(id), Some(chunk)) = (import.thunk_symbol, import.thunk_chunk) {
+                if self.chunks[chunk].live {
+                    publics.push(id);
+                }
+            }
+        }
+        let publics = self.sorted_map_symbols(publics);
+        let statics = self.sorted_map_symbols(statics);
+        let output = &self.options.output;
+        let file_name = output.rsplit(['/', '\\']).next().unwrap_or(output);
+        let application = match file_name.rfind('.') {
+            Some(position) if position > 0 => &file_name[..position],
+            _ => file_name,
+        };
+        let mut text = format!(" {application}\n\n");
+        let when = if self.options.repro {
+            "Repro mode".to_string()
+        } else {
+            format_map_time(u64::from(stamp))
+        };
+        text.push_str(&format!(" Timestamp is {stamp:08x} ({when})\n\n"));
+        text.push_str(&format!(
+            " Preferred load address is {:016x}\n\n",
+            self.image_base
+        ));
+        text.push_str(" Start         Length     Name                   Class\n");
+        for output in &self.outputs {
+            let mut ranges: Vec<(usize, usize)> = Vec::new();
+            for &chunk in &output.chunks {
+                if self.chunks[chunk].kind != CoffChunkKind::Section {
+                    continue;
+                }
+                match ranges.last_mut() {
+                    Some((first, last)) if self.chunks[*first].name == self.chunks[chunk].name => {
+                        *last = chunk;
+                    }
+                    _ => ranges.push((chunk, chunk)),
+                }
+            }
+            let wanted = character::CODE | character::READ | character::EXECUTE;
+            let class = if output.characteristics & wanted == wanted {
+                "CODE"
+            } else {
+                "DATA"
+            };
+            for (first, last) in ranges {
+                let start = self.chunk_rva(first);
+                let size = self.chunk_rva(last) + self.chunks[last].size - start;
+                text.push_str(&format!(
+                    " {:04x}:{:08x} {size:08x}H {:<23} {class}\n",
+                    output.index,
+                    start - output.virtual_address,
+                    self.chunks[first].name
+                ));
+            }
+        }
+        text.push_str("\n  Address         Publics by Value              Rva+Base               Lib:Object\n\n");
+        for id in publics {
+            text.push_str(&self.map_symbol_line(id));
+            text.push('\n');
+        }
+        text.push('\n');
+        let mut entry_section = 0usize;
+        let mut entry_address = 0u64;
+        if !self.options.no_entry {
+            if let Some(entry) = self.entry {
+                if let Some(output) = self
+                    .symbol_chunk(entry)
+                    .and_then(|chunk| self.chunk_output(chunk))
+                {
+                    entry_section = self.outputs[output].index;
+                    entry_address = self.symbol_rva(entry) - self.outputs[output].virtual_address;
+                }
+            }
+        }
+        text.push_str(&format!(
+            " entry point at         {entry_section:04x}:{entry_address:08x}\n\n Static symbols\n\n"
+        ));
+        for id in statics {
+            text.push_str(&self.map_symbol_line(id));
+            text.push('\n');
+        }
+        if self.map_exports {
+            text.push_str("\n Exports\n\n  ordinal    name\n\n");
+            for export in &self.exports {
+                text.push_str(&format!("  {:7}    {}\n", export.ordinal, export.name));
+                if !export.external_name.is_empty() && export.external_name != export.name {
+                    text.push_str(&format!(
+                        "               exported name: {}\n",
+                        export.external_name
+                    ));
+                }
+            }
+        }
+        let requested = self.options.program_map_path.clone().unwrap_or_default();
+        let path = self.map_path_for(&requested);
+        self.extra_outputs.push((path, text.into_bytes()));
     }
 
     fn write_linker_map(&mut self) {
@@ -26116,7 +26745,23 @@ impl<'s> CoffContext<'s> {
                     }
                     continue;
                 }
-                let name = entry.name.clone();
+                let mut name = entry.name.clone();
+                if self.options.mingw
+                    && entry.kind == CoffChunkKind::Section
+                    && entry.comdat
+                    && [
+                        ".text$",
+                        ".data$",
+                        ".rdata$",
+                        ".pdata$",
+                        ".xdata$",
+                        ".eh_frame$",
+                    ]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                {
+                    name = name.split('$').next().unwrap_or_default().to_string();
+                }
                 if name.starts_with(".tls") {
                     self.thread_local_alignment = self.thread_local_alignment.max(entry.alignment);
                 }
@@ -26351,6 +26996,19 @@ impl<'s> CoffContext<'s> {
             self.outputs[edata].chunks.extend(chunks);
             self.export_range = Some((first, last));
         }
+        for index in 0..self.exports.len() {
+            let Some(id) = self.exports[index].symbol else {
+                continue;
+            };
+            if self.symbols[id].name.starts_with("??_G") {
+                let shown = self.display_symbol_name(&self.symbols[id].name);
+                self.warn(
+                    caution("EI292", "An export names a deleting destructor.")
+                        .with_context(format!("Symbol: {}", self.symbols[id].name))
+                        .with_context(format!("Cause: export of deleting dtor: {shown}")),
+                );
+            }
+        }
         if let (Some(first), Some(last)) = (
             self.outputs[pdata].chunks.first().copied(),
             self.outputs[pdata].chunks.last().copied(),
@@ -26451,6 +27109,11 @@ impl<'s> CoffContext<'s> {
             self.write_linker_map();
         }
         self.write_time_stamp(&mut bytes);
+        if self.options.program_map_path.is_some() {
+            let at = self.coff_header_offset() + 4;
+            let stamp = crate::compilers::pe::read_u32(&bytes, at).unwrap_or(0);
+            self.write_program_map(stamp);
+        }
         if self.write_check_sum {
             let offset = self.coff_header_offset() + 20 + 64;
             crate::compilers::pe::write_u32(&mut bytes, offset, 0);
@@ -38594,6 +39257,816 @@ pub fn demangle_itanium(name: &str) -> Option<String> {
         return None;
     }
     Some(mangled_text(&node))
+}
+
+#[derive(Clone, Debug)]
+enum MicrosoftType {
+    Plain {
+        text: String,
+        qualifiers: String,
+    },
+    Pointer {
+        pointee: Box<MicrosoftType>,
+        symbol: &'static str,
+        qualifiers: String,
+    },
+    Function(Box<MicrosoftSignature>),
+}
+
+#[derive(Clone, Debug, Default)]
+struct MicrosoftSignature {
+    result: Option<MicrosoftType>,
+    convention: &'static str,
+    parameters: String,
+    qualifiers: String,
+}
+
+#[derive(Clone, Debug)]
+enum MicrosoftIdentifier {
+    Name(String),
+    Constructor,
+    Destructor,
+    Conversion,
+}
+
+fn microsoft_qualifier_words(code: u8) -> Option<&'static str> {
+    Some(match code {
+        b'A' => "",
+        b'B' => "const",
+        b'C' => "volatile",
+        b'D' => "const volatile",
+        _ => return None,
+    })
+}
+
+fn microsoft_type_text(kind: &MicrosoftType, declarator: &str) -> String {
+    match kind {
+        MicrosoftType::Plain { text, qualifiers } => {
+            let mut out = text.clone();
+            if !qualifiers.is_empty() {
+                out.push(' ');
+                out.push_str(qualifiers);
+            }
+            if !declarator.is_empty() {
+                out.push(' ');
+                out.push_str(declarator);
+            }
+            out
+        }
+        MicrosoftType::Pointer {
+            pointee,
+            symbol,
+            qualifiers,
+        } => {
+            let mut combined = format!("{symbol}{qualifiers}");
+            if !declarator.is_empty() {
+                if combined.ends_with(|letter: char| letter.is_ascii_alphanumeric()) {
+                    combined.push(' ');
+                }
+                combined.push_str(declarator);
+            }
+            microsoft_type_text(pointee, &combined)
+        }
+        MicrosoftType::Function(signature) => {
+            let result = signature
+                .result
+                .as_ref()
+                .map(|result| format!("{} ", microsoft_type_text(result, "")))
+                .unwrap_or_default();
+            format!(
+                "{result}({} {declarator})({}){}",
+                signature.convention, signature.parameters, signature.qualifiers
+            )
+        }
+    }
+}
+
+fn microsoft_operator(code: u8, underscored: bool) -> Option<&'static str> {
+    Some(if underscored {
+        match code {
+            b'0' => "operator/=",
+            b'1' => "operator%=",
+            b'2' => "operator>>=",
+            b'3' => "operator<<=",
+            b'4' => "operator&=",
+            b'5' => "operator|=",
+            b'6' => "operator^=",
+            b'D' => "`vbase dtor'",
+            b'E' => "`vector deleting dtor'",
+            b'F' => "`default ctor closure'",
+            b'G' => "`scalar deleting dtor'",
+            b'H' => "`vector ctor iterator'",
+            b'I' => "`vector dtor iterator'",
+            b'J' => "`vector vbase ctor iterator'",
+            b'K' => "`virtual displacement map'",
+            b'L' => "`eh vector ctor iterator'",
+            b'M' => "`eh vector dtor iterator'",
+            b'N' => "`eh vector vbase ctor iterator'",
+            b'O' => "`copy ctor closure'",
+            b'T' => "`local vftable ctor closure'",
+            b'U' => "operator new[]",
+            b'V' => "operator delete[]",
+            _ => return None,
+        }
+    } else {
+        match code {
+            b'2' => "operator new",
+            b'3' => "operator delete",
+            b'4' => "operator=",
+            b'5' => "operator>>",
+            b'6' => "operator<<",
+            b'7' => "operator!",
+            b'8' => "operator==",
+            b'9' => "operator!=",
+            b'A' => "operator[]",
+            b'C' => "operator->",
+            b'D' => "operator*",
+            b'E' => "operator++",
+            b'F' => "operator--",
+            b'G' => "operator-",
+            b'H' => "operator+",
+            b'I' => "operator&",
+            b'J' => "operator->*",
+            b'K' => "operator/",
+            b'L' => "operator%",
+            b'M' => "operator<",
+            b'N' => "operator<=",
+            b'O' => "operator>",
+            b'P' => "operator>=",
+            b'Q' => "operator,",
+            b'R' => "operator()",
+            b'S' => "operator~",
+            b'T' => "operator^",
+            b'U' => "operator|",
+            b'V' => "operator&&",
+            b'W' => "operator||",
+            b'X' => "operator*=",
+            b'Y' => "operator+=",
+            b'Z' => "operator-=",
+            _ => return None,
+        }
+    })
+}
+
+struct MicrosoftDemangler<'a> {
+    text: &'a [u8],
+    at: usize,
+    names: Vec<String>,
+    parameters: Vec<MicrosoftType>,
+    depth: usize,
+}
+
+impl<'a> MicrosoftDemangler<'a> {
+    fn peek(&self) -> u8 {
+        self.text.get(self.at).copied().unwrap_or(0)
+    }
+
+    fn next(&mut self) -> Option<u8> {
+        let value = *self.text.get(self.at)?;
+        self.at += 1;
+        Some(value)
+    }
+
+    fn consume(&mut self, prefix: &str) -> bool {
+        if self.text[self.at..].starts_with(prefix.as_bytes()) {
+            self.at += prefix.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn memorize(&mut self, name: &str) {
+        if self.names.len() < 10 && !self.names.iter().any(|held| held == name) {
+            self.names.push(name.to_string());
+        }
+    }
+
+    fn number(&mut self) -> Option<(bool, u64)> {
+        let negative = self.consume("?");
+        let first = self.next()?;
+        if first.is_ascii_digit() {
+            return Some((negative, u64::from(first - b'0') + 1));
+        }
+        let mut value = 0u64;
+        let mut letter = first;
+        loop {
+            if letter == b'@' {
+                return Some((negative, value));
+            }
+            if !(b'A'..=b'P').contains(&letter) {
+                return None;
+            }
+            value = value.checked_mul(16)? + u64::from(letter - b'A');
+            letter = self.next()?;
+        }
+    }
+
+    fn simple_name(&mut self, memorize: bool) -> Option<String> {
+        let rest = &self.text[self.at..];
+        let end = rest.iter().position(|byte| *byte == b'@')?;
+        if end == 0 {
+            return None;
+        }
+        let name = std::str::from_utf8(&rest[..end]).ok()?.to_string();
+        self.at += end + 1;
+        if memorize {
+            self.memorize(&name);
+        }
+        Some(name)
+    }
+
+    fn back_reference(&mut self) -> Option<String> {
+        let index = usize::from(self.next()? - b'0');
+        self.names.get(index).cloned()
+    }
+
+    fn template_name(&mut self) -> Option<String> {
+        self.depth += 1;
+        if self.depth > 32 {
+            return None;
+        }
+        let outer_names = std::mem::take(&mut self.names);
+        let outer_parameters = std::mem::take(&mut self.parameters);
+        let identifier = self.unqualified_symbol_name();
+        let arguments = identifier.as_ref().and_then(|_| self.template_arguments());
+        self.names = outer_names;
+        self.parameters = outer_parameters;
+        self.depth -= 1;
+        let name = match identifier? {
+            MicrosoftIdentifier::Name(name) => name,
+            _ => return None,
+        };
+        let text = format!("{name}<{}>", arguments?);
+        self.memorize(&text);
+        Some(text)
+    }
+
+    fn template_arguments(&mut self) -> Option<String> {
+        let mut arguments: Vec<String> = Vec::new();
+        while self.peek() != b'@' {
+            if self.consume("$S")
+                || self.consume("$$V")
+                || self.consume("$$$V")
+                || self.consume("$$Z")
+            {
+                continue;
+            }
+            if self.consume("$0") {
+                let (negative, value) = self.number()?;
+                arguments.push(if negative {
+                    format!("-{value}")
+                } else {
+                    value.to_string()
+                });
+                continue;
+            }
+            let rest = &self.text[self.at..];
+            if rest.starts_with(b"$")
+                && !(rest.starts_with(b"$$Q")
+                    || rest.starts_with(b"$$R")
+                    || rest.starts_with(b"$$T"))
+            {
+                return None;
+            }
+            let kind = self.parse_type(false)?;
+            arguments.push(microsoft_type_text(&kind, ""));
+        }
+        self.at += 1;
+        Some(arguments.join(", "))
+    }
+
+    fn unqualified_symbol_name(&mut self) -> Option<MicrosoftIdentifier> {
+        let letter = self.peek();
+        if letter.is_ascii_digit() {
+            return self.back_reference().map(MicrosoftIdentifier::Name);
+        }
+        if self.consume("?$") {
+            return self.template_name().map(MicrosoftIdentifier::Name);
+        }
+        if self.consume("?") {
+            let code = self.next()?;
+            return Some(match code {
+                b'0' => MicrosoftIdentifier::Constructor,
+                b'1' => MicrosoftIdentifier::Destructor,
+                b'B' => MicrosoftIdentifier::Conversion,
+                b'_' => {
+                    let code = self.next()?;
+                    MicrosoftIdentifier::Name(microsoft_operator(code, true)?.to_string())
+                }
+                other => MicrosoftIdentifier::Name(microsoft_operator(other, false)?.to_string()),
+            });
+        }
+        self.simple_name(true).map(MicrosoftIdentifier::Name)
+    }
+
+    fn scope_chain(&mut self) -> Option<Vec<String>> {
+        let mut scopes: Vec<String> = Vec::new();
+        while !self.consume("@") {
+            let letter = self.peek();
+            if letter == 0 {
+                return None;
+            }
+            let piece = if letter.is_ascii_digit() {
+                self.back_reference()?
+            } else if self.consume("?$") {
+                self.template_name()?
+            } else if self.consume("?A") {
+                let rest = &self.text[self.at..];
+                let end = rest.iter().position(|byte| *byte == b'@')?;
+                let key = std::str::from_utf8(&rest[..end]).ok()?.to_string();
+                self.at += end + 1;
+                self.memorize(&key);
+                "`anonymous namespace'".to_string()
+            } else if letter == b'?' {
+                return None;
+            } else {
+                self.simple_name(true)?
+            };
+            scopes.push(piece);
+        }
+        scopes.reverse();
+        Some(scopes)
+    }
+
+    fn type_name(&mut self) -> Option<String> {
+        let letter = self.peek();
+        let first = if letter.is_ascii_digit() {
+            self.back_reference()?
+        } else if self.consume("?$") {
+            self.template_name()?
+        } else {
+            self.simple_name(true)?
+        };
+        let mut scopes = self.scope_chain()?;
+        scopes.push(first);
+        Some(scopes.join("::"))
+    }
+
+    fn primitive(&mut self) -> Option<&'static str> {
+        if self.consume("$$T") {
+            return Some("std::nullptr_t");
+        }
+        let letter = self.next()?;
+        Some(match letter {
+            b'X' => "void",
+            b'C' => "signed char",
+            b'D' => "char",
+            b'E' => "unsigned char",
+            b'F' => "short",
+            b'G' => "unsigned short",
+            b'H' => "int",
+            b'I' => "unsigned int",
+            b'J' => "long",
+            b'K' => "unsigned long",
+            b'M' => "float",
+            b'N' => "double",
+            b'O' => "long double",
+            b'_' => match self.next()? {
+                b'N' => "bool",
+                b'J' => "__int64",
+                b'K' => "unsigned __int64",
+                b'W' => "wchar_t",
+                b'Q' => "char8_t",
+                b'S' => "char16_t",
+                b'U' => "char32_t",
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+
+    fn pointer_extension(&mut self) {
+        while matches!(self.peek(), b'E' | b'I' | b'F') {
+            self.at += 1;
+        }
+    }
+
+    fn parse_type(&mut self, mangled_qualifiers: bool) -> Option<MicrosoftType> {
+        self.depth += 1;
+        if self.depth > 64 {
+            return None;
+        }
+        let mut qualifiers = String::new();
+        if mangled_qualifiers {
+            qualifiers = microsoft_qualifier_words(self.next()?)?.to_string();
+        }
+        let letter = self.peek();
+        let kind = if matches!(letter, b'T' | b'U' | b'V' | b'W') {
+            self.at += 1;
+            let tag = match letter {
+                b'T' => "union",
+                b'U' => "struct",
+                b'V' => "class",
+                _ => {
+                    self.next()?;
+                    "enum"
+                }
+            };
+            MicrosoftType::Plain {
+                text: format!("{tag} {}", self.type_name()?),
+                qualifiers: String::new(),
+            }
+        } else if matches!(letter, b'P' | b'Q' | b'R' | b'S' | b'A' | b'B')
+            || self.text[self.at..].starts_with(b"$$Q")
+            || self.text[self.at..].starts_with(b"$$R")
+        {
+            let (symbol, own) = if self.consume("$$Q") {
+                ("&&", "")
+            } else if self.consume("$$R") {
+                ("&&", "volatile")
+            } else {
+                match self.next()? {
+                    b'A' => ("&", ""),
+                    b'B' => ("&", "volatile"),
+                    b'P' => ("*", ""),
+                    b'Q' => ("*", "const"),
+                    b'R' => ("*", "volatile"),
+                    _ => ("*", "const volatile"),
+                }
+            };
+            let pointee = if self.consume("6") {
+                MicrosoftType::Function(Box::new(self.function_type(false)?))
+            } else {
+                self.pointer_extension();
+                self.parse_type(true)?
+            };
+            MicrosoftType::Pointer {
+                pointee: Box::new(pointee),
+                symbol,
+                qualifiers: own.to_string(),
+            }
+        } else {
+            MicrosoftType::Plain {
+                text: self.primitive()?.to_string(),
+                qualifiers: String::new(),
+            }
+        };
+        self.depth -= 1;
+        Some(match kind {
+            MicrosoftType::Plain {
+                text,
+                qualifiers: held,
+            } if !qualifiers.is_empty() => {
+                let joined = if held.is_empty() {
+                    qualifiers
+                } else {
+                    format!("{held} {qualifiers}")
+                };
+                MicrosoftType::Plain {
+                    text,
+                    qualifiers: joined,
+                }
+            }
+            other => other,
+        })
+    }
+
+    fn calling_convention(&mut self) -> Option<&'static str> {
+        Some(match self.next()? {
+            b'A' | b'B' => "__cdecl",
+            b'C' | b'D' => "__pascal",
+            b'E' | b'F' => "__thiscall",
+            b'G' | b'H' => "__stdcall",
+            b'I' | b'J' => "__fastcall",
+            b'M' | b'N' => "__clrcall",
+            b'O' | b'P' => "__eabi",
+            b'Q' => "__vectorcall",
+            b'S' => "__swift_1",
+            b'T' => "__swift_2",
+            b'W' => "__swift_3",
+            _ => return None,
+        })
+    }
+
+    fn function_type(&mut self, this_qualifiers: bool) -> Option<MicrosoftSignature> {
+        let mut signature = MicrosoftSignature::default();
+        let mut words: Vec<&str> = Vec::new();
+        let mut reference = "";
+        if this_qualifiers {
+            loop {
+                match self.peek() {
+                    b'E' | b'F' => self.at += 1,
+                    b'I' => {
+                        self.at += 1;
+                        words.push("__restrict");
+                    }
+                    _ => break,
+                }
+            }
+            if self.consume("G") {
+                reference = " &";
+            } else if self.consume("H") {
+                reference = " &&";
+            }
+            let base = microsoft_qualifier_words(self.next()?)?;
+            if !base.is_empty() {
+                words.insert(0, base);
+            }
+        }
+        signature.convention = self.calling_convention()?;
+        if !self.consume("@") {
+            let mut qualifiers = String::new();
+            if self.consume("?") {
+                qualifiers = microsoft_qualifier_words(self.next()?)?.to_string();
+            }
+            let result = self.parse_type(false)?;
+            signature.result = Some(match result {
+                MicrosoftType::Plain { text, .. } if !qualifiers.is_empty() => {
+                    MicrosoftType::Plain { text, qualifiers }
+                }
+                other => other,
+            });
+        }
+        signature.parameters = self.parameter_list()?;
+        if !self.consume("_E") && !self.consume("Z") {
+            return None;
+        }
+        for word in words {
+            signature.qualifiers.push(' ');
+            signature.qualifiers.push_str(word);
+        }
+        signature.qualifiers.push_str(reference);
+        Some(signature)
+    }
+
+    fn parameter_list(&mut self) -> Option<String> {
+        if self.consume("X") {
+            return Some("void".to_string());
+        }
+        let mut parameters: Vec<String> = Vec::new();
+        while !matches!(self.peek(), b'@' | b'Z' | 0) {
+            if self.peek().is_ascii_digit() {
+                let index = usize::from(self.next()? - b'0');
+                let kind = self.parameters.get(index)?.clone();
+                parameters.push(microsoft_type_text(&kind, ""));
+                continue;
+            }
+            let start = self.at;
+            let kind = self.parse_type(false)?;
+            if self.at - start > 1 && self.parameters.len() < 10 {
+                self.parameters.push(kind.clone());
+            }
+            parameters.push(microsoft_type_text(&kind, ""));
+        }
+        if self.consume("Z") {
+            parameters.push("...".to_string());
+        } else if !self.consume("@") {
+            return None;
+        }
+        Some(parameters.join(", "))
+    }
+
+    fn special_table(&mut self, label: &str) -> Option<String> {
+        let name = self.type_name()?;
+        if !matches!(self.next()?, b'6' | b'7') {
+            return None;
+        }
+        let qualifiers = microsoft_qualifier_words(self.next()?)?;
+        let mut targets: Vec<String> = Vec::new();
+        while !self.consume("@") {
+            targets.push(self.type_name()?);
+        }
+        let prefix = if qualifiers.is_empty() {
+            String::new()
+        } else {
+            format!("{qualifiers} ")
+        };
+        let mut text = format!("{prefix}{name}::{label}");
+        if !targets.is_empty() {
+            let shown: Vec<String> = targets.iter().map(|target| format!("`{target}'")).collect();
+            text.push_str(&format!("{{for {}}}", shown.join("s ")));
+        }
+        Some(text)
+    }
+
+    fn literal_character(&mut self) -> Option<u8> {
+        let letter = self.next()?;
+        if letter != b'?' {
+            return Some(letter);
+        }
+        let code = self.next()?;
+        Some(match code {
+            b'$' => {
+                let high = self.next()?.checked_sub(b'A')?;
+                let low = self.next()?.checked_sub(b'A')?;
+                if high > 15 || low > 15 {
+                    return None;
+                }
+                high * 16 + low
+            }
+            b'0'..=b'9' => b",/\\:. \n\t'-"[usize::from(code - b'0')],
+            b'a'..=b'z' => code - b'a' + 0xe1,
+            b'A'..=b'Z' => code - b'A' + 0xc1,
+            _ => return None,
+        })
+    }
+
+    fn string_literal(&mut self) -> Option<String> {
+        let wide = match self.next()? {
+            b'0' => false,
+            b'1' => true,
+            _ => return None,
+        };
+        let (_, length) = self.number()?;
+        let rest = &self.text[self.at..];
+        let end = rest.iter().position(|byte| *byte == b'@')?;
+        self.at += end + 1;
+        let mut bytes: Vec<u8> = Vec::new();
+        while !self.consume("@") {
+            bytes.push(self.literal_character()?);
+        }
+        let units: Vec<u32> = if wide {
+            bytes
+                .chunks(2)
+                .map(|pair| u32::from(pair[0]) << 8 | u32::from(*pair.get(1).unwrap_or(&0)))
+                .collect()
+        } else {
+            bytes.iter().map(|byte| u32::from(*byte)).collect()
+        };
+        let unit_size = if wide { 2 } else { 1 };
+        let terminated = units.last() == Some(&0);
+        let shown = if terminated {
+            &units[..units.len() - 1]
+        } else {
+            &units[..]
+        };
+        let mut text = String::new();
+        for unit in shown {
+            match char::from_u32(*unit) {
+                Some('\n') => text.push_str("\\n"),
+                Some('\t') => text.push_str("\\t"),
+                Some('"') => text.push_str("\\\""),
+                Some(letter) => text.push(letter),
+                None => return None,
+            }
+        }
+        let prefix = if wide { "L" } else { "" };
+        let truncated = !terminated || (units.len() as u64) * unit_size < length;
+        let suffix = if truncated { "..." } else { "" };
+        Some(format!("{prefix}\"{text}\"{suffix}"))
+    }
+
+    fn symbol(&mut self) -> Option<String> {
+        if !self.consume("?") {
+            return None;
+        }
+        let tables = [
+            ("?_7", "`vftable'"),
+            ("?_8", "`vbtable'"),
+            ("?_S", "`local vftable'"),
+            ("?_R4", "`RTTI Complete Object Locator'"),
+        ];
+        for (prefix, label) in tables {
+            if self.consume(prefix) {
+                return self.special_table(label);
+            }
+        }
+        if self.consume("?_R0") {
+            let kind = if self.consume("?") {
+                self.parse_type(true)?
+            } else {
+                self.parse_type(false)?
+            };
+            if !self.consume("@8") {
+                return None;
+            }
+            return Some(format!(
+                "{} `RTTI Type Descriptor'",
+                microsoft_type_text(&kind, "")
+            ));
+        }
+        if self.consume("?_R1") {
+            let mut numbers: Vec<String> = Vec::new();
+            for _ in 0..4 {
+                let (negative, value) = self.number()?;
+                numbers.push(if negative {
+                    format!("-{value}")
+                } else {
+                    value.to_string()
+                });
+            }
+            let name = self.type_name()?;
+            if !self.consume("8") {
+                return None;
+            }
+            return Some(format!(
+                "{name}::`RTTI Base Class Descriptor at ({})'",
+                numbers.join(", ")
+            ));
+        }
+        for (prefix, label) in [
+            ("?_R2", "`RTTI Base Class Array'"),
+            ("?_R3", "`RTTI Class Hierarchy Descriptor'"),
+        ] {
+            if self.consume(prefix) {
+                let name = self.type_name()?;
+                if !self.consume("8") {
+                    return None;
+                }
+                return Some(format!("{name}::{label}"));
+            }
+        }
+        if self.consume("?_C@_") {
+            return self.string_literal();
+        }
+        let identifier = self.unqualified_symbol_name()?;
+        let scopes = self.scope_chain()?;
+        let class = scopes.last().cloned().unwrap_or_default();
+        let base = match &identifier {
+            MicrosoftIdentifier::Name(name) => name.clone(),
+            MicrosoftIdentifier::Constructor => class.clone(),
+            MicrosoftIdentifier::Destructor => format!("~{class}"),
+            MicrosoftIdentifier::Conversion => "operator".to_string(),
+        };
+        let mut parts = scopes;
+        parts.push(base);
+        let mut name = parts.join("::");
+        let letter = self.peek();
+        if (b'0'..=b'4').contains(&letter) {
+            self.at += 1;
+            let prefix = match letter {
+                b'0' => "private: static ",
+                b'1' => "protected: static ",
+                b'2' => "public: static ",
+                _ => "",
+            };
+            let mut kind = self.parse_type(false)?;
+            match &mut kind {
+                MicrosoftType::Pointer { pointee, .. } => {
+                    self.pointer_extension();
+                    let extra = microsoft_qualifier_words(self.next()?)?;
+                    if let MicrosoftType::Plain { qualifiers, .. } = pointee.as_mut() {
+                        if !extra.is_empty() && !qualifiers.contains(extra) {
+                            if qualifiers.is_empty() {
+                                *qualifiers = extra.to_string();
+                            } else {
+                                *qualifiers = format!("{qualifiers} {extra}");
+                            }
+                        }
+                    }
+                }
+                MicrosoftType::Plain { qualifiers, .. } => {
+                    *qualifiers = microsoft_qualifier_words(self.next()?)?.to_string();
+                }
+                MicrosoftType::Function(_) => return None,
+            }
+            return Some(format!("{prefix}{}", microsoft_type_text(&kind, &name)));
+        }
+        self.consume("$$J0");
+        let class_letter = self.next()?;
+        let (access, member, global) = match class_letter {
+            b'A' | b'B' => ("private: ", "", false),
+            b'C' | b'D' => ("private: ", "static ", false),
+            b'E' | b'F' => ("private: ", "virtual ", false),
+            b'G' | b'H' => ("[thunk]: private: ", "virtual ", false),
+            b'I' | b'J' => ("protected: ", "", false),
+            b'K' | b'L' => ("protected: ", "static ", false),
+            b'M' | b'N' => ("protected: ", "virtual ", false),
+            b'O' | b'P' => ("[thunk]: protected: ", "virtual ", false),
+            b'Q' | b'R' => ("public: ", "", false),
+            b'S' | b'T' => ("public: ", "static ", false),
+            b'U' | b'V' => ("public: ", "virtual ", false),
+            b'W' | b'X' => ("[thunk]: public: ", "virtual ", false),
+            b'Y' | b'Z' => ("", "", true),
+            _ => return None,
+        };
+        if access.starts_with("[thunk]") {
+            let (negative, value) = self.number()?;
+            let sign = if negative { "-" } else { "" };
+            name = format!("{name}`adjustor{{{sign}{value}}}'");
+        }
+        let this_qualifiers = !global && member != "static ";
+        let signature = self.function_type(this_qualifiers)?;
+        if let MicrosoftIdentifier::Conversion = identifier {
+            let result = signature.result.as_ref()?;
+            name = format!("{name} {}", microsoft_type_text(result, ""));
+        }
+        let result = signature
+            .result
+            .as_ref()
+            .map(|result| format!("{} ", microsoft_type_text(result, "")))
+            .unwrap_or_default();
+        Some(format!(
+            "{access}{member}{result}{} {name}({}){}",
+            signature.convention, signature.parameters, signature.qualifiers
+        ))
+    }
+}
+
+pub fn demangle_microsoft(name: &str) -> Option<String> {
+    let mut demangler = MicrosoftDemangler {
+        text: name.as_bytes(),
+        at: 0,
+        names: Vec::new(),
+        parameters: Vec::new(),
+        depth: 0,
+    };
+    let text = demangler.symbol()?;
+    if demangler.at != demangler.text.len() {
+        return None;
+    }
+    Some(text)
 }
 
 pub fn demangled_function_name(name: &str) -> Option<String> {
