@@ -128,6 +128,145 @@ pub mod relocation_i386 {
     pub const RELATIVE_32: u16 = 0x14;
 }
 
+pub mod relocation_arm {
+    pub const ABSOLUTE: u16 = 0;
+    pub const ADDRESS_32: u16 = 1;
+    pub const ADDRESS_32_IMAGE_RELATIVE: u16 = 2;
+    pub const BRANCH_24: u16 = 3;
+    pub const BRANCH_11: u16 = 4;
+    pub const RELATIVE_32: u16 = 0xa;
+    pub const SECTION: u16 = 0xe;
+    pub const SECTION_RELATIVE: u16 = 0xf;
+    pub const MOVE_32: u16 = 0x10;
+    pub const THUMB_MOVE_32: u16 = 0x11;
+    pub const THUMB_BRANCH_20: u16 = 0x12;
+    pub const THUMB_BRANCH_24: u16 = 0x14;
+    pub const THUMB_BRANCH_EXCHANGE_23: u16 = 0x15;
+    pub const PAIR: u16 = 0x16;
+}
+
+pub mod relocation_arm64 {
+    pub const ABSOLUTE: u16 = 0;
+    pub const ADDRESS_32: u16 = 1;
+    pub const ADDRESS_32_IMAGE_RELATIVE: u16 = 2;
+    pub const BRANCH_26: u16 = 3;
+    pub const PAGE_BASE_RELATIVE_21: u16 = 4;
+    pub const RELATIVE_21: u16 = 5;
+    pub const PAGE_OFFSET_12_ADD: u16 = 6;
+    pub const PAGE_OFFSET_12_LOAD: u16 = 7;
+    pub const SECTION_RELATIVE: u16 = 8;
+    pub const SECTION_RELATIVE_LOW_12_ADD: u16 = 9;
+    pub const SECTION_RELATIVE_HIGH_12_ADD: u16 = 0xa;
+    pub const SECTION_RELATIVE_LOW_12_LOAD: u16 = 0xb;
+    pub const TOKEN: u16 = 0xc;
+    pub const SECTION: u16 = 0xd;
+    pub const ADDRESS_64: u16 = 0xe;
+    pub const BRANCH_19: u16 = 0xf;
+    pub const BRANCH_14: u16 = 0x10;
+    pub const RELATIVE_32: u16 = 0x11;
+}
+
+pub fn read_thumb_move(bytes: &[u8], at: usize, top: bool) -> Result<u16, &'static str> {
+    let first = read_u16(bytes, at).unwrap_or(0);
+    let second = read_u16(bytes, at + 2).unwrap_or(0);
+    let expected = if top { 0xf2c0 } else { 0xf240 };
+    if first & 0xfbf0 != expected || second & 0x8000 != 0 {
+        return Err(if top { "MOVT" } else { "MOVW" });
+    }
+    Ok((second & 0x00ff)
+        | ((second >> 4) & 0x0700)
+        | ((first << 1) & 0x0800)
+        | ((first & 0x000f) << 12))
+}
+
+pub fn write_thumb_move(bytes: &mut [u8], at: usize, value: u16) {
+    let first = read_u16(bytes, at).unwrap_or(0);
+    let second = read_u16(bytes, at + 2).unwrap_or(0);
+    let first = (first & 0xfbf0) | ((value & 0x800) >> 1) | ((value >> 12) & 0xf);
+    let second = (second & 0x8f00) | ((value & 0x700) << 4) | (value & 0xff);
+    bytes[at..at + 2].copy_from_slice(&first.to_le_bytes());
+    bytes[at + 2..at + 4].copy_from_slice(&second.to_le_bytes());
+}
+
+pub fn apply_thumb_move_32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), &'static str> {
+    let low = read_thumb_move(bytes, at, false);
+    let high = read_thumb_move(bytes, at + 4, true);
+    let immediate = u32::from(low.unwrap_or(0)) | (u32::from(high.unwrap_or(0)) << 16);
+    let value = value.wrapping_add(immediate);
+    write_thumb_move(bytes, at, value as u16);
+    write_thumb_move(bytes, at + 4, (value >> 16) as u16);
+    low.and(high).map(|_| ())
+}
+
+pub fn apply_thumb_branch_20(bytes: &mut [u8], at: usize, value: i32) -> bool {
+    let fits = (-(1 << 20)..(1 << 20)).contains(&value);
+    let sign = u16::from(value < 0);
+    let jump_one = ((value >> 19) & 1) as u16;
+    let jump_two = ((value >> 18) & 1) as u16;
+    let first = read_u16(bytes, at).unwrap_or(0) | (sign << 10) | ((value >> 12) & 0x3f) as u16;
+    let second = read_u16(bytes, at + 2).unwrap_or(0)
+        | (jump_one << 13)
+        | (jump_two << 11)
+        | ((value >> 1) & 0x7ff) as u16;
+    bytes[at..at + 2].copy_from_slice(&first.to_le_bytes());
+    bytes[at + 2..at + 4].copy_from_slice(&second.to_le_bytes());
+    fits
+}
+
+pub fn apply_thumb_branch_24(bytes: &mut [u8], at: usize, value: i32) -> bool {
+    let fits = (-(1 << 24)..(1 << 24)).contains(&value);
+    let sign = u16::from(value < 0);
+    let jump_one = (((!value >> 23) & 1) as u16) ^ sign;
+    let jump_two = (((!value >> 22) & 1) as u16) ^ sign;
+    let first = read_u16(bytes, at).unwrap_or(0) | (sign << 10) | ((value >> 12) & 0x3ff) as u16;
+    let second = (read_u16(bytes, at + 2).unwrap_or(0) & 0xd000)
+        | (jump_one << 13)
+        | (jump_two << 11)
+        | ((value >> 1) & 0x7ff) as u16;
+    bytes[at..at + 2].copy_from_slice(&first.to_le_bytes());
+    bytes[at + 2..at + 4].copy_from_slice(&second.to_le_bytes());
+    fits
+}
+
+pub fn apply_arm64_address(bytes: &mut [u8], at: usize, target: u64, place: u64, shift: u32) {
+    let original = read_u32(bytes, at).unwrap_or(0);
+    let raw = ((original >> 29) & 0x3) | ((original >> 3) & 0x1f_fffc);
+    let immediate = ((i64::from(raw) << 43) >> 43) as u64;
+    let target = target.wrapping_add(immediate);
+    let delta = (target >> shift).wrapping_sub(place >> shift) as u32;
+    let low = (delta & 0x3) << 29;
+    let high = (delta & 0x1f_fffc) << 3;
+    let mask = (0x3u32 << 29) | (0x1f_fffcu32 << 3);
+    write_u32(bytes, at, (original & !mask) | low | high);
+}
+
+pub fn apply_arm64_immediate(bytes: &mut [u8], at: usize, immediate: u64, range_limit: u32) {
+    let original = read_u32(bytes, at).unwrap_or(0);
+    let immediate = immediate.wrapping_add(u64::from((original >> 10) & 0xfff));
+    let cleared = original & !(0xfff << 10);
+    write_u32(
+        bytes,
+        at,
+        cleared | (((immediate as u32) & (0xfff >> range_limit)) << 10),
+    );
+}
+
+pub fn apply_arm64_load(bytes: &mut [u8], at: usize, immediate: u64) -> bool {
+    let original = read_u32(bytes, at).unwrap_or(0);
+    let mut size = original >> 30;
+    if original & 0x480_0000 == 0x480_0000 {
+        size += 4;
+    }
+    let aligned = immediate & ((1u64 << size) - 1) == 0;
+    apply_arm64_immediate(bytes, at, immediate >> size, size);
+    aligned
+}
+
+pub fn or_u32(bytes: &mut [u8], at: usize, value: u32) {
+    let original = read_u32(bytes, at).unwrap_or(0);
+    write_u32(bytes, at, original | value);
+}
+
 pub mod base_relocation {
     pub const ABSOLUTE: u8 = 0;
     pub const HIGH: u8 = 1;
@@ -1654,6 +1793,8 @@ const NULL_IMPORT_DESCRIPTOR: &str = "__NULL_IMPORT_DESCRIPTOR";
 fn image_relative_relocation(machine_number: u16) -> u16 {
     match machine_number {
         machine::I386 => relocation_i386::DIRECT_32_IMAGE_RELATIVE,
+        machine::ARM_THUMB => relocation_arm::ADDRESS_32_IMAGE_RELATIVE,
+        machine::ARM64 => relocation_arm64::ADDRESS_32_IMAGE_RELATIVE,
         _ => relocation_amd64::ADDRESS_32_IMAGE_RELATIVE,
     }
 }

@@ -19164,6 +19164,9 @@ impl CoffSymbolData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoffChunkKind {
     Section,
+    RangeThunk {
+        target: SymbolIndex,
+    },
     Common {
         symbol: SymbolIndex,
     },
@@ -19561,6 +19564,7 @@ pub struct CoffContext<'s> {
     pub dwarf_lines: BTreeMap<usize, Rc<SourceLines>>,
     pub system_paths: Option<SystemPaths>,
     pub map_exports: bool,
+    pub relocation_redirects: BTreeMap<(usize, usize), u32>,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19659,6 +19663,7 @@ impl<'s> CoffContext<'s> {
             dwarf_lines: BTreeMap::new(),
             system_paths: None,
             map_exports: false,
+            relocation_redirects: BTreeMap::new(),
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -20452,7 +20457,7 @@ impl<'s> CoffContext<'s> {
             machine::I386 => ("", "x86"),
             machine::AMD64 => ("amd64", "x64"),
             0x01c4 => ("arm", "arm"),
-            machine::ARM64 => ("arm64", "arm64"),
+            machine::ARM64 | 0xa641 | 0xa64e => ("arm64", "arm64"),
             _ => ("", ""),
         };
         if let Some(interface) = &paths.interface {
@@ -20491,7 +20496,7 @@ impl<'s> CoffContext<'s> {
             self.add_system_root_paths();
             return;
         }
-        if self.machine != machine_number {
+        if !compatible_machine(self.machine, machine_number) {
             let label = self.file_label(Some(file));
             let found = crate::compilers::pe::machine_name(machine_number);
             let expected = crate::compilers::pe::machine_name(self.machine);
@@ -21182,15 +21187,16 @@ impl<'s> CoffContext<'s> {
                 self.add_import_data(&symbol_name, index);
             }
             if kind == import_type::CODE {
-                let alignment = if machine_number == crate::compilers::pe::machine::AMD64 {
-                    16
-                } else {
-                    1
+                let (size, alignment) = match machine_number {
+                    crate::compilers::pe::machine::AMD64 => (6, 16),
+                    crate::compilers::pe::machine::ARM64 => (12, 4),
+                    0x01c4 => (12, 2),
+                    _ => (6, 1),
                 };
                 let chunk = self.chunks.len();
                 let mut thunk = CoffChunk::synthetic(
                     CoffChunkKind::ImportThunk { import: index },
-                    6,
+                    size,
                     alignment,
                     crate::compilers::pe::section_characteristic::READ
                         | crate::compilers::pe::section_characteristic::EXECUTE,
@@ -21206,7 +21212,7 @@ impl<'s> CoffContext<'s> {
             if self.machine == 0 {
                 self.machine = machine_number;
                 self.add_system_root_paths();
-            } else if self.machine != machine_number {
+            } else if !compatible_machine(self.machine, machine_number) {
                 let found = crate::compilers::pe::machine_name(machine_number);
                 let expected = crate::compilers::pe::machine_name(self.machine);
                 self.error(
@@ -21700,6 +21706,21 @@ impl<'s> CoffContext<'s> {
             ));
             self.machine = machine::AMD64;
             self.add_system_root_paths();
+        }
+        if !self.dynamic_base && matches!(self.machine, 0x01c4 | machine::ARM64 | 0xa641 | 0xa64e) {
+            let name = match self.machine {
+                machine::ARM64 => "arm64",
+                0xa641 => "arm64ec",
+                0xa64e => "arm64x",
+                _ => "arm",
+            };
+            self.error(
+                problem("EI204", "An option value is not valid.")
+                    .with_context("Option: /dynamicbase:no".to_string())
+                    .with_context(format!(
+                        "Cause: /dynamicbase:no is not compatible with {name}"
+                    )),
+            );
         }
         if self.options.print_search_paths {
             let mut text = "Library search paths:\n".to_string();
@@ -22491,10 +22512,14 @@ impl<'s> CoffContext<'s> {
 
     fn code_view_line(&mut self, file: usize, chunk: usize, address: u32) -> Option<(String, u32)> {
         use crate::compilers::pe::machine;
-        let secrel_kind = match self.machine {
+        let object_machine = match self.objects[file].object.machine {
+            0 => self.machine,
+            other => other,
+        };
+        let secrel_kind = match object_machine {
             machine::AMD64 => 0x000b,
             machine::I386 => 0x000b,
-            machine::ARM64 => 0x0008,
+            machine::ARM64 | 0xa641 | 0xa64e => 0x0008,
             _ => 0x000f,
         };
         let mut strings: Option<Vec<u8>> = None;
@@ -23742,6 +23767,42 @@ fn coff_relocation_name(machine_number: u16, kind: u16) -> String {
         (13, "SECREL7"),
         (20, "REL32"),
     ];
+    let arm: [(u16, &str); 14] = [
+        (0, "ABSOLUTE"),
+        (1, "ADDR32"),
+        (2, "ADDR32NB"),
+        (3, "BRANCH24"),
+        (4, "BRANCH11"),
+        (10, "REL32"),
+        (14, "SECTION"),
+        (15, "SECREL"),
+        (16, "MOV32A"),
+        (17, "MOV32T"),
+        (18, "BRANCH20T"),
+        (20, "BRANCH24T"),
+        (21, "BLX23T"),
+        (22, "PAIR"),
+    ];
+    let arm64 = [
+        "ABSOLUTE",
+        "ADDR32",
+        "ADDR32NB",
+        "BRANCH26",
+        "PAGEBASE_REL21",
+        "REL21",
+        "PAGEOFFSET_12A",
+        "PAGEOFFSET_12L",
+        "SECREL",
+        "SECREL_LOW12A",
+        "SECREL_HIGH12A",
+        "SECREL_LOW12L",
+        "TOKEN",
+        "SECTION",
+        "ADDR64",
+        "BRANCH19",
+        "BRANCH14",
+        "REL32",
+    ];
     let found = match machine_number {
         crate::compilers::pe::machine::AMD64 => amd64
             .get(kind as usize)
@@ -23750,6 +23811,13 @@ fn coff_relocation_name(machine_number: u16, kind: u16) -> String {
             .iter()
             .find(|(number, _)| *number == kind)
             .map(|(_, name)| format!("IMAGE_REL_I386_{name}")),
+        0x01c4 => arm
+            .iter()
+            .find(|(number, _)| *number == kind)
+            .map(|(_, name)| format!("IMAGE_REL_ARM_{name}")),
+        crate::compilers::pe::machine::ARM64 => arm64
+            .get(kind as usize)
+            .map(|name| format!("IMAGE_REL_ARM64_{name}")),
         _ => None,
     };
     found.unwrap_or_else(|| "Unknown".to_string())
@@ -23976,6 +24044,25 @@ fn format_map_time(seconds: u64) -> String {
         rest % 60,
         year
     )
+}
+
+fn relocation_machine(configured: u16, object: u16) -> u16 {
+    let chosen = if object == 0 { configured } else { object };
+    match chosen {
+        0xa641 | 0xa64e => crate::compilers::pe::machine::ARM64,
+        other => other,
+    }
+}
+
+fn compatible_machine(configured: u16, found: u16) -> bool {
+    use crate::compilers::pe::machine;
+    let any_arm64 = |value: u16| matches!(value, machine::ARM64 | 0xa641 | 0xa64e);
+    match configured {
+        machine::ARM64 => matches!(found, machine::ARM64 | 0xa64e),
+        0xa641 | 0xa64e => any_arm64(found) || found == machine::AMD64,
+        0 => true,
+        _ => configured == found,
+    }
 }
 
 fn kill_at(symbol: &str, prefix: bool) -> String {
@@ -27039,7 +27126,7 @@ impl<'s> CoffContext<'s> {
         if let Some(layout) = self.options.section_layout.clone() {
             self.apply_section_layout(&layout);
         }
-        self.assign_addresses();
+        self.finalize_addresses();
         let oversized: Vec<String> = self
             .outputs
             .iter()
@@ -27210,6 +27297,200 @@ impl<'s> CoffContext<'s> {
         let (offsets, size) = tail_merged_layout(&strings, alignment);
         self.chunks[merge].size = size;
         self.merge_offsets.insert(merge, offsets);
+    }
+
+    fn branch_in_range(&self, kind: u16, target: u64, place: u64, margin: i64) -> bool {
+        use crate::compilers::pe::{machine, relocation_arm as arm, relocation_arm64 as arm64};
+        let fits = |difference: i64, bits: u32| difference < (1i64 << (bits - 1));
+        match self.machine {
+            0x01c4 => {
+                let difference = (target as i64 - (place as i64 + 4)).abs() + margin;
+                match kind {
+                    arm::THUMB_BRANCH_20 => fits(difference, 21),
+                    arm::THUMB_BRANCH_24 | arm::THUMB_BRANCH_EXCHANGE_23 => fits(difference, 25),
+                    _ => true,
+                }
+            }
+            machine::ARM64 => {
+                let difference = (target as i64 - place as i64).abs() + margin;
+                match kind {
+                    arm64::BRANCH_26 => fits(difference, 28),
+                    arm64::BRANCH_19 => fits(difference, 21),
+                    arm64::BRANCH_14 => fits(difference, 16),
+                    _ => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+    fn effective_relocations(&self, chunk: usize) -> Vec<crate::compilers::pe::CoffRelocation> {
+        let mut relocations = self.section_relocations(chunk).to_vec();
+        if self.relocation_redirects.is_empty() {
+            return relocations;
+        }
+        for (position, relocation) in relocations.iter_mut().enumerate() {
+            if let Some(index) = self.relocation_redirects.get(&(chunk, position)) {
+                relocation.symbol_index = *index;
+            }
+        }
+        relocations
+    }
+
+    fn relocation_target(&self, file: usize, index: u32) -> Option<SymbolIndex> {
+        self.objects[file]
+            .symbols
+            .get(index as usize)
+            .copied()
+            .flatten()
+            .and_then(|symbol| self.defined_target(symbol))
+    }
+
+    fn verify_ranges(&self, output: usize) -> bool {
+        for &chunk in &self.outputs[output].chunks {
+            if self.chunks[chunk].kind != CoffChunkKind::Section {
+                continue;
+            }
+            let Some(file) = self.chunks[chunk].file else {
+                continue;
+            };
+            for relocation in self.effective_relocations(chunk) {
+                let Some(target) = self.relocation_target(file, relocation.symbol_index) else {
+                    continue;
+                };
+                let place = self.chunks[chunk].rva + u64::from(relocation.virtual_address);
+                if !self.branch_in_range(relocation.kind, self.symbol_rva(target), place, 0) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn create_thunks(&mut self, output: usize, margin: i64) {
+        use crate::compilers::pe::section_characteristic as character;
+        let mut last_thunks: BTreeMap<u64, SymbolIndex> = BTreeMap::new();
+        let mut thunk_indices: BTreeMap<(usize, SymbolIndex), u32> = BTreeMap::new();
+        let mut thunks_size = 0u64;
+        let (size, alignment) = if self.machine == 0x01c4 {
+            (10, 2)
+        } else {
+            (12, 4)
+        };
+        let mut position = 0usize;
+        while position < self.outputs[output].chunks.len() {
+            let chunk = self.outputs[output].chunks[position];
+            position += 1;
+            if self.chunks[chunk].kind != CoffChunkKind::Section {
+                continue;
+            }
+            let Some(file) = self.chunks[chunk].file else {
+                continue;
+            };
+            let mut insertion = position;
+            let mut insertion_rva = self.chunks[chunk].rva + self.chunks[chunk].size + thunks_size;
+            for (index, relocation) in self.section_relocations(chunk).to_vec().iter().enumerate() {
+                let Some(target) = self.relocation_target(file, relocation.symbol_index) else {
+                    continue;
+                };
+                let target_rva = self.symbol_rva(target);
+                let place =
+                    self.chunks[chunk].rva + u64::from(relocation.virtual_address) + thunks_size;
+                if self.branch_in_range(relocation.kind, target_rva, place, margin) {
+                    continue;
+                }
+                let reusable = last_thunks.get(&target_rva).copied().filter(|thunk| {
+                    self.branch_in_range(relocation.kind, self.symbol_rva(*thunk), place, margin)
+                });
+                let thunk = match reusable {
+                    Some(thunk) => thunk,
+                    None => {
+                        let thunk_chunk = self.new_chunk(
+                            CoffChunkKind::RangeThunk { target },
+                            size,
+                            alignment,
+                            character::CODE | character::READ | character::EXECUTE,
+                        );
+                        self.chunks[thunk_chunk].rva = insertion_rva;
+                        self.chunks[thunk_chunk].output = Some(output);
+                        self.outputs[output].chunks.insert(insertion, thunk_chunk);
+                        insertion += 1;
+                        position += 1;
+                        thunks_size += size;
+                        insertion_rva += size;
+                        let symbol = self.local_symbol(
+                            "range_extension_thunk",
+                            CoffSymbolKind::Synthetic {
+                                chunk: Some(thunk_chunk),
+                                offset: 0,
+                            },
+                        );
+                        last_thunks.insert(target_rva, symbol);
+                        symbol
+                    }
+                };
+                let slot = *thunk_indices.entry((file, thunk)).or_insert_with(|| {
+                    self.objects[file].symbols.push(Some(thunk));
+                    (self.objects[file].symbols.len() - 1) as u32
+                });
+                self.relocation_redirects.insert((chunk, index), slot);
+            }
+        }
+    }
+
+    fn finalize_addresses(&mut self) {
+        self.assign_addresses();
+        if !matches!(self.machine, 0x01c4 | crate::compilers::pe::machine::ARM64) {
+            return;
+        }
+        let original: Vec<Vec<usize>> = self
+            .outputs
+            .iter()
+            .map(|output| output.chunks.clone())
+            .collect();
+        let original_count: usize = original.iter().map(Vec::len).sum();
+        let mut pass = 0usize;
+        let mut margin = 1024 * 100i64;
+        loop {
+            let mut ranges_ok = true;
+            let mut count = 0usize;
+            for output in 0..self.outputs.len() {
+                if !self.verify_ranges(output) {
+                    ranges_ok = false;
+                    break;
+                }
+                count += self.outputs[output].chunks.len();
+            }
+            if ranges_ok {
+                if pass > 0 && self.options.verbose {
+                    self.messages.push(format!(
+                        "Added {} thunks with margin {margin} in {pass} passes",
+                        count - original_count
+                    ));
+                }
+                return;
+            }
+            if pass >= 10 {
+                self.error(
+                    problem("EI208", "A relocation value does not fit in its field.").with_context(
+                        format!("Cause: adding thunks hasn't converged after {pass} passes"),
+                    ),
+                );
+                return;
+            }
+            if pass > 0 {
+                for (output, chunks) in original.iter().enumerate() {
+                    self.outputs[output].chunks = chunks.clone();
+                }
+                margin *= 2;
+            }
+            self.relocation_redirects.clear();
+            for output in 0..self.outputs.len() {
+                self.create_thunks(output, margin);
+            }
+            self.assign_addresses();
+            pass += 1;
+        }
     }
 
     fn assign_addresses(&mut self) {
@@ -27444,7 +27725,10 @@ impl<'s> CoffContext<'s> {
                             continue;
                         };
                         for relocation in self.section_relocations(chunk).to_vec() {
-                            let kind = match self.machine {
+                            let kind = match relocation_machine(
+                                self.machine,
+                                self.objects[file].object.machine,
+                            ) {
                                 machine::AMD64 => match relocation.kind {
                                     relocation_amd64::ADDRESS_64 => base_relocation::DIRECT_64,
                                     relocation_amd64::ADDRESS_32 => base_relocation::HIGH_LOW,
@@ -27452,6 +27736,21 @@ impl<'s> CoffContext<'s> {
                                 },
                                 machine::I386 => match relocation.kind {
                                     relocation_i386::DIRECT_32 => base_relocation::HIGH_LOW,
+                                    _ => continue,
+                                },
+                                0x01c4 => match relocation.kind {
+                                    crate::compilers::pe::relocation_arm::ADDRESS_32 => {
+                                        base_relocation::HIGH_LOW
+                                    }
+                                    crate::compilers::pe::relocation_arm::THUMB_MOVE_32 => {
+                                        base_relocation::THUMB_MOVE_32
+                                    }
+                                    _ => continue,
+                                },
+                                machine::ARM64 => match relocation.kind {
+                                    crate::compilers::pe::relocation_arm64::ADDRESS_64 => {
+                                        base_relocation::DIRECT_64
+                                    }
                                     _ => continue,
                                 },
                                 _ => continue,
@@ -27481,6 +27780,12 @@ impl<'s> CoffContext<'s> {
                     }
                     CoffChunkKind::ImportThunk { .. } if self.machine == machine::I386 => {
                         entries.push(((self.chunks[chunk].rva + 2) as u32, default_kind));
+                    }
+                    CoffChunkKind::ImportThunk { .. } if self.machine == 0x01c4 => {
+                        entries.push((
+                            self.chunks[chunk].rva as u32,
+                            base_relocation::THUMB_MOVE_32,
+                        ));
                     }
                     CoffChunkKind::LocalImport { .. } => {
                         entries.push((self.chunks[chunk].rva as u32, default_kind));
@@ -27689,10 +27994,16 @@ impl<'s> CoffContext<'s> {
         let entry = if self.options.no_entry {
             0
         } else {
-            self.entry
+            let address = self
+                .entry
                 .and_then(|entry| self.defined_target(entry))
                 .map(|entry| self.symbol_rva(entry) as u32)
-                .unwrap_or(0)
+                .unwrap_or(0);
+            if self.machine == 0x01c4 {
+                address | 1
+            } else {
+                address
+            }
         };
         let header = ImageHeader {
             machine: self.machine,
@@ -27815,6 +28126,51 @@ impl<'s> CoffContext<'s> {
                     out[at..end].copy_from_slice(&bytes[..end - at]);
                 }
             }
+            CoffChunkKind::RangeThunk { target } => {
+                let target_rva = self.symbol_rva(target);
+                let place = self.chunks[chunk].rva;
+                if self.machine == 0x01c4 {
+                    out[..10].copy_from_slice(&[
+                        0x40, 0xf2, 0x00, 0x0c, 0xc0, 0xf2, 0x00, 0x0c, 0xe7, 0x44,
+                    ]);
+                    let offset = target_rva.wrapping_sub(place).wrapping_sub(12) as u32;
+                    let _ = crate::compilers::pe::apply_thumb_move_32(&mut out, 0, offset);
+                } else {
+                    out[..12].copy_from_slice(&[
+                        0x10, 0x00, 0x00, 0x90, 0x10, 0x02, 0x00, 0x91, 0x00, 0x02, 0x1f, 0xd6,
+                    ]);
+                    crate::compilers::pe::apply_arm64_address(&mut out, 0, target_rva, place, 12);
+                    crate::compilers::pe::apply_arm64_immediate(&mut out, 4, target_rva & 0xfff, 0);
+                }
+            }
+            CoffChunkKind::ImportThunk { import } if self.machine == 0x01c4 => {
+                let target = self.imports[import]
+                    .import_symbol
+                    .map(|symbol| self.symbol_rva(symbol))
+                    .unwrap_or(0);
+                out[..12].copy_from_slice(&[
+                    0x40, 0xf2, 0x00, 0x0c, 0xc0, 0xf2, 0x00, 0x0c, 0xdc, 0xf8, 0x00, 0xf0,
+                ]);
+                let _ = crate::compilers::pe::apply_thumb_move_32(
+                    &mut out,
+                    0,
+                    target.wrapping_add(self.image_base) as u32,
+                );
+            }
+            CoffChunkKind::ImportThunk { import }
+                if self.machine == crate::compilers::pe::machine::ARM64 =>
+            {
+                let target = self.imports[import]
+                    .import_symbol
+                    .map(|symbol| self.symbol_rva(symbol))
+                    .unwrap_or(0);
+                out[..12].copy_from_slice(&[
+                    0x10, 0x00, 0x00, 0x90, 0x10, 0x02, 0x40, 0xf9, 0x00, 0x02, 0x1f, 0xd6,
+                ]);
+                let place = self.chunks[chunk].rva;
+                crate::compilers::pe::apply_arm64_address(&mut out, 0, target, place, 12);
+                let _ = crate::compilers::pe::apply_arm64_load(&mut out, 4, target & 0xfff);
+            }
             CoffChunkKind::ImportThunk { import } => {
                 out[0] = 0xff;
                 out[1] = 0x25;
@@ -27905,6 +28261,11 @@ impl<'s> CoffContext<'s> {
                             .and_then(|symbol| self.defined_target(symbol))
                             .map(|symbol| self.symbol_rva(symbol))
                             .unwrap_or(0),
+                    };
+                    let value = if self.machine == 0x01c4 && !export.data {
+                        value | 1
+                    } else {
+                        value
                     };
                     if at + 4 <= out.len() {
                         out[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
@@ -28044,6 +28405,12 @@ impl<'s> CoffContext<'s> {
             },
             machine::I386 => match kind {
                 i386::DIRECT_32 | i386::RELATIVE_32 => 32,
+                _ => 0,
+            },
+            0x01c4 if kind == crate::compilers::pe::relocation_arm::ADDRESS_32 => 32,
+            machine::ARM64 => match kind {
+                crate::compilers::pe::relocation_arm64::ADDRESS_64 => 64,
+                crate::compilers::pe::relocation_arm64::ADDRESS_32 => 32,
                 _ => 0,
             },
             _ => 0,
@@ -28380,7 +28747,7 @@ impl<'s> CoffContext<'s> {
         let Some(file) = self.chunks[chunk].file else {
             return;
         };
-        let relocations = self.section_relocations(chunk).to_vec();
+        let relocations = self.effective_relocations(chunk);
         let size = self.chunks[chunk].size;
         let section_count = self.outputs.len() as u16;
         for relocation in relocations {
@@ -28474,7 +28841,7 @@ impl<'s> CoffContext<'s> {
                     None => None,
                 }
             };
-            match self.machine {
+            match relocation_machine(self.machine, self.objects[file].object.machine) {
                 machine::AMD64 => match relocation.kind {
                     amd64::ADDRESS_32 => add32(out, s.wrapping_add(self.image_base)),
                     amd64::ADDRESS_64 => {
@@ -28510,9 +28877,183 @@ impl<'s> CoffContext<'s> {
                     },
                     other => self.unsupported_coff_relocation(file, other),
                 },
+                0x01c4 => {
+                    use crate::compilers::pe::relocation_arm as arm;
+                    let executable = output.is_some_and(|output| {
+                        self.outputs[output].characteristics
+                            & crate::compilers::pe::section_characteristic::EXECUTE
+                            != 0
+                    });
+                    let thumb = if executable { s | 1 } else { s };
+                    let branch = thumb.wrapping_sub(p).wrapping_sub(4) as i32;
+                    match relocation.kind {
+                        arm::ADDRESS_32 => add32(out, thumb.wrapping_add(self.image_base)),
+                        arm::ADDRESS_32_IMAGE_RELATIVE => add32(out, thumb),
+                        arm::THUMB_MOVE_32 => {
+                            let value = thumb.wrapping_add(self.image_base) as u32;
+                            if let Err(which) =
+                                crate::compilers::pe::apply_thumb_move_32(out, at, value)
+                            {
+                                self.arm_instruction_failure(&format!(
+                                    "unexpected instruction in {which} instruction in MOV32T relocation"
+                                ));
+                            }
+                        }
+                        arm::THUMB_BRANCH_20 => {
+                            if !crate::compilers::pe::apply_thumb_branch_20(out, at, branch) {
+                                self.relocation_range_failure();
+                            }
+                        }
+                        arm::THUMB_BRANCH_24 | arm::THUMB_BRANCH_EXCHANGE_23 => {
+                            if !crate::compilers::pe::apply_thumb_branch_24(out, at, branch) {
+                                self.relocation_range_failure();
+                            }
+                        }
+                        arm::SECTION => add16(out, section_index),
+                        arm::SECTION_RELATIVE => match section_relative(self) {
+                            Some(value) => add32(out, value),
+                            None => self.section_relative_failure(chunk, output.is_none()),
+                        },
+                        arm::RELATIVE_32 => add32(out, thumb.wrapping_sub(p).wrapping_sub(4)),
+                        other => self.unsupported_coff_relocation(file, other),
+                    }
+                }
+                machine::ARM64 => {
+                    use crate::compilers::pe::relocation_arm64 as arm64;
+                    let delta = s.wrapping_sub(p) as i64;
+                    let branch = |out: &mut [u8], bits: u32, mask: u32, shift: i32| {
+                        let fits = delta >= -(1i64 << (bits - 1)) && delta < (1i64 << (bits - 1));
+                        let field = if shift >= 0 {
+                            ((delta as u32) & mask) << shift
+                        } else {
+                            ((delta as u32) & mask) >> -shift
+                        };
+                        crate::compilers::pe::or_u32(out, at, field);
+                        fits
+                    };
+                    match relocation.kind {
+                        arm64::PAGE_BASE_RELATIVE_21 => {
+                            crate::compilers::pe::apply_arm64_address(out, at, s, p, 12)
+                        }
+                        arm64::RELATIVE_21 => {
+                            crate::compilers::pe::apply_arm64_address(out, at, s, p, 0)
+                        }
+                        arm64::PAGE_OFFSET_12_ADD => {
+                            crate::compilers::pe::apply_arm64_immediate(out, at, s & 0xfff, 0)
+                        }
+                        arm64::PAGE_OFFSET_12_LOAD => {
+                            if !crate::compilers::pe::apply_arm64_load(out, at, s & 0xfff) {
+                                self.arm_instruction_failure("misaligned ldr/str offset");
+                            }
+                        }
+                        arm64::BRANCH_26 => {
+                            if !branch(out, 28, 0x0fff_fffc, -2) {
+                                self.relocation_range_failure();
+                            }
+                        }
+                        arm64::BRANCH_19 => {
+                            if !branch(out, 21, 0x001f_fffc, 3) {
+                                self.relocation_range_failure();
+                            }
+                        }
+                        arm64::BRANCH_14 => {
+                            if !branch(out, 16, 0x0000_fffc, 3) {
+                                self.relocation_range_failure();
+                            }
+                        }
+                        arm64::ADDRESS_32 => add32(out, s.wrapping_add(self.image_base)),
+                        arm64::ADDRESS_32_IMAGE_RELATIVE => add32(out, s),
+                        arm64::ADDRESS_64 => {
+                            let current =
+                                u64::from_le_bytes(out[at..at + 8].try_into().unwrap_or([0; 8]));
+                            out[at..at + 8].copy_from_slice(
+                                &current
+                                    .wrapping_add(s.wrapping_add(self.image_base))
+                                    .to_le_bytes(),
+                            );
+                        }
+                        arm64::SECTION_RELATIVE => match section_relative(self) {
+                            Some(value) => add32(out, value),
+                            None => self.section_relative_failure(chunk, output.is_none()),
+                        },
+                        arm64::SECTION_RELATIVE_LOW_12_ADD => match output {
+                            Some(output) => {
+                                let relative = s.wrapping_sub(self.outputs[output].virtual_address);
+                                crate::compilers::pe::apply_arm64_immediate(
+                                    out,
+                                    at,
+                                    relative & 0xfff,
+                                    0,
+                                );
+                            }
+                            None => self.section_relative_failure(chunk, true),
+                        },
+                        arm64::SECTION_RELATIVE_HIGH_12_ADD => match output {
+                            Some(output) => {
+                                let original = crate::compilers::pe::read_u32(out, at).unwrap_or(0);
+                                let addend = u64::from((original >> 10) & 0xfff);
+                                let value = s
+                                    .wrapping_add(addend)
+                                    .wrapping_sub(self.outputs[output].virtual_address)
+                                    >> 12;
+                                if value > 0xfff {
+                                    let name = self.chunks[chunk].name.clone();
+                                    self.error(
+                                        problem("EI208", "A relocation value does not fit in its field.")
+                                            .with_context(format!("Section: {name}"))
+                                            .with_context("Relocation: SECREL_HIGH12A".to_string())
+                                            .with_context(format!(
+                                                "Cause: overflow in SECREL_HIGH12A relocation in section: {name}"
+                                            )),
+                                    );
+                                } else {
+                                    crate::compilers::pe::write_u32(
+                                        out,
+                                        at,
+                                        (original & !(0xfff << 10)) | ((value as u32) << 10),
+                                    );
+                                }
+                            }
+                            None => self.section_relative_failure(chunk, true),
+                        },
+                        arm64::SECTION_RELATIVE_LOW_12_LOAD => match output {
+                            Some(output) => {
+                                let relative = s.wrapping_sub(self.outputs[output].virtual_address);
+                                if !crate::compilers::pe::apply_arm64_load(
+                                    out,
+                                    at,
+                                    relative & 0xfff,
+                                ) {
+                                    self.arm_instruction_failure("misaligned ldr/str offset");
+                                }
+                            }
+                            None => self.section_relative_failure(chunk, true),
+                        },
+                        arm64::SECTION => add16(out, section_index),
+                        arm64::RELATIVE_32 => add32(out, s.wrapping_sub(p).wrapping_sub(4)),
+                        other => self.unsupported_coff_relocation(file, other),
+                    }
+                }
                 _ => self.unsupported_coff_relocation(file, relocation.kind),
             }
         }
+    }
+
+    fn relocation_range_failure(&mut self) {
+        self.error(
+            problem("EI208", "A relocation value does not fit in its field.")
+                .with_context("Cause: relocation out of range".to_string()),
+        );
+    }
+
+    fn arm_instruction_failure(&mut self, cause: &str) {
+        self.error(
+            problem(
+                "EI293",
+                "A relocation does not match the instruction it patches.",
+            )
+            .with_context(format!("Cause: {cause}")),
+        );
     }
 
     fn section_relative_failure(&mut self, chunk: usize, absolute: bool) {
@@ -28538,7 +29079,10 @@ impl<'s> CoffContext<'s> {
         self.error(
             problem("EI210", "The linker does not support this relocation.")
                 .with_context(format!("Relocation: {kind:#x}"))
-                .with_context(format!("File: {label}")),
+                .with_context(format!("File: {label}"))
+                .with_context(format!(
+                    "Cause: unsupported relocation type 0x{kind:x} in {label}"
+                )),
         );
     }
 
@@ -28584,16 +29128,21 @@ impl<'s> CoffContext<'s> {
         let Some((first, last)) = self.exception_range else {
             return;
         };
-        if self.machine != crate::compilers::pe::machine::AMD64 {
-            self.warn(
-                caution(
-                    "EI212",
-                    "The linker does not support what this input asks for yet.",
-                )
-                .with_context("Feature: sorting .pdata for this machine".to_string()),
-            );
-            return;
-        }
+        let entry_size = match self.machine {
+            crate::compilers::pe::machine::AMD64 => 12usize,
+            crate::compilers::pe::machine::ARM64 | 0x01c4 => 8usize,
+            _ => {
+                self.warn(
+                    caution(
+                        "EI212",
+                        "The linker does not support what this input asks for yet.",
+                    )
+                    .with_context("Feature: sorting .pdata for this machine".to_string())
+                    .with_context("Cause: don't know how to handle .pdata".to_string()),
+                );
+                return;
+            }
+        };
         let offset_of = |context: &CoffContext, chunk: usize| -> Option<usize> {
             let output = context.chunk_output(chunk)?;
             Some(
@@ -28605,23 +29154,30 @@ impl<'s> CoffContext<'s> {
             return;
         };
         let end = end_start + self.chunks[last].size as usize;
-        if !(end - begin).is_multiple_of(12) {
+        if !(end - begin).is_multiple_of(entry_size) {
+            let size = end - begin;
             self.error(
                 problem(
                     "EI212",
                     "The linker does not support what this input asks for yet.",
                 )
-                .with_context("Feature: a .pdata size that is not a multiple of 12".to_string()),
+                .with_context(format!(
+                    "Feature: a .pdata size that is not a multiple of {entry_size}"
+                ))
+                .with_context(format!(
+                    "Cause: unexpected .pdata size: {size} is not a multiple of {entry_size}"
+                )),
             );
             return;
         }
-        let mut entries: Vec<[u8; 12]> = out[begin..end]
-            .chunks(12)
-            .map(|entry| entry.try_into().unwrap_or([0; 12]))
+        let mut entries: Vec<Vec<u8>> = out[begin..end]
+            .chunks(entry_size)
+            .map(|entry| entry.to_vec())
             .collect();
         entries.sort_by_key(|entry| u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]));
         for (position, entry) in entries.iter().enumerate() {
-            out[begin + position * 12..begin + position * 12 + 12].copy_from_slice(entry);
+            let at = begin + position * entry_size;
+            out[at..at + entry_size].copy_from_slice(entry);
         }
     }
 

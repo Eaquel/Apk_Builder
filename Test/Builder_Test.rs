@@ -69387,6 +69387,15 @@ mod linker_lit {
 
     fn missing_input(tree: &Tree, path: &str) -> Option<String> {
         let text = String::from_utf8_lossy(tree.file(path)?).into_owned();
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        if file_name.contains("arm64ec")
+            || file_name.contains("arm64x")
+            || file_name == "merge-wowthk.s"
+        {
+            return Some(
+                "ARM64EC and ARM64X hybrid images are not a target of this linker".to_string(),
+            );
+        }
         let folder = path
             .rsplit_once('/')
             .map(|(folder, _)| folder)
@@ -69441,11 +69450,7 @@ mod linker_lit {
         if let Ok(filter) = std::env::var("APK_BUILDER_LLD_FILTER") {
             tests.retain(|path| path.contains(&filter));
         }
-        let architectures: &[&str] = if folder == "COFF" {
-            &["x86"]
-        } else {
-            &["x86", "aarch64", "arm"]
-        };
+        let architectures: &[&str] = &["x86", "aarch64", "arm"];
         let features = [
             "shell",
             "llvm-64-bits",
