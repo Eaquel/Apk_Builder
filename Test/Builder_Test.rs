@@ -69359,9 +69359,14 @@ mod linker_lit {
             return tool_host(arguments, input, world);
         }
         let directory = world.directory.clone();
+        let environment: Vec<(String, String)> = world
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         let outcome = {
             let reader = |path: &str| world.read(path);
-            link_coff_in(&arguments[1..], &reader, &directory)
+            link_coff_in(&arguments[1..], &reader, &directory, &environment)
         };
         finish_link(outcome, "lld-link", world, false, colored(arguments))
     }

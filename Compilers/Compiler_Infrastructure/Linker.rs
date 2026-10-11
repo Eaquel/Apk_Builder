@@ -17986,6 +17986,61 @@ impl<'s> Context<'s> {
     }
 }
 
+pub fn tokenize_posix_command_line(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => {
+                if let Some(next) = characters.next() {
+                    current.push(next);
+                }
+                started = true;
+            }
+            '\'' => {
+                started = true;
+                for inner in characters.by_ref() {
+                    if inner == '\'' {
+                        break;
+                    }
+                    current.push(inner);
+                }
+            }
+            '"' => {
+                started = true;
+                while let Some(inner) = characters.next() {
+                    if inner == '"' {
+                        break;
+                    }
+                    if inner == '\\' {
+                        if let Some(next) = characters.next() {
+                            current.push(next);
+                        }
+                        continue;
+                    }
+                    current.push(inner);
+                }
+            }
+            character if character.is_whitespace() || character == '\0' => {
+                if started {
+                    out.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            character => {
+                current.push(character);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(current);
+    }
+    out
+}
+
 pub fn tokenize_windows_command_line(text: &str) -> Vec<String> {
     let characters: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
@@ -18151,6 +18206,8 @@ pub struct CoffOptions {
     pub map_path: Option<String>,
     pub help: bool,
     pub align_given: bool,
+    pub section_layout: Option<String>,
+    pub allow_duplicate_weak: Option<bool>,
     pub infer_sanitizer_libraries: bool,
     pub exports: Vec<String>,
     pub definition_file: Option<String>,
@@ -18251,6 +18308,8 @@ impl Default for CoffOptions {
             map_path: None,
             help: false,
             align_given: false,
+            section_layout: None,
+            allow_duplicate_weak: None,
             infer_sanitizer_libraries: false,
             exports: Vec::new(),
             definition_file: None,
@@ -18372,18 +18431,41 @@ pub fn parse_coff_command_line(
     arguments: &[String],
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<CoffOptions, Diagnostic> {
+    let mut quoting_problem = None;
+    let mut posix = false;
+    for argument in arguments {
+        let name = argument.trim_start_matches('-');
+        if let Some(style) = name.strip_prefix("rsp-quoting=") {
+            match style {
+                "windows" => posix = false,
+                "posix" => posix = true,
+                _ => {
+                    quoting_problem = Some(
+                        invalid_value("--rsp-quoting", style)
+                            .with_context(format!("Cause: invalid response file quoting: {style}")),
+                    )
+                }
+            }
+        }
+    }
     let mut expanded: Vec<String> = Vec::new();
     for argument in arguments {
         if let Some(path) = argument.strip_prefix('@') {
             let bytes = source(path).ok_or_else(|| file_missing(path))?;
-            expanded.extend(tokenize_windows_command_line(&String::from_utf8_lossy(
-                &bytes,
-            )));
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            if posix {
+                expanded.extend(tokenize_posix_command_line(&text));
+            } else {
+                expanded.extend(tokenize_windows_command_line(&text));
+            }
         } else {
             expanded.push(argument.clone());
         }
     }
     let mut options = CoffOptions::default();
+    if let Some(problem) = quoting_problem {
+        options.warnings.push(problem);
+    }
     let mut index = 0usize;
     while index < expanded.len() {
         let argument = expanded[index].clone();
@@ -18536,7 +18618,11 @@ pub fn parse_coff_command_line(
                 let text = need(&value)?;
                 let number = coff_number(&text)
                     .filter(|number| *number <= u64::from(u32::MAX))
-                    .ok_or_else(|| invalid_value("/timestamp", &text))?;
+                    .ok_or_else(|| {
+                        invalid_value("/timestamp", &text).with_context(format!(
+                            "Cause: invalid timestamp: {text}.  Expected 32-bit integer"
+                        ))
+                    })?;
                 options.timestamp = Some(number as u32);
                 options.repro = false;
             }
@@ -18675,6 +18761,7 @@ pub fn parse_coff_command_line(
                     .is_some_and(|text| text.eq_ignore_ascii_case("no"))
             }
             "order" => options.order_file = Some(need(&value)?),
+            "sectionlayout" => options.section_layout = Some(need(&value)?),
             "lldmap" => options.map_path = Some(value.clone().unwrap_or_default()),
             "help" | "?" => options.help = true,
             "pdbstripped" => options.warnings.push(
@@ -18727,6 +18814,13 @@ pub fn parse_coff_command_line(
                     }
                 }
             }
+            "lld-allow-duplicate-weak" => {
+                options.allow_duplicate_weak = Some(
+                    !value
+                        .as_deref()
+                        .is_some_and(|text| text.eq_ignore_ascii_case("no")),
+                )
+            }
             "export-all-symbols" => options.export_all_symbols = true,
             "exclude-all-symbols" => options.exclude_all_symbols = true,
             "exclude-symbols" => options.exclude_symbols.push(value_text.clone()),
@@ -18765,11 +18859,37 @@ pub fn parse_coff_command_line(
                 _ => return Err(invalid_value("/driver", &value_text)),
             },
             "swaprun" => {
-                for part in need(&value)?.to_ascii_lowercase().split(',') {
-                    match part {
-                        "cd" => options.swap_run_cd = true,
-                        "net" => options.swap_run_net = true,
-                        _ => return Err(invalid_value("/swaprun", part)),
+                let mut rest = value_text.clone();
+                loop {
+                    let (part, next) = match rest.split_once(',') {
+                        Some((part, next)) => (part.to_string(), next.to_string()),
+                        None => (rest.clone(), String::new()),
+                    };
+                    if part.eq_ignore_ascii_case("cd") {
+                        options.swap_run_cd = true;
+                    } else if part.eq_ignore_ascii_case("net") {
+                        options.swap_run_net = true;
+                    } else if part.is_empty() {
+                        options.warnings.push(
+                            invalid_value("/swaprun", "")
+                                .with_context("Cause: /swaprun: missing argument".to_string()),
+                        );
+                    } else {
+                        options
+                            .warnings
+                            .push(invalid_value("/swaprun", &part).with_context(format!(
+                                "Cause: /swaprun: invalid argument: {part}"
+                            )));
+                    }
+                    if next.is_empty() && rest.ends_with(',') {
+                        options.warnings.push(
+                            invalid_value("/swaprun", "")
+                                .with_context("Cause: /swaprun: missing argument".to_string()),
+                        );
+                    }
+                    rest = next;
+                    if rest.is_empty() {
+                        break;
                     }
                 }
             }
@@ -19393,7 +19513,17 @@ impl<'s> CoffContext<'s> {
     ) -> CoffContext<'s> {
         CoffContext {
             source,
-            diagnostics: options.warnings.clone(),
+            diagnostics: options
+                .warnings
+                .iter()
+                .cloned()
+                .map(|mut diagnostic| {
+                    if options.warnings_as_errors && diagnostic.severity == Severity::Warning {
+                        diagnostic.severity = Severity::Error;
+                    }
+                    diagnostic
+                })
+                .collect(),
             messages: Vec::new(),
             machine: options.machine,
             options,
@@ -20305,6 +20435,25 @@ impl<'s> CoffContext<'s> {
                             continue;
                         }
                         if !anti_dependency {
+                            if self
+                                .options
+                                .allow_duplicate_weak
+                                .unwrap_or(self.options.mingw)
+                            {
+                                let absolute_zero = |context: &CoffContext, symbol: SymbolIndex| {
+                                    matches!(
+                                        context.symbols[symbol].kind,
+                                        CoffSymbolKind::Absolute { address: 0 }
+                                    )
+                                };
+                                if absolute_zero(self, existing) && !absolute_zero(self, target) {
+                                    self.symbols[id].kind = CoffSymbolKind::Undefined {
+                                        alias: Some(target),
+                                        anti_dependency: anti,
+                                    };
+                                }
+                                continue;
+                            }
                             self.report_duplicate(id, Some(file));
                         }
                     }
@@ -20773,10 +20922,37 @@ impl<'s> CoffContext<'s> {
                 | "throwingnew" | "inferasanlibs" => {}
                 _ => {
                     let label = self.file_label(Some(file));
+                    let known = parse_coff_command_line(std::slice::from_ref(&token), &|_| None)
+                        .is_ok_and(|parsed| {
+                            parsed.inputs.is_empty()
+                                && !parsed.warnings.iter().any(|warning| {
+                                    warning.message.starts_with("The linker ignores an option")
+                                })
+                        });
+                    let spelling = if known {
+                        let prefix = &token[..1];
+                        match token[1..].split_once(':') {
+                            Some((option, _)) => format!("{prefix}{option}:"),
+                            None => token.clone(),
+                        }
+                    } else {
+                        self.warn(
+                            caution(
+                                "EI247",
+                                "The linker ignores an option it does not recognize.",
+                            )
+                            .with_context(format!("Option: {token}"))
+                            .with_context(format!("Cause: ignoring unknown argument: {token}")),
+                        );
+                        token.clone()
+                    };
                     self.error(
                         problem("EI202", "The linker does not recognize this option.")
                             .with_context(format!("Option: {token}"))
-                            .with_context(format!("File: {label}")),
+                            .with_context(format!("File: {label}"))
+                            .with_context(format!(
+                                "Cause: {spelling} is not allowed in .drectve ({label})"
+                            )),
                     );
                 }
             }
@@ -21130,6 +21306,13 @@ impl<'s> CoffContext<'s> {
             }
             return None;
         }
+        if let Some((system, version)) = self.options.subsystem {
+            self.subsystem = system;
+            if let Some(version) = version {
+                self.subsystem_version = version;
+            }
+        }
+        self.os_version = self.options.os_version.unwrap_or(self.subsystem_version);
         if self.subsystem == subsystem::UNKNOWN {
             self.subsystem = self.infer_subsystem();
             if self.subsystem == subsystem::UNKNOWN {
@@ -21173,9 +21356,14 @@ impl<'s> CoffContext<'s> {
                 _ => None,
             });
             let first = first.unwrap_or_default();
-            let stem = match first.rsplit_once('.') {
-                Some((stem, _)) if !stem.ends_with(['/', '\\']) => stem.to_string(),
-                _ => first.clone(),
+            let file_name = first
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&first)
+                .to_string();
+            let stem = match file_name.rfind('.') {
+                Some(position) if position > 0 => file_name[..position].to_string(),
+                _ => file_name.clone(),
             };
             let extension = if self.options.dll {
                 ".dll"
@@ -21334,7 +21522,7 @@ impl<'s> CoffContext<'s> {
         self.write_image()
     }
 
-    fn infer_subsystem(&self) -> u16 {
+    fn infer_subsystem(&mut self) -> u16 {
         use crate::compilers::pe::subsystem;
         if self.options.dll {
             return subsystem::WINDOWS_GRAPHICAL;
@@ -21344,6 +21532,21 @@ impl<'s> CoffContext<'s> {
         }
         let has = |name: &str| self.find_underscore_mangle(name);
         if has("main") || has("wmain") {
+            if has("WinMain") || has("wWinMain") {
+                let console = if has("main") { "main" } else { "wmain" };
+                let graphical = if has("WinMain") {
+                    "WinMain"
+                } else {
+                    "wWinMain"
+                };
+                self.warn(
+                    caution("EI287", "An option has no effect in this link.")
+                        .with_context("Option: /subsystem".to_string())
+                        .with_context(format!(
+                            "Cause: found {console} and {graphical}; defaulting to /subsystem:console"
+                        )),
+                );
+            }
             return subsystem::WINDOWS_CONSOLE;
         }
         if has("WinMain") || has("wWinMain") {
@@ -21572,9 +21775,11 @@ impl<'s> CoffContext<'s> {
         for root in self.gc_roots.clone() {
             if undefined.contains(&root) {
                 let name = self.symbols[root].name.clone();
+                let display = self.display_symbol_name(&name);
                 let diagnostic = problem("EI207", "A symbol is referenced but never defined.")
                     .with_context(format!("Symbol: {name}"))
-                    .with_context("Reference: <root>".to_string());
+                    .with_context("Reference: <root>".to_string())
+                    .with_context(format!("Cause: <root>: undefined symbol: {display}"));
                 if self.options.force_unresolved {
                     self.warn(diagnostic);
                 } else {
@@ -21631,49 +21836,213 @@ impl<'s> CoffContext<'s> {
         }
         for symbol in order {
             let name = self.symbols[symbol].name.clone();
+            let display = self.display_symbol_name(&name);
             let mut diagnostic = problem("EI207", "A symbol is referenced but never defined.")
                 .with_context(format!("Symbol: {name}"));
+            let mut text = format!("undefined symbol: {display}");
             let mut shown = 0usize;
             let mut total = 0usize;
             for (file, index) in &references[&symbol] {
-                let mut locations: Vec<String> = Vec::new();
-                for chunk in self.objects[*file].chunks.clone() {
-                    if self.chunks[chunk].kind != CoffChunkKind::Section {
-                        continue;
-                    }
-                    for relocation in self.section_relocations(chunk).to_vec() {
-                        if relocation.symbol_index != *index {
-                            continue;
-                        }
-                        total += 1;
-                        if shown + locations.len() >= 3 {
-                            continue;
-                        }
-                        let label = self.file_label(Some(*file));
-                        match self.enclosing_symbol(*file, chunk, relocation.virtual_address) {
-                            Some(owner) => locations.push(format!("{label}:({owner})")),
-                            None => locations.push(label),
-                        }
-                    }
-                }
-                if total == 0 && shown < 3 {
-                    locations.push(self.file_label(Some(*file)));
-                    total += 1;
-                }
+                let (locations, count) = self.symbol_locations(*file, *index, 3 - shown);
+                total += count;
                 shown += locations.len();
                 for location in locations {
+                    text.push_str(&format!("\n>>> referenced by {location}"));
                     diagnostic = diagnostic.with_context(format!("Reference: {location}"));
                 }
             }
             if shown < total {
+                text.push_str(&format!("\n>>> referenced {} more times", total - shown));
                 diagnostic = diagnostic.with_context(format!("More references: {}", total - shown));
             }
+            diagnostic = diagnostic.with_context(format!("Cause: {text}"));
             if self.options.force_unresolved {
                 self.warn(diagnostic);
             } else {
                 self.error(diagnostic);
             }
         }
+    }
+
+    fn symbol_locations(
+        &mut self,
+        file: usize,
+        index: u32,
+        maximum: usize,
+    ) -> (Vec<String>, usize) {
+        let mut locations: Vec<String> = Vec::new();
+        let mut count = 0usize;
+        let label = self.file_label(Some(file));
+        for chunk in self.objects[file].chunks.clone() {
+            if self.chunks[chunk].kind != CoffChunkKind::Section {
+                continue;
+            }
+            for relocation in self.section_relocations(chunk).to_vec() {
+                if relocation.symbol_index != index {
+                    continue;
+                }
+                count += 1;
+                if locations.len() >= maximum {
+                    continue;
+                }
+                let line = self.source_line(file, chunk, relocation.virtual_address);
+                let owner = self
+                    .enclosing_symbol(file, chunk, relocation.virtual_address)
+                    .map(|owner| self.display_symbol_name(&owner));
+                let mut text = String::new();
+                if let Some((path, number)) = &line {
+                    text.push_str(&format!("{path}:{number}\n>>>               "));
+                } else if owner.is_none() {
+                    continue;
+                }
+                text.push_str(&label);
+                if let Some(owner) = owner {
+                    text.push_str(&format!(":({owner})"));
+                }
+                locations.push(text);
+            }
+        }
+        if maximum == 0 {
+            return (Vec::new(), count);
+        }
+        if count == 0 {
+            return (vec![label], 1);
+        }
+        (locations, count)
+    }
+
+    fn source_line(&mut self, file: usize, chunk: usize, address: u32) -> Option<(String, u32)> {
+        use crate::compilers::pe::machine;
+        let secrel_kind = match self.machine {
+            machine::AMD64 => 0x000b,
+            machine::I386 => 0x000b,
+            machine::ARM64 => 0x0008,
+            _ => 0x000f,
+        };
+        let mut strings: Option<Vec<u8>> = None;
+        let mut checksums: Option<Vec<u8>> = None;
+        let mut found: Option<(Vec<u8>, u32)> = None;
+        for debug in self.objects[file].debug_chunks.clone() {
+            if self.chunks[debug].name != ".debug$S" {
+                continue;
+            }
+            let mut secrels: BTreeMap<u32, u32> = BTreeMap::new();
+            for relocation in self.section_relocations(debug).to_vec() {
+                if relocation.kind != secrel_kind {
+                    continue;
+                }
+                let target = self.objects[file]
+                    .symbols
+                    .get(relocation.symbol_index as usize)
+                    .copied()
+                    .flatten();
+                if let Some(target) = target {
+                    if let CoffSymbolKind::Regular {
+                        chunk: Some(target_chunk),
+                        value,
+                        ..
+                    } = self.symbols[target].kind
+                    {
+                        if target_chunk == chunk {
+                            secrels.insert(relocation.virtual_address, value);
+                        }
+                    }
+                }
+            }
+            let data = self.section_data(debug).to_vec();
+            if data.len() < 4 || code_view_u32(&data, 0) != 4 {
+                continue;
+            }
+            let mut at = 4usize;
+            while at + 8 <= data.len() {
+                let kind = code_view_u32(&data, at);
+                let length = code_view_u32(&data, at + 4) as usize;
+                let start = at + 8;
+                let end = (start + length).min(data.len());
+                let body = data[start..end].to_vec();
+                at = (start + length).div_ceil(4) * 4;
+                match kind {
+                    0xf3 => {
+                        if strings.is_none() {
+                            strings = Some(body);
+                        }
+                    }
+                    0xf4 => {
+                        if checksums.is_none() {
+                            checksums = Some(body);
+                        }
+                    }
+                    0xf2 => {
+                        if found.is_some() {
+                            continue;
+                        }
+                        let Some(base) = secrels.get(&(start as u32)).copied() else {
+                            continue;
+                        };
+                        if body.len() < 12 {
+                            continue;
+                        }
+                        let begin = base.wrapping_add(code_view_u32(&body, 0));
+                        let size = code_view_u32(&body, 8);
+                        if address < begin || address >= begin.wrapping_add(size) {
+                            continue;
+                        }
+                        found = Some((body, address - begin));
+                    }
+                    _ => {}
+                }
+                if strings.is_some() && checksums.is_some() && found.is_some() {
+                    break;
+                }
+            }
+            if strings.is_some() && checksums.is_some() && found.is_some() {
+                break;
+            }
+        }
+        let (strings, checksums, (lines, offset)) = (strings?, checksums?, found?);
+        let mut name_index: Option<u32> = None;
+        let mut line_number = 0u32;
+        let mut cursor = 12usize;
+        let mut result: Option<(u32, u32)> = None;
+        'blocks: while cursor + 12 <= lines.len() {
+            let name = code_view_u32(&lines, cursor);
+            let count = code_view_u32(&lines, cursor + 4) as usize;
+            let block_size = code_view_u32(&lines, cursor + 8) as usize;
+            let mut entry = cursor + 12;
+            for _ in 0..count {
+                if entry + 8 > lines.len() {
+                    break;
+                }
+                let line_offset = code_view_u32(&lines, entry);
+                let start_line = code_view_u32(&lines, entry + 4) & 0x00ff_ffff;
+                if line_offset > offset {
+                    if name_index.is_none() {
+                        name_index = Some(name);
+                        line_number = start_line;
+                    }
+                    result = Some((name_index.unwrap_or(name), line_number));
+                    break 'blocks;
+                }
+                name_index = Some(name);
+                line_number = start_line;
+                entry += 8;
+            }
+            if block_size == 0 {
+                break;
+            }
+            cursor += block_size;
+        }
+        let (name_index, line_number) = match result {
+            Some(result) => result,
+            None => (name_index?, line_number),
+        };
+        let name_offset = code_view_u32(&checksums, name_index as usize) as usize;
+        if name_offset >= strings.len() {
+            return None;
+        }
+        let length = strings[name_offset..].iter().position(|byte| *byte == 0)?;
+        let path = String::from_utf8_lossy(&strings[name_offset..name_offset + length]).to_string();
+        Some((path, line_number))
     }
 
     fn enclosing_symbol(&self, file: usize, chunk: usize, address: u32) -> Option<String> {
@@ -22796,6 +23165,8 @@ const INCREMENTAL_REFERENCE: &str = "because REF is enabled; use '/opt:noref' to
 
 const INCREMENTAL_FOLDING: &str = "because ICF is enabled; use '/opt:noicf' to disable";
 
+const LAYOUT_DUPLICATE: &str = ", ignoring";
+
 const TOO_MANY_ERRORS: &str = ", stopping now";
 
 const PDB_ALTERNATE_VARIABLES: &str = "only %_PDB% and %_EXT% supported in /pdbaltpath:, keeping";
@@ -22906,14 +23277,37 @@ fn archive_coff_inputs(
 }
 
 pub fn link_coff(arguments: &[String], source: &dyn Fn(&str) -> Option<Vec<u8>>) -> LinkOutcome {
-    link_coff_in(arguments, source, "")
+    link_coff_in(arguments, source, "", &[])
 }
 
 pub fn link_coff_in(
     arguments: &[String],
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
     directory: &str,
+    environment: &[(String, String)],
 ) -> LinkOutcome {
+    let variable = |name: &str| {
+        environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    };
+    let ignore_environment = arguments.iter().any(|argument| {
+        argument.eq_ignore_ascii_case("/lldignoreenv")
+            || argument.eq_ignore_ascii_case("-lldignoreenv")
+    });
+    let mut arguments = arguments.to_vec();
+    if !ignore_environment {
+        if let Some(text) = variable("LINK") {
+            let mut combined = tokenize_windows_command_line(&text);
+            combined.extend(arguments);
+            arguments = combined;
+        }
+        if let Some(text) = variable("_LINK_") {
+            arguments.extend(tokenize_windows_command_line(&text));
+        }
+    }
+    let arguments = &arguments[..];
     if arguments.first().is_some_and(|first| {
         first.eq_ignore_ascii_case("/lib") || first.eq_ignore_ascii_case("-lib")
     }) {
@@ -22936,6 +23330,31 @@ pub fn link_coff_in(
             messages: vec![
                 "OVERVIEW: LLVM Linker\n\nUSAGE: lld-link [options] <inputs>\n".to_string(),
             ],
+        };
+    }
+    let mut options = options;
+    let mut epoch_problem = None;
+    if options.timestamp.is_none() {
+        if let Some(epoch) = variable("SOURCE_DATE_EPOCH") {
+            match coff_number(&epoch).filter(|number| *number <= u64::from(u32::MAX)) {
+                Some(number) => {
+                    if !options.repro {
+                        options.timestamp = Some(number as u32);
+                    }
+                }
+                None => {
+                    epoch_problem = Some(invalid_value("SOURCE_DATE_EPOCH", &epoch).with_context(
+                        format!("Cause: invalid SOURCE_DATE_EPOCH timestamp: {epoch}.  Expected 32-bit integer"),
+                    ))
+                }
+            }
+        }
+    }
+    if let Some(problem) = epoch_problem {
+        return LinkOutcome {
+            outputs: Vec::new(),
+            diagnostics: vec![problem],
+            messages: Vec::new(),
         };
     }
     let mut context = CoffContext::new(options, source);
@@ -24011,6 +24430,42 @@ impl<'s> CoffContext<'s> {
             incremental = false;
         }
         self.incremental = incremental;
+    }
+
+    fn apply_section_layout(&mut self, argument: &str) {
+        let path = argument.strip_prefix('@').unwrap_or(argument);
+        let Some(bytes) = (self.source)(path) else {
+            self.error(file_missing(path).with_context(format!(
+                "Cause: could not open {path}: No such file or directory"
+            )));
+            return;
+        };
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut order: BTreeMap<String, usize> = BTreeMap::new();
+        for line in text.split(['\r', '\n']) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let name = line.split(' ').next().unwrap_or("").to_string();
+            if order.contains_key(&name) {
+                self.warn(
+                    caution("EI287", "An option has no effect in this link.")
+                        .with_context("Option: /sectionlayout".to_string())
+                        .with_context(format!(
+                            "Cause: duplicate section '{name}' in section layout file{LAYOUT_DUPLICATE}"
+                        )),
+                );
+                continue;
+            }
+            let next = order.len();
+            order.insert(name, next);
+        }
+        if order.is_empty() {
+            return;
+        }
+        self.outputs
+            .sort_by_key(|output| order.get(&output.name).copied().unwrap_or(usize::MAX));
     }
 
     fn order_priorities(&mut self) -> BTreeMap<String, i64> {
@@ -25268,6 +25723,9 @@ impl<'s> CoffContext<'s> {
                 || !output.chunks.is_empty()
         });
         let _ = (rsrc_name, data_output);
+        if let Some(layout) = self.options.section_layout.clone() {
+            self.apply_section_layout(&layout);
+        }
         self.assign_addresses();
         self.outputs.retain(|output| output.virtual_size != 0);
         for (position, output) in self.outputs.iter_mut().enumerate() {
@@ -26509,7 +26967,10 @@ impl<'s> CoffContext<'s> {
                         "A relocation points outside its section or at a discarded section.",
                     )
                     .with_context(format!("File: {label}"))
-                    .with_context(format!("Offset: {}", relocation.virtual_address)),
+                    .with_context(format!("Offset: {}", relocation.virtual_address))
+                    .with_context(
+                        "Cause: relocation points beyond the end of its parent section".to_string(),
+                    ),
                 );
                 continue;
             }
@@ -26535,17 +26996,29 @@ impl<'s> CoffContext<'s> {
                     .unwrap_or_default();
                 if self.chunks[chunk].name.starts_with(".debug")
                     || self.chunks[chunk].name == ".eh_frame"
+                    || self.options.mingw
                 {
                     continue;
                 }
                 let label = self.file_label(Some(file));
+                let shown = match symbol {
+                    Some(id) => self.display_symbol_name(&self.symbols[id].name.clone()),
+                    None => self.display_symbol_name(&name),
+                };
+                let mut text = format!("relocation against symbol in discarded section: {shown}");
+                let (locations, _) =
+                    self.symbol_locations(file, relocation.symbol_index, usize::MAX);
+                for location in locations {
+                    text.push_str(&format!("\n>>> referenced by {location}"));
+                }
                 self.error(
                     problem(
                         "EI248",
                         "A relocation points outside its section or at a discarded section.",
                     )
                     .with_context(format!("Symbol: {name}"))
-                    .with_context(format!("File: {label}")),
+                    .with_context(format!("File: {label}"))
+                    .with_context(format!("Cause: {text}")),
                 );
                 continue;
             };
@@ -26863,7 +27336,10 @@ impl<'s> CoffContext<'s> {
                         "EI260",
                         "An input is not compatible with safe exception handlers.",
                     )
-                    .with_context(format!("File: {label}")),
+                    .with_context(format!("File: {label}"))
+                    .with_context(format!(
+                        "Cause: /safeseh: {label} is not compatible with SEH"
+                    )),
                 );
             }
             for symbol in self
