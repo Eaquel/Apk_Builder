@@ -95,6 +95,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI287", "An option has no effect in this link."),
     ("EI288", "The linker stops after too many errors."),
     ("EI289", "A symbol named in the order file does not exist."),
+    ("EI290", "An undecorated symbol resolves a decorated reference."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

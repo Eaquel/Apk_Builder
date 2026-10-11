@@ -3442,3 +3442,107 @@ pub mod program_database {
         }
     }
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct DllExports {
+    pub machine: u16,
+    pub dll_name: String,
+    pub exports: Vec<(String, bool)>,
+}
+
+pub fn read_dll_exports(bytes: &[u8]) -> Result<DllExports, String> {
+    let header = read_u32(bytes, 0x3c).ok_or("is not a COFF file")? as usize;
+    if bytes.get(header..header + 4) != Some(b"PE\0\0".as_slice()) {
+        return Err("is not a COFF file".to_string());
+    }
+    let coff = header + 4;
+    let machine_number = read_u16(bytes, coff).ok_or("is not a COFF file")?;
+    let section_count = read_u16(bytes, coff + 2).ok_or("is not a COFF file")? as usize;
+    let optional_size = read_u16(bytes, coff + 16).ok_or("is not a COFF file")? as usize;
+    let optional = coff + 20;
+    let magic = read_u16(bytes, optional).unwrap_or(0);
+    let directories = match magic {
+        0x10b => optional + 96,
+        0x20b => optional + 112,
+        _ => return Err("is not a PE-COFF executable".to_string()),
+    };
+    let mut sections: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let table = optional + optional_size;
+    for index in 0..section_count {
+        let at = table + index * 40;
+        let virtual_size = read_u32(bytes, at + 8).unwrap_or(0);
+        let virtual_address = read_u32(bytes, at + 12).unwrap_or(0);
+        let raw_pointer = read_u32(bytes, at + 20).unwrap_or(0);
+        let characteristics = read_u32(bytes, at + 36).unwrap_or(0);
+        sections.push((virtual_address, virtual_size, raw_pointer, characteristics));
+    }
+    let offset_of = |rva: u32| -> Option<usize> {
+        sections.iter().find_map(|(address, size, raw, _)| {
+            if rva >= *address && rva < address.wrapping_add((*size).max(1)) {
+                Some((*raw + (rva - address)) as usize)
+            } else {
+                None
+            }
+        })
+    };
+    let string_at = |rva: u32| -> String {
+        match offset_of(rva) {
+            Some(at) if at < bytes.len() => {
+                let end = bytes[at..]
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .map_or(bytes.len(), |length| at + length);
+                String::from_utf8_lossy(&bytes[at..end]).to_string()
+            }
+            _ => String::new(),
+        }
+    };
+    let mut result = DllExports {
+        machine: machine_number,
+        ..DllExports::default()
+    };
+    let export_rva = read_u32(bytes, directories).unwrap_or(0);
+    if export_rva == 0 {
+        return Ok(result);
+    }
+    let Some(directory) = offset_of(export_rva) else {
+        return Ok(result);
+    };
+    result.dll_name = string_at(read_u32(bytes, directory + 12).unwrap_or(0));
+    let function_count = read_u32(bytes, directory + 20).unwrap_or(0) as usize;
+    let name_count = read_u32(bytes, directory + 24).unwrap_or(0) as usize;
+    let functions = read_u32(bytes, directory + 28).unwrap_or(0);
+    let names = read_u32(bytes, directory + 32).unwrap_or(0);
+    let ordinals = read_u32(bytes, directory + 36).unwrap_or(0);
+    let mut names_by_index: std::collections::BTreeMap<usize, String> =
+        std::collections::BTreeMap::new();
+    if let (Some(names_at), Some(ordinals_at)) = (offset_of(names), offset_of(ordinals)) {
+        for position in 0..name_count {
+            let name_rva = read_u32(bytes, names_at + position * 4).unwrap_or(0);
+            let index = read_u16(bytes, ordinals_at + position * 2).unwrap_or(0) as usize;
+            names_by_index
+                .entry(index)
+                .or_insert_with(|| string_at(name_rva));
+        }
+    }
+    let Some(functions_at) = offset_of(functions) else {
+        return Ok(result);
+    };
+    for index in 0..function_count {
+        let rva = read_u32(bytes, functions_at + index * 4).unwrap_or(0);
+        let Some(name) = names_by_index.get(&index) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let code = sections
+            .iter()
+            .find(|(address, size, _, _)| rva >= *address && rva <= address.wrapping_add(*size))
+            .is_some_and(|(_, _, _, characteristics)| {
+                characteristics & section_characteristic::CODE != 0
+            });
+        result.exports.push((name.clone(), code));
+    }
+    Ok(result)
+}

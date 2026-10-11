@@ -18207,7 +18207,11 @@ pub struct CoffOptions {
     pub help: bool,
     pub align_given: bool,
     pub section_layout: Option<String>,
+    pub call_graph_file: Option<String>,
+    pub call_graph_sort: bool,
+    pub print_symbol_order: Option<String>,
     pub allow_duplicate_weak: Option<bool>,
+    pub stdcall_fixup: Option<bool>,
     pub infer_sanitizer_libraries: bool,
     pub exports: Vec<String>,
     pub definition_file: Option<String>,
@@ -18309,7 +18313,11 @@ impl Default for CoffOptions {
             help: false,
             align_given: false,
             section_layout: None,
+            call_graph_file: None,
+            call_graph_sort: true,
+            print_symbol_order: None,
             allow_duplicate_weak: None,
+            stdcall_fixup: None,
             infer_sanitizer_libraries: false,
             exports: Vec::new(),
             definition_file: None,
@@ -18762,6 +18770,13 @@ pub fn parse_coff_command_line(
             }
             "order" => options.order_file = Some(need(&value)?),
             "sectionlayout" => options.section_layout = Some(need(&value)?),
+            "call-graph-ordering-file" => options.call_graph_file = Some(need(&value)?),
+            "call-graph-profile-sort" => {
+                options.call_graph_sort = !value
+                    .as_deref()
+                    .is_some_and(|text| text.eq_ignore_ascii_case("no"))
+            }
+            "print-symbol-order" => options.print_symbol_order = Some(need(&value)?),
             "lldmap" => options.map_path = Some(value.clone().unwrap_or_default()),
             "help" | "?" => options.help = true,
             "pdbstripped" => options.warnings.push(
@@ -18813,6 +18828,13 @@ pub fn parse_coff_command_line(
                         )))
                     }
                 }
+            }
+            "stdcall-fixup" => {
+                options.stdcall_fixup = Some(
+                    !value
+                        .as_deref()
+                        .is_some_and(|text| text.eq_ignore_ascii_case("no")),
+                )
             }
             "lld-allow-duplicate-weak" => {
                 options.allow_duplicate_weak = Some(
@@ -19468,6 +19490,7 @@ pub struct CoffContext<'s> {
     pub relocatable: bool,
     pub safe_seh: bool,
     pub incremental: bool,
+    pub prevailing_comdat: Option<usize>,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19561,6 +19584,7 @@ impl<'s> CoffContext<'s> {
             relocatable: true,
             safe_seh: false,
             incremental: false,
+            prevailing_comdat: None,
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -20098,14 +20122,99 @@ impl<'s> CoffContext<'s> {
             self.add_object_bytes(path, "", &bytes, lazy);
             return;
         }
+        if bytes.starts_with(b"MZ") {
+            if self.options.mingw {
+                self.add_dll_file(path, &bytes);
+                return;
+            }
+            if path.to_ascii_lowercase().ends_with(".dll") {
+                self.error(
+                    problem(
+                        "EI212",
+                        "The linker does not support what this input asks for yet.",
+                    )
+                    .with_context("Feature: this input file type".to_string())
+                    .with_context(format!("File: {path}"))
+                    .with_context(format!(
+                        "Cause: {path}: bad file type. Did you specify a DLL instead of an import library?"
+                    )),
+                );
+                return;
+            }
+        }
         self.error(
             problem(
                 "EI212",
                 "The linker does not support what this input asks for yet.",
             )
             .with_context("Feature: this input file type".to_string())
-            .with_context(format!("File: {path}")),
+            .with_context(format!("File: {path}"))
+            .with_context(format!("Cause: {path}: unknown file type")),
         );
+    }
+
+    fn add_dll_file(&mut self, path: &str, bytes: &[u8]) {
+        let exports = match crate::compilers::pe::read_dll_exports(bytes) {
+            Ok(exports) => exports,
+            Err(reason) => {
+                self.error(
+                    problem(
+                        "EI212",
+                        "The linker does not support what this input asks for yet.",
+                    )
+                    .with_context("Feature: this input file type".to_string())
+                    .with_context(format!("File: {path}"))
+                    .with_context(format!("Cause: {path} {reason}")),
+                );
+                return;
+            }
+        };
+        let i386 = exports.machine == crate::compilers::pe::machine::I386;
+        let mut archive = CoffArchive {
+            name: String::new(),
+            ..CoffArchive::default()
+        };
+        let mut lazy: Vec<(String, usize)> = Vec::new();
+        for (name, code) in &exports.exports {
+            let symbol = if i386 {
+                format!("_{name}")
+            } else {
+                name.clone()
+            };
+            let name_type: u16 = if i386 { 2 } else { 1 };
+            let import_type: u16 = if *code { 0 } else { 1 };
+            let mut object = Vec::new();
+            crate::compilers::pe::put_u16(&mut object, 0);
+            crate::compilers::pe::put_u16(&mut object, 0xffff);
+            crate::compilers::pe::put_u16(&mut object, 0);
+            crate::compilers::pe::put_u16(&mut object, exports.machine);
+            crate::compilers::pe::put_u32(&mut object, 0);
+            crate::compilers::pe::put_u32(
+                &mut object,
+                (symbol.len() + exports.dll_name.len() + 2) as u32,
+            );
+            crate::compilers::pe::put_u16(&mut object, 0);
+            crate::compilers::pe::put_u16(&mut object, (name_type << 2) | import_type);
+            object.extend_from_slice(symbol.as_bytes());
+            object.push(0);
+            object.extend_from_slice(exports.dll_name.as_bytes());
+            object.push(0);
+            let member = archive.members.len();
+            archive.members.push(CoffArchiveMember {
+                name: exports.dll_name.clone(),
+                bytes: object,
+                offset: member,
+            });
+            lazy.push((format!("__imp_{symbol}"), member));
+            if *code {
+                lazy.push((symbol, member));
+            }
+        }
+        let index = self.archives.len();
+        self.archives.push(archive);
+        for (name, member) in lazy {
+            self.add_lazy_archive(index, &name, member);
+        }
     }
 
     fn add_archive_buffer(&mut self, name: &str, parent: &str, bytes: Vec<u8>, lazy: bool) {
@@ -20326,6 +20435,7 @@ impl<'s> CoffContext<'s> {
         let mut pending: Vec<usize> = Vec::new();
         let mut comdat_definitions: Vec<Option<crate::compilers::pe::SectionDefinition>> =
             vec![None; section_count + 1];
+        let mut prevailing_sections: BTreeMap<String, usize> = BTreeMap::new();
         for (position, symbol) in symbols.iter().enumerate() {
             let index = symbol.index as usize;
             if symbol.storage_class == crate::compilers::pe::storage_class::EXTERNAL
@@ -20368,9 +20478,26 @@ impl<'s> CoffContext<'s> {
                     self.objects[file].symbols[index] = Some(id);
                 }
             } else {
+                self.prevailing_comdat = None;
                 match self.create_defined(file, position, &mut sparse, &mut comdat_definitions, big)
                 {
-                    Some(created) => self.objects[file].symbols[index] = created,
+                    Some(created) => {
+                        self.objects[file].symbols[index] = created;
+                        if let (true, Some(number)) =
+                            (self.options.mingw, self.prevailing_comdat.take())
+                        {
+                            if let Some(Some(Some(chunk))) = sparse.get(number).cloned() {
+                                if self.chunks[chunk].output_characteristics() & character::EXECUTE
+                                    != 0
+                                {
+                                    let name = self.chunks[chunk].name.clone();
+                                    let suffix =
+                                        name.split_once('$').map(|(_, rest)| rest).unwrap_or("");
+                                    prevailing_sections.insert(suffix.to_string(), number);
+                                }
+                            }
+                        }
+                    }
                     None => pending.push(position),
                 }
             }
@@ -20379,11 +20506,29 @@ impl<'s> CoffContext<'s> {
             let symbol = symbols[position].clone();
             let number = symbol.section_number as usize;
             if let Some(definition) = symbol.section_definition(big) {
+                let mut parent_number = None;
                 if definition.selection == comdat_selection::ASSOCIATIVE {
-                    let parent = definition.number as usize;
+                    parent_number = Some(definition.number as usize);
+                } else if self.options.mingw {
+                    let name = symbol.name.as_str();
+                    let suffix = name
+                        .strip_prefix(".pdata$")
+                        .or_else(|| name.strip_prefix(".xdata$"))
+                        .or_else(|| name.strip_prefix(".eh_frame$"));
+                    if let Some(suffix) = suffix {
+                        parent_number = prevailing_sections.get(suffix).copied();
+                    }
+                }
+                if let Some(parent) = parent_number {
                     match sparse.get(parent).cloned().flatten() {
                         None => {
                             let label = self.file_label(Some(file));
+                            let parent_name = self.objects[file]
+                                .object
+                                .sections
+                                .get(parent.wrapping_sub(1))
+                                .map(|section| section.name.clone())
+                                .unwrap_or_default();
                             self.error(
                                 problem(
                                     "EI212",
@@ -20394,7 +20539,11 @@ impl<'s> CoffContext<'s> {
                                         .to_string(),
                                 )
                                 .with_context(format!("File: {label}"))
-                                .with_context(format!("Symbol: {}", symbol.name)),
+                                .with_context(format!("Symbol: {}", symbol.name))
+                                .with_context(format!(
+                                    "Cause: {label}: associative comdat {} (sec {number}) has invalid reference to section {parent_name} (sec {parent})",
+                                    symbol.name
+                                )),
                             );
                         }
                         Some(Some(parent_chunk)) => {
@@ -20619,7 +20768,11 @@ impl<'s> CoffContext<'s> {
                         "Feature: comdat selection {}",
                         definition.selection
                     ))
-                    .with_context(format!("File: {label}")),
+                    .with_context(format!("File: {label}"))
+                    .with_context(format!(
+                        "Cause: unknown comdat type {} for {} in {label}",
+                        definition.selection, symbol.name
+                    )),
                 );
                 return Some(None);
             }
@@ -20643,6 +20796,7 @@ impl<'s> CoffContext<'s> {
                 let Some(chunk) = chunk else {
                     return Some(None);
                 };
+                self.prevailing_comdat = Some(number);
                 self.chunks[chunk].leader = Some(leader);
                 self.chunks[chunk].selection = selection;
                 if let CoffSymbolKind::Regular {
@@ -21458,7 +21612,7 @@ impl<'s> CoffContext<'s> {
         if !wrapped.is_empty() {
             while self.run_tasks() {}
         }
-        if self.auto_import() {
+        if self.auto_import() || self.options.stdcall_fixup.unwrap_or(self.options.mingw) {
             self.load_automatic_imports();
             self.run_tasks();
         }
@@ -24468,6 +24622,262 @@ impl<'s> CoffContext<'s> {
             .sort_by_key(|output| order.get(&output.name).copied().unwrap_or(usize::MAX));
     }
 
+    fn call_graph_profile(&mut self) -> Vec<((usize, usize), u64)> {
+        let mut profile: Vec<((usize, usize), u64)> = Vec::new();
+        let add = |profile: &mut Vec<((usize, usize), u64)>, from: usize, to: usize, count: u64| {
+            match profile.iter_mut().find(|(pair, _)| *pair == (from, to)) {
+                Some((_, total)) => *total += count,
+                None => profile.push(((from, to), count)),
+            }
+        };
+        let section_of = |context: &CoffContext, id: SymbolIndex| -> Option<usize> {
+            let target = context.defined_target(id)?;
+            match context.symbols[target].kind {
+                CoffSymbolKind::Regular {
+                    chunk: Some(chunk), ..
+                } if context.chunks[chunk].kind == CoffChunkKind::Section => Some(chunk),
+                _ => None,
+            }
+        };
+        if let Some(path) = self.options.call_graph_file.clone() {
+            let Some(bytes) = (self.source)(&path) else {
+                self.error(file_missing(&path).with_context(format!(
+                    "Cause: could not open {path}: No such file or directory"
+                )));
+                return profile;
+            };
+            let mut names: BTreeMap<String, SymbolIndex> = BTreeMap::new();
+            for file in self.object_order.clone() {
+                for id in self.objects[file].symbols.iter().flatten() {
+                    names.insert(self.symbols[*id].name.clone(), *id);
+                }
+            }
+            let warn = !self
+                .options
+                .ignored_warnings
+                .iter()
+                .any(|code| code == "4037");
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            for line in text.lines() {
+                let line = line.split('#').next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let fields: Vec<&str> = line.split(' ').collect();
+                let count = fields.get(2).and_then(|field| field.parse::<u64>().ok());
+                let (true, Some(count)) = (fields.len() == 3, count) else {
+                    self.error(
+                        problem("EI204", "An option value is not valid.")
+                            .with_context(format!("Option: /call-graph-ordering-file:{path}"))
+                            .with_context(format!("Cause: {path}: parse error")),
+                    );
+                    return profile;
+                };
+                let find = |context: &mut CoffContext, name: &str| -> Option<usize> {
+                    match names.get(name) {
+                        Some(id) => section_of(context, *id),
+                        None => {
+                            if warn {
+                                context.warn(
+                                    caution(
+                                        "EI289",
+                                        "A symbol named in the order file does not exist.",
+                                    )
+                                    .with_context(format!("Symbol: {name}"))
+                                    .with_context(format!("Cause: {path}: no such symbol: {name}")),
+                                );
+                            }
+                            None
+                        }
+                    }
+                };
+                if let Some(from) = find(self, fields[0]) {
+                    if let Some(to) = find(self, fields[1]) {
+                        add(&mut profile, from, to, count);
+                    }
+                }
+            }
+            return profile;
+        }
+        for file in self.object_order.clone() {
+            let Some(section) = self.objects[file]
+                .object
+                .sections
+                .iter()
+                .find(|section| section.name == ".llvm.call-graph-profile")
+                .cloned()
+            else {
+                continue;
+            };
+            for entry in section.data.chunks_exact(16) {
+                let from_index = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+                let to_index = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+                let mut count_bytes = [0u8; 8];
+                count_bytes.copy_from_slice(&entry[8..16]);
+                let count = u64::from_le_bytes(count_bytes);
+                let symbol = |index: u32| {
+                    self.objects[file]
+                        .symbols
+                        .get(index as usize)
+                        .copied()
+                        .flatten()
+                };
+                let (Some(from), Some(to)) = (symbol(from_index), symbol(to_index)) else {
+                    continue;
+                };
+                if let (Some(from), Some(to)) = (section_of(self, from), section_of(self, to)) {
+                    add(&mut profile, from, to, count);
+                }
+            }
+        }
+        profile
+    }
+
+    fn call_graph_priorities(&mut self) -> BTreeMap<String, i64> {
+        let profile = self.call_graph_profile();
+        let mut priorities = BTreeMap::new();
+        if profile.is_empty() {
+            return priorities;
+        }
+        struct Cluster {
+            next: usize,
+            previous: usize,
+            size: u64,
+            weight: u64,
+            initial_weight: u64,
+            best_from: Option<usize>,
+            best_weight: u64,
+        }
+        let mut nodes: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut sections: Vec<usize> = Vec::new();
+        let mut clusters: Vec<Cluster> = Vec::new();
+        for ((from, to), weight) in profile {
+            let resolve = |chunk: usize| {
+                let replacement = self.chunks[chunk].replacement;
+                if replacement == usize::MAX {
+                    chunk
+                } else {
+                    replacement
+                }
+            };
+            let from = resolve(from);
+            let to = resolve(to);
+            let mut node =
+                |chunk: usize, clusters: &mut Vec<Cluster>, sections: &mut Vec<usize>| {
+                    *nodes.entry(chunk).or_insert_with(|| {
+                        let index = clusters.len();
+                        sections.push(chunk);
+                        clusters.push(Cluster {
+                            next: index,
+                            previous: index,
+                            size: self.chunks[chunk].size,
+                            weight: 0,
+                            initial_weight: 0,
+                            best_from: None,
+                            best_weight: 0,
+                        });
+                        index
+                    })
+                };
+            let from = node(from, &mut clusters, &mut sections);
+            let to = node(to, &mut clusters, &mut sections);
+            clusters[to].weight += weight;
+            if from == to {
+                continue;
+            }
+            if clusters[to].best_from.is_none() || clusters[to].best_weight < weight {
+                clusters[to].best_from = Some(from);
+                clusters[to].best_weight = weight;
+            }
+        }
+        for cluster in clusters.iter_mut() {
+            cluster.initial_weight = cluster.weight;
+        }
+        let density = |cluster: &Cluster| {
+            if cluster.size == 0 {
+                0.0
+            } else {
+                cluster.weight as f64 / cluster.size as f64
+            }
+        };
+        let mut sorted: Vec<usize> = (0..clusters.len()).collect();
+        sorted.sort_by(|left, right| {
+            density(&clusters[*right])
+                .partial_cmp(&density(&clusters[*left]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut leaders: Vec<usize> = (0..clusters.len()).collect();
+        let leader_of = |leaders: &mut Vec<usize>, mut node: usize| {
+            while leaders[node] != node {
+                leaders[node] = leaders[leaders[node]];
+                node = leaders[node];
+            }
+            node
+        };
+        for current in sorted {
+            let Some(best) = clusters[current].best_from else {
+                continue;
+            };
+            if clusters[current].best_weight * 10 <= clusters[current].initial_weight {
+                continue;
+            }
+            let predecessor = leader_of(&mut leaders, best);
+            if current == predecessor {
+                continue;
+            }
+            if clusters[current].size + clusters[predecessor].size > 1024 * 1024 {
+                continue;
+            }
+            let combined = (clusters[predecessor].weight + clusters[current].weight) as f64
+                / (clusters[predecessor].size + clusters[current].size) as f64;
+            if combined < density(&clusters[predecessor]) / 8.0 {
+                continue;
+            }
+            leaders[current] = predecessor;
+            let tail_into = clusters[predecessor].previous;
+            let tail_from = clusters[current].previous;
+            clusters[predecessor].previous = tail_from;
+            clusters[tail_from].next = predecessor;
+            clusters[current].previous = tail_into;
+            clusters[tail_into].next = current;
+            clusters[predecessor].size += clusters[current].size;
+            clusters[predecessor].weight += clusters[current].weight;
+            clusters[current].size = 0;
+            clusters[current].weight = 0;
+        }
+        let mut sorted: Vec<usize> = (0..clusters.len())
+            .filter(|index| clusters[*index].size > 0)
+            .collect();
+        sorted.sort_by(|left, right| {
+            density(&clusters[*right])
+                .partial_cmp(&density(&clusters[*left]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut order = i64::from(i32::MIN);
+        let mut printed = String::new();
+        for leader in sorted {
+            let mut index = leader;
+            loop {
+                let chunk = sections[index];
+                if let Some(symbol) = self.chunks[chunk].leader {
+                    let name = self.symbols[symbol].name.clone();
+                    printed.push_str(&name);
+                    printed.push('\n');
+                    priorities.insert(name, order);
+                }
+                order += 1;
+                index = clusters[index].next;
+                if index == leader {
+                    break;
+                }
+            }
+        }
+        if let Some(path) = self.options.print_symbol_order.clone() {
+            self.extra_outputs.push((path, printed.into_bytes()));
+        }
+        priorities
+    }
+
     fn order_priorities(&mut self) -> BTreeMap<String, i64> {
         let mut priorities = BTreeMap::new();
         let Some(argument) = self.options.order_file.clone() else {
@@ -25548,7 +25958,10 @@ impl<'s> CoffContext<'s> {
                 }
             }
         }
-        let priorities = self.order_priorities();
+        let mut priorities = self.order_priorities();
+        if self.options.order_file.is_none() && self.options.call_graph_sort {
+            priorities.extend(self.call_graph_priorities());
+        }
         for ((name, characteristics), list) in partial {
             let mut list = list;
             if !priorities.is_empty() {
@@ -26885,7 +27298,63 @@ impl<'s> CoffContext<'s> {
             .filter(|id| self.symbols[*id].is_undefined() && self.weak_alias_target(*id).is_none())
             .collect();
         for id in undefined {
+            if !self.symbols[id].is_undefined() || self.weak_alias_target(id).is_some() {
+                continue;
+            }
             let name = self.symbols[id].name.clone();
+            if self.machine == crate::compilers::pe::machine::I386
+                && self.options.stdcall_fixup.unwrap_or(self.options.mingw)
+            {
+                let trimmed = name
+                    .strip_prefix('_')
+                    .or_else(|| name.strip_prefix('@'))
+                    .unwrap_or(&name);
+                let base = trimmed.split('@').next().unwrap_or(trimmed);
+                let replacement = format!("_{base}");
+                if replacement != name {
+                    if let Some(target) = self.find(&replacement) {
+                        if self.symbols[target].is_lazy()
+                            && !self.symbols[target].pending_archive_load
+                        {
+                            if self.options.verbose {
+                                let source = self.lazy_source(target);
+                                self.messages.push(format!(
+                                    "Loading lazy {replacement} from {source} for stdcall fixup"
+                                ));
+                            }
+                            self.force_lazy(target);
+                        }
+                        if self.symbols[target].is_lazy() || self.symbols[target].is_defined() {
+                            let text = format!("Resolving {name} by linking to {replacement}");
+                            if self.options.stdcall_fixup.is_none() {
+                                self.warn(
+                                    caution(
+                                        "EI290",
+                                        "An undecorated symbol resolves a decorated reference.",
+                                    )
+                                    .with_context(format!("Symbol: {name}"))
+                                    .with_context(format!("Cause: {text}")),
+                                );
+                            } else if self.options.verbose {
+                                self.messages.push(text);
+                            }
+                            if let CoffSymbolKind::Undefined {
+                                anti_dependency, ..
+                            } = self.symbols[id].kind.clone()
+                            {
+                                self.symbols[id].kind = CoffSymbolKind::Undefined {
+                                    alias: Some(target),
+                                    anti_dependency,
+                                };
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            if !self.auto_import() {
+                continue;
+            }
             if name.starts_with("__imp_") {
                 continue;
             }
@@ -26895,7 +27364,28 @@ impl<'s> CoffContext<'s> {
             if !self.symbols[import].is_lazy() || self.symbols[import].pending_archive_load {
                 continue;
             }
+            if self.options.verbose {
+                let source = self.lazy_source(import);
+                self.messages.push(format!(
+                    "Loading lazy __imp_{name} from {source} for automatic import"
+                ));
+            }
             self.force_lazy(import);
+        }
+    }
+
+    fn lazy_source(&self, id: SymbolIndex) -> String {
+        match self.symbols[id].kind {
+            CoffSymbolKind::LazyArchive { archive, member } => {
+                let name = self.archives[archive].name.clone();
+                if name.is_empty() {
+                    self.archives[archive].members[member].name.clone()
+                } else {
+                    name
+                }
+            }
+            CoffSymbolKind::LazyObject { file } => self.objects[file].name.clone(),
+            _ => String::new(),
         }
     }
 
