@@ -13,15 +13,15 @@
       "total": 90
     },
     "lld-coff": {
-      "failed": 201,
-      "out_of_scope": 249,
-      "passed": 115,
+      "failed": 190,
+      "out_of_scope": 250,
+      "passed": 125,
       "total": 565
     },
     "lld-elf": {
-      "failed": 377,
+      "failed": 376,
       "out_of_scope": 637,
-      "passed": 1042,
+      "passed": 1043,
       "total": 2056
     },
     "regex-oracle": {

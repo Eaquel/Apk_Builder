@@ -68981,9 +68981,14 @@ mod linker_lit {
                                 ));
                             }
                         }
+                        let stdout = if std::str::from_utf8(&output.stdout).is_ok() {
+                            clean(output.stdout)
+                        } else {
+                            output.stdout
+                        };
                         ToolOutcome {
                             status,
-                            stdout: clean(output.stdout),
+                            stdout,
                             stderr,
                         }
                     }

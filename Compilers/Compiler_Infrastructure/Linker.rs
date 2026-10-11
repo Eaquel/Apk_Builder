@@ -20928,10 +20928,11 @@ impl<'s> CoffContext<'s> {
             self.entry = Some(self.add_gc_root(&mangled));
         } else if self.entry.is_none() && !self.options.no_entry {
             if self.options.dll {
-                let name = if self.machine == machine::I386 {
-                    "__DllMainCRTStartup@12"
-                } else {
-                    "_DllMainCRTStartup"
+                let name = match (self.options.mingw, self.machine == machine::I386) {
+                    (true, true) => "_DllMainCRTStartup@12",
+                    (true, false) => "DllMainCRTStartup",
+                    (false, true) => "__DllMainCRTStartup@12",
+                    (false, false) => "_DllMainCRTStartup",
                 };
                 self.entry = Some(self.add_gc_root(name));
             } else if self.options.driver_wdm {
@@ -20940,6 +20941,9 @@ impl<'s> CoffContext<'s> {
             } else {
                 let name = self.find_default_entry();
                 self.entry = Some(self.add_gc_root(&name));
+                if self.options.verbose {
+                    self.messages.push(format!("Entry name inferred: {name}"));
+                }
             }
         }
         if self.options.output.is_empty() {
