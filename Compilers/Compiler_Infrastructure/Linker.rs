@@ -18627,6 +18627,28 @@ pub fn parse_coff_command_line(
             "pdbsourcepath" => options.pdb_source_path = Some(need(&value)?),
             "natvis" => options.natvis_files.push(need(&value)?),
             "nodbgdirmerge" => options.merge_debug_directory = false,
+            "pdbstripped" => options.warnings.push(
+                caution(
+                    "EI247",
+                    "The linker ignores an option it does not recognize.",
+                )
+                .with_context(format!("Option: {argument}"))
+                .with_context(format!("Cause: {PDB_STRIPPED_IGNORED}")),
+            ),
+            "debugtype" => {
+                for part in need(&value)?.split(',').filter(|part| !part.is_empty()) {
+                    if !["cv", "pdata", "fixup"].contains(&part.to_ascii_lowercase().as_str()) {
+                        options.warnings.push(
+                            caution(
+                                "EI247",
+                                "The linker ignores an option it does not recognize.",
+                            )
+                            .with_context(format!("Option: {argument}"))
+                            .with_context(format!("Cause: /debugtype: unknown option '{part}'")),
+                        );
+                    }
+                }
+            }
             "pdbstream" => {
                 let text = need(&value)?;
                 let (name, path) = text.split_once('=').unwrap_or((text.as_str(), ""));
@@ -18755,6 +18777,7 @@ pub fn parse_coff_command_line(
             | "time"
             | "inferasanlibs"
             | "prefetch-inputs"
+            | "threads"
             | "failifmismatch"
             | "profile" => {}
             _ if argument.starts_with('/') => options.inputs.push(CoffInput::File(argument)),
@@ -19035,6 +19058,7 @@ pub struct CoffObjectInput {
     pub guard_import_chunks: Vec<usize>,
     pub guard_long_jump_chunks: Vec<usize>,
     pub guard_continuation_chunks: Vec<usize>,
+    pub debug_chunks: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -19394,9 +19418,11 @@ impl<'s> CoffContext<'s> {
 
     pub fn warn(&mut self, diagnostic: Diagnostic) {
         let mut diagnostic = diagnostic;
-        if self.options.warnings_as_errors {
-            diagnostic.severity = Severity::Error;
-        }
+        diagnostic.severity = if self.options.warnings_as_errors {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
         self.diagnostics.push(diagnostic);
     }
 
@@ -20054,9 +20080,9 @@ impl<'s> CoffContext<'s> {
             classes: [0, 0],
             merged_into: None,
         });
-        let is_code_view =
-            name == ".debug$S" || name == ".debug$T" || name == ".debug$P" || name == ".debug$H";
+        let is_code_view = name == ".debug" || name.starts_with(".debug$");
         if is_code_view {
+            self.objects[file].debug_chunks.push(index);
         } else if name == ".gfids$y" {
             self.objects[file].guard_function_chunks.push(index);
         } else if name == ".giats$y" {
@@ -22655,6 +22681,11 @@ const LOAD_CONFIG_GOT: &str = ", got";
 
 const PSEUDO_RELOCATION_NARROW: &str = "; this can fail at runtime depending on memory layout";
 
+const PDB_STRIPPED_IGNORED: &str = "ignoring /pdbstripped flag, it is not yet supported";
+
+const STRING_TABLE_MISSING: &str =
+    "No StringTable subsection was encountered, but there are string table references";
+
 const PDB_ALTERNATE_VARIABLES: &str = "only %_PDB% and %_EXT% supported in /pdbaltpath:, keeping";
 
 const PSEUDO_RELOCATOR_MISSING: &str = "output image has runtime pseudo relocations, but the function _pei386_runtime_relocator is missing; it is needed for fixing the relocations at runtime";
@@ -22801,6 +22832,983 @@ pub fn link_coff_in(
     }
     outcome.outputs.append(&mut context.extra_outputs);
     outcome
+}
+
+const CODE_VIEW_NOT_TRANSLATED: u32 = 0x0007;
+
+fn code_view_records(data: &[u8]) -> Option<Vec<(usize, usize)>> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < data.len() {
+        if at + 4 > data.len() {
+            return None;
+        }
+        let length = u16::from_le_bytes([data[at], data[at + 1]]) as usize;
+        if length < 2 || at + 2 + length > data.len() {
+            return None;
+        }
+        out.push((at, 2 + length));
+        at += 2 + length;
+    }
+    Some(out)
+}
+
+fn code_view_kind(record: &[u8]) -> u16 {
+    if record.len() < 4 {
+        return 0;
+    }
+    u16::from_le_bytes([record[2], record[3]])
+}
+
+fn code_view_u16(data: &[u8], at: usize) -> u16 {
+    if at + 2 > data.len() {
+        return 0;
+    }
+    u16::from_le_bytes([data[at], data[at + 1]])
+}
+
+fn code_view_u32(data: &[u8], at: usize) -> u32 {
+    if at + 4 > data.len() {
+        return 0;
+    }
+    u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
+}
+
+fn numeric_leaf_length(data: &[u8], at: usize) -> usize {
+    let leaf = code_view_u16(data, at);
+    if leaf < 0x8000 {
+        return 2;
+    }
+    let sizes = [1usize, 2, 2, 4, 4, 4, 8, 10, 16, 8, 8];
+    let index = (leaf - 0x8000) as usize;
+    2 + sizes.get(index).copied().unwrap_or(0)
+}
+
+fn c_string_length(data: &[u8], at: usize) -> usize {
+    if at >= data.len() {
+        return 1;
+    }
+    data[at..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|length| length + 1)
+        .unwrap_or(data.len() - at)
+}
+
+fn introduces_virtual(attributes: u16) -> bool {
+    let kind = (attributes & 0x1c) >> 2;
+    kind == 4 || kind == 6
+}
+
+fn field_list_references(content: &[u8], references: &mut Vec<(bool, usize, usize)>) {
+    let mut offset = 0usize;
+    while offset < content.len() {
+        let kind = code_view_u16(content, offset);
+        let length = match kind {
+            0x1400 => {
+                references.push((false, offset + 4, 1));
+                8 + numeric_leaf_length(content, offset + 8)
+            }
+            0x1502 => {
+                let size = 4 + numeric_leaf_length(content, offset + 4);
+                size + c_string_length(content, offset + size)
+            }
+            0x150d => {
+                references.push((false, offset + 4, 1));
+                let size = 8 + numeric_leaf_length(content, offset + 8);
+                size + c_string_length(content, offset + size)
+            }
+            0x150e..=0x1510 => {
+                references.push((false, offset + 4, 1));
+                8 + c_string_length(content, offset + 8)
+            }
+            0x1511 => {
+                references.push((false, offset + 4, 1));
+                let mut size = 8;
+                if introduces_virtual(code_view_u16(content, offset + 2)) {
+                    size += 4;
+                }
+                size + c_string_length(content, offset + size)
+            }
+            0x1401 | 0x1402 => {
+                references.push((false, offset + 4, 2));
+                let mut size = 12;
+                size += numeric_leaf_length(content, offset + size);
+                size += numeric_leaf_length(content, offset + size);
+                size
+            }
+            0x1409 | 0x1404 => {
+                references.push((false, offset + 4, 1));
+                8
+            }
+            _ => return,
+        };
+        offset += length;
+        if offset < content.len() && content[offset] >= 0xf0 {
+            offset += usize::from(content[offset] & 0x0f);
+        }
+    }
+}
+
+fn type_references(record: &[u8]) -> Vec<(bool, usize, usize)> {
+    let kind = code_view_kind(record);
+    let content = if record.len() >= 4 { &record[4..] } else { &[] };
+    let mut references = Vec::new();
+    match kind {
+        0x1601 => {
+            references.push((true, 0, 1));
+            references.push((false, 4, 1));
+        }
+        0x1602 => references.push((false, 0, 2)),
+        0x1605 => references.push((true, 0, 1)),
+        0x1604 => {
+            let count = code_view_u32(content, 0) as usize;
+            if count > 0 {
+                references.push((true, 4, count));
+            }
+        }
+        0x1603 => {
+            let count = code_view_u16(content, 0) as usize;
+            if count > 0 {
+                references.push((true, 2, count));
+            }
+        }
+        0x1606 => {
+            references.push((false, 0, 1));
+            references.push((true, 4, 1));
+        }
+        0x1607 | 0x1001 | 0x1205 => references.push((false, 0, 1)),
+        0x1008 => {
+            references.push((false, 0, 1));
+            references.push((false, 8, 1));
+        }
+        0x1009 => {
+            references.push((false, 0, 3));
+            references.push((false, 16, 1));
+        }
+        0x1201 => {
+            let count = code_view_u32(content, 0) as usize;
+            if count > 0 {
+                references.push((false, 4, count));
+            }
+        }
+        0x1503 | 0x151d => references.push((false, 0, 2)),
+        0x1504 | 0x1505 | 0x1519 | 0x1608 | 0x1609 | 0x160b => references.push((false, 4, 3)),
+        0x1506 | 0x160a => references.push((false, 4, 1)),
+        0x1507 => references.push((false, 4, 2)),
+        0x1206 => {
+            let mut offset = 0usize;
+            while offset < content.len() {
+                references.push((false, offset + 4, 1));
+                let mut length = 8;
+                if introduces_virtual(code_view_u16(content, offset)) {
+                    length += 4;
+                }
+                offset += length;
+            }
+        }
+        0x1203 => field_list_references(content, &mut references),
+        0x1002 => {
+            references.push((false, 0, 1));
+            let attributes = code_view_u32(content, 4);
+            let mode = (attributes >> 5) & 0x7;
+            if mode == 2 || mode == 3 {
+                references.push((false, 8, 1));
+            }
+        }
+        _ => {}
+    }
+    references
+}
+
+fn symbol_type_references(record: &[u8]) -> Option<Vec<(bool, usize, usize)>> {
+    let kind = code_view_kind(record);
+    let content = if record.len() >= 4 { &record[4..] } else { &[] };
+    let mut references = Vec::new();
+    match kind {
+        0x1147 | 0x1146 | 0x1155 | 0x1156 => references.push((true, 24, 1)),
+        0x1110 | 0x110f => references.push((false, 24, 1)),
+        0x1108 | 0x110d | 0x110c | 0x1112 | 0x1113 | 0x1153 | 0x113e | 0x1106 | 0x1107 => {
+            references.push((false, 0, 1))
+        }
+        0x114c => references.push((true, 0, 1)),
+        0x110b | 0x1111 | 0x1171 => references.push((false, 4, 1)),
+        0x1139 => references.push((false, 8, 1)),
+        0x115b | 0x115a | 0x1168 => {
+            let count = code_view_u32(content, 0) as usize;
+            references.push((true, 4, count));
+        }
+        0x114d => references.push((true, 8, 1)),
+        0x115e => references.push((false, 8, 1)),
+        0x1141 | 0x1145 | 0x1177 | 0x1142 | 0x1144 | 0x1143 | 0x1140 => {}
+        0x1105 | 0x1101 | 0x0001 | 0x1116 | 0x113c | 0x113d | 0x1103 | 0x1012 | 0x1102 | 0x113a
+        | 0x1124 | 0x1159 | 0x117c => {}
+        0x0006 | 0x114e | 0x114f => {}
+        _ => return None,
+    }
+    Some(references)
+}
+
+fn symbol_name(record: &[u8]) -> Vec<u8> {
+    let kind = code_view_kind(record);
+    let content = if record.len() >= 4 { &record[4..] } else { &[] };
+    let offset = match kind {
+        0x1107 => {
+            let at = 4 + numeric_leaf_length(content, 4);
+            let length = c_string_length(content, at).saturating_sub(1);
+            return content.get(at..at + length).unwrap_or(&[]).to_vec();
+        }
+        0x1110 | 0x110f | 0x1147 | 0x1146 | 0x1155 | 0x1156 => 35,
+        0x1102 => 21,
+        0x1136 => 16,
+        0x1137 => 14,
+        0x110e | 0x1153 | 0x1111 | 0x110d | 0x110c | 0x111c | 0x111d | 0x1112 | 0x1113 | 0x1125
+        | 0x1127 => 10,
+        0x1106 | 0x113e => 6,
+        0x1103 => 18,
+        0x1105 => 7,
+        0x1101 | 0x1138 | 0x1108 => 4,
+        0x110b => 8,
+        0x1124 => 0,
+        _ => return Vec::new(),
+    };
+    if offset >= content.len() {
+        return Vec::new();
+    }
+    let length = c_string_length(content, offset).saturating_sub(1);
+    content[offset..offset + length.min(content.len() - offset)].to_vec()
+}
+
+fn opens_scope(kind: u16) -> bool {
+    matches!(
+        kind,
+        0x1110 | 0x110f | 0x1146 | 0x1147 | 0x1103 | 0x1132 | 0x1102 | 0x114d | 0x115d
+    )
+}
+
+fn ends_scope(kind: u16) -> bool {
+    matches!(kind, 0x0006 | 0x114f | 0x114e)
+}
+
+fn goes_in_module_stream(kind: u16, depth: usize) -> bool {
+    match kind {
+        0x110d | 0x1113 | 0x1125 | 0x1127 => false,
+        0x1108 | 0x1107 => depth > 0,
+        _ => true,
+    }
+}
+
+fn goes_in_globals_stream(kind: u16, depth: usize) -> bool {
+    match kind {
+        0x110d | 0x1113 | 0x1110 | 0x110f | 0x1147 | 0x1146 | 0x1125 | 0x1127 => true,
+        0x1108 | 0x110c | 0x1112 | 0x1107 => depth == 0,
+        _ => false,
+    }
+}
+
+fn is_identifier_record(kind: u16) -> bool {
+    matches!(kind, 0x1601..=0x1607)
+}
+
+fn tag_record_names(record: &[u8]) -> Option<(u16, Vec<u8>, Vec<u8>)> {
+    let kind = code_view_kind(record);
+    let content = &record[4.min(record.len())..];
+    let (options, name_at) = match kind {
+        0x1504 | 0x1505 | 0x1519 => {
+            let at = 16 + numeric_leaf_length(content, 16);
+            (code_view_u16(content, 2), at)
+        }
+        0x1506 => {
+            let at = 8 + numeric_leaf_length(content, 8);
+            (code_view_u16(content, 2), at)
+        }
+        0x1507 => (code_view_u16(content, 2), 12),
+        _ => return None,
+    };
+    let name_length = c_string_length(content, name_at);
+    let name = content
+        .get(name_at..name_at + name_length.saturating_sub(1))
+        .unwrap_or(&[])
+        .to_vec();
+    let unique_at = name_at + name_length;
+    let unique = if options & 0x200 != 0 {
+        let length = c_string_length(content, unique_at).saturating_sub(1);
+        content
+            .get(unique_at..unique_at + length)
+            .unwrap_or(&[])
+            .to_vec()
+    } else {
+        Vec::new()
+    };
+    Some((options, name, unique))
+}
+
+fn type_record_hash(record: &[u8]) -> u32 {
+    use crate::compilers::pe::program_database::{hash_string_first, jam_checksum};
+    let kind = code_view_kind(record);
+    if let Some((options, name, unique)) = tag_record_names(record) {
+        let forward = options & 0x80 != 0;
+        let scoped = options & 0x100 != 0;
+        let has_unique = options & 0x200 != 0;
+        let anonymous = has_unique
+            && (name == b"<unnamed-tag>"
+                || name == b"__unnamed"
+                || name.ends_with(b"::<unnamed-tag>")
+                || name.ends_with(b"::__unnamed"));
+        if !forward && !scoped && !anonymous {
+            return hash_string_first(&name);
+        }
+        if !forward && has_unique && !anonymous {
+            return hash_string_first(&unique);
+        }
+        return jam_checksum(record);
+    }
+    if kind == 0x1606 || kind == 0x1607 {
+        let content = &record[4.min(record.len())..];
+        return hash_string_first(&code_view_u32(content, 0).to_le_bytes());
+    }
+    jam_checksum(record)
+}
+
+#[derive(Clone, Debug, Default)]
+struct TypeSource {
+    file: usize,
+    records: Vec<Vec<u8>>,
+    map: Vec<u32>,
+    failure: Option<String>,
+}
+
+fn remap_record(record: &mut [u8], references: &[(bool, usize, usize)], map: &[u32]) {
+    for (_, offset, count) in references {
+        for index in 0..*count {
+            let at = 4 + offset + index * 4;
+            if at + 4 > record.len() {
+                return;
+            }
+            let value = code_view_u32(record, at);
+            if value < 0x1000 {
+                continue;
+            }
+            let position = (value - 0x1000) as usize;
+            let mapped = map
+                .get(position)
+                .copied()
+                .unwrap_or(CODE_VIEW_NOT_TRANSLATED);
+            record[at..at + 4].copy_from_slice(&mapped.to_le_bytes());
+        }
+    }
+}
+
+fn merge_type_sources(
+    sources: &mut [TypeSource],
+    database: &mut crate::compilers::pe::program_database::ProgramDatabase,
+) -> BTreeMap<u32, u32> {
+    let mut keys: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    let mut cells: Vec<(bool, usize, usize)> = Vec::new();
+    let mut identities: Vec<Vec<Option<usize>>> = Vec::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let count = source.records.len();
+        let mut identity: Vec<Option<usize>> = vec![None; count];
+        loop {
+            let mut progress = false;
+            let mut pending = false;
+            for record_index in 0..count {
+                if identity[record_index].is_some() {
+                    continue;
+                }
+                let record = &source.records[record_index];
+                let references = type_references(record);
+                let mut key = Vec::with_capacity(record.len() + 8);
+                let mut cursor = 0usize;
+                let content = &record[4.min(record.len())..];
+                key.extend_from_slice(&record[..4.min(record.len())]);
+                let mut ready = true;
+                for (_, offset, count) in &references {
+                    let start = (*offset).min(content.len());
+                    if start > cursor {
+                        key.extend_from_slice(&content[cursor..start]);
+                    }
+                    for index in 0..*count {
+                        let at = offset + index * 4;
+                        let value = code_view_u32(content, at);
+                        if value < 0x1000 {
+                            key.push(0);
+                            key.extend_from_slice(&value.to_le_bytes());
+                        } else {
+                            let position = (value - 0x1000) as usize;
+                            match identity.get(position).copied().flatten() {
+                                Some(global) => {
+                                    key.push(1);
+                                    key.extend_from_slice(&(global as u64).to_le_bytes());
+                                }
+                                None => {
+                                    ready = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !ready {
+                        break;
+                    }
+                    cursor = (offset + count * 4).min(content.len());
+                }
+                if !ready {
+                    pending = true;
+                    continue;
+                }
+                if cursor < content.len() {
+                    key.extend_from_slice(&content[cursor..]);
+                }
+                let item = is_identifier_record(code_view_kind(record));
+                let next = cells.len();
+                let global = *keys.entry(key).or_insert(next);
+                if global == next {
+                    cells.push((item, source_index, record_index));
+                }
+                identity[record_index] = Some(global);
+                progress = true;
+            }
+            if !pending || !progress {
+                break;
+            }
+        }
+        for (record_index, slot) in identity.iter_mut().enumerate() {
+            if slot.is_none() {
+                let item = is_identifier_record(code_view_kind(&source.records[record_index]));
+                *slot = Some(cells.len());
+                cells.push((item, source_index, record_index));
+            }
+        }
+        identities.push(identity);
+    }
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by_key(|global| cells[*global]);
+    let mut final_index = vec![0u32; cells.len()];
+    let mut type_count = 0u32;
+    let mut item_count = 0u32;
+    for global in &order {
+        if cells[*global].0 {
+            final_index[*global] = 0x1000 + item_count;
+            item_count += 1;
+        } else {
+            final_index[*global] = 0x1000 + type_count;
+            type_count += 1;
+        }
+    }
+    for (source, identity) in sources.iter_mut().zip(&identities) {
+        source.map = identity
+            .iter()
+            .map(|global| {
+                global
+                    .map(|global| final_index[global])
+                    .unwrap_or(CODE_VIEW_NOT_TRANSLATED)
+            })
+            .collect();
+    }
+    let mut function_types = BTreeMap::new();
+    for global in order {
+        let (item, source_index, record_index) = cells[global];
+        let original = &sources[source_index].records[record_index];
+        let size = original.len().div_ceil(4) * 4;
+        let mut record = original.clone();
+        record.resize(size, 0);
+        if size != original.len() {
+            record[..2].copy_from_slice(&((size - 2) as u16).to_le_bytes());
+            for (position, byte) in record.iter_mut().enumerate().skip(original.len()) {
+                *byte = 0xf0 + (size - position) as u8;
+            }
+        }
+        let references = type_references(&record);
+        remap_record(&mut record, &references, &sources[source_index].map);
+        let hash = type_record_hash(&record);
+        let kind = code_view_kind(&record);
+        if (kind == 0x1601 || kind == 0x1602) && original.len() >= 12 {
+            function_types.insert(final_index[global], code_view_u32(&record, 8));
+        }
+        if item {
+            database.identifiers.add(record, hash);
+        } else {
+            database.types.add(record, hash);
+        }
+    }
+    function_types
+}
+
+impl<'s> CoffContext<'s> {
+    fn debug_section_contents(&mut self, chunk: usize) -> Vec<u8> {
+        let name = self.chunks[chunk].name.clone();
+        let data = self.chunk_contents(chunk);
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let label = self.file_label(self.chunks[chunk].file);
+        if data.len() < 4 {
+            self.error(
+                problem("EI280", "A CodeView debug section is malformed.")
+                    .with_context(format!("Section: {name}"))
+                    .with_context(format!("File: {label}"))
+                    .with_context(format!("Cause: the section is too short: {name}")),
+            );
+            return Vec::new();
+        }
+        let magic = code_view_u32(&data, 0);
+        let expected = if name == ".debug$H" { 0x0133_c9c5 } else { 4 };
+        if magic != expected {
+            self.warn(
+                caution(
+                    "EI281",
+                    "The linker ignores a debug section with an unknown signature.",
+                )
+                .with_context(format!("Section: {name}"))
+                .with_context(format!(
+                    "Cause: ignoring section {name} with unrecognized magic 0x{magic:X}"
+                )),
+            );
+            return Vec::new();
+        }
+        data[4..].to_vec()
+    }
+
+    fn add_program_database_debug_information(
+        &mut self,
+        database: &mut crate::compilers::pe::program_database::ProgramDatabase,
+        modules: &BTreeMap<usize, u16>,
+    ) {
+        let mut sources: Vec<TypeSource> = Vec::new();
+        for file in self.object_order.clone() {
+            let chunks = self.objects[file].debug_chunks.clone();
+            if chunks.is_empty() {
+                continue;
+            }
+            let mut source = TypeSource {
+                file,
+                ..TypeSource::default()
+            };
+            let types = chunks
+                .iter()
+                .copied()
+                .find(|chunk| self.chunks[*chunk].name == ".debug$P")
+                .or_else(|| {
+                    chunks
+                        .iter()
+                        .copied()
+                        .find(|chunk| self.chunks[*chunk].name == ".debug$T")
+                });
+            if let Some(chunk) = types {
+                let data = self.debug_section_contents(chunk);
+                match code_view_records(&data) {
+                    Some(records) => {
+                        for (at, length) in records {
+                            source.records.push(data[at..at + length].to_vec());
+                        }
+                    }
+                    None => {
+                        source.failure = Some("corrupt type records".to_string());
+                    }
+                }
+                if let Some(first) = source.records.first() {
+                    let kind = code_view_kind(first);
+                    if kind == 0x1515 || kind == 0x1509 {
+                        let content = &first[4..];
+                        let reference = if kind == 0x1515 {
+                            let at = 20;
+                            let length = c_string_length(content, at).saturating_sub(1);
+                            String::from_utf8_lossy(content.get(at..at + length).unwrap_or(&[]))
+                                .to_string()
+                        } else {
+                            let at = 12;
+                            let length = c_string_length(content, at).saturating_sub(1);
+                            String::from_utf8_lossy(content.get(at..at + length).unwrap_or(&[]))
+                                .to_string()
+                        };
+                        source.failure = Some(reference);
+                        source.records.clear();
+                    }
+                }
+            }
+            sources.push(source);
+        }
+        let function_types = merge_type_sources(&mut sources, database);
+        for source in sources {
+            let file = source.file;
+            let module = modules[&file] as usize;
+            if let Some(reference) = source.failure.clone() {
+                let label = self.file_label(Some(file));
+                if self
+                    .options
+                    .ignored_warnings
+                    .iter()
+                    .any(|code| code == "4099")
+                {
+                    continue;
+                }
+                self.warn(
+                    caution("EI282", "The linker cannot use the debug information of an input file.")
+                        .with_context(format!("File: {label}"))
+                        .with_context(format!(
+                            "Cause: Cannot use debug info for '{label}' [LNK4099]\n>>> failed to load reference '{reference}': No such file or directory"
+                        )),
+                );
+                continue;
+            }
+            self.add_debug_symbols(database, &source, module, &function_types);
+        }
+    }
+
+    fn add_debug_symbols(
+        &mut self,
+        database: &mut crate::compilers::pe::program_database::ProgramDatabase,
+        source: &TypeSource,
+        module: usize,
+        function_types: &BTreeMap<u32, u32>,
+    ) {
+        use crate::compilers::pe::put_u32;
+        let file = source.file;
+        let label = self.file_label(Some(file));
+        let mut string_table: Option<Vec<u8>> = None;
+        let mut checksums: Option<Vec<u8>> = None;
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut subsections: Vec<u8> = Vec::new();
+        let mut symbols: Vec<u8> = Vec::new();
+        let mut file_static_fixups: Vec<(usize, u32)> = Vec::new();
+        for chunk in self.objects[file].debug_chunks.clone() {
+            if !self.chunks[chunk].live || self.chunks[chunk].size == 0 {
+                continue;
+            }
+            let name = self.chunks[chunk].name.clone();
+            if name == ".debug$F" {
+                let data = self.chunk_contents(chunk);
+                let count = data.len() / 16;
+                let entry = database.information.debug_streams
+                    [crate::compilers::pe::program_database::DEBUG_STREAM_FRAME_OLD]
+                    .get_or_insert_with(Vec::new);
+                entry.extend_from_slice(&data[..count * 16]);
+                continue;
+            }
+            if name != ".debug$S" {
+                continue;
+            }
+            let data = self.debug_section_contents(chunk);
+            let mut at = 0usize;
+            while at + 8 <= data.len() {
+                let kind = code_view_u32(&data, at);
+                let length = code_view_u32(&data, at + 4) as usize;
+                let start = at + 8;
+                let end = (start + length).min(data.len());
+                let body = data[start..end].to_vec();
+                at = (start + length).div_ceil(4) * 4;
+                if kind & 0x8000_0000 != 0 {
+                    continue;
+                }
+                match kind {
+                    0xf3 => string_table = Some(body),
+                    0xf4 => checksums = Some(body),
+                    0xf2 | 0xf6 => {
+                        let mut body = body;
+                        if kind == 0xf6 && body.len() >= 4 {
+                            let signature = code_view_u32(&body, 0);
+                            let entry = 12;
+                            let mut offset = 4usize;
+                            while offset + entry <= body.len() {
+                                let value = code_view_u32(&body, offset);
+                                if value >= 0x1000 {
+                                    let mapped = source
+                                        .map
+                                        .get((value - 0x1000) as usize)
+                                        .copied()
+                                        .unwrap_or(value);
+                                    body[offset..offset + 4].copy_from_slice(&mapped.to_le_bytes());
+                                }
+                                let extra = if signature == 1 {
+                                    4 + 4 * code_view_u32(&body, offset + 12) as usize
+                                } else {
+                                    0
+                                };
+                                offset += entry + extra;
+                            }
+                        }
+                        put_u32(&mut subsections, kind);
+                        put_u32(&mut subsections, body.len().div_ceil(4) as u32 * 4);
+                        subsections.extend_from_slice(&body);
+                        while !subsections.len().is_multiple_of(4) {
+                            subsections.push(0);
+                        }
+                    }
+                    0xf5 => frames.push(body),
+                    0xf1 => self.add_symbol_subsection(
+                        database,
+                        source,
+                        module,
+                        &body,
+                        &mut symbols,
+                        &mut file_static_fixups,
+                        function_types,
+                    ),
+                    0xf7 | 0xf8 | 0xf9 | 0xfa | 0xfb | 0xfc | 0xfd | 0xff | 0x100 => {}
+                    _ => self.warn(
+                        caution("EI283", "The linker ignores a debug subsection of an unknown kind.")
+                            .with_context(format!("File: {label}"))
+                            .with_context(format!(
+                                "Cause: ignoring unknown debug$S subsection kind 0x{kind:X} in file {label}"
+                            )),
+                    ),
+                }
+            }
+        }
+        database.information.modules[module].symbols = symbols;
+        let Some(strings) = string_table else {
+            if checksums.is_some() {
+                self.error(
+                    problem("EI280", "A CodeView debug section is malformed.")
+                        .with_context(format!("File: {label}"))
+                        .with_context(
+                            "Cause: .debug$S sections with a checksums subsection must also contain a string table subsection"
+                                .to_string(),
+                        ),
+                );
+            } else if !file_static_fixups.is_empty() {
+                self.warn(
+                    caution("EI280", "A CodeView debug section is malformed.")
+                        .with_context(format!("File: {label}"))
+                        .with_context(format!("Cause: {STRING_TABLE_MISSING}")),
+                );
+            }
+            database.information.modules[module].subsections = subsections;
+            return;
+        };
+        let string_at = |offset: u32| -> Option<Vec<u8>> {
+            let start = offset as usize;
+            if start >= strings.len() {
+                return None;
+            }
+            let length = strings[start..].iter().position(|byte| *byte == 0)?;
+            Some(strings[start..start + length].to_vec())
+        };
+        let mut new_frames = Vec::new();
+        for body in frames {
+            if body.len() < 4 {
+                continue;
+            }
+            let mut offset = if body.len() % 32 != 0 { 4 } else { 0 };
+            let base = code_view_u32(&body, 0);
+            while offset + 32 <= body.len() {
+                let mut frame = body[offset..offset + 32].to_vec();
+                let start = code_view_u32(&frame, 0).wrapping_add(base);
+                frame[..4].copy_from_slice(&start.to_le_bytes());
+                let function = code_view_u32(&frame, 20);
+                let translated = match string_at(function) {
+                    Some(text) => database.strings.insert(&text),
+                    None => {
+                        self.warn(
+                            caution("EI280", "A CodeView debug section is malformed.")
+                                .with_context(format!("File: {label}"))
+                                .with_context("Cause: Invalid string table reference".to_string()),
+                        );
+                        0
+                    }
+                };
+                frame[20..24].copy_from_slice(&translated.to_le_bytes());
+                new_frames.push(frame);
+                offset += 32;
+            }
+        }
+        if !new_frames.is_empty() {
+            let entry = database.information.debug_streams
+                [crate::compilers::pe::program_database::DEBUG_STREAM_FRAME_NEW]
+                .get_or_insert_with(Vec::new);
+            let mut existing: Vec<Vec<u8>> = entry.chunks(32).map(|frame| frame.to_vec()).collect();
+            existing.extend(new_frames);
+            existing.sort_by_key(|frame| code_view_u32(frame, 0));
+            *entry = existing.concat();
+        }
+        let mut module_symbols = std::mem::take(&mut database.information.modules[module].symbols);
+        for (offset, reference) in file_static_fixups {
+            let translated = match string_at(reference) {
+                Some(text) => database.strings.insert(&text),
+                None => {
+                    self.warn(
+                        caution("EI280", "A CodeView debug section is malformed.")
+                            .with_context(format!("File: {label}"))
+                            .with_context("Cause: Invalid string table reference".to_string()),
+                    );
+                    0
+                }
+            };
+            let at = offset - 4;
+            if at + 4 <= module_symbols.len() {
+                module_symbols[at..at + 4].copy_from_slice(&translated.to_le_bytes());
+            }
+        }
+        database.information.modules[module].symbols = module_symbols;
+        {
+            let checksums = checksums.unwrap_or_default();
+            let mut rewritten = Vec::new();
+            let mut offset = 0usize;
+            while offset + 6 <= checksums.len() {
+                let name_offset = code_view_u32(&checksums, offset);
+                let size = checksums[offset + 4] as usize;
+                let kind = checksums[offset + 5];
+                let name = string_at(name_offset).unwrap_or_default();
+                let path = self.program_database_absolute(&String::from_utf8_lossy(&name));
+                database.information.add_source_file(module, &path);
+                let new_offset = database.strings.insert(path.as_bytes());
+                put_u32(&mut rewritten, new_offset);
+                rewritten.push(size as u8);
+                rewritten.push(kind);
+                let end = (offset + 6 + size).min(checksums.len());
+                rewritten.extend_from_slice(&checksums[offset + 6..end]);
+                while !rewritten.len().is_multiple_of(4) {
+                    rewritten.push(0);
+                }
+                offset = (offset + 6 + size).div_ceil(4) * 4;
+            }
+            put_u32(&mut subsections, 0xf4);
+            put_u32(&mut subsections, rewritten.len() as u32);
+            subsections.extend_from_slice(&rewritten);
+        }
+        database.information.modules[module].subsections = subsections;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_symbol_subsection(
+        &mut self,
+        database: &mut crate::compilers::pe::program_database::ProgramDatabase,
+        source: &TypeSource,
+        module: usize,
+        body: &[u8],
+        symbols: &mut Vec<u8>,
+        file_static_fixups: &mut Vec<(usize, u32)>,
+        function_types: &BTreeMap<u32, u32>,
+    ) {
+        use crate::compilers::pe::{put_u16, put_u32};
+        let label = self.file_label(Some(source.file));
+        if body.is_empty() {
+            self.warn(
+                caution(
+                    "EI284",
+                    "A symbols subsection in the debug information is empty.",
+                )
+                .with_context(format!("File: {label}"))
+                .with_context(format!("Cause: empty symbols subsection in {label}")),
+            );
+        }
+        let Some(records) = code_view_records(body) else {
+            self.warn(
+                caution("EI280", "A CodeView debug section is malformed.")
+                    .with_context(format!("File: {label}"))
+                    .with_context(format!("Cause: corrupt symbol records in {label}")),
+            );
+            return;
+        };
+        let base = 4 + symbols.len();
+        let mut storage: Vec<u8> = Vec::new();
+        let mut scopes: Vec<usize> = Vec::new();
+        let mut depth = 0usize;
+        for (at, length) in records {
+            let original = &body[at..at + length];
+            let kind = code_view_kind(original);
+            if opens_scope(kind) {
+                depth += 1;
+            } else if ends_scope(kind) {
+                depth = depth.saturating_sub(1);
+            }
+            let size = length.div_ceil(4) * 4;
+            let mut record = original.to_vec();
+            record.resize(size, 0);
+            record[..2].copy_from_slice(&((size - 2) as u16).to_le_bytes());
+            match symbol_type_references(&record) {
+                Some(references) => remap_record(&mut record, &references, &source.map),
+                None => {
+                    record.iter_mut().for_each(|byte| *byte = 0);
+                    record[..2].copy_from_slice(&((size - 2) as u16).to_le_bytes());
+                    record[2..4].copy_from_slice(&0x0007u16.to_le_bytes());
+                }
+            }
+            let current = code_view_kind(&record);
+            if current == 0x114f {
+                record[2..4].copy_from_slice(&0x0006u16.to_le_bytes());
+            } else if current == 0x1147 || current == 0x1146 {
+                let at = 4 + 24;
+                let item = code_view_u32(&record, at);
+                if item >= 0x1000 {
+                    let translated = match function_types.get(&item) {
+                        Some(function) => *function,
+                        None => {
+                            let name = String::from_utf8_lossy(&symbol_name(&record)).to_string();
+                            self.warn(
+                                caution(
+                                    "EI285",
+                                    "A procedure symbol refers to an item that is not a function identifier.",
+                                )
+                                .with_context(format!("Symbol: {name}"))
+                                .with_context(format!(
+                                    "Cause: procedure symbol record for `{name}` in {label} refers to PDB item index 0x{item:X} which is not a valid function ID record"
+                                )),
+                            );
+                            CODE_VIEW_NOT_TRANSLATED
+                        }
+                    };
+                    record[at..at + 4].copy_from_slice(&translated.to_le_bytes());
+                }
+                let new_kind: u16 = if current == 0x1147 { 0x1110 } else { 0x110f };
+                record[2..4].copy_from_slice(&new_kind.to_le_bytes());
+            }
+            let offset = base + storage.len();
+            if goes_in_globals_stream(kind, depth) {
+                let global_kind = code_view_kind(&record);
+                match global_kind {
+                    0x1110 | 0x110f => {
+                        let name = symbol_name(&record);
+                        let mut content = Vec::new();
+                        put_u32(&mut content, 0);
+                        put_u32(&mut content, offset as u32);
+                        put_u16(&mut content, module as u16 + 1);
+                        content.extend_from_slice(&name);
+                        content.push(0);
+                        let reference_kind = if global_kind == 0x110f {
+                            0x1127
+                        } else {
+                            0x1125
+                        };
+                        database.add_global(code_view_symbol(reference_kind, &content), name);
+                    }
+                    _ => {
+                        let name = symbol_name(&record);
+                        database.add_global(record.clone(), name);
+                    }
+                }
+            }
+            if !goes_in_module_stream(kind, depth) {
+                continue;
+            }
+            if kind == 0x1153 {
+                file_static_fixups.push((offset + 8, code_view_u32(original, 8)));
+            }
+            if opens_scope(kind) {
+                scopes.push(storage.len());
+            } else if ends_scope(kind) {
+                match scopes.pop() {
+                    Some(open) => {
+                        let parent = scopes.last().map(|parent| base + parent).unwrap_or(0) as u32;
+                        let end = (base + storage.len()) as u32;
+                        storage[open + 4..open + 8].copy_from_slice(&parent.to_le_bytes());
+                        storage[open + 8..open + 12].copy_from_slice(&end.to_le_bytes());
+                    }
+                    None => self.warn(
+                        caution(
+                            "EI286",
+                            "The symbol scopes in the debug information are not balanced.",
+                        )
+                        .with_context(format!("File: {label}"))
+                        .with_context(format!("Cause: symbol scopes are not balanced in {label}")),
+                    ),
+                }
+            }
+            storage.extend_from_slice(&record);
+        }
+        symbols.extend_from_slice(&storage);
+    }
 }
 
 fn code_view_symbol(kind: u16, body: &[u8]) -> Vec<u8> {
@@ -23308,13 +24316,6 @@ impl<'s> CoffContext<'s> {
                 }
             }
         }
-    }
-
-    fn add_program_database_debug_information(
-        &mut self,
-        _database: &mut crate::compilers::pe::program_database::ProgramDatabase,
-        _modules: &BTreeMap<usize, u16>,
-    ) {
     }
 
     fn add_import_modules(

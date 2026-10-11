@@ -85,6 +85,13 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI277", "The PDB alternate path uses a variable the linker does not expand."),
     ("EI278", "The linker cannot open a file that the PDB should contain."),
     ("EI279", "The linker cannot write the PDB file."),
+    ("EI280", "A CodeView debug section is malformed."),
+    ("EI281", "The linker ignores a debug section with an unknown signature."),
+    ("EI282", "The linker cannot use the debug information of an input file."),
+    ("EI283", "The linker ignores a debug subsection of an unknown kind."),
+    ("EI284", "A symbols subsection in the debug information is empty."),
+    ("EI285", "A procedure symbol refers to an item that is not a function identifier."),
+    ("EI286", "The symbol scopes in the debug information are not balanced."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
