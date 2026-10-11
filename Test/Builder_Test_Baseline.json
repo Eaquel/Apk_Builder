@@ -13,9 +13,9 @@
       "total": 90
     },
     "lld-coff": {
-      "failed": 217,
+      "failed": 201,
       "out_of_scope": 249,
-      "passed": 99,
+      "passed": 115,
       "total": 565
     },
     "lld-elf": {

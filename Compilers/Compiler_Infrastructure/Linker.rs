@@ -18487,6 +18487,7 @@ pub fn parse_coff_command_line(
                 options.repro = false;
             }
             "guard" => {
+                options.guard = guard_level::OFF;
                 for part in need(&value)?.split(',') {
                     match part.to_ascii_lowercase().as_str() {
                         "no" => options.guard = guard_level::OFF,
@@ -21439,8 +21440,23 @@ impl<'s> CoffContext<'s> {
         self.symbols[id].kind = kind;
     }
 
+    fn load_config_warning(&mut self, cause: String) {
+        self.warn(
+            caution(
+                "EI275",
+                "The load configuration does not match what the linker writes.",
+            )
+            .with_context(format!("Cause: {cause}")),
+        );
+    }
+
     fn initialize_load_config(&mut self) {
         let Some(id) = self.find_underscore("_load_config_used") else {
+            if self.options.guard != guard_level::OFF {
+                self.load_config_warning(
+                    "Control Flow Guard is enabled but '_load_config_used' is missing".to_string(),
+                );
+            }
             return;
         };
         let CoffSymbolKind::Regular {
@@ -21457,7 +21473,8 @@ impl<'s> CoffContext<'s> {
                     "EI212",
                     "The linker does not support what this input asks for yet.",
                 )
-                .with_context("Feature: _load_config_used in uninitialized data".to_string()),
+                .with_context("Feature: _load_config_used in uninitialized data".to_string())
+                .with_context("Cause: _load_config_used points to uninitialized data".to_string()),
             );
             return;
         }
@@ -21469,7 +21486,8 @@ impl<'s> CoffContext<'s> {
                     "EI212",
                     "The linker does not support what this input asks for yet.",
                 )
-                .with_context("Feature: a _load_config_used section that is too small".to_string()),
+                .with_context("Feature: a _load_config_used section that is too small".to_string())
+                .with_context("Cause: _load_config_used section chunk is too small".to_string()),
             );
             return;
         }
@@ -21487,12 +21505,130 @@ impl<'s> CoffContext<'s> {
                 )
                 .with_context(
                     "Feature: a _load_config_used size larger than its section".to_string(),
+                )
+                .with_context(
+                    "Cause: _load_config_used specifies a size larger than its containing section chunk"
+                        .to_string(),
                 ),
             );
             return;
         }
+        let expected = if self.is_64() { 8 } else { 4 };
+        if self.chunks[chunk].alignment < expected {
+            let actual = self.chunks[chunk].alignment;
+            self.load_config_warning(format!(
+                "'_load_config_used' is misaligned (expected alignment to be {expected} bytes{LOAD_CONFIG_GOT} {actual} instead)"
+            ));
+        } else if !u64::from(value).is_multiple_of(expected) {
+            self.load_config_warning(format!(
+                "'_load_config_used' is misaligned (section offset is 0x{value:X} not aligned to {expected} bytes)"
+            ));
+        }
         self.load_config_size = size;
         self.load_config_symbol = Some(id);
+    }
+
+    fn check_load_config(&mut self, bytes: &[u8]) {
+        if self.options.guard == guard_level::OFF {
+            return;
+        }
+        let Some(id) = self.load_config_symbol else {
+            return;
+        };
+        let rva = self.symbol_rva(id);
+        let Some(output) = self.outputs.iter().find(|output| {
+            output.virtual_address <= rva && rva < output.virtual_address + output.virtual_size
+        }) else {
+            return;
+        };
+        let base = (output.file_offset + rva - output.virtual_address) as usize;
+        let size = self.load_config_size as usize;
+        let wide = self.is_64();
+        let word = if wide { 8 } else { 4 };
+        let read = |at: usize, width: usize| -> u64 {
+            let mut value = 0u64;
+            for index in 0..width {
+                value |=
+                    u64::from(bytes.get(base + at + index).copied().unwrap_or(0)) << (8 * index);
+            }
+            value
+        };
+        let layout: [(&str, usize, usize); 9] = if wide {
+            [
+                ("GuardCFFunctionTable", 128, 8),
+                ("GuardCFFunctionCount", 136, 8),
+                ("GuardFlags", 144, 4),
+                ("GuardAddressTakenIatEntryTable", 160, 8),
+                ("GuardAddressTakenIatEntryCount", 168, 8),
+                ("GuardLongJumpTargetTable", 176, 8),
+                ("GuardLongJumpTargetCount", 184, 8),
+                ("GuardEHContinuationTable", 264, 8),
+                ("GuardEHContinuationCount", 272, 8),
+            ]
+        } else {
+            [
+                ("GuardCFFunctionTable", 80, 4),
+                ("GuardCFFunctionCount", 84, 4),
+                ("GuardFlags", 88, 4),
+                ("GuardAddressTakenIatEntryTable", 104, 4),
+                ("GuardAddressTakenIatEntryCount", 108, 4),
+                ("GuardLongJumpTargetTable", 112, 4),
+                ("GuardLongJumpTargetCount", 116, 4),
+                ("GuardEHContinuationTable", 164, 4),
+                ("GuardEHContinuationCount", 168, 4),
+            ]
+        };
+        let _ = word;
+        let fits = |index: usize| size >= layout[index].1 + layout[index].2;
+        let mut warnings: Vec<String> = Vec::new();
+        let check = |context: &Self, index: usize, symbol: &str, warnings: &mut Vec<String>| {
+            let (field, at, width) = layout[index];
+            let Some(found) = context.find_underscore(symbol) else {
+                return;
+            };
+            let expected = match context.symbols[found].kind {
+                CoffSymbolKind::Synthetic { chunk: Some(_), .. } => {
+                    context.image_base + context.symbol_rva(found)
+                }
+                CoffSymbolKind::Absolute { address } if !symbol.ends_with("_table") => address,
+                _ => return,
+            };
+            if read(at, width) != expected {
+                warnings.push(format!("{field} not set correctly in '_load_config_used'"));
+            }
+        };
+        let too_small =
+            |field: &str| format!("'_load_config_used' structure too small to include {field}");
+        if !fits(2) {
+            warnings.push(too_small("GuardFlags"));
+        } else {
+            check(self, 0, "__guard_fids_table", &mut warnings);
+            check(self, 1, "__guard_fids_count", &mut warnings);
+            check(self, 2, "__guard_flags", &mut warnings);
+            if fits(4) {
+                check(self, 3, "__guard_iat_table", &mut warnings);
+                check(self, 4, "__guard_iat_count", &mut warnings);
+            }
+            if self.options.guard & guard_level::LONG_JUMP != 0 {
+                if !fits(6) {
+                    warnings.push(too_small("GuardLongJumpTargetCount"));
+                } else {
+                    check(self, 5, "__guard_longjmp_table", &mut warnings);
+                    check(self, 6, "__guard_longjmp_count", &mut warnings);
+                    if self.options.guard & guard_level::EXCEPTION_CONTINUATION != 0 {
+                        if !fits(8) {
+                            warnings.push(too_small("GuardEHContinuationCount"));
+                        } else {
+                            check(self, 7, "__guard_eh_cont_table", &mut warnings);
+                            check(self, 8, "__guard_eh_cont_count", &mut warnings);
+                        }
+                    }
+                }
+            }
+        }
+        for warning in warnings {
+            self.load_config_warning(warning);
+        }
     }
 
     fn mark_live(&mut self) {
@@ -22132,6 +22268,8 @@ pub fn is_coff_decorated(symbol: &str, mingw: bool) -> bool {
         || symbol.starts_with('?')
         || (!mingw && symbol.contains('@'))
 }
+
+const LOAD_CONFIG_GOT: &str = ", got";
 
 const LIBRARY_MODE_OPTIONS: &[&str] = &[
     "out",
@@ -22776,6 +22914,7 @@ impl<'s> CoffContext<'s> {
         let mut bytes = self.write_headers();
         self.write_sections(&mut bytes);
         self.write_symbol_and_string_table(&mut bytes);
+        self.check_load_config(&bytes);
         if self.failed() {
             return None;
         }
@@ -24059,11 +24198,22 @@ impl<'s> CoffContext<'s> {
                 continue;
             }
             let data = self.section_data(*chunk).to_vec();
+            let name = self.chunks[*chunk].name.clone();
+            let label = self.file_label(Some(file));
             if !data.len().is_multiple_of(4) {
+                self.load_config_warning(format!(
+                    "ignoring {name} symbol table index section in object {label}"
+                ));
                 continue;
             }
             for entry in data.chunks(4) {
                 let index = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]) as usize;
+                if index >= self.objects[file].symbols.len() {
+                    self.load_config_warning(format!(
+                        "ignoring invalid symbol table index in section {name} in object {label}"
+                    ));
+                    continue;
+                }
                 if let Some(symbol) = self.objects[file].symbols.get(index).copied().flatten() {
                     if let Some(target) = self.defined_target(symbol) {
                         if self.symbol_is_live(target) {
@@ -24136,8 +24286,149 @@ impl<'s> CoffContext<'s> {
             }
             return;
         }
-        self.error(not_supported("/guard:cf"));
-        let _ = rdata;
+        let mut address_taken: BTreeSet<(usize, u32)> = BTreeSet::new();
+        let mut import_table: BTreeSet<(usize, u32)> = BTreeSet::new();
+        let mut long_jumps: BTreeSet<(usize, u32)> = BTreeSet::new();
+        let mut continuations: BTreeSet<(usize, u32)> = BTreeSet::new();
+        for file in self.object_order.clone() {
+            let flags = self.objects[file].feature_flags;
+            if flags & 0x800 != 0 {
+                let chunks = self.objects[file].guard_function_chunks.clone();
+                for symbol in self.symbols_from_index_sections(file, &chunks) {
+                    if let Some(entry) = self.rva_set_entry(symbol) {
+                        address_taken.insert(entry);
+                    }
+                }
+                let chunks = self.objects[file].guard_import_chunks.clone();
+                for symbol in self.symbols_from_index_sections(file, &chunks) {
+                    if let Some(entry) = self.rva_set_entry(symbol) {
+                        import_table.insert(entry);
+                    }
+                }
+                let chunks = self.objects[file].guard_long_jump_chunks.clone();
+                for symbol in self.symbols_from_index_sections(file, &chunks) {
+                    if let Some(entry) = self.rva_set_entry(symbol) {
+                        long_jumps.insert(entry);
+                    }
+                }
+            } else {
+                for chunk in self.objects[file].chunks.clone() {
+                    if self.chunks[chunk].kind != CoffChunkKind::Section || !self.chunks[chunk].live
+                    {
+                        continue;
+                    }
+                    for relocation in self.section_relocations(chunk).to_vec() {
+                        if self.machine == crate::compilers::pe::machine::I386
+                            && relocation.kind == crate::compilers::pe::relocation_i386::RELATIVE_32
+                        {
+                            continue;
+                        }
+                        let symbol = self.objects[file]
+                            .symbols
+                            .get(relocation.symbol_index as usize)
+                            .copied()
+                            .flatten();
+                        self.add_address_taken_function(&mut address_taken, symbol);
+                    }
+                }
+            }
+            if flags & 0x4000 != 0 {
+                let chunks = self.objects[file].guard_continuation_chunks.clone();
+                for symbol in self.symbols_from_index_sections(file, &chunks) {
+                    if let Some(entry) = self.rva_set_entry(symbol) {
+                        continuations.insert(entry);
+                    }
+                }
+            }
+        }
+        let entry = self.entry;
+        self.add_address_taken_function(&mut address_taken, entry);
+        for export in self.exports.clone() {
+            self.add_address_taken_function(&mut address_taken, export.symbol);
+        }
+        for (chunk, _) in &address_taken {
+            if self.chunks[*chunk].alignment < 16 {
+                self.chunks[*chunk].alignment = 16;
+            }
+        }
+        self.add_rva_table(
+            address_taken,
+            "__guard_fids_table",
+            "__guard_fids_count",
+            rdata,
+        );
+        self.add_rva_table(
+            import_table,
+            "__guard_iat_table",
+            "__guard_iat_count",
+            rdata,
+        );
+        if self.options.guard & guard_level::LONG_JUMP != 0 {
+            self.add_rva_table(
+                long_jumps,
+                "__guard_longjmp_table",
+                "__guard_longjmp_count",
+                rdata,
+            );
+        }
+        if self.options.guard & guard_level::EXCEPTION_CONTINUATION != 0 {
+            self.add_rva_table(
+                continuations,
+                "__guard_eh_cont_table",
+                "__guard_eh_cont_count",
+                rdata,
+            );
+        }
+        let mut guard_flags: u64 = 0x100 | 0x400;
+        if self.options.guard & guard_level::LONG_JUMP != 0 {
+            guard_flags |= 0x1_0000;
+        }
+        if self.options.guard & guard_level::EXCEPTION_CONTINUATION != 0 {
+            guard_flags |= 0x40_0000;
+        }
+        if let Some(id) = self.find_underscore("__guard_flags") {
+            self.symbols[id].kind = CoffSymbolKind::Absolute {
+                address: guard_flags,
+            };
+        }
+    }
+
+    fn add_address_taken_function(
+        &mut self,
+        set: &mut BTreeSet<(usize, u32)>,
+        symbol: Option<SymbolIndex>,
+    ) {
+        use crate::compilers::pe::section_characteristic as character;
+        let Some(symbol) = symbol else {
+            return;
+        };
+        let Some(target) = self.defined_target(symbol) else {
+            return;
+        };
+        match self.symbols[target].kind {
+            CoffSymbolKind::ImportThunk { .. } => {
+                if let Some(entry) = self.rva_set_entry(target) {
+                    set.insert(entry);
+                }
+            }
+            CoffSymbolKind::Regular {
+                chunk: Some(chunk),
+                kind,
+                ..
+            } => {
+                let chunk_data = &self.chunks[chunk];
+                if kind & 0xf0 == 0x20
+                    && chunk_data.kind == CoffChunkKind::Section
+                    && self.chunks[chunk_data.replacement].live
+                    && chunk_data.output_characteristics() & character::EXECUTE != 0
+                {
+                    if let Some(entry) = self.rva_set_entry(target) {
+                        set.insert(entry);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
