@@ -18144,6 +18144,14 @@ pub struct CoffOptions {
     pub merge_debug_directory: bool,
     pub debug_global_hashes: bool,
     pub command_arguments: Vec<String>,
+    pub error_limit: usize,
+    pub incremental: Option<bool>,
+    pub profile: bool,
+    pub order_file: Option<String>,
+    pub map_path: Option<String>,
+    pub help: bool,
+    pub align_given: bool,
+    pub infer_sanitizer_libraries: bool,
     pub exports: Vec<String>,
     pub definition_file: Option<String>,
     pub import_library: Option<String>,
@@ -18236,6 +18244,14 @@ impl Default for CoffOptions {
             merge_debug_directory: true,
             debug_global_hashes: false,
             command_arguments: Vec::new(),
+            error_limit: 20,
+            incremental: None,
+            profile: false,
+            order_file: None,
+            map_path: None,
+            help: false,
+            align_given: false,
+            infer_sanitizer_libraries: false,
             exports: Vec::new(),
             definition_file: None,
             import_library: None,
@@ -18411,7 +18427,14 @@ pub fn parse_coff_command_line(
                 Some(library) => options.no_default_libraries.push(library),
                 None => options.no_default_all = true,
             },
-            "entry" => options.entry = Some(need(&value)?),
+            "entry" => {
+                let entry = need(&value)?;
+                if entry.is_empty() {
+                    return Err(invalid_value("/entry", "")
+                        .with_context("Cause: missing entry point symbol name".to_string()));
+                }
+                options.entry = Some(entry);
+            }
             "noentry" => options.no_entry = true,
             "dll" => options.dll = true,
             "machine" => {
@@ -18446,6 +18469,7 @@ pub fn parse_coff_command_line(
                     return Err(invalid_value("/align", &text));
                 }
                 options.section_alignment = Some(number);
+                options.align_given = true;
             }
             "filealign" => {
                 let text = need(&value)?;
@@ -18627,6 +18651,32 @@ pub fn parse_coff_command_line(
             "pdbsourcepath" => options.pdb_source_path = Some(need(&value)?),
             "natvis" => options.natvis_files.push(need(&value)?),
             "nodbgdirmerge" => options.merge_debug_directory = false,
+            "errorlimit" => {
+                match value_text.parse::<usize>() {
+                    Ok(limit) => options.error_limit = limit,
+                    Err(_) => options.warnings.push(
+                        invalid_value("/errorlimit", &value_text).with_context(format!(
+                            "Cause: /errorlimit: {NUMBER_EXPECTED} {value_text}"
+                        )),
+                    ),
+                }
+            }
+            "incremental" => {
+                options.incremental = Some(
+                    !value
+                        .as_deref()
+                        .is_some_and(|text| text.eq_ignore_ascii_case("no")),
+                )
+            }
+            "profile" => options.profile = true,
+            "inferasanlibs" => {
+                options.infer_sanitizer_libraries = !value
+                    .as_deref()
+                    .is_some_and(|text| text.eq_ignore_ascii_case("no"))
+            }
+            "order" => options.order_file = Some(need(&value)?),
+            "lldmap" => options.map_path = Some(value.clone().unwrap_or_default()),
+            "help" | "?" => options.help = true,
             "pdbstripped" => options.warnings.push(
                 caution(
                     "EI247",
@@ -18740,8 +18790,7 @@ pub fn parse_coff_command_line(
                 .extend(need(&value)?.split(',').map(str::to_string)),
             "verbose" => options.verbose = true,
             "wrap" => options.wrapped.push(need(&value)?),
-            "incremental"
-            | "nologo"
+            "nologo"
             | "link"
             | "ignoreidl"
             | "ltcg"
@@ -18771,15 +18820,12 @@ pub fn parse_coff_command_line(
             | "manifestfile"
             | "manifestdependency"
             | "mllvm"
-            | "errorlimit"
             | "cetcompat"
             | "summary"
             | "time"
-            | "inferasanlibs"
             | "prefetch-inputs"
             | "threads"
-            | "failifmismatch"
-            | "profile" => {}
+            | "failifmismatch" => {}
             _ if argument.starts_with('/') => options.inputs.push(CoffInput::File(argument)),
             _ => {
                 options.warnings.push(
@@ -19301,6 +19347,7 @@ pub struct CoffContext<'s> {
     pub dynamic_base: bool,
     pub relocatable: bool,
     pub safe_seh: bool,
+    pub incremental: bool,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19383,6 +19430,7 @@ impl<'s> CoffContext<'s> {
             dynamic_base: true,
             relocatable: true,
             safe_seh: false,
+            incremental: false,
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -19872,7 +19920,9 @@ impl<'s> CoffContext<'s> {
             match task {
                 CoffTask::Path { path, lazy, whole } => match (self.source)(&path) {
                     Some(bytes) => self.add_buffer(&path, bytes, whole, lazy),
-                    None => self.error(file_missing(&path)),
+                    None => self.error(file_missing(&path).with_context(format!(
+                        "Cause: could not open '{path}': No such file or directory"
+                    ))),
                 },
                 CoffTask::Member { archive, member } => {
                     let data = self.archives[archive].members[member].clone();
@@ -20158,6 +20208,35 @@ impl<'s> CoffContext<'s> {
                 let id = self.add_undefined(&symbol.name, true, true);
                 self.objects[file].symbols[index] = Some(id);
                 weak_aliases.push((id, tag, characteristics == 4));
+            } else if symbol.storage_class == crate::compilers::pe::storage_class::SECTION
+                && symbol.section_number == 0
+                && symbol.value != 0
+            {
+                let name: String = symbol.name.chars().take(8).collect();
+                self.objects[file]
+                    .object
+                    .sections
+                    .push(crate::compilers::pe::CoffSection {
+                        name,
+                        characteristics: symbol.value | 0x0030_0000,
+                        ..crate::compilers::pe::CoffSection::default()
+                    });
+                let number = self.objects[file].object.sections.len();
+                if let Some(chunk) = self.read_section(file, number, 0, "") {
+                    let id = self.local_symbol(
+                        &symbol.name,
+                        CoffSymbolKind::Regular {
+                            file: Some(file),
+                            chunk: Some(chunk),
+                            value: 0,
+                            comdat: false,
+                            external: false,
+                            weak: false,
+                            kind: symbol.kind,
+                        },
+                    );
+                    self.objects[file].symbols[index] = Some(id);
+                }
             } else {
                 match self.create_defined(file, position, &mut sparse, &mut comdat_definitions, big)
                 {
@@ -20653,6 +20732,13 @@ impl<'s> CoffContext<'s> {
                     }
                 }
                 "entry" => {
+                    if value.is_empty() {
+                        self.error(
+                            invalid_value("/entry", "")
+                                .with_context("Cause: missing entry point symbol name".to_string()),
+                        );
+                        continue;
+                    }
                     let mangled = self.mangle(&value);
                     let id = self.add_gc_root(&mangled);
                     self.entry = Some(id);
@@ -20887,6 +20973,7 @@ impl<'s> CoffContext<'s> {
         self.tail_merge = (self.options.tail_merge == 1
             && self.folding != IdenticalCodeFolding::None)
             || self.options.tail_merge == 2;
+        self.report_ignored_options();
         if self.options.no_entry && !self.options.dll {
             self.error(
                 problem("EI204", "An option value is not valid.")
@@ -21497,10 +21584,14 @@ impl<'s> CoffContext<'s> {
             if warn_local {
                 if let Some(target) = local_imports.get(&root) {
                     let name = self.symbols[*target].name.clone();
+                    let defined = self.defining_file_label(*target);
                     self.warn(
                         caution("EI259", "A locally defined symbol is imported.")
                             .with_context(format!("Symbol: {name}"))
-                            .with_context("Reference: <root>".to_string()),
+                            .with_context("Reference: <root>".to_string())
+                            .with_context(format!(
+                                "Cause: <root>: locally defined symbol imported: {name} (defined in {defined}) [LNK4217]"
+                            )),
                     );
                 }
             }
@@ -21525,10 +21616,14 @@ impl<'s> CoffContext<'s> {
                     if let Some(target) = local_imports.get(&symbol) {
                         let name = self.symbols[*target].name.clone();
                         let label = self.file_label(Some(file));
+                        let defined = self.defining_file_label(*target);
                         self.warn(
                             caution("EI259", "A locally defined symbol is imported.")
                                 .with_context(format!("Symbol: {name}"))
-                                .with_context(format!("Reference: {label}")),
+                                .with_context(format!("Reference: {label}"))
+                                .with_context(format!(
+                                    "Cause: {label}: locally defined symbol imported: {name} (defined in {defined}) [LNK4217]"
+                                )),
                         );
                     }
                 }
@@ -21813,6 +21908,7 @@ impl<'s> CoffContext<'s> {
                 if data.kind == CoffChunkKind::Section
                     && data.live
                     && !data.name.starts_with(".debug_")
+                    && data.name != ".eh_frame"
                 {
                     worklist.push(chunk);
                 }
@@ -22335,7 +22431,13 @@ impl<'s> CoffContext<'s> {
             self.machine,
             self.options.mingw,
         ) {
-            Ok(bytes) => self.extra_outputs.push((path, bytes)),
+            Ok(bytes) => {
+                let unchanged = self.incremental
+                    && (self.source)(&path).is_some_and(|existing| existing == bytes);
+                if !unchanged {
+                    self.extra_outputs.push((path, bytes));
+                }
+            }
             Err(diagnostic) => self.error(diagnostic),
         }
     }
@@ -22686,6 +22788,16 @@ const PDB_STRIPPED_IGNORED: &str = "ignoring /pdbstripped flag, it is not yet su
 const STRING_TABLE_MISSING: &str =
     "No StringTable subsection was encountered, but there are string table references";
 
+const ALIGN_WITHOUT_DRIVER: &str = "/align specified without /driver; image may not run";
+
+const INFER_SANITIZER_IGNORED: &str = "ignoring '/inferasanlibs', this flag is not supported";
+
+const INCREMENTAL_REFERENCE: &str = "because REF is enabled; use '/opt:noref' to disable";
+
+const INCREMENTAL_FOLDING: &str = "because ICF is enabled; use '/opt:noicf' to disable";
+
+const TOO_MANY_ERRORS: &str = ", stopping now";
+
 const PDB_ALTERNATE_VARIABLES: &str = "only %_PDB% and %_EXT% supported in /pdbaltpath:, keeping";
 
 const PSEUDO_RELOCATOR_MISSING: &str = "output image has runtime pseudo relocations, but the function _pei386_runtime_relocator is missing; it is needed for fixing the relocations at runtime";
@@ -22817,12 +22929,47 @@ pub fn link_coff_in(
             }
         }
     };
+    if options.help {
+        return LinkOutcome {
+            outputs: Vec::new(),
+            diagnostics: options.warnings.clone(),
+            messages: vec![
+                "OVERVIEW: LLVM Linker\n\nUSAGE: lld-link [options] <inputs>\n".to_string(),
+            ],
+        };
+    }
     let mut context = CoffContext::new(options, source);
     context.directory = directory.to_string();
     let bytes = context.run();
+    let limit = context.options.error_limit;
+    let mut diagnostics = std::mem::take(&mut context.diagnostics);
+    if limit > 0 {
+        let mut count = 0usize;
+        let cut = diagnostics.iter().position(|diagnostic| {
+            if diagnostic.severity.is_blocking() {
+                count += 1;
+            }
+            count > limit
+        });
+        if let Some(cut) = cut {
+            diagnostics.truncate(cut);
+            let hint = if context.options.mingw {
+                "--error-limit=0"
+            } else {
+                "/errorlimit:0"
+            };
+            diagnostics.push(
+                problem("EI288", "The linker stops after too many errors.")
+                    .with_context(format!("Limit: {limit}"))
+                    .with_context(format!(
+                        "Cause: too many errors emitted{TOO_MANY_ERRORS} (use {hint} to see all errors)"
+                    )),
+            );
+        }
+    }
     let mut outcome = LinkOutcome {
         outputs: Vec::new(),
-        diagnostics: context.diagnostics,
+        diagnostics,
         messages: context.messages,
     };
     if let Some(bytes) = bytes {
@@ -23811,6 +23958,230 @@ impl<'s> CoffContext<'s> {
     }
 }
 
+impl<'s> CoffContext<'s> {
+    fn defining_file_label(&self, id: SymbolIndex) -> String {
+        match self.symbols[id].kind {
+            CoffSymbolKind::Regular { file, .. } => self.file_label(file),
+            CoffSymbolKind::Common { file, .. } => self.file_label(Some(file)),
+            _ => self.file_label(None),
+        }
+    }
+
+    fn report_ignored_options(&mut self) {
+        if self.options.align_given && !self.options.driver {
+            self.warn(
+                caution("EI287", "An option has no effect in this link.")
+                    .with_context("Option: /align".to_string())
+                    .with_context(format!("Cause: {ALIGN_WITHOUT_DRIVER}")),
+            );
+        }
+        if self.options.infer_sanitizer_libraries {
+            self.warn(
+                caution("EI287", "An option has no effect in this link.")
+                    .with_context("Option: /inferasanlibs".to_string())
+                    .with_context(format!("Cause: {INFER_SANITIZER_IGNORED}")),
+            );
+        }
+        let default = !self.collect
+            && self.folding == IdenticalCodeFolding::None
+            && self.options.order_file.is_none()
+            && !self.options.profile;
+        let mut incremental = self.options.incremental.unwrap_or(default);
+        let ignore = |context: &mut CoffContext, reason: &str| {
+            context.warn(
+                caution("EI287", "An option has no effect in this link.")
+                    .with_context("Option: /incremental".to_string())
+                    .with_context(format!("Cause: ignoring '/incremental' {reason}")),
+            );
+        };
+        if incremental && self.options.profile {
+            ignore(self, "due to '/profile' specification");
+            incremental = false;
+        }
+        if incremental && self.options.order_file.is_some() {
+            ignore(self, "due to '/order' specification");
+            incremental = false;
+        }
+        if incremental && self.collect {
+            ignore(self, INCREMENTAL_REFERENCE);
+            incremental = false;
+        }
+        if incremental && self.folding != IdenticalCodeFolding::None {
+            ignore(self, INCREMENTAL_FOLDING);
+            incremental = false;
+        }
+        self.incremental = incremental;
+    }
+
+    fn order_priorities(&mut self) -> BTreeMap<String, i64> {
+        let mut priorities = BTreeMap::new();
+        let Some(argument) = self.options.order_file.clone() else {
+            return priorities;
+        };
+        let Some(path) = argument.strip_prefix('@') else {
+            self.error(
+                problem("EI204", "An option value is not valid.")
+                    .with_context(format!("Option: /order:{argument}"))
+                    .with_context("Cause: malformed /order option: '@' missing".to_string()),
+            );
+            return priorities;
+        };
+        let Some(bytes) = (self.source)(path) else {
+            self.error(file_missing(path).with_context(format!(
+                "Cause: could not open {path}: No such file or directory"
+            )));
+            return priorities;
+        };
+        let mut known: BTreeSet<String> = BTreeSet::new();
+        for chunk in &self.chunks {
+            if let Some(leader) = chunk.leader {
+                if chunk.kind == CoffChunkKind::Section {
+                    known.insert(self.symbols[leader].name.clone());
+                }
+            }
+        }
+        let warn = !self
+            .options
+            .ignored_warnings
+            .iter()
+            .any(|code| code == "4037");
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let name = if self.machine == crate::compilers::pe::machine::I386
+                && !is_coff_decorated(line, self.options.mingw)
+            {
+                format!("_{line}")
+            } else {
+                line.to_string()
+            };
+            if !known.contains(&name) {
+                if warn {
+                    self.warn(
+                        caution("EI289", "A symbol named in the order file does not exist.")
+                            .with_context(format!("Symbol: {name}"))
+                            .with_context(format!(
+                                "Cause: /order:{line}: missing symbol: {name} [LNK4037]"
+                            )),
+                    );
+                }
+            } else {
+                let next = i64::from(i32::MIN) + priorities.len() as i64;
+                priorities.entry(name).or_insert(next);
+            }
+        }
+        priorities
+    }
+
+    fn display_symbol_name(&self, name: &str) -> String {
+        if !self.options.demangle {
+            return name.to_string();
+        }
+        let (prefix, rest) = match name.strip_prefix("__imp_") {
+            Some(rest) => ("__declspec(dllimport) ", rest),
+            None => ("", name),
+        };
+        let input = if self.machine == crate::compilers::pe::machine::I386 {
+            rest.strip_prefix('_').unwrap_or(rest)
+        } else {
+            rest
+        };
+        match demangle_itanium(input) {
+            Some(demangled) if demangled != input => format!("{prefix}{demangled}"),
+            _ => format!("{prefix}{rest}"),
+        }
+    }
+
+    fn write_linker_map(&mut self) {
+        use crate::compilers::pe::storage_class;
+        let header = |address: u64, size: u64, alignment: u64| {
+            format!("{address:08x} {size:08x} {alignment:5} ")
+        };
+        let mut by_chunk: BTreeMap<usize, Vec<(u64, usize, String)>> = BTreeMap::new();
+        let mut sequence = 0usize;
+        for file in self.object_order.clone() {
+            let raw = self.objects[file].object.symbols.clone();
+            for (index, slot) in self.objects[file].symbols.clone().into_iter().enumerate() {
+                let Some(id) = slot else {
+                    continue;
+                };
+                let CoffSymbolKind::Regular {
+                    chunk: Some(chunk), ..
+                } = self.symbols[id].kind
+                else {
+                    continue;
+                };
+                if let Some(symbol) = raw.iter().find(|symbol| symbol.index as usize == index) {
+                    if symbol.auxiliary_count > 0
+                        && (symbol.storage_class == storage_class::STATIC
+                            || (symbol.storage_class == storage_class::EXTERNAL
+                                && symbol.section_number == -1))
+                    {
+                        continue;
+                    }
+                }
+                let rva = self.symbol_rva(id);
+                let name = self.display_symbol_name(&self.symbols[id].name.clone());
+                by_chunk
+                    .entry(chunk)
+                    .or_default()
+                    .push((rva, sequence, name));
+                sequence += 1;
+            }
+        }
+        for list in by_chunk.values_mut() {
+            list.sort_by_key(|(rva, sequence, _)| (*rva, *sequence));
+        }
+        let mut text = String::from("Address  Size     Align Out     In      Symbol\n");
+        for output in self.outputs.clone() {
+            text.push_str(&header(output.virtual_address, output.virtual_size, 4096));
+            text.push_str(&output.name);
+            text.push('\n');
+            for chunk in output.chunks {
+                if self.chunks[chunk].kind != CoffChunkKind::Section {
+                    continue;
+                }
+                let Some(file) = self.chunks[chunk].file else {
+                    continue;
+                };
+                text.push_str(&header(
+                    self.chunk_rva(chunk),
+                    self.chunks[chunk].size,
+                    self.chunks[chunk].alignment,
+                ));
+                text.push_str(&format!(
+                    "        {}:({})\n",
+                    self.objects[file].name, self.chunks[chunk].name
+                ));
+                for (rva, _, name) in by_chunk.get(&chunk).cloned().unwrap_or_default() {
+                    text.push_str(&header(rva, 0, 0));
+                    text.push_str("                ");
+                    text.push_str(&name);
+                    text.push('\n');
+                }
+            }
+        }
+        let requested = self.options.map_path.clone().unwrap_or_default();
+        let path = if requested.is_empty() {
+            let output = self.options.output.clone();
+            match output.rfind('.') {
+                Some(position) => format!("{}.map", &output[..position]),
+                None => format!("{output}.map"),
+            }
+        } else {
+            requested
+        };
+        if path == "-" {
+            self.messages.push(text);
+        } else {
+            self.extra_outputs.push((path, text.into_bytes()));
+        }
+    }
+}
+
 fn code_view_symbol(kind: u16, body: &[u8]) -> Vec<u8> {
     use crate::compilers::pe::put_u16;
     let total = (body.len() + 4).div_ceil(4) * 4;
@@ -24636,6 +25007,15 @@ impl<'s> CoffContext<'s> {
             for chunk in self.objects[file].chunks.clone() {
                 let entry = &self.chunks[chunk];
                 if !entry.live {
+                    if self.options.verbose
+                        && entry.kind == CoffChunkKind::Section
+                        && entry.replacement == chunk
+                    {
+                        if let Some(leader) = entry.leader {
+                            let name = self.symbols[leader].name.clone();
+                            self.messages.push(format!("Discarded {name}"));
+                        }
+                    }
                     continue;
                 }
                 let name = entry.name.clone();
@@ -24713,7 +25093,17 @@ impl<'s> CoffContext<'s> {
                 }
             }
         }
+        let priorities = self.order_priorities();
         for ((name, characteristics), list) in partial {
+            let mut list = list;
+            if !priorities.is_empty() {
+                list.sort_by_key(|chunk| {
+                    self.chunks[*chunk]
+                        .leader
+                        .and_then(|leader| priorities.get(&self.symbols[leader].name).copied())
+                        .unwrap_or(0)
+                });
+            }
             self.partial_sections
                 .push((name.clone(), characteristics, list.clone()));
             let base = name.split('$').next().unwrap_or("").to_string();
@@ -24726,7 +25116,6 @@ impl<'s> CoffContext<'s> {
                 base
             };
             let mut characteristics = characteristics;
-            let mut list = list;
             if base == ".CRT" {
                 characteristics = data | read;
                 list.sort_by(|left, right| {
@@ -24924,6 +25313,9 @@ impl<'s> CoffContext<'s> {
             if self.failed() {
                 return None;
             }
+        }
+        if self.options.map_path.is_some() {
+            self.write_linker_map();
         }
         self.write_time_stamp(&mut bytes);
         if self.write_check_sum {
@@ -26141,7 +26533,9 @@ impl<'s> CoffContext<'s> {
                     .symbol_at(relocation.symbol_index)
                     .map(|symbol| symbol.name.clone())
                     .unwrap_or_default();
-                if self.chunks[chunk].name.starts_with(".debug") {
+                if self.chunks[chunk].name.starts_with(".debug")
+                    || self.chunks[chunk].name == ".eh_frame"
+                {
                     continue;
                 }
                 let label = self.file_label(Some(file));

@@ -92,6 +92,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI284", "A symbols subsection in the debug information is empty."),
     ("EI285", "A procedure symbol refers to an item that is not a function identifier."),
     ("EI286", "The symbol scopes in the debug information are not balanced."),
+    ("EI287", "An option has no effect in this link."),
+    ("EI288", "The linker stops after too many errors."),
+    ("EI289", "A symbol named in the order file does not exist."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

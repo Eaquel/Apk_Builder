@@ -69235,7 +69235,27 @@ mod linker_lit {
         None
     }
 
-    fn render(outcome: &LinkOutcome, program: &str, visual: bool) -> (Vec<u8>, Vec<u8>, i32) {
+    fn colored(arguments: &[String]) -> bool {
+        let mut color = false;
+        for argument in arguments {
+            let name = argument.trim_start_matches('-');
+            match name {
+                "color-diagnostics" | "color-diagnostics=always" => color = true,
+                "color-diagnostics=never" | "color-diagnostics=auto" | "no-color-diagnostics" => {
+                    color = false
+                }
+                _ => {}
+            }
+        }
+        color
+    }
+
+    fn render(
+        outcome: &LinkOutcome,
+        program: &str,
+        visual: bool,
+        color: bool,
+    ) -> (Vec<u8>, Vec<u8>, i32) {
         let mut stderr = String::new();
         for diagnostic in &outcome.diagnostics {
             let level = match diagnostic.severity {
@@ -69270,7 +69290,12 @@ mod linker_lit {
                 } else {
                     program.to_string()
                 };
-                stderr.push_str(&format!("{location}: {level}: {part}\n"));
+                let shown = match (color, level) {
+                    (true, "warning") => "\u{1b}[0;35mwarning: \u{1b}[0m".to_string(),
+                    (true, "error") => "\u{1b}[0;31merror: \u{1b}[0m".to_string(),
+                    _ => format!("{level}: "),
+                };
+                stderr.push_str(&format!("{location}: {shown}{part}\n"));
             }
         }
         let mut stdout = String::new();
@@ -69289,8 +69314,9 @@ mod linker_lit {
         program: &str,
         world: &mut World,
         visual: bool,
+        color: bool,
     ) -> ToolOutcome {
-        let (mut stdout, stderr, status) = render(&outcome, program, visual);
+        let (mut stdout, stderr, status) = render(&outcome, program, visual, color);
         for (path, bytes) in outcome.outputs {
             if path == "-" {
                 stdout.extend_from_slice(&bytes);
@@ -69325,7 +69351,7 @@ mod linker_lit {
         let visual = arguments
             .iter()
             .any(|argument| argument == "--vs-diagnostics" || argument == "-vs-diagnostics");
-        finish_link(outcome, "ld.lld", world, visual)
+        finish_link(outcome, "ld.lld", world, visual, colored(arguments))
     }
 
     fn tool_lld_link(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
@@ -69337,7 +69363,7 @@ mod linker_lit {
             let reader = |path: &str| world.read(path);
             link_coff_in(&arguments[1..], &reader, &directory)
         };
-        finish_link(outcome, "lld-link", world, false)
+        finish_link(outcome, "lld-link", world, false, colored(arguments))
     }
 
     fn lld_tools() -> BTreeMap<String, ToolFunction> {
@@ -69362,6 +69388,11 @@ mod linker_lit {
             };
             if command.contains(">&") && !command.contains("2>&1") && !command.contains(">&2") {
                 return Some("the lit shell here does not support the >& redirect".to_string());
+            }
+            if command.contains("touch -t") {
+                return Some(
+                    "the lit shell here does not keep file times between commands".to_string(),
+                );
             }
             for word in command.split(|character: char| {
                 character.is_whitespace() || character == '=' || character == ','
