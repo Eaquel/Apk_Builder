@@ -101,6 +101,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI293", "A relocation does not match the instruction it patches."),
     ("EI294", "The linker found two candidate entry points."),
     ("EI295", "The linker skips an imported DllMain symbol."),
+    ("EI296", "The image exports more symbols than ordinals allow."),
+    ("EI297", "Library grouping options are not balanced."),
+    ("EI298", "Two resources share a type, name and language."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

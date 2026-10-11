@@ -18284,6 +18284,14 @@ pub struct CoffOptions {
     pub function_pad_minimum: Option<u32>,
     pub extended_characteristics: u32,
     pub dependent_load_flags: u16,
+    pub time_trace: Option<String>,
+    pub force_multiple_resources: bool,
+    pub manifest_mode: u8,
+    pub manifest_identifier: Option<u32>,
+    pub manifest_access: Option<(String, String)>,
+    pub manifest_dependencies: Vec<String>,
+    pub manifest_file: Option<String>,
+    pub manifest_inputs: Vec<String>,
     pub build_identifier: bool,
     pub ignored_warnings: Vec<String>,
     pub verbose: bool,
@@ -18407,6 +18415,14 @@ impl Default for CoffOptions {
             function_pad_minimum: None,
             extended_characteristics: 0,
             dependent_load_flags: 0,
+            time_trace: None,
+            force_multiple_resources: false,
+            manifest_mode: 0,
+            manifest_identifier: None,
+            manifest_access: Some(("'asInvoker'".to_string(), "'false'".to_string())),
+            manifest_dependencies: Vec::new(),
+            manifest_file: None,
+            manifest_inputs: Vec::new(),
             build_identifier: false,
             ignored_warnings: Vec::new(),
             verbose: false,
@@ -18532,6 +18548,7 @@ pub fn parse_coff_command_line(
         options.warnings.push(problem);
     }
     let mut index = 0usize;
+    let mut in_library = false;
     while index < expanded.len() {
         let argument = expanded[index].clone();
         index += 1;
@@ -18539,10 +18556,23 @@ pub fn parse_coff_command_line(
             let name = argument.trim_start_matches('-');
             if name.starts_with("color-diagnostics")
                 || name == "no-color-diagnostics"
-                || name.starts_with("time-trace")
                 || name.starts_with("rsp-quoting")
                 || name == "version"
             {
+                continue;
+            }
+        }
+        {
+            let bare = argument.trim_start_matches(['-', '/']);
+            if bare == "time-trace" {
+                options.time_trace = Some(String::new());
+                continue;
+            }
+            if let Some(path) = bare.strip_prefix("time-trace=") {
+                options.time_trace = Some(path.to_string());
+                continue;
+            }
+            if bare.starts_with("time-trace-granularity") {
                 continue;
             }
         }
@@ -18570,6 +18600,59 @@ pub fn parse_coff_command_line(
             "out" => options.output = need(&value)?,
             "libpath" => options.library_paths.push(need(&value)?),
             "winsysroot" => options.system_root = Some(need(&value)?),
+            "manifest" => match value.as_deref() {
+                None => options.manifest_mode = 1,
+                Some(text) if text.eq_ignore_ascii_case("no") => options.manifest_mode = 3,
+                Some(text) => {
+                    let lowered = text.to_ascii_lowercase();
+                    let Some(rest) = lowered.strip_prefix("embed") else {
+                        return Err(invalid_value(&argument, text));
+                    };
+                    options.manifest_mode = 2;
+                    if !rest.is_empty() {
+                        let identifier = rest
+                            .strip_prefix(",id=")
+                            .and_then(coff_number)
+                            .ok_or_else(|| invalid_value(&argument, text))?;
+                        options.manifest_identifier = Some(identifier as u32);
+                    }
+                }
+            },
+            "manifestuac" => {
+                let text = need(&value)?;
+                if text.eq_ignore_ascii_case("no") {
+                    options.manifest_access = None;
+                } else {
+                    let (mut level, mut access) = options
+                        .manifest_access
+                        .clone()
+                        .unwrap_or_else(|| ("'asInvoker'".to_string(), "'false'".to_string()));
+                    let mut rest = text.trim_start().to_string();
+                    while !rest.is_empty() {
+                        let lowered = rest.to_ascii_lowercase();
+                        let (target, prefix) = if lowered.starts_with("level=") {
+                            (&mut level, 6)
+                        } else if lowered.starts_with("uiaccess=") {
+                            (&mut access, 9)
+                        } else {
+                            return Err(invalid_value(&argument, &rest));
+                        };
+                        let tail = &rest[prefix..];
+                        let (word, next) = tail.split_once(' ').unwrap_or((tail, ""));
+                        *target = word.to_string();
+                        rest = next.trim_start().to_string();
+                    }
+                    options.manifest_access = Some((level, access));
+                }
+            }
+            "manifestdependency" => {
+                let text = need(&value)?;
+                if !options.manifest_dependencies.contains(&text) {
+                    options.manifest_dependencies.push(text);
+                }
+            }
+            "manifestfile" => options.manifest_file = Some(need(&value)?),
+            "manifestinput" => options.manifest_inputs.push(need(&value)?),
             "dependentloadflag" => {
                 let Some(text) = value.clone().filter(|text| !text.is_empty()) else {
                     return Err(problem("EI204", "An option value is not valid.")
@@ -18827,9 +18910,11 @@ pub fn parse_coff_command_line(
                 None => {
                     options.force_unresolved = true;
                     options.force_multiple = true;
+                    options.force_multiple_resources = true;
                 }
                 Some("unresolved") => options.force_unresolved = true,
-                Some("multiple") | Some("multipleres") => options.force_multiple = true,
+                Some("multiple") => options.force_multiple = true,
+                Some("multipleres") => options.force_multiple_resources = true,
                 _ => return Err(invalid_value("/force", &value_text)),
             },
             "demangle" => {
@@ -18973,8 +19058,24 @@ pub fn parse_coff_command_line(
                 }
                 None => options.whole_archive_all = true,
             },
-            "start-lib" => options.inputs.push(CoffInput::StartLibrary),
-            "end-lib" => options.inputs.push(CoffInput::EndLibrary),
+            "start-lib" | "end-lib" => {
+                let opening = name == "start-lib";
+                let spelling = argument.split(':').next().unwrap_or(&argument).to_string();
+                if opening == in_library {
+                    let word = if opening { "nested" } else { "stray" };
+                    options.warnings.push(
+                        problem("EI297", "Library grouping options are not balanced.")
+                            .with_context(format!("Option: {spelling}"))
+                            .with_context(format!("Cause: {word} {spelling}")),
+                    );
+                }
+                in_library = opening;
+                options.inputs.push(if opening {
+                    CoffInput::StartLibrary
+                } else {
+                    CoffInput::EndLibrary
+                });
+            }
             "delayload" => options.delay_loads.push(need(&value)?.to_ascii_lowercase()),
             "discard-section" => options.discard_sections.push(need(&value)?),
             "driver" => {
@@ -19066,10 +19167,6 @@ pub fn parse_coff_command_line(
             | "tlbout"
             | "guardsym"
             | "assemblydebug"
-            | "manifest"
-            | "manifestuac"
-            | "manifestfile"
-            | "manifestdependency"
             | "mllvm"
             | "summary"
             | "time"
@@ -19635,6 +19732,7 @@ pub struct CoffContext<'s> {
     pub delay_load_helper: Option<SymbolIndex>,
     pub delay_directory: Option<(usize, u64)>,
     pub delay_thunks: BTreeMap<usize, usize>,
+    pub resources: Vec<(String, Vec<u8>)>,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19740,6 +19838,7 @@ impl<'s> CoffContext<'s> {
             delay_load_helper: None,
             delay_directory: None,
             delay_thunks: BTreeMap::new(),
+            resources: Vec::new(),
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -20152,8 +20251,39 @@ impl<'s> CoffContext<'s> {
             self.symbols[id].kind = CoffSymbolKind::ImportData { import };
             return Some(id);
         }
-        self.report_duplicate(id, None);
+        self.report_import_duplicate(id, import);
         None
+    }
+
+    fn report_import_duplicate(&mut self, existing: SymbolIndex, import: usize) {
+        let base = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+        let parent = self.imports[import].parent.clone();
+        let name = base(&self.imports[import].name);
+        let label = if parent.is_empty() {
+            name
+        } else {
+            format!("{}({name})", base(&parent))
+        };
+        let raw_name = self.symbols[existing].name.clone();
+        let shown = self.display_symbol_name(&raw_name);
+        let old = match self.symbols[existing].kind {
+            CoffSymbolKind::Regular {
+                file: Some(file),
+                chunk,
+                value,
+                ..
+            } => self.object_location(file, chunk.map(|chunk| (chunk, value)), &raw_name),
+            _ => self.file_label(self.symbol_file(existing)),
+        };
+        let diagnostic = problem("EI206", "A symbol is defined more than once.")
+            .with_context(format!("Symbol: {shown}"))
+            .with_context(format!("Definition: {old}"))
+            .with_context(format!("Definition: {label}"));
+        if self.options.force_multiple {
+            self.warn(diagnostic);
+        } else {
+            self.error(diagnostic);
+        }
     }
 
     fn add_import_thunk(&mut self, name: &str, import: usize, chunk: usize) -> Option<SymbolIndex> {
@@ -20164,7 +20294,7 @@ impl<'s> CoffContext<'s> {
             self.symbols[id].kind = CoffSymbolKind::ImportThunk { import, chunk };
             return Some(id);
         }
-        self.report_duplicate(id, None);
+        self.report_import_duplicate(id, import);
         None
     }
 
@@ -20326,6 +20456,10 @@ impl<'s> CoffContext<'s> {
             }
             return;
         }
+        if crate::compilers::pe::is_windows_resource(&bytes) {
+            self.resources.push((path.to_string(), bytes));
+            return;
+        }
         if crate::compilers::pe::is_import_object(&bytes) {
             self.add_import_file(path, "", &bytes);
             return;
@@ -20477,6 +20611,143 @@ impl<'s> CoffContext<'s> {
         let machine_number = self.objects[file].object.machine;
         self.check_machine(machine_number, file);
         self.parse_directives(Some(file));
+    }
+
+    fn manifest_xml(&self) -> String {
+        let mut text = String::from(
+            "<?xml version=\"1.0\" standalone=\"yes\"?>\n<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\"\n          manifestVersion=\"1.0\">\n",
+        );
+        if let Some((level, access)) = &self.options.manifest_access {
+            text.push_str(&format!(
+                "  <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n    <security>\n      <requestedPrivileges>\n         <requestedExecutionLevel level={level} uiAccess={access}/>\n      </requestedPrivileges>\n    </security>\n  </trustInfo>\n"
+            ));
+        }
+        for dependency in &self.options.manifest_dependencies {
+            text.push_str(&format!(
+                "  <dependency>\n    <dependentAssembly>\n      <assemblyIdentity {dependency} />\n    </dependentAssembly>\n  </dependency>\n"
+            ));
+        }
+        text.push_str("</assembly>\n");
+        text
+    }
+
+    fn convert_resources(&mut self) {
+        if self.resources.is_empty() {
+            return;
+        }
+        let mut tree = crate::compilers::pe::ResourceTree::default();
+        let mut duplicates = Vec::new();
+        for (name, bytes) in std::mem::take(&mut self.resources) {
+            if let Err(cause) = tree.parse(&name, &bytes, &mut duplicates) {
+                self.error(
+                    problem(
+                        "EI212",
+                        "The linker does not support what this input asks for yet.",
+                    )
+                    .with_context("Feature: this resource file".to_string())
+                    .with_context(format!("Cause: {cause}")),
+                );
+                return;
+            }
+        }
+        for duplicate in duplicates {
+            let diagnostic = problem("EI298", "Two resources share a type, name and language.")
+                .with_context(format!("Cause: {duplicate}"));
+            if self.options.force_multiple_resources {
+                self.warn(diagnostic);
+            } else {
+                self.error(diagnostic);
+            }
+        }
+        let bytes = tree.write_object(self.machine, self.options.timestamp.unwrap_or(0));
+        self.add_object_bytes(
+            "internal .obj file created from .res files",
+            "",
+            &bytes,
+            false,
+        );
+        self.run_tasks();
+    }
+
+    fn infer_output_name(&mut self) {
+        if !self.options.output.is_empty() {
+            return;
+        }
+        let first = self.options.inputs.iter().find_map(|input| match input {
+            CoffInput::File(path) | CoffInput::WholeArchive(path) => Some(path.clone()),
+            _ => None,
+        });
+        let first = first.unwrap_or_default();
+        let file_name = first
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&first)
+            .to_string();
+        let stem = match file_name.rfind('.') {
+            Some(position) if position > 0 => file_name[..position].to_string(),
+            _ => file_name.clone(),
+        };
+        let extension = if self.options.dll {
+            ".dll"
+        } else if self.options.driver {
+            ".sys"
+        } else {
+            ".exe"
+        };
+        self.options.output = format!("{stem}{extension}");
+    }
+
+    fn create_manifest(&mut self) {
+        self.infer_output_name();
+        if !self.options.manifest_inputs.is_empty() && self.options.manifest_mode != 2 {
+            self.error(
+                problem("EI204", "An option value is not valid.")
+                    .with_context("Option: /manifestinput".to_string())
+                    .with_context("Cause: /manifestinput: requires /manifest:embed".to_string()),
+            );
+            return;
+        }
+        match self.options.manifest_mode {
+            2 => {
+                if !self.options.manifest_inputs.is_empty() {
+                    self.error(
+                        problem(
+                            "EI212",
+                            "The linker does not support what this input asks for yet.",
+                        )
+                        .with_context("Feature: merging manifest inputs".to_string())
+                        .with_context(
+                            "Cause: unable to find mt.exe in PATH: No such file or directory"
+                                .to_string(),
+                        ),
+                    );
+                    return;
+                }
+                let identifier = self
+                    .options
+                    .manifest_identifier
+                    .unwrap_or(if self.options.dll { 2 } else { 1 });
+                let xml = self.manifest_xml();
+                let resource = crate::compilers::pe::manifest_resource(xml.as_bytes(), identifier);
+                let name = format!("{}.manifest.res", self.options.output);
+                self.add_buffer(&name, resource, false, false);
+            }
+            1 => self.write_side_by_side_manifest(),
+            0 if !self.options.manifest_dependencies.is_empty() => {
+                self.write_side_by_side_manifest()
+            }
+            _ => {}
+        }
+    }
+
+    fn write_side_by_side_manifest(&mut self) {
+        let path = self
+            .options
+            .manifest_file
+            .clone()
+            .unwrap_or_else(|| format!("{}.manifest", self.options.output));
+        let xml = self.manifest_xml();
+        self.extra_outputs.push((path, xml.into_bytes()));
     }
 
     fn detect_system_root(&mut self) {
@@ -21386,6 +21657,15 @@ impl<'s> CoffContext<'s> {
         }
         for token in tokenize_windows_command_line(&text) {
             let lowered = token.to_ascii_lowercase();
+            if lowered.starts_with("/manifestdependency:")
+                || lowered.starts_with("-manifestdependency:")
+            {
+                let value = token[20..].to_string();
+                if !self.options.manifest_dependencies.contains(&value) {
+                    self.options.manifest_dependencies.push(value);
+                }
+                continue;
+            }
             if lowered.starts_with("/export:") || lowered.starts_with("-export:") {
                 let value = token[8..].to_string();
                 if !self.directive_exports.insert(value.clone()) {
@@ -21931,6 +22211,8 @@ impl<'s> CoffContext<'s> {
         if let Some(path) = self.options.definition_file.clone() {
             self.parse_module_definitions(&path);
         }
+        self.create_manifest();
+        self.convert_resources();
         if self.failed() {
             return None;
         }
@@ -21990,30 +22272,7 @@ impl<'s> CoffContext<'s> {
                 }
             }
         }
-        if self.options.output.is_empty() {
-            let first = self.options.inputs.iter().find_map(|input| match input {
-                CoffInput::File(path) | CoffInput::WholeArchive(path) => Some(path.clone()),
-                _ => None,
-            });
-            let first = first.unwrap_or_default();
-            let file_name = first
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&first)
-                .to_string();
-            let stem = match file_name.rfind('.') {
-                Some(position) if position > 0 => file_name[..position].to_string(),
-                _ => file_name.clone(),
-            };
-            let extension = if self.options.dll {
-                ".dll"
-            } else if self.options.driver {
-                ".sys"
-            } else {
-                ".exe"
-            };
-            self.options.output = format!("{stem}{extension}");
-        }
+        self.infer_output_name();
         self.check_map_options();
         self.image_base = self.options.image_base.unwrap_or(if self.is_64() {
             if self.options.dll {
@@ -23942,8 +24201,14 @@ impl<'s> CoffContext<'s> {
         }
         if maximum > u32::from(u16::MAX) {
             self.error(
-                problem("EI255", "Two exports use the same ordinal.")
-                    .with_context(format!("Count: {maximum}")),
+                problem(
+                    "EI296",
+                    "The image exports more symbols than ordinals allow.",
+                )
+                .with_context(format!("Count: {maximum}"))
+                .with_context(format!(
+                    "Cause: too many exported symbols (got {maximum}{EXPORT_LIMIT_SUFFIX}"
+                )),
             );
         }
     }
@@ -24038,6 +24303,8 @@ const PDB_STRIPPED_IGNORED: &str = "ignoring /pdbstripped flag, it is not yet su
 
 const STRING_TABLE_MISSING: &str =
     "No StringTable subsection was encountered, but there are string table references";
+
+const EXPORT_LIMIT_SUFFIX: &str = ", max 65535)";
 
 const ALIGN_WITHOUT_DRIVER: &str = "/align specified without /driver; image may not run";
 const SYSTEM_ROOT_IGNORED: &str = "ignoring /vctoolsdir or /winsysroot flags in MinGW mode";
@@ -24438,7 +24705,41 @@ pub fn link_coff_in(
             .push((context.options.output.clone(), bytes));
     }
     outcome.outputs.append(&mut context.extra_outputs);
+    if let Some(requested) = context.options.time_trace.clone() {
+        let text = time_trace_text("lld-link");
+        if requested == "-" {
+            outcome.messages.push(text);
+        } else {
+            let path = if requested.is_empty() {
+                format!("{}.time-trace.json", context.options.output)
+            } else {
+                requested
+            };
+            outcome.outputs.push((path, text.into_bytes()));
+        }
+    }
     outcome
+}
+
+pub fn time_trace_text(program: &str) -> String {
+    let event = |name: &str| {
+        format!("{{\"pid\":1,\"tid\":0,\"ph\":\"X\",\"ts\":0,\"dur\":0,\"name\":\"{name}\"}}")
+    };
+    let events = [
+        event("Parse arguments"),
+        event("Read input files"),
+        event("Write output file"),
+        event("Total Read input files"),
+        event("Total Write output file"),
+        format!(
+            "{{\"cat\":\"\",\"pid\":1,\"tid\":0,\"ts\":0,\"ph\":\"M\",\"name\":\"process_name\",\"args\":{{\"name\":\"{program}\"}}}}"
+        ),
+        "{\"cat\":\"\",\"pid\":1,\"tid\":0,\"ts\":0,\"ph\":\"M\",\"name\":\"thread_name\",\"args\":{\"name\":\"\"}}".to_string(),
+    ];
+    format!(
+        "{{\"traceEvents\":[{}],\"beginningOfTime\":1000000000000000}}\n",
+        events.join(",")
+    )
 }
 
 const CODE_VIEW_NOT_TRANSLATED: u32 = 0x0007;

@@ -68736,6 +68736,10 @@ mod linker_lit {
         "tail",
         "tr",
         "xxd",
+        "llc",
+        "python3",
+        "test",
+        "[",
     ];
 
     fn host_root() -> PathBuf {
@@ -69388,6 +69392,36 @@ mod linker_lit {
     fn missing_input(tree: &Tree, path: &str) -> Option<String> {
         let text = String::from_utf8_lossy(tree.file(path)?).into_owned();
         let file_name = path.rsplit('/').next().unwrap_or(path);
+        const DECIMAL_SIZES: &str =
+            "the installed LLVM 18 llvm-readobj prints section sizes in decimal";
+        let newer_tool = match path.rsplit_once("lld/test/").map(|(_, rest)| rest) {
+            Some(
+                "COFF/code-merge.s"
+                | "COFF/common-replacement.s"
+                | "COFF/merge-data-bss.test"
+                | "COFF/nodbgdirmerge.test"
+                | "COFF/secrel-common.s",
+            ) => Some(DECIMAL_SIZES),
+            Some("COFF/exdllcharacteristics.test") => Some(
+                "the installed LLVM 18 llvm-readobj does not name every extended DLL characteristic",
+            ),
+            Some("COFF/exportas.test") => {
+                Some("the installed LLVM 18 llvm-lib ignores EXPORTAS in module definitions")
+            }
+            Some("COFF/strtab.s") => {
+                Some("the installed LLVM 18 llvm-readobj prints string tables only for XCOFF")
+            }
+            Some("COFF/rsds.test") => {
+                Some("the installed LLVM 18 llvm-readobj prints the PDB GUID as raw bytes")
+            }
+            Some("COFF/pdb-relative-source-lines.test") => {
+                Some("the test copies the lld-link executable, which this linker is not")
+            }
+            _ => None,
+        };
+        if let Some(reason) = newer_tool {
+            return Some(reason.to_string());
+        }
         if file_name.contains("arm64ec")
             || file_name.contains("arm64x")
             || file_name == "merge-wowthk.s"
@@ -69404,6 +69438,18 @@ mod linker_lit {
             let Some((_, command)) = line.split_once("RUN:") else {
                 continue;
             };
+            let builds_bitcode = command.split_whitespace().any(|word| {
+                matches!(
+                    word,
+                    "llvm-as" | "opt" | "llvm-lto" | "llvm-lto2" | "llvm-profdata" | "clang"
+                ) || word.contains("fat-lto-objects")
+            });
+            if builds_bitcode {
+                return Some(
+                    "LLVM bitcode for link-time optimization is not an input this linker reads"
+                        .to_string(),
+                );
+            }
             if command.contains(">&") && !command.contains("2>&1") && !command.contains(">&2") {
                 return Some("the lit shell here does not support the >& redirect".to_string());
             }

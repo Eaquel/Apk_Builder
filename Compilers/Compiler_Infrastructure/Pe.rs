@@ -3699,3 +3699,387 @@ pub fn read_dll_exports(bytes: &[u8]) -> Result<DllExports, String> {
     }
     Ok(result)
 }
+
+pub const RESOURCE_MAGIC: [u8; 16] = [
+    0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00,
+];
+
+pub fn is_windows_resource(bytes: &[u8]) -> bool {
+    bytes.starts_with(&RESOURCE_MAGIC)
+}
+
+pub fn manifest_resource(manifest: &[u8], identifier: u32) -> Vec<u8> {
+    let mut out = RESOURCE_MAGIC.to_vec();
+    out.extend_from_slice(&[0u8; 16]);
+    put_u32(&mut out, manifest.len() as u32);
+    put_u32(&mut out, 32);
+    put_u16(&mut out, 0xffff);
+    put_u16(&mut out, 24);
+    put_u16(&mut out, 0xffff);
+    put_u16(&mut out, identifier as u16);
+    put_u32(&mut out, 0);
+    put_u16(&mut out, 0x30);
+    put_u16(&mut out, 0x0409);
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0);
+    out.extend_from_slice(manifest);
+    while !out.len().is_multiple_of(4) {
+        out.push(0);
+    }
+    out
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResourceKey {
+    Text(Vec<u16>),
+    Number(u16),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ResourceNode {
+    pub children: std::collections::BTreeMap<ResourceKey, ResourceNode>,
+    pub data: Option<usize>,
+    pub string_index: Option<usize>,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub characteristics: u32,
+    pub origin: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ResourceTree {
+    pub root: ResourceNode,
+    pub data: Vec<Vec<u8>>,
+    pub strings: Vec<Vec<u16>>,
+    pub files: Vec<String>,
+}
+
+fn resource_key_text(key: &ResourceKey) -> String {
+    match key {
+        ResourceKey::Number(number) => number.to_string(),
+        ResourceKey::Text(units) => String::from_utf16_lossy(units),
+    }
+}
+
+fn resource_type_text(key: &ResourceKey) -> String {
+    let ResourceKey::Number(number) = key else {
+        return resource_key_text(key);
+    };
+    let name = match number {
+        1 => "CURSOR (ID 1)",
+        2 => "BITMAP (ID 2)",
+        3 => "ICON (ID 3)",
+        4 => "MENU (ID 4)",
+        5 => "DIALOG (ID 5)",
+        6 => "STRINGTABLE (ID 6)",
+        7 => "FONTDIR (ID 7)",
+        8 => "FONT (ID 8)",
+        9 => "ACCELERATOR (ID 9)",
+        10 => "RCDATA (ID 10)",
+        11 => "MESSAGETABLE (ID 11)",
+        12 => "GROUP_CURSOR (ID 12)",
+        14 => "GROUP_ICON (ID 14)",
+        16 => "VERSIONINFO (ID 16)",
+        17 => "DLGINCLUDE (ID 17)",
+        19 => "PLUGPLAY (ID 19)",
+        20 => "VXD (ID 20)",
+        21 => "ANICURSOR (ID 21)",
+        22 => "ANIICON (ID 22)",
+        23 => "HTML (ID 23)",
+        24 => "MANIFEST (ID 24)",
+        _ => return format!("ID {number}"),
+    };
+    name.to_string()
+}
+
+fn read_resource_key(bytes: &[u8], at: &mut usize) -> Option<ResourceKey> {
+    let first = read_u16(bytes, *at)?;
+    if first == 0xffff {
+        let number = read_u16(bytes, *at + 2)?;
+        *at += 4;
+        return Some(ResourceKey::Number(number));
+    }
+    let mut units = Vec::new();
+    loop {
+        let unit = read_u16(bytes, *at)?;
+        *at += 2;
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    Some(ResourceKey::Text(units))
+}
+
+impl ResourceTree {
+    pub fn parse(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        duplicates: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if bytes.len() < 32 {
+            return Err(format!("{name}: too small to be a resource file"));
+        }
+        let origin = self.files.len();
+        self.files.push(name.to_string());
+        let mut at = 32usize;
+        while at < bytes.len() {
+            let data_size = read_u32(bytes, at)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?
+                as usize;
+            let header_size = read_u32(bytes, at + 4)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?
+                as usize;
+            if header_size < 32 {
+                return Err(format!("{name}: header size too small"));
+            }
+            let mut cursor = at + 8;
+            let kind = read_resource_key(bytes, &mut cursor)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?;
+            let entry = read_resource_key(bytes, &mut cursor)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?;
+            cursor = (cursor - at).div_ceil(4) * 4 + at;
+            let language = read_u16(bytes, cursor + 6)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?;
+            let version = read_u32(bytes, cursor + 8)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?;
+            let characteristics = read_u32(bytes, cursor + 12)
+                .ok_or_else(|| format!("{name}: unexpected end of file"))?;
+            let start = at + header_size;
+            let end = start + data_size;
+            if end > bytes.len() {
+                return Err(format!("{name}: unexpected end of file"));
+            }
+            let content = bytes[start..end].to_vec();
+            at = end.div_ceil(4) * 4;
+            if data_size == 0 && kind == ResourceKey::Number(0) && entry == ResourceKey::Number(0) {
+                continue;
+            }
+            let strings = &mut self.strings;
+            let mut add_child = |node: &mut ResourceNode, key: &ResourceKey| -> usize {
+                let fresh = !node.children.contains_key(key);
+                let child = node.children.entry(key.clone()).or_default();
+                if fresh {
+                    if let ResourceKey::Text(units) = key {
+                        child.string_index = Some(strings.len());
+                        strings.push(units.clone());
+                    }
+                }
+                0
+            };
+            add_child(&mut self.root, &kind);
+            let type_node = self
+                .root
+                .children
+                .get_mut(&kind)
+                .unwrap_or_else(|| unreachable!());
+            add_child(type_node, &entry);
+            let name_node = type_node
+                .children
+                .get_mut(&entry)
+                .unwrap_or_else(|| unreachable!());
+            let language_key = ResourceKey::Number(language);
+            if let Some(existing) = name_node.children.get(&language_key) {
+                let first = self.files[existing.origin].clone();
+                duplicates.push(format!(
+                    "duplicate resource: type {}/name {}/language {language}, in {first} and in {name}",
+                    resource_type_text(&kind),
+                    resource_key_text(&entry)
+                ));
+                continue;
+            }
+            let index = self.data.len();
+            self.data.push(content);
+            name_node.children.insert(
+                language_key,
+                ResourceNode {
+                    data: Some(index),
+                    major_version: (version >> 16) as u16,
+                    minor_version: version as u16,
+                    characteristics,
+                    origin,
+                    ..ResourceNode::default()
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub fn write_object(&self, machine_number: u16, time_stamp: u32) -> Vec<u8> {
+        fn tree_size(node: &ResourceNode) -> usize {
+            if node.data.is_some() {
+                return 16;
+            }
+            16 + node.children.len() * 8 + node.children.values().map(tree_size).sum::<usize>()
+        }
+        let tree = tree_size(&self.root);
+        let mut string_offsets = Vec::new();
+        let mut current = tree;
+        let mut strings_total = 0usize;
+        for text in &self.strings {
+            string_offsets.push(current as u32);
+            let size = text.len() * 2 + 2;
+            current += size;
+            strings_total += size;
+        }
+        let section_one = tree + strings_total.div_ceil(4) * 4;
+        let mut section_one_bytes: Vec<u8> = Vec::with_capacity(section_one);
+        let mut relocation_addresses = vec![0u32; self.data.len()];
+        let mut queue: std::collections::VecDeque<&ResourceNode> =
+            std::collections::VecDeque::new();
+        queue.push_back(&self.root);
+        let mut next_level = 16 + self.root.children.len() * 8;
+        let mut data_nodes: Vec<&ResourceNode> = Vec::new();
+        while let Some(node) = queue.pop_front() {
+            let names = node
+                .children
+                .keys()
+                .filter(|key| matches!(key, ResourceKey::Text(_)))
+                .count();
+            put_u32(&mut section_one_bytes, node.characteristics);
+            put_u32(&mut section_one_bytes, 0);
+            put_u16(&mut section_one_bytes, node.major_version);
+            put_u16(&mut section_one_bytes, node.minor_version);
+            put_u16(&mut section_one_bytes, names as u16);
+            put_u16(&mut section_one_bytes, (node.children.len() - names) as u16);
+            let ordered = node
+                .children
+                .iter()
+                .filter(|(key, _)| matches!(key, ResourceKey::Text(_)))
+                .chain(
+                    node.children
+                        .iter()
+                        .filter(|(key, _)| matches!(key, ResourceKey::Number(_))),
+                );
+            for (key, child) in ordered {
+                let identifier = match key {
+                    ResourceKey::Number(number) => u32::from(*number),
+                    ResourceKey::Text(_) => {
+                        string_offsets[child.string_index.unwrap_or(0)] | 0x8000_0000
+                    }
+                };
+                put_u32(&mut section_one_bytes, identifier);
+                if child.data.is_some() {
+                    put_u32(&mut section_one_bytes, next_level as u32);
+                    next_level += 16;
+                    data_nodes.push(child);
+                } else {
+                    put_u32(&mut section_one_bytes, next_level as u32 | 0x8000_0000);
+                    next_level += 16 + child.children.len() * 8;
+                    queue.push_back(child);
+                }
+            }
+        }
+        for node in data_nodes {
+            let index = node.data.unwrap_or(0);
+            relocation_addresses[index] = section_one_bytes.len() as u32;
+            put_u32(&mut section_one_bytes, 0);
+            put_u32(&mut section_one_bytes, self.data[index].len() as u32);
+            put_u32(&mut section_one_bytes, 0);
+            put_u32(&mut section_one_bytes, 0);
+        }
+        for text in &self.strings {
+            put_u16(&mut section_one_bytes, text.len() as u16);
+            for unit in text {
+                put_u16(&mut section_one_bytes, *unit);
+            }
+        }
+        section_one_bytes.resize(section_one, 0);
+        let mut data_offsets = Vec::new();
+        let mut section_two_bytes: Vec<u8> = Vec::new();
+        for content in &self.data {
+            data_offsets.push(section_two_bytes.len() as u32);
+            section_two_bytes.extend_from_slice(content);
+            section_two_bytes.resize(section_two_bytes.len().div_ceil(8) * 8, 0);
+        }
+        let header = 20 + 2 * 40;
+        let section_one_offset = header;
+        let relocations_offset = section_one_offset + section_one;
+        let section_two_offset = (relocations_offset + self.data.len() * 10).div_ceil(8) * 8;
+        let symbol_offset = (section_two_offset + section_two_bytes.len()).div_ceil(8) * 8;
+        let mut out = Vec::new();
+        put_u16(&mut out, machine_number);
+        put_u16(&mut out, 2);
+        put_u32(&mut out, time_stamp);
+        put_u32(&mut out, symbol_offset as u32);
+        put_u32(&mut out, (self.data.len() + 5) as u32);
+        put_u16(&mut out, 0);
+        put_u16(&mut out, 0x0100);
+        let section_header = |out: &mut Vec<u8>,
+                              name: &[u8; 8],
+                              size: usize,
+                              pointer: usize,
+                              relocations: usize,
+                              count: usize| {
+            out.extend_from_slice(name);
+            put_u32(out, 0);
+            put_u32(out, 0);
+            put_u32(out, size as u32);
+            put_u32(out, pointer as u32);
+            put_u32(out, relocations as u32);
+            put_u32(out, 0);
+            put_u16(out, count as u16);
+            put_u16(out, 0);
+            put_u32(
+                out,
+                section_characteristic::INITIALIZED_DATA | section_characteristic::READ,
+            );
+        };
+        section_header(
+            &mut out,
+            b".rsrc$01",
+            section_one,
+            section_one_offset,
+            relocations_offset,
+            self.data.len(),
+        );
+        section_header(
+            &mut out,
+            b".rsrc$02",
+            section_two_bytes.len(),
+            section_two_offset,
+            0,
+            0,
+        );
+        out.extend_from_slice(&section_one_bytes);
+        let relocation_kind = match machine_number {
+            machine::I386 => relocation_i386::DIRECT_32_IMAGE_RELATIVE,
+            machine::ARM_THUMB => relocation_arm::ADDRESS_32_IMAGE_RELATIVE,
+            machine::AMD64 => relocation_amd64::ADDRESS_32_IMAGE_RELATIVE,
+            _ => relocation_arm64::ADDRESS_32_IMAGE_RELATIVE,
+        };
+        for (index, address) in relocation_addresses.iter().enumerate() {
+            put_u32(&mut out, *address);
+            put_u32(&mut out, (index + 5) as u32);
+            put_u16(&mut out, relocation_kind);
+        }
+        out.resize(section_two_offset, 0);
+        out.extend_from_slice(&section_two_bytes);
+        out.resize(symbol_offset, 0);
+        let symbol = |out: &mut Vec<u8>, name: &[u8], value: u32, section: u16, auxiliary: u8| {
+            let mut short = [0u8; 8];
+            short[..name.len()].copy_from_slice(name);
+            out.extend_from_slice(&short);
+            put_u32(out, value);
+            put_u16(out, section);
+            put_u16(out, 0);
+            out.push(storage_class::STATIC);
+            out.push(auxiliary);
+        };
+        symbol(&mut out, b"@feat.00", 0x11, 0xffff, 0);
+        symbol(&mut out, b".rsrc$01", 0, 1, 1);
+        put_u32(&mut out, section_one as u32);
+        put_u16(&mut out, self.data.len() as u16);
+        out.extend_from_slice(&[0u8; 12]);
+        symbol(&mut out, b".rsrc$02", 0, 2, 1);
+        put_u32(&mut out, section_two_bytes.len() as u32);
+        out.extend_from_slice(&[0u8; 14]);
+        for (index, offset) in data_offsets.iter().enumerate() {
+            let name = format!("$R{:06X}", index & 0xff_ffff);
+            symbol(&mut out, name.as_bytes(), *offset, 2, 0);
+        }
+        put_u32(&mut out, 0);
+        out
+    }
+}
