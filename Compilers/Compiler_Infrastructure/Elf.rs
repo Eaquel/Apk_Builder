@@ -645,6 +645,15 @@ pub fn string_at(table: &[u8], offset: u32) -> Option<String> {
 }
 
 pub fn read_header(bytes: &[u8]) -> Result<Header, Diagnostic> {
+    if !is_elf(bytes) {
+        return Err(unreadable(0, "not an ELF file"));
+    }
+    if !matches!(bytes.get(5), Some(1) | Some(2)) {
+        return Err(unreadable(0, "corrupted ELF file: invalid data encoding"));
+    }
+    if !matches!(bytes.get(4), Some(1) | Some(2)) {
+        return Err(unreadable(0, "corrupted ELF file: invalid file class"));
+    }
     let encoding = identify(bytes).ok_or_else(|| unreadable(0, "not an ELF file"))?;
     if bytes.len() < encoding.header_size() {
         return Err(unreadable(0, "the file header is truncated"));

@@ -125,6 +125,7 @@ pub struct Options {
     pub print_symbol_order: Option<String>,
     pub warn_symbol_ordering: bool,
     pub merge_exception_index: bool,
+    pub dependent_libraries: bool,
     pub visual_studio_diagnostics: bool,
     pub retain_symbols_file: Option<String>,
     pub print_version: bool,
@@ -243,6 +244,7 @@ impl Default for Options {
             print_symbol_order: None,
             warn_symbol_ordering: true,
             merge_exception_index: true,
+            dependent_libraries: true,
             visual_studio_diagnostics: false,
             retain_symbols_file: None,
             print_version: false,
@@ -329,8 +331,29 @@ fn unknown_option(option: &str) -> Diagnostic {
 }
 
 fn missing_value(option: &str) -> Diagnostic {
-    problem("EI203", "An option is missing its value.").with_context(format!("Option: {option}"))
+    problem("EI203", "An option is missing its value.")
+        .with_context(format!("Option: {option}"))
+        .with_context(format!("Cause: {option}: missing argument"))
 }
+
+pub fn parse_integer_any_radix(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    if let Some(digits) = lower.strip_prefix("0x") {
+        return u64::from_str_radix(digits, 16).ok();
+    }
+    if let Some(digits) = lower.strip_prefix("0b") {
+        return u64::from_str_radix(digits, 2).ok();
+    }
+    if let Some(digits) = text.strip_prefix("0o") {
+        return u64::from_str_radix(digits, 8).ok();
+    }
+    if text.len() > 1 && text.starts_with('0') && text.as_bytes()[1].is_ascii_digit() {
+        return u64::from_str_radix(&text[1..], 8).ok();
+    }
+    text.parse::<u64>().ok()
+}
+
+const NUMBER_EXPECTED: &str = "number expected, but got";
 
 const ARM_ONLY: u8 = 1;
 const AARCH64_ONLY: u8 = 2;
@@ -898,8 +921,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--image-base"])? {
-            options.image_base =
-                Some(parse_number(&value).ok_or_else(|| invalid_value("--image-base", &value))?);
+            options.image_base = Some(parse_integer_any_radix(&value).ok_or_else(|| {
+                invalid_value("--image-base", &value)
+                    .with_context(format!("Cause: --image-base: {NUMBER_EXPECTED} {value}"))
+            })?);
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--hash-style"])? {
@@ -1139,6 +1164,8 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--warn-symbol-ordering" => options.warn_symbol_ordering = true,
             "--no-warn-symbol-ordering" => options.warn_symbol_ordering = false,
             "--merge-exidx-entries" => options.merge_exception_index = true,
+            "--dependent-libraries" => options.dependent_libraries = true,
+            "--no-dependent-libraries" => options.dependent_libraries = false,
             "--vs-diagnostics" => options.visual_studio_diagnostics = true,
             "--be8" => {
                 options.byte_invariant_big_endian = true;
@@ -2711,6 +2738,8 @@ pub struct Context<'s> {
     pub dynamic_string_table: StringTable,
     pub input_order: Vec<SectionIndex>,
     pub exception_index_inputs: Vec<SectionIndex>,
+    pub deferred_duplicates: Vec<Diagnostic>,
+    pub pending_dependent_libraries: Vec<(FileIndex, String)>,
     pub exception_index_code: Vec<SectionIndex>,
     pub exception_index_order: Vec<SectionIndex>,
     pub exception_index_sentinel: Option<SectionIndex>,
@@ -2828,6 +2857,8 @@ impl<'s> Context<'s> {
             dynamic_string_table: StringTable::new(),
             input_order: Vec::new(),
             exception_index_inputs: Vec::new(),
+            deferred_duplicates: Vec::new(),
+            pending_dependent_libraries: Vec::new(),
             exception_index_code: Vec::new(),
             exception_index_order: Vec::new(),
             exception_index_sentinel: None,
@@ -3409,6 +3440,35 @@ impl<'s> Context<'s> {
                 }
             }
         }
+        while !self.pending_dependent_libraries.is_empty() {
+            let pending = std::mem::take(&mut self.pending_dependent_libraries);
+            for (file, specifier) in pending {
+                match self.find_dependent_library(&specifier, state.is_static) {
+                    Some((path, from_library)) => {
+                        let bytes = (self.source)(&path).unwrap_or_default();
+                        self.add_file(
+                            &path,
+                            &path,
+                            bytes,
+                            state,
+                            group,
+                            from_library,
+                            &mut target_reference,
+                        );
+                    }
+                    None => {
+                        let display = self.file_name(Some(file));
+                        self.error_always(
+                            problem("EI205", "An input file could not be found.")
+                                .with_context(format!("File: {specifier}"))
+                                .with_context(format!(
+                                    "Cause: {display}: unable to find library from dependent library specifier: {specifier}"
+                                )),
+                        );
+                    }
+                }
+            }
+        }
         if files_seen == 0 && !self.failed() {
             self.error(problem("EI213", "No input files were given."));
         }
@@ -3462,7 +3522,18 @@ impl<'s> Context<'s> {
                 }
             };
             for member in members {
-                if !elf::is_elf(&member.bytes) {
+                let relocatable_object = elf::identify(&member.bytes)
+                    .and_then(|encoding| encoding.read_u16(&member.bytes, 16))
+                    == Some(file_type::RELOCATABLE);
+                if !state.whole_archive && !relocatable_object {
+                    self.warn(
+                        problem("EI215", "The input file is neither an object nor a shared library.")
+                            .with_context(format!("File: {display}({})", member.name))
+                            .with_context(format!(
+                                "Cause: {display}: archive member '{}' is neither ET_REL nor LLVM bitcode",
+                                member.name
+                            )),
+                    );
                     continue;
                 }
                 let lazy = !state.whole_archive;
@@ -3563,8 +3634,25 @@ impl<'s> Context<'s> {
                 if elf.header.machine != self.target.architecture.machine()
                     || encoding != self.target.encoding
                 {
-                    let reference = reference.clone();
-                    self.error(incompatible(&display, &reference));
+                    let existing = if self.options.emulation.is_some() {
+                        Some(reference.clone())
+                    } else {
+                        self.object_files
+                            .first()
+                            .or(self.shared_files.first())
+                            .map(|file| self.file_name(Some(*file)))
+                    };
+                    match existing {
+                        Some(existing) => self.error(incompatible(&display, &existing)),
+                        None => self.error(
+                            problem(
+                                "EI209",
+                                "The input targets a different machine than the output.",
+                            )
+                            .with_context(format!("File: {display}"))
+                            .with_context(format!("Cause: {display} is incompatible")),
+                        ),
+                    }
                     return;
                 }
             }
@@ -3644,6 +3732,29 @@ impl<'s> Context<'s> {
         let first_global = elf.sections[table].info as usize;
         match elf.symbols(table) {
             Ok(symbols) => {
+                if first_global == 0 || first_global > symbols.len() {
+                    let display = self.file_name(Some(index));
+                    self.error_always(
+                        problem("EI200", "The object file could not be read.")
+                            .with_context(format!("File: {display}"))
+                            .with_context(format!(
+                                "Cause: {display}: invalid sh_info in symbol table"
+                            )),
+                    );
+                    return None;
+                }
+                for (position, symbol) in symbols.iter().enumerate().take(first_global).skip(1) {
+                    if symbol.binding != symbol_binding::LOCAL {
+                        let display = self.file_name(Some(index));
+                        self.error_always(
+                            problem("EI218", "A symbol has a binding the linker does not know.")
+                                .with_context(format!("File: {display}"))
+                                .with_context(format!(
+                                    "Cause: {display}: non-local symbol ({position}) found at index < .symtab's sh_info ({first_global})"
+                                )),
+                        );
+                    }
+                }
                 self.files[index].first_global = first_global.min(symbols.len());
                 Some(symbols)
             }
@@ -3673,8 +3784,67 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn queue_dependent_libraries(&mut self, index: FileIndex) {
+        if !self.options.dependent_libraries || self.is_relocatable() {
+            return;
+        }
+        let file = self.file_name(Some(index));
+        let sections: Vec<(String, Vec<u8>)> = self.files[index]
+            .elf
+            .sections
+            .iter()
+            .filter(|section| section.kind == section_type::LLVM_DEPENDENT_LIBRARIES)
+            .map(|section| (section.name.clone(), section.data.clone()))
+            .collect();
+        for (name, data) in sections {
+            let mut rest = &data[..];
+            while !rest.is_empty() {
+                let Some(end) = rest.iter().position(|byte| *byte == 0) else {
+                    self.error(
+                        problem("EI200", "The object file could not be read.")
+                            .with_context(format!("File: {file}"))
+                            .with_context(format!(
+                                "Cause: {file}: corrupted dependent libraries section (unterminated string): {name}"
+                            )),
+                    );
+                    break;
+                };
+                let specifier = String::from_utf8_lossy(&rest[..end]).into_owned();
+                self.pending_dependent_libraries.push((index, specifier));
+                rest = &rest[end + 1..];
+            }
+        }
+    }
+
+    fn find_dependent_library(&self, specifier: &str, is_static: bool) -> Option<(String, bool)> {
+        for folder in &self.options.library_paths {
+            let folder = self.resolve_path(folder);
+            let mut candidates = Vec::new();
+            if !is_static {
+                candidates.push(format!("{folder}/lib{specifier}.so"));
+            }
+            candidates.push(format!("{folder}/lib{specifier}.a"));
+            for candidate in candidates {
+                if (self.source)(&candidate).is_some() {
+                    return Some((candidate, true));
+                }
+            }
+        }
+        for folder in &self.options.library_paths {
+            let candidate = format!("{}/{specifier}", self.resolve_path(folder));
+            if (self.source)(&candidate).is_some() {
+                return Some((candidate, true));
+            }
+        }
+        if (self.source)(specifier).is_some() {
+            return Some((specifier.to_string(), false));
+        }
+        None
+    }
+
     pub fn parse_object(&mut self, index: FileIndex) {
         self.object_files.push(index);
+        self.queue_dependent_libraries(index);
         let Some(symbols) = (if self.files[index].elf_symbols.is_empty() {
             self.read_symbols(index)
         } else {
@@ -3689,13 +3859,32 @@ impl<'s> Context<'s> {
             if self.files[index].elf.sections[position].kind != section_type::GROUP {
                 continue;
             }
+            let display = self.file_name(Some(index));
+            let group_failure = |cause: String| {
+                problem("EI200", "The object file could not be read.")
+                    .with_context(format!("File: {display}"))
+                    .with_context(format!("Cause: {display}: {cause}"))
+            };
             let group = match self.files[index].elf.group(position) {
                 Ok(group) => group,
                 Err(diagnostic) => {
-                    self.error(diagnostic);
+                    let cause = if self.files[index].elf.sections[position].data.is_empty() {
+                        group_failure("empty SHT_GROUP".to_string())
+                    } else {
+                        diagnostic
+                    };
+                    self.error_always(cause);
                     continue;
                 }
             };
+            if group.flags != 0 && group.flags != 1 {
+                self.error_always(group_failure("unsupported SHT_GROUP format".to_string()));
+                continue;
+            }
+            if group.signature as usize >= symbols.len() {
+                self.error_always(group_failure("invalid symbol index".to_string()));
+                continue;
+            }
             let signature = symbols
                 .get(group.signature as usize)
                 .map(|symbol| symbol.name.clone())
@@ -3708,8 +3897,14 @@ impl<'s> Context<'s> {
                 kept.push(position);
             } else {
                 for member in group.members {
-                    if let Some(slot) = self.files[index].discarded.get_mut(member as usize) {
-                        *slot = true;
+                    match self.files[index].discarded.get_mut(member as usize) {
+                        Some(slot) => *slot = true,
+                        None => {
+                            self.error_always(group_failure(format!(
+                                "invalid section index in group: {member}"
+                            )));
+                            break;
+                        }
                     }
                 }
             }
@@ -3731,6 +3926,18 @@ impl<'s> Context<'s> {
             let id = handles[position];
             self.symbols[id].used_in_regular_object = true;
             if symbol.is_common() {
+                if symbol.value == 0 || symbol.value >= u64::from(u32::MAX) {
+                    let display = self.file_name(Some(index));
+                    self.error(
+                        problem("EI218", "A symbol has a binding the linker does not know.")
+                            .with_context(format!("File: {display}"))
+                            .with_context(format!(
+                                "Cause: {display}: common symbol '{}' has invalid alignment: {}",
+                                symbol.name, symbol.value
+                            )),
+                    );
+                    continue;
+                }
                 self.resolve_common(
                     id,
                     index,
@@ -4698,6 +4905,32 @@ impl<'s> Context<'s> {
                 self.decompress_input(index, &mut header);
             }
             let is_exception_frame = header.name == ".eh_frame" && !relocatable;
+            if header.flags & section_flag::MERGE != 0
+                && (self.options.optimize > 0 || relocatable)
+                && header.size > 0
+                && header.entry_size > 0
+            {
+                let place = format!("{}:({})", self.file_name(Some(index)), header.name);
+                if !header.size.is_multiple_of(header.entry_size) {
+                    self.error_always(
+                        problem("EI200", "The object file could not be read.")
+                            .with_context(format!("File: {place}"))
+                            .with_context(format!(
+                                "Cause: {place}: SHF_MERGE section size ({}) must be a multiple of sh_entsize ({})",
+                                header.size, header.entry_size
+                            )),
+                    );
+                }
+                if header.flags & section_flag::WRITE != 0 {
+                    self.error(
+                        problem("EI200", "The object file could not be read.")
+                            .with_context(format!("File: {place}"))
+                            .with_context(format!(
+                                "Cause: {place}: writable SHF_MERGE section is not supported"
+                            )),
+                    );
+                }
+            }
             let is_merge = header.flags & section_flag::MERGE != 0
                 && (self.options.optimize > 0 || relocatable)
                 && header.size > 0
@@ -4787,9 +5020,7 @@ impl<'s> Context<'s> {
                 let target = match map.get(info) {
                     Some(Some(target)) => *target,
                     _ => {
-                        if (info >= count || !self.files[index].discarded[info])
-                            && (info >= count || map.get(info).is_none())
-                        {
+                        if info >= count || !self.files[index].discarded[info] {
                             let display = self.file_name(Some(index));
                             self.error(
                                 problem(
@@ -4809,6 +5040,20 @@ impl<'s> Context<'s> {
                 };
                 if self.sections[target].is_merge {
                     self.sections[target].is_merge = false;
+                }
+                if self.sections[target].relocation_section.is_some() {
+                    let place = self.section_place(target);
+                    self.error_always(
+                        problem(
+                            "EI216",
+                            "A relocation section points at a section that does not exist.",
+                        )
+                        .with_context(format!("File: {place}"))
+                        .with_context(format!(
+                            "Cause: {place}: multiple relocation sections to one section are not supported"
+                        )),
+                    );
+                    continue;
                 }
                 self.sections[target].relocation_section = Some(position);
                 if let Some(own) = map[position] {
@@ -5115,7 +5360,7 @@ impl<'s> Context<'s> {
                     (first, second, cause)
                 }
             };
-            self.error(
+            self.deferred_duplicates.push(
                 problem("EI206", "A symbol is defined more than once.")
                     .with_context(format!("Symbol: {shown}"))
                     .with_context(format!("Definition: {first}"))
@@ -5140,7 +5385,8 @@ impl<'s> Context<'s> {
 
     pub fn split_merge_sections(&mut self) {
         let gc = self.options.gc_sections;
-        for section in self.sections.iter_mut() {
+        let mut unterminated: Vec<SectionIndex> = Vec::new();
+        for (index, section) in self.sections.iter_mut().enumerate() {
             if !section.is_merge || !section.live || !section.pieces.is_empty() {
                 continue;
             }
@@ -5156,6 +5402,10 @@ impl<'s> Context<'s> {
                         && data[end..end + entry].iter().any(|&b| b != 0)
                     {
                         end += entry;
+                    }
+                    if end + entry > data.len() {
+                        unterminated.push(index);
+                        break;
                     }
                     let content_end = end.min(data.len());
                     let piece_end = (end + entry).min(data.len());
@@ -5182,6 +5432,14 @@ impl<'s> Context<'s> {
                 }
             }
             section.pieces = pieces;
+        }
+        for section in unterminated {
+            let place = self.section_place(section);
+            self.error_always(
+                problem("EI200", "The object file could not be read.")
+                    .with_context(format!("File: {place}"))
+                    .with_context(format!("Cause: {place}: string is not null terminated")),
+            );
         }
     }
 
@@ -5825,7 +6083,12 @@ impl<'s> Context<'s> {
             Synthetic::DynamicRelocations => !self.dynamic_relocations.is_empty(),
             Synthetic::RelativeRelocations => !self.relative_relocations.is_empty(),
             Synthetic::ExceptionFrame => !self.frame_pieces.is_empty(),
-            Synthetic::ExceptionFrameHeader => !self.frame_pieces.is_empty(),
+            Synthetic::ExceptionFrameHeader => {
+                !self.frame_pieces.is_empty()
+                    && self
+                        .synthetic_section(".eh_frame")
+                        .is_some_and(|frame| self.sections[frame].live)
+            }
             Synthetic::VersionNeeds => self.version_need_count() > 0,
             Synthetic::VersionSymbols => self.version_need_count() > 0 || self.has_named_versions(),
             Synthetic::VersionDefinitions => self.has_named_versions(),
@@ -6472,6 +6735,31 @@ impl<'s> Context<'s> {
                 self.commit_section(output, *member);
             }
             self.outputs[output].members = kept;
+            if !merges.is_empty() {
+                let mut placed: BTreeSet<SectionIndex> = BTreeSet::new();
+                for command in self.outputs[output].script.commands.clone() {
+                    let OutputCommand::Input(description) = command else {
+                        continue;
+                    };
+                    let bases = std::mem::take(&mut self.script.descriptions[description].bases);
+                    let mut updated = Vec::new();
+                    for base in bases {
+                        let target = self.sections[base].merged_into.filter(|target| {
+                            self.sections[*target].synthetic == Some(Synthetic::Merge)
+                                && self.sections[*target].output == Some(output)
+                        });
+                        match target {
+                            Some(target) => {
+                                if placed.insert(target) {
+                                    updated.push(target);
+                                }
+                            }
+                            None => updated.push(base),
+                        }
+                    }
+                    self.script.descriptions[description].bases = updated;
+                }
+            }
             for merge in merges {
                 self.finalize_merge(merge);
             }
@@ -10080,10 +10368,12 @@ impl<'s> Context<'s> {
                     });
                     break;
                 }
-                let identifier = if data.len() - at >= 8 {
-                    encoding.read_u32(&data, at + 4).unwrap_or(1)
-                } else {
-                    1
+                let identifier = {
+                    let mut bytes = [0u8; 4];
+                    for (position, byte) in bytes.iter_mut().enumerate() {
+                        *byte = data.get(at + 4 + position).copied().unwrap_or(0);
+                    }
+                    encoding.read_u32(&bytes, 0).unwrap_or(1)
                 };
                 while relocation_index < relocations.len()
                     && relocations[relocation_index].offset < at as u64
@@ -10108,7 +10398,10 @@ impl<'s> Context<'s> {
                 self.error(
                     problem("EI240", "The exception frame section is malformed.")
                         .with_context(format!("Reason: {reason}"))
-                        .with_context(format!("Location: {place}")),
+                        .with_context(format!("Location: {place}"))
+                        .with_context(format!(
+                            "Cause: corrupted .eh_frame: {reason}\n>>> defined in {place}"
+                        )),
                 );
             }
             self.frame_pieces.insert(section, pieces);
@@ -10165,10 +10458,12 @@ impl<'s> Context<'s> {
                 let target = (piece.input_offset + 4).wrapping_sub(identifier);
                 let Some(record) = offset_to_record.get(&target).copied() else {
                     let place = self.object_message(section, piece.input_offset);
+                    let holder = self.section_place(section);
                     self.error(
                         problem("EI240", "The exception frame section is malformed.")
                             .with_context("Reason: invalid CIE reference".to_string())
-                            .with_context(format!("Location: {place}")),
+                            .with_context(format!("Location: {place}"))
+                            .with_context(format!("Cause: {holder}: invalid CIE reference")),
                     );
                     continue;
                 };
@@ -10523,54 +10818,89 @@ impl<'s> Context<'s> {
             .is_some_and(|target| self.sections[target].live)
     }
 
-    fn frame_encoding_of(&self, data: &[u8]) -> Option<u8> {
+    fn frame_encoding_of(&self, data: &[u8]) -> Result<u8, (usize, String)> {
+        let failure = |at: usize, message: &str| Err((at, message.to_string()));
         let mut at = 8usize;
-        let version = *data.get(at)?;
+        if data.len() < at {
+            return failure(0, "CIE is too small");
+        }
+        let Some(version) = data.get(at).copied() else {
+            return failure(at, "unexpected end of CIE");
+        };
         at += 1;
         if version != 1 && version != 3 {
-            return None;
+            return failure(
+                at - 1,
+                &format!("FDE version 1 or 3 expected, but got {version}"),
+            );
         }
-        let end = data[at..].iter().position(|byte| *byte == 0)? + at;
-        let augmentation = data[at..end].to_vec();
-        at = end + 1;
-        let skip_leb = |at: &mut usize| -> Option<()> {
-            loop {
-                let byte = *data.get(*at)?;
+        let Some(length) = data[at..].iter().position(|byte| *byte == 0) else {
+            return failure(at, "corrupted CIE (failed to read string)");
+        };
+        let augmentation_at = at;
+        let augmentation = data[at..at + length].to_vec();
+        at += length + 1;
+        let skip_leb = |at: &mut usize| -> Result<(), (usize, String)> {
+            let start = *at;
+            while let Some(byte) = data.get(*at).copied() {
                 *at += 1;
                 if byte & 0x80 == 0 {
-                    return Some(());
+                    return Ok(());
                 }
+            }
+            Err((start, "corrupted CIE (failed to read LEB128)".to_string()))
+        };
+        let read_byte = |at: &mut usize| -> Result<u8, (usize, String)> {
+            match data.get(*at).copied() {
+                Some(byte) => {
+                    *at += 1;
+                    Ok(byte)
+                }
+                None => Err((*at, "unexpected end of CIE".to_string())),
             }
         };
         skip_leb(&mut at)?;
         skip_leb(&mut at)?;
         if version == 1 {
-            at += 1;
+            read_byte(&mut at)?;
         } else {
             skip_leb(&mut at)?;
         }
-        for character in augmentation {
+        for character in &augmentation {
             match character {
-                b'R' => return data.get(at).copied(),
+                b'R' => return read_byte(&mut at),
                 b'z' => skip_leb(&mut at)?,
-                b'L' => at += 1,
+                b'L' => {
+                    read_byte(&mut at)?;
+                }
                 b'P' => {
-                    let encoding = *data.get(at)?;
-                    at += 1;
+                    let encoding = read_byte(&mut at)?;
+                    if encoding & 0xf0 == 0x50 {
+                        return failure(at - 1, "DW_EH_PE_aligned encoding is not supported");
+                    }
                     let size = match encoding & 0x0f {
                         0x00 | 0x08 => self.word_size() as usize,
                         0x02 | 0x0a => 2,
                         0x03 | 0x0b => 4,
                         0x04 | 0x0c => 8,
-                        _ => return None,
+                        _ => return failure(at - 1, "unknown FDE encoding"),
                     };
+                    if size >= data.len() - at {
+                        return failure(at - 1, "corrupted CIE");
+                    }
                     at += size;
                 }
                 b'B' | b'S' | b'G' => {}
-                _ => return None,
+                _ => {
+                    let text = String::from_utf8_lossy(&augmentation).into_owned();
+                    return failure(
+                        augmentation_at,
+                        &format!("unknown .eh_frame augmentation string: {text}"),
+                    );
+                }
             }
         }
-        Some(0)
+        Ok(0)
     }
 
     pub fn update_frame_header(&mut self) -> bool {
@@ -10593,11 +10923,26 @@ impl<'s> Context<'s> {
             let cie = self.frame_pieces[&cie_section][cie_index].clone();
             let start = cie.input_offset as usize;
             let data = self.sections[cie_section].data[start..start + cie.size as usize].to_vec();
-            let encoding = self.frame_encoding_of(&data).unwrap_or(0);
+            let encoding = match self.frame_encoding_of(&data) {
+                Ok(encoding) => encoding,
+                Err((at, message)) => {
+                    let place = self.object_message(cie_section, cie.input_offset + at as u64);
+                    self.error(
+                        problem("EI240", "The exception frame section is malformed.")
+                            .with_context(format!("Reason: {message}"))
+                            .with_context(format!("Location: {place}"))
+                            .with_context(format!(
+                                "Cause: corrupted .eh_frame: {message}\n>>> defined in {place}"
+                            )),
+                    );
+                    0
+                }
+            };
             if encoding & 0x70 != 0x00 && encoding & 0x70 != 0x10 {
                 self.error(
                     problem("EI240", "The exception frame section is malformed.")
-                        .with_context("Reason: unknown FDE size encoding".to_string()),
+                        .with_context("Reason: unknown FDE size encoding".to_string())
+                        .with_context("Cause: unknown FDE size encoding".to_string()),
                 );
                 continue;
             }
@@ -10718,14 +11063,19 @@ impl<'s> Context<'s> {
     ) {
         let name = self.symbols[symbol].name.clone();
         let place = self.error_location(section, offset);
+        let reason = format!("unknown relocation ({kind}) against symbol {name}");
+        let cause = if self.sections[section].flags & section_flag::ALLOCATE != 0 {
+            reason.clone()
+        } else {
+            format!("{place}: {reason}")
+        };
         self.error(
             problem("EI210", "The linker does not support this relocation.")
                 .with_context(format!("Relocation: {kind}"))
                 .with_context(format!("Symbol: {name}"))
                 .with_context(format!("Location: {place}"))
-                .with_context(format!(
-                    "Reason: unknown relocation ({kind}) against symbol {name}"
-                )),
+                .with_context(format!("Reason: {reason}"))
+                .with_context(format!("Cause: {cause}")),
         );
     }
 
@@ -10740,13 +11090,8 @@ impl<'s> Context<'s> {
             let relocation = relocations[position];
             position += 1;
             let Some(symbol) = self.symbol_of(section, relocation.symbol) else {
-                self.error(
-                    problem("EI230", "A relocation names a symbol that does not exist.")
-                        .with_context(format!(
-                            "Location: {}",
-                            self.error_location(section, relocation.offset)
-                        )),
-                );
+                let diagnostic = self.missing_relocation_symbol(section, &relocation);
+                self.error(diagnostic);
                 continue;
             };
             let kind = relocation.kind;
@@ -13514,6 +13859,29 @@ fn arm_undefined_weak_destination(kind: u32, addend: i64, place: u64) -> u64 {
 }
 
 impl<'s> Context<'s> {
+    fn missing_relocation_symbol(
+        &self,
+        section: SectionIndex,
+        relocation: &RawRelocation,
+    ) -> Diagnostic {
+        let mut diagnostic = problem("EI230", "A relocation names a symbol that does not exist.")
+            .with_context(format!(
+                "Location: {}",
+                self.error_location(section, relocation.offset)
+            ));
+        if let Some(file) = self.sections[section]
+            .file
+            .filter(|file| *file < self.files.len())
+        {
+            if relocation.symbol as usize >= self.files[file].symbols.len() {
+                let display = self.file_name(Some(file));
+                diagnostic =
+                    diagnostic.with_context(format!("Cause: {display}: invalid symbol index"));
+            }
+        }
+        diagnostic
+    }
+
     fn next_symbol(
         &mut self,
         section: SectionIndex,
@@ -13521,14 +13889,8 @@ impl<'s> Context<'s> {
         undefined: &mut Vec<UndefinedReference>,
     ) -> Option<SymbolIndex> {
         let Some(symbol) = self.symbol_of(section, relocation.symbol) else {
-            self.error(
-                problem("EI230", "A relocation names a symbol that does not exist.").with_context(
-                    format!(
-                        "Location: {}",
-                        self.error_location(section, relocation.offset)
-                    ),
-                ),
-            );
+            let diagnostic = self.missing_relocation_symbol(section, relocation);
+            self.error(diagnostic);
             return None;
         };
         if self.symbols[symbol].is_undefined()
@@ -16107,7 +16469,7 @@ impl<'s> Context<'s> {
         if let Some(id) = self.find(&self.entry_name) {
             return self.symbol_address(id, 0);
         }
-        parse_number(&self.entry_name).unwrap_or(0)
+        parse_integer_any_radix(&self.entry_name).unwrap_or(0)
     }
 
     pub fn finalize_output_headers(&mut self) {
@@ -16246,6 +16608,9 @@ impl<'s> Context<'s> {
         }
         for file in self.object_files.clone() {
             self.post_parse(file);
+        }
+        for diagnostic in std::mem::take(&mut self.deferred_duplicates) {
+            self.error(diagnostic);
         }
         self.redirect_wrapped_symbols(&wrapped);
         if self.failed() {
@@ -16503,7 +16868,7 @@ impl<'s> Context<'s> {
         let explicit_entry = self.options.entry.is_some() || self.script.entry.is_some();
         if (explicit_entry || (!self.is_shared() && !relocatable))
             && self.find(&self.entry_name.clone()).is_none()
-            && parse_number(&self.entry_name).is_none()
+            && parse_integer_any_radix(&self.entry_name).is_none()
         {
             let entry = self.entry_name.clone();
             self.warn(
