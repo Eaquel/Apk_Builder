@@ -81,6 +81,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI273", "A shared library references a symbol that is not exported."),
     ("EI274", "A section name is longer than eight characters and uses a non-standard string table."),
     ("EI275", "The load configuration does not match what the linker writes."),
+    ("EI276", "A runtime pseudo relocation is narrower than an address."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
