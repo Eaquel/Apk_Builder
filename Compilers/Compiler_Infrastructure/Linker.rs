@@ -18185,6 +18185,10 @@ pub struct CoffOptions {
     pub tools_environment: Option<String>,
     pub install_environment: Option<String>,
     pub print_search_paths: bool,
+    pub summary: bool,
+    pub reproduce: Option<String>,
+    pub link_reproduce: Option<String>,
+    pub argument_entries: Vec<(String, String, Option<String>)>,
     pub default_libraries: Vec<String>,
     pub no_default_libraries: Vec<String>,
     pub no_default_all: bool,
@@ -18316,6 +18320,10 @@ impl Default for CoffOptions {
             tools_environment: None,
             install_environment: None,
             print_search_paths: false,
+            summary: false,
+            reproduce: None,
+            link_reproduce: None,
+            argument_entries: Vec::new(),
             default_libraries: Vec::new(),
             no_default_libraries: Vec::new(),
             no_default_all: false,
@@ -18581,6 +18589,10 @@ pub fn parse_coff_command_line(
         } else {
             None
         };
+        options.argument_entries.push(match &parsed {
+            Some((name, value)) => (argument.clone(), name.clone(), value.clone()),
+            None => (argument.clone(), String::new(), None),
+        });
         let Some((name, value)) = parsed else {
             options.inputs.push(CoffInput::File(argument));
             continue;
@@ -18678,6 +18690,9 @@ pub fn parse_coff_command_line(
             "winsdkversion" => options.kit_version = Some(need(&value)?),
             "diasdkdir" => options.interface_directory = Some(need(&value)?),
             "print-search-paths" => options.print_search_paths = true,
+            "summary" => options.summary = true,
+            "reproduce" => options.reproduce = Some(need(&value)?),
+            "linkrepro" => options.link_reproduce = Some(need(&value)?),
             "lldignoreenv" => options.ignore_environment = true,
             "defaultlib" => options.default_libraries.push(need(&value)?),
             "nodefaultlib" => match value {
@@ -18871,10 +18886,22 @@ pub fn parse_coff_command_line(
                             options.debug_collect = true;
                         }
                         "full" | "ghash" | "noghash" | "fastlink" => {
+                            if part == "fastlink" {
+                                options.warnings.push(
+                                    caution("EI287", "An option has no effect in this link.")
+                                        .with_context("Option: /debug:fastlink".to_string())
+                                        .with_context(
+                                            "Cause: /debug:fastlink unsupported; using /debug:full"
+                                                .to_string(),
+                                        ),
+                                );
+                            }
                             options.debug = true;
                             options.include_dwarf_chunks = true;
                             options.create_program_database = true;
-                            options.debug_global_hashes = part != "noghash";
+                            if part != "noghash" {
+                                options.debug_global_hashes = true;
+                            }
                             options.debug_collect = false;
                         }
                         "dwarf" => {
@@ -19168,7 +19195,6 @@ pub fn parse_coff_command_line(
             | "guardsym"
             | "assemblydebug"
             | "mllvm"
-            | "summary"
             | "time"
             | "prefetch-inputs"
             | "threads"
@@ -19500,6 +19526,7 @@ pub struct CoffArchiveMember {
     pub name: String,
     pub bytes: Vec<u8>,
     pub offset: usize,
+    pub thin_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -19511,9 +19538,10 @@ pub struct CoffArchive {
 }
 
 pub fn read_coff_archive(name: &str, bytes: &[u8]) -> Result<CoffArchive, Diagnostic> {
-    if !bytes.starts_with(b"!<arch>\n") {
+    if !is_archive(bytes) {
         return Err(archive_problem(name, "the archive signature is missing"));
     }
+    let thin = bytes.starts_with(b"!<thin>\n");
     let mut at = 8usize;
     let mut members = Vec::new();
     let mut long_names: Vec<u8> = Vec::new();
@@ -19533,6 +19561,38 @@ pub fn read_coff_archive(name: &str, bytes: &[u8]) -> Result<CoffArchive, Diagno
             .parse::<usize>()
             .map_err(|_| archive_problem(name, "a member size is not a number"))?;
         let data_at = at + 60;
+        let special_member = raw_name == "/" || raw_name == "/SYM64/" || raw_name == "//";
+        if thin && !special_member {
+            let offset = raw_name
+                .strip_prefix('/')
+                .and_then(|offset| offset.parse::<usize>().ok())
+                .unwrap_or(0);
+            let rest = long_names.get(offset..).unwrap_or(&[]);
+            let end = rest
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(rest.len());
+            let member_name = String::from_utf8_lossy(&rest[..end])
+                .trim_end_matches('/')
+                .to_string();
+            let full = if member_name.starts_with('/') {
+                member_name.clone()
+            } else {
+                match name.rfind('/') {
+                    Some(0) => format!("/{member_name}"),
+                    Some(position) => format!("{}/{member_name}", &name[..position]),
+                    None => member_name.clone(),
+                }
+            };
+            members.push(CoffArchiveMember {
+                name: member_name,
+                bytes: Vec::new(),
+                offset: at,
+                thin_path: Some(full),
+            });
+            at = data_at;
+            continue;
+        }
         if data_at + size > bytes.len() {
             return Err(archive_problem(
                 name,
@@ -19568,6 +19628,7 @@ pub fn read_coff_archive(name: &str, bytes: &[u8]) -> Result<CoffArchive, Diagno
                 name: member_name,
                 bytes: data.to_vec(),
                 offset: at,
+                thin_path: None,
             });
         }
         at = data_at + size + (size & 1);
@@ -19666,6 +19727,7 @@ pub enum CoffTask {
     Member {
         archive: usize,
         member: usize,
+        symbol: String,
     },
 }
 
@@ -19733,6 +19795,9 @@ pub struct CoffContext<'s> {
     pub delay_directory: Option<(usize, u64)>,
     pub delay_thunks: BTreeMap<usize, usize>,
     pub resources: Vec<(String, Vec<u8>)>,
+    consumed_bytes: u64,
+    debug_summary: Option<DebugSummary>,
+    pub tape: Option<TapeArchive>,
     pub load_config_symbol: Option<SymbolIndex>,
     pub load_config_size: u32,
     pub library_order: BTreeMap<String, usize>,
@@ -19839,6 +19904,9 @@ impl<'s> CoffContext<'s> {
             delay_directory: None,
             delay_thunks: BTreeMap::new(),
             resources: Vec::new(),
+            consumed_bytes: 0,
+            debug_summary: None,
+            tape: None,
             load_config_symbol: None,
             load_config_size: 0,
             library_order: BTreeMap::new(),
@@ -19999,7 +20067,10 @@ impl<'s> CoffContext<'s> {
     fn force_lazy(&mut self, id: SymbolIndex) {
         self.symbols[id].pending_archive_load = true;
         match self.symbols[id].kind.clone() {
-            CoffSymbolKind::LazyArchive { archive, member } => self.add_member(archive, member),
+            CoffSymbolKind::LazyArchive { archive, member } => {
+                let symbol = self.symbols[id].name.clone();
+                self.add_member(archive, member, &symbol)
+            }
             CoffSymbolKind::LazyObject { file } => {
                 if !self.objects[file].lazy {
                     return;
@@ -20011,12 +20082,16 @@ impl<'s> CoffContext<'s> {
         }
     }
 
-    fn add_member(&mut self, archive: usize, member: usize) {
+    fn add_member(&mut self, archive: usize, member: usize, symbol: &str) {
         let offset = self.archives[archive].members[member].offset;
         if !self.archives[archive].seen.insert(offset) {
             return;
         }
-        self.tasks.push_back(CoffTask::Member { archive, member });
+        self.tasks.push_back(CoffTask::Member {
+            archive,
+            member,
+            symbol: symbol.to_string(),
+        });
     }
 
     pub fn add_undefined(&mut self, name: &str, regular: bool, override_lazy: bool) -> SymbolIndex {
@@ -20124,7 +20199,7 @@ impl<'s> CoffContext<'s> {
             return;
         }
         self.symbols[id].pending_archive_load = true;
-        self.add_member(archive, member);
+        self.add_member(archive, member, name);
     }
 
     fn add_lazy_object(&mut self, file: usize, name: &str) {
@@ -20383,26 +20458,119 @@ impl<'s> CoffContext<'s> {
         while let Some(task) = self.tasks.pop_front() {
             match task {
                 CoffTask::Path { path, lazy, whole } => match (self.source)(&path) {
-                    Some(bytes) => self.add_buffer(&path, bytes, whole, lazy),
+                    Some(bytes) => {
+                        self.tape_append(&path, &bytes);
+                        self.add_buffer(&path, bytes, whole, lazy)
+                    }
                     None => self.error(file_missing(&path).with_context(format!(
                         "Cause: could not open '{path}': No such file or directory"
                     ))),
                 },
-                CoffTask::Member { archive, member } => {
+                CoffTask::Member {
+                    archive,
+                    member,
+                    symbol,
+                } => {
                     let data = self.archives[archive].members[member].clone();
                     let parent = self.archives[archive].name.clone();
-                    self.add_archive_buffer(&data.name, &parent, data.bytes, false);
+                    let reason = self.display_symbol_name(&symbol);
+                    match &data.thin_path {
+                        None => {
+                            self.add_archive_buffer(&data.name, &parent, data.bytes, false, &reason)
+                        }
+                        Some(path) => match (self.source)(path) {
+                            Some(bytes) => {
+                                self.tape_append(path, &bytes);
+                                self.add_archive_buffer(path, "", bytes, false, &reason);
+                            }
+                            None => self.error(file_missing(path).with_context(format!(
+                                "Cause: could not get the buffer for the member defining symbol {reason}: {parent}({}): No such file or directory",
+                                data.name
+                            ))),
+                        },
+                    }
                 }
             }
         }
         worked
     }
 
+    fn tape_append(&mut self, path: &str, bytes: &[u8]) {
+        let relative = relative_to_root(path, &self.directory);
+        if let Some(tape) = self.tape.as_mut() {
+            tape.append(&relative, bytes);
+        }
+    }
+
+    fn reproduce_response(&self) -> String {
+        let inputs: BTreeSet<&String> = self
+            .options
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                CoffInput::File(path) => Some(path),
+                _ => None,
+            })
+            .collect();
+        let rewrite = |path: &str| -> String {
+            let text = if (self.source)(path).is_some() {
+                relative_to_root(path, &self.directory)
+            } else {
+                path.to_string()
+            };
+            quote_spaced(&text)
+        };
+        let mut text = String::new();
+        for (raw, name, value) in &self.options.argument_entries {
+            if name.is_empty() || inputs.contains(raw) {
+                text.push_str(&format!("{}\n", rewrite(raw)));
+                continue;
+            }
+            let spelling = match value {
+                Some(value) => &raw[..raw.len() - value.len()],
+                None => raw.as_str(),
+            };
+            let value = value.clone().unwrap_or_default();
+            match name.as_str() {
+                "linkrepro" | "reproduce" | "libpath" | "winsysroot" => {}
+                "wholearchive" if !value.is_empty() => {
+                    text.push_str(&format!("{spelling}{}\n", rewrite(&value)));
+                }
+                "call-graph-ordering-file" | "def" | "manifestinput" | "natvis" => {
+                    text.push_str(&format!("{spelling}{}\n", rewrite(&value)));
+                }
+                "order" => {
+                    let file = value.strip_prefix('@').unwrap_or(&value);
+                    text.push_str(&format!("{spelling}@{}\n", rewrite(file)));
+                }
+                "pdbstream" => {
+                    let (stream, file) = value.split_once('=').unwrap_or((value.as_str(), ""));
+                    text.push_str(&format!("{spelling}{stream}={}\n", rewrite(file)));
+                }
+                "implib" | "manifestfile" | "pdb" | "pdbstripped" | "out" => {
+                    let file = value.rsplit('/').next().unwrap_or(&value);
+                    text.push_str(&format!("{spelling}{file}\n"));
+                }
+                _ => text.push_str(&format!("{raw}\n")),
+            }
+        }
+        for path in self.search_paths.iter().skip(1) {
+            text.push_str(&format!(
+                "/libpath:{}\n",
+                quote_spaced(&relative_to_root(path, &self.directory))
+            ));
+        }
+        text
+    }
+
     fn add_buffer(&mut self, path: &str, bytes: Vec<u8>, whole: bool, lazy: bool) {
         if self.options.verbose {
             self.messages.push(format!("Reading {path}"));
         }
-        if bytes.starts_with(b"!<arch>\n") {
+        if !lazy && !(whole && is_archive(&bytes)) {
+            self.consumed_bytes += bytes.len() as u64;
+        }
+        if is_archive(&bytes) {
             let archive = match read_coff_archive(path, &bytes) {
                 Ok(archive) => archive,
                 Err(diagnostic) => {
@@ -20412,7 +20580,27 @@ impl<'s> CoffContext<'s> {
             };
             if whole {
                 for member in archive.members {
-                    self.add_archive_buffer(&member.name, path, member.bytes, false);
+                    match &member.thin_path {
+                        None => self.add_archive_buffer(
+                            &member.name,
+                            path,
+                            member.bytes,
+                            false,
+                            "<whole-archive>",
+                        ),
+                        Some(full) => match (self.source)(full) {
+                            Some(bytes) => {
+                                self.tape_append(full, &bytes);
+                                self.add_archive_buffer(full, "", bytes, false, "<whole-archive>");
+                            }
+                            None => {
+                                self.error(file_missing(full).with_context(format!(
+                                    "Cause: {path}: could not get the buffer for a child of the archive: '{full}': No such file or directory"
+                                )));
+                                return;
+                            }
+                        },
+                    }
                 }
                 return;
             }
@@ -20550,6 +20738,7 @@ impl<'s> CoffContext<'s> {
                 name: exports.dll_name.clone(),
                 bytes: object,
                 offset: member,
+                thin_path: None,
             });
             lazy.push((format!("__imp_{symbol}"), member));
             if *code {
@@ -20563,13 +20752,35 @@ impl<'s> CoffContext<'s> {
         }
     }
 
-    fn add_archive_buffer(&mut self, name: &str, parent: &str, bytes: Vec<u8>, lazy: bool) {
+    fn add_archive_buffer(
+        &mut self,
+        name: &str,
+        parent: &str,
+        bytes: Vec<u8>,
+        lazy: bool,
+        reason: &str,
+    ) {
+        if !lazy {
+            self.consumed_bytes += bytes.len() as u64;
+        }
+        let label = if parent.is_empty() {
+            name.to_string()
+        } else {
+            let base = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+            format!("{}({})", base(parent), base(name))
+        };
+        if self.options.verbose {
+            self.messages.push(format!("Reading {label}"));
+        }
         if crate::compilers::pe::is_import_object(&bytes) {
             self.add_import_file(name, parent, &bytes);
             return;
         }
         if crate::compilers::pe::is_coff_object(&bytes) {
             self.add_object_bytes(name, parent, &bytes, lazy);
+            if self.options.verbose {
+                self.messages.push(format!("Loaded {label} for {reason}"));
+            }
             return;
         }
         self.error(
@@ -22187,6 +22398,12 @@ impl<'s> CoffContext<'s> {
         if self.failed() {
             return None;
         }
+        if self.tape.is_some() {
+            let response = self.reproduce_response();
+            if let Some(tape) = self.tape.as_mut() {
+                tape.append("response.txt", response.as_bytes());
+            }
+        }
         if self.machine == machine::I386 {
             self.safe_seh = self.options.safe_seh.unwrap_or(!self.options.mingw);
         }
@@ -23743,6 +23960,7 @@ impl<'s> CoffContext<'s> {
             self.error(file_missing(path));
             return;
         };
+        self.tape_append(path, &bytes);
         let text = String::from_utf8_lossy(&bytes).to_string();
         let definition = match crate::compilers::pe::parse_module_definition(
             &text,
@@ -24341,9 +24559,33 @@ const LIBRARY_MODE_OPTIONS: &[&str] = &[
     "ltcg",
 ];
 
+fn archive_relative_path(output: &str, member: &str, directory: &str) -> String {
+    let root = if directory.is_empty() { "/" } else { directory };
+    let target_text = relative_to_root(member, root);
+    let origin_text = relative_to_root(output, root);
+    let target: Vec<&str> = target_text
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let mut origin: Vec<&str> = origin_text
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    origin.pop();
+    let common = origin
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts: Vec<&str> = vec![".."; origin.len() - common];
+    parts.extend_from_slice(&target[common..]);
+    parts.join("/")
+}
+
 fn archive_coff_inputs(
     arguments: &[String],
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    directory: &str,
 ) -> LinkOutcome {
     let mut outcome = LinkOutcome {
         outputs: Vec::new(),
@@ -24353,6 +24595,8 @@ fn archive_coff_inputs(
     let mut output: Option<String> = None;
     let mut inputs: Vec<String> = Vec::new();
     let mut library_paths: Vec<String> = Vec::new();
+    let mut thin = false;
+    let mut index = true;
     for argument in arguments {
         if argument.starts_with('/') || argument.starts_with('-') {
             let body = &argument[1..];
@@ -24362,6 +24606,8 @@ fn archive_coff_inputs(
                 match lowered.as_str() {
                     "out" => output = Some(value.to_string()),
                     "libpath" => library_paths.push(value.to_string()),
+                    "llvmlibthin" => thin = true,
+                    "llvmlibindex" => index = !value.eq_ignore_ascii_case("no"),
                     _ => {}
                 }
                 continue;
@@ -24373,6 +24619,7 @@ fn archive_coff_inputs(
         return outcome;
     }
     let mut members: Vec<crate::compilers::pe::ArchiveMember> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     for input in &inputs {
         let mut found = source(input).map(|bytes| (input.clone(), bytes));
         if found.is_none() {
@@ -24392,40 +24639,68 @@ fn archive_coff_inputs(
                 )));
             continue;
         };
-        if bytes.starts_with(b"!<arch>\n") {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if is_archive(&bytes) {
             match read_coff_archive(&path, &bytes) {
                 Ok(archive) => {
                     for member in archive.members {
-                        members.push(crate::compilers::pe::ArchiveMember {
-                            name: member.name,
-                            data: member.bytes,
-                        });
+                        let (name, data) = match member.thin_path {
+                            None => (member.name, member.bytes),
+                            Some(full) => match source(&full) {
+                                Some(data) => (full, data),
+                                None => {
+                                    outcome.diagnostics.push(file_missing(&full).with_context(
+                                        format!(
+                                            "Cause: {path}: '{full}': No such file or directory"
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                            },
+                        };
+                        members.push(crate::compilers::pe::ArchiveMember { name, data });
                     }
                 }
                 Err(diagnostic) => outcome.diagnostics.push(diagnostic),
             }
             continue;
         }
-        let name = path
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(path.as_str())
-            .to_string();
-        members.push(crate::compilers::pe::ArchiveMember { name, data: bytes });
+        members.push(crate::compilers::pe::ArchiveMember {
+            name: path,
+            data: bytes,
+        });
     }
     if !outcome.diagnostics.is_empty() {
         return outcome;
     }
     let output = output.unwrap_or_else(|| {
-        let first = &inputs[0];
-        match first.rsplit_once('.') {
-            Some((stem, _)) if !stem.ends_with(['/', '\\']) => format!("{stem}.lib"),
+        let first = members
+            .first()
+            .map(|member| member.name.as_str())
+            .unwrap_or(&inputs[0]);
+        let start = first.rfind('/').map_or(0, |position| position + 1);
+        let file = &first[start..];
+        match file.rfind('.') {
+            Some(position) if file != "." && file != ".." => {
+                format!("{}.lib", &first[..start + position])
+            }
             _ => format!("{first}.lib"),
         }
     });
-    outcome
-        .outputs
-        .push((output, crate::compilers::pe::write_coff_archive(&members)));
+    if thin {
+        for member in &mut members {
+            if !member.name.starts_with('/') {
+                member.name = archive_relative_path(&output, &member.name, directory);
+            }
+        }
+    }
+    members.reverse();
+    outcome.outputs.push((
+        output,
+        crate::compilers::pe::write_library_archive(&members, thin, index),
+    ));
     outcome
 }
 
@@ -24616,7 +24891,7 @@ pub fn link_coff_in(
     if arguments.first().is_some_and(|first| {
         first.eq_ignore_ascii_case("/lib") || first.eq_ignore_ascii_case("-lib")
     }) {
-        return archive_coff_inputs(&arguments[1..], source);
+        return archive_coff_inputs(&arguments[1..], source, directory);
     }
     let options = match parse_coff_command_line(arguments, source) {
         Ok(options) => options,
@@ -24665,8 +24940,19 @@ pub fn link_coff_in(
             messages: Vec::new(),
         };
     }
+    let reproduce = options
+        .reproduce
+        .clone()
+        .or_else(|| {
+            options
+                .link_reproduce
+                .as_ref()
+                .map(|folder| format!("{}/repro.tar", folder.trim_end_matches('/')))
+        })
+        .or_else(|| variable("LLD_REPRODUCE"));
     let mut context = CoffContext::new(options, source);
     context.directory = directory.to_string();
+    context.tape = reproduce.as_deref().map(TapeArchive::new);
     let bytes = context.run();
     let limit = context.options.error_limit;
     let mut diagnostics = std::mem::take(&mut context.diagnostics);
@@ -24705,6 +24991,9 @@ pub fn link_coff_in(
             .push((context.options.output.clone(), bytes));
     }
     outcome.outputs.append(&mut context.extra_outputs);
+    if let (Some(path), Some(tape)) = (reproduce, context.tape.as_ref()) {
+        outcome.outputs.push((path, tape.finish()));
+    }
     if let Some(requested) = context.options.time_trace.clone() {
         let text = time_trace_text("lld-link");
         if requested == "-" {
@@ -24719,6 +25008,133 @@ pub fn link_coff_in(
         }
     }
     outcome
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TapeArchive {
+    base: String,
+    data: Vec<u8>,
+    seen: BTreeSet<String>,
+}
+
+const TAPE_BLOCK: usize = 512;
+
+fn tape_header(prefix: &str, name: &str, size: usize, kind: u8) -> Vec<u8> {
+    let mut header = vec![0u8; TAPE_BLOCK];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    if kind == 0 {
+        header[100..108].copy_from_slice(b"0000664\0");
+    }
+    let size_text = format!("{size:011o}");
+    header[124..124 + size_text.len()].copy_from_slice(size_text.as_bytes());
+    header[156] = kind;
+    header[257..262].copy_from_slice(b"ustar");
+    header[263..265].copy_from_slice(b"00");
+    header[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
+    header[148..156].copy_from_slice(b"        ");
+    let sum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+    let sum_text = format!("{sum:06o}\0");
+    header[148..148 + sum_text.len()].copy_from_slice(sum_text.as_bytes());
+    header
+}
+
+fn split_tape_path(path: &str) -> Option<(&str, &str)> {
+    if path.len() < 100 {
+        return Some(("", path));
+    }
+    let limit = 138.min(path.len());
+    let separator = path.as_bytes()[..limit]
+        .iter()
+        .rposition(|byte| *byte == b'/')?;
+    if path.len() - separator > 100 {
+        return None;
+    }
+    Some((&path[..separator], &path[separator + 1..]))
+}
+
+impl TapeArchive {
+    pub fn new(path: &str) -> TapeArchive {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let base = if file == "." || file == ".." {
+            file
+        } else {
+            match file.rfind('.') {
+                Some(position) => &file[..position],
+                None => file,
+            }
+        };
+        TapeArchive {
+            base: base.to_string(),
+            ..TapeArchive::default()
+        }
+    }
+
+    pub fn append(&mut self, path: &str, contents: &[u8]) {
+        let full = format!("{}/{path}", self.base);
+        if !self.seen.insert(full.clone()) {
+            return;
+        }
+        match split_tape_path(&full) {
+            Some((prefix, name)) => {
+                let header = tape_header(prefix, name, contents.len(), 0);
+                self.data.extend_from_slice(&header);
+            }
+            None => {
+                let length = full.len() + 7;
+                let mut total = length + length.to_string().len();
+                total = length + total.to_string().len();
+                let record = format!("{total} path={full}\n");
+                self.data
+                    .extend_from_slice(&tape_header("", "", record.len(), b'x'));
+                self.data.extend_from_slice(record.as_bytes());
+                self.pad();
+                let header = tape_header("", "", contents.len(), 0);
+                self.data.extend_from_slice(&header);
+            }
+        }
+        self.data.extend_from_slice(contents);
+        self.pad();
+    }
+
+    fn pad(&mut self) {
+        let size = self.data.len().div_ceil(TAPE_BLOCK) * TAPE_BLOCK;
+        self.data.resize(size, 0);
+    }
+
+    pub fn finish(&self) -> Vec<u8> {
+        let mut out = self.data.clone();
+        if !self.seen.is_empty() {
+            out.resize(out.len() + TAPE_BLOCK * 2, 0);
+        }
+        out
+    }
+}
+
+pub fn relative_to_root(path: &str, directory: &str) -> String {
+    let absolute = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("{directory}/{path}")
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in absolute.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("/")
+}
+
+fn quote_spaced(text: &str) -> String {
+    if text.contains(' ') {
+        format!("\"{text}\"")
+    } else {
+        text.to_string()
+    }
 }
 
 pub fn time_trace_text(program: &str) -> String {
@@ -25081,13 +25497,53 @@ fn type_record_hash(record: &[u8]) -> u32 {
 #[derive(Clone, Debug, Default)]
 struct TypeSource {
     file: usize,
+    rank: usize,
     records: Vec<Vec<u8>>,
+    skipped: Option<usize>,
+    own_map: Vec<u32>,
     map: Vec<u32>,
+    item_map: Vec<u32>,
     failure: Option<String>,
+    type_parent: Option<usize>,
+    prefix: Option<(usize, usize)>,
+    server_reference: Option<(String, [u8; 16])>,
+    precompiled_reference: Option<(usize, u32, String)>,
+    precompiled_header: bool,
+    end_signature: u32,
+    input_records: u64,
+    input_bytes: u64,
 }
 
-fn remap_record(record: &mut [u8], references: &[(bool, usize, usize)], map: &[u32]) {
-    for (_, offset, count) in references {
+#[derive(Clone, Debug, Default)]
+struct DebugSummary {
+    type_servers: u64,
+    precompiled_objects: u64,
+    input_records: u64,
+    input_bytes: u64,
+    type_records: u64,
+    item_records: u64,
+    strings: u64,
+    globals: u64,
+    module_symbols: u64,
+    publics: u64,
+    large_records: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MergedTypes {
+    function_types: BTreeMap<u32, u32>,
+    type_counts: Vec<u32>,
+    item_counts: Vec<u32>,
+}
+
+fn remap_record(
+    record: &mut [u8],
+    references: &[(bool, usize, usize)],
+    type_map: &[u32],
+    item_map: &[u32],
+) {
+    for (item, offset, count) in references {
+        let map = if *item { item_map } else { type_map };
         for index in 0..*count {
             let at = 4 + offset + index * 4;
             if at + 4 > record.len() {
@@ -25107,12 +25563,33 @@ fn remap_record(record: &mut [u8], references: &[(bool, usize, usize)], map: &[u
     }
 }
 
+fn resolve_type_reference(
+    identities: &[Vec<Option<usize>>],
+    own: &[Option<usize>],
+    source: &TypeSource,
+    item: bool,
+    position: usize,
+) -> Option<usize> {
+    if !item {
+        if let Some(parent) = source.type_parent {
+            return identities.get(parent)?.get(position).copied().flatten();
+        }
+    }
+    if let Some((parent, count)) = source.prefix {
+        if position < count {
+            return identities.get(parent)?.get(position).copied().flatten();
+        }
+        return own.get(position - count).copied().flatten();
+    }
+    own.get(position).copied().flatten()
+}
+
 fn merge_type_sources(
     sources: &mut [TypeSource],
     database: &mut crate::compilers::pe::program_database::ProgramDatabase,
-) -> BTreeMap<u32, u32> {
+) -> MergedTypes {
     let mut keys: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
-    let mut cells: Vec<(bool, usize, usize)> = Vec::new();
+    let mut cells: Vec<(bool, usize, usize, usize)> = Vec::new();
     let mut identities: Vec<Vec<Option<usize>>> = Vec::new();
     for (source_index, source) in sources.iter().enumerate() {
         let count = source.records.len();
@@ -25121,7 +25598,7 @@ fn merge_type_sources(
             let mut progress = false;
             let mut pending = false;
             for record_index in 0..count {
-                if identity[record_index].is_some() {
+                if identity[record_index].is_some() || source.skipped == Some(record_index) {
                     continue;
                 }
                 let record = &source.records[record_index];
@@ -25131,7 +25608,7 @@ fn merge_type_sources(
                 let content = &record[4.min(record.len())..];
                 key.extend_from_slice(&record[..4.min(record.len())]);
                 let mut ready = true;
-                for (_, offset, count) in &references {
+                for (item, offset, count) in &references {
                     let start = (*offset).min(content.len());
                     if start > cursor {
                         key.extend_from_slice(&content[cursor..start]);
@@ -25144,7 +25621,13 @@ fn merge_type_sources(
                             key.extend_from_slice(&value.to_le_bytes());
                         } else {
                             let position = (value - 0x1000) as usize;
-                            match identity.get(position).copied().flatten() {
+                            match resolve_type_reference(
+                                &identities,
+                                &identity,
+                                source,
+                                *item,
+                                position,
+                            ) {
                                 Some(global) => {
                                     key.push(1);
                                     key.extend_from_slice(&(global as u64).to_le_bytes());
@@ -25171,8 +25654,11 @@ fn merge_type_sources(
                 let item = is_identifier_record(code_view_kind(record));
                 let next = cells.len();
                 let global = *keys.entry(key).or_insert(next);
+                let cell = (item, source.rank, record_index, source_index);
                 if global == next {
-                    cells.push((item, source_index, record_index));
+                    cells.push(cell);
+                } else if (cell.1, cell.2) < (cells[global].1, cells[global].2) {
+                    cells[global] = cell;
                 }
                 identity[record_index] = Some(global);
                 progress = true;
@@ -25182,16 +25668,19 @@ fn merge_type_sources(
             }
         }
         for (record_index, slot) in identity.iter_mut().enumerate() {
-            if slot.is_none() {
+            if slot.is_none() && source.skipped != Some(record_index) {
                 let item = is_identifier_record(code_view_kind(&source.records[record_index]));
                 *slot = Some(cells.len());
-                cells.push((item, source_index, record_index));
+                cells.push((item, source.rank, record_index, source_index));
             }
         }
         identities.push(identity);
     }
     let mut order: Vec<usize> = (0..cells.len()).collect();
-    order.sort_by_key(|global| cells[*global]);
+    order.sort_by_key(|global| {
+        let (item, rank, record, _) = cells[*global];
+        (item, rank, record)
+    });
     let mut final_index = vec![0u32; cells.len()];
     let mut type_count = 0u32;
     let mut item_count = 0u32;
@@ -25205,7 +25694,7 @@ fn merge_type_sources(
         }
     }
     for (source, identity) in sources.iter_mut().zip(&identities) {
-        source.map = identity
+        source.own_map = identity
             .iter()
             .map(|global| {
                 global
@@ -25214,9 +25703,49 @@ fn merge_type_sources(
             })
             .collect();
     }
-    let mut function_types = BTreeMap::new();
+    for index in 0..sources.len() {
+        let own = sources[index].own_map.clone();
+        if let Some(parent) = sources[index].type_parent {
+            sources[index].map = sources[parent].own_map.clone();
+            sources[index].item_map = own;
+        } else if let Some((parent, count)) = sources[index].prefix {
+            let mut map: Vec<u32> = sources[parent]
+                .own_map
+                .iter()
+                .take(count)
+                .copied()
+                .collect();
+            map.extend_from_slice(&own);
+            sources[index].map = map.clone();
+            sources[index].item_map = map;
+        } else {
+            sources[index].map = own.clone();
+            sources[index].item_map = own;
+        }
+    }
+    let mut merged = MergedTypes {
+        type_counts: vec![0; type_count as usize],
+        item_counts: vec![0; item_count as usize],
+        ..MergedTypes::default()
+    };
+    for source in sources.iter() {
+        for (record, mapped) in source.records.iter().zip(&source.own_map) {
+            if *mapped < 0x1000 {
+                continue;
+            }
+            let position = (*mapped - 0x1000) as usize;
+            let counts = if is_identifier_record(code_view_kind(record)) {
+                &mut merged.item_counts
+            } else {
+                &mut merged.type_counts
+            };
+            if let Some(slot) = counts.get_mut(position) {
+                *slot += 1;
+            }
+        }
+    }
     for global in order {
-        let (item, source_index, record_index) = cells[global];
+        let (item, _, record_index, source_index) = cells[global];
         let original = &sources[source_index].records[record_index];
         let size = original.len().div_ceil(4) * 4;
         let mut record = original.clone();
@@ -25228,11 +25757,18 @@ fn merge_type_sources(
             }
         }
         let references = type_references(&record);
-        remap_record(&mut record, &references, &sources[source_index].map);
+        remap_record(
+            &mut record,
+            &references,
+            &sources[source_index].map,
+            &sources[source_index].item_map,
+        );
         let hash = type_record_hash(&record);
         let kind = code_view_kind(&record);
         if (kind == 0x1601 || kind == 0x1602) && original.len() >= 12 {
-            function_types.insert(final_index[global], code_view_u32(&record, 8));
+            merged
+                .function_types
+                .insert(final_index[global], code_view_u32(&record, 8));
         }
         if item {
             database.identifiers.add(record, hash);
@@ -25240,7 +25776,62 @@ fn merge_type_sources(
             database.types.add(record, hash);
         }
     }
-    function_types
+    merged
+}
+
+fn windows_base_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+fn join_parent_path(path: &str, name: &str) -> String {
+    match path.rfind('/') {
+        Some(0) => format!("/{name}"),
+        Some(position) => format!("{}/{name}", &path[..position]),
+        None => name.to_string(),
+    }
+}
+
+fn top_input_records(name: &str, counts: &[u32], records: &[Vec<u8>], pdb_path: &str) -> String {
+    use crate::compilers::pe::program_database::group_digits;
+    if counts.is_empty() {
+        return String::new();
+    }
+    let mut entries: Vec<(u64, u32, u32, u32)> = counts
+        .iter()
+        .enumerate()
+        .map(|(index, count)| {
+            let size = records.get(index).map(|record| record.len()).unwrap_or(0) as u32;
+            (
+                u64::from(*count) * u64::from(size),
+                0x1000 + index as u32,
+                *count,
+                size,
+            )
+        })
+        .collect();
+    entries.sort();
+    let mut text = format!("\nTop 10 types responsible for the most {name} input:\n");
+    text.push_str("       index     total bytes   count     size\n");
+    for (total, index, count, size) in entries.iter().rev().take(10) {
+        text.push_str(&format!(
+            "  {:>10}: {:>14} = {:>5} * {:>6}\n",
+            format!("0x{index:X}"),
+            group_digits(*total),
+            group_digits(u64::from(*count)),
+            group_digits(u64::from(*size))
+        ));
+    }
+    text.push_str("Run llvm-pdbutil to print details about a particular record:\n");
+    let (option, flag) = if name == "TPI" {
+        ("types", "type")
+    } else {
+        ("ids", "id")
+    };
+    let last = entries.last().map(|entry| entry.1).unwrap_or(0);
+    text.push_str(&format!(
+        "llvm-pdbutil dump -{option} -{flag}-index 0x{last:X} {pdb_path}\n"
+    ));
+    text
 }
 
 impl<'s> CoffContext<'s> {
@@ -25278,67 +25869,281 @@ impl<'s> CoffContext<'s> {
         data[4..].to_vec()
     }
 
+    fn find_server_database_path(&self, record: &str, file: usize) -> Option<String> {
+        if (self.source)(record).is_some() {
+            return Some(record.to_string());
+        }
+        let object = if self.objects[file].parent.is_empty() {
+            self.objects[file].name.clone()
+        } else {
+            self.objects[file].parent.clone()
+        };
+        let name = windows_base_name(record);
+        let beside_object = join_parent_path(&object, name);
+        if (self.source)(&beside_object).is_some() {
+            return Some(beside_object);
+        }
+        let beside_output = join_parent_path(&self.options.output, name);
+        if (self.source)(&beside_output).is_some() {
+            return Some(beside_output);
+        }
+        None
+    }
+
+    fn object_type_source(&mut self, file: usize) -> TypeSource {
+        let chunks = self.objects[file].debug_chunks.clone();
+        let mut source = TypeSource {
+            file,
+            ..TypeSource::default()
+        };
+        let precompiled = chunks
+            .iter()
+            .copied()
+            .find(|chunk| self.chunks[*chunk].name == ".debug$P");
+        let types = precompiled.or_else(|| {
+            chunks
+                .iter()
+                .copied()
+                .find(|chunk| self.chunks[*chunk].name == ".debug$T")
+        });
+        let Some(chunk) = types else {
+            return source;
+        };
+        let data = self.debug_section_contents(chunk);
+        match code_view_records(&data) {
+            Some(records) => {
+                for (at, length) in records {
+                    source.records.push(data[at..at + length].to_vec());
+                }
+            }
+            None => {
+                source.failure = Some("corrupt type records".to_string());
+            }
+        }
+        source.input_bytes = data.len() as u64;
+        let text_at = |content: &[u8], at: usize| {
+            let length = c_string_length(content, at).saturating_sub(1);
+            String::from_utf8_lossy(content.get(at..at + length).unwrap_or(&[])).to_string()
+        };
+        if precompiled.is_some() {
+            source.precompiled_header = true;
+            if let Some(position) = source
+                .records
+                .iter()
+                .position(|record| code_view_kind(record) == 0x0014)
+            {
+                source.skipped = Some(position);
+                source.end_signature = code_view_u32(&source.records[position][4..], 0);
+            }
+        } else if let Some(first) = source.records.first().cloned() {
+            let content = &first[4.min(first.len())..];
+            match code_view_kind(&first) {
+                0x1515 => {
+                    let mut guid = [0u8; 16];
+                    if content.len() >= 16 {
+                        guid.copy_from_slice(&content[..16]);
+                    }
+                    source.server_reference = Some((text_at(content, 20), guid));
+                    source.records.clear();
+                    source.input_bytes = 0;
+                }
+                0x1509 => {
+                    let count = code_view_u32(content, 4) as usize;
+                    let signature = code_view_u32(content, 8);
+                    source.precompiled_reference = Some((count, signature, text_at(content, 12)));
+                    source.records.remove(0);
+                    source.input_bytes -= first.len() as u64;
+                }
+                _ => {}
+            }
+        }
+        source.input_records = source.records.len() as u64;
+        source
+    }
+
     fn add_program_database_debug_information(
         &mut self,
         database: &mut crate::compilers::pe::program_database::ProgramDatabase,
         modules: &BTreeMap<usize, u16>,
-    ) {
-        let mut sources: Vec<TypeSource> = Vec::new();
+    ) -> MergedTypes {
+        use crate::compilers::pe::program_database::{read_server_database, ServerDatabase};
+        let mut objects: Vec<TypeSource> = Vec::new();
         for file in self.object_order.clone() {
-            let chunks = self.objects[file].debug_chunks.clone();
-            if chunks.is_empty() {
+            if self.objects[file].debug_chunks.is_empty() {
                 continue;
             }
-            let mut source = TypeSource {
-                file,
-                ..TypeSource::default()
+            objects.push(self.object_type_source(file));
+        }
+        let mut loaded: Vec<(String, Result<ServerDatabase, String>)> = Vec::new();
+        let mut located: Vec<Option<String>> = Vec::new();
+        for source in &objects {
+            let Some((record, _)) = &source.server_reference else {
+                located.push(None);
+                continue;
             };
-            let types = chunks
-                .iter()
-                .copied()
-                .find(|chunk| self.chunks[*chunk].name == ".debug$P")
-                .or_else(|| {
-                    chunks
-                        .iter()
-                        .copied()
-                        .find(|chunk| self.chunks[*chunk].name == ".debug$T")
-                });
-            if let Some(chunk) = types {
-                let data = self.debug_section_contents(chunk);
-                match code_view_records(&data) {
-                    Some(records) => {
-                        for (at, length) in records {
-                            source.records.push(data[at..at + length].to_vec());
+            let path = self.find_server_database_path(record, source.file);
+            if let Some(path) = &path {
+                if !loaded.iter().any(|(known, _)| known == path) {
+                    let result = match (self.source)(path) {
+                        Some(bytes) => {
+                            self.tape_append(path, &bytes);
+                            read_server_database(&bytes)
                         }
-                    }
-                    None => {
-                        source.failure = Some("corrupt type records".to_string());
-                    }
-                }
-                if let Some(first) = source.records.first() {
-                    let kind = code_view_kind(first);
-                    if kind == 0x1515 || kind == 0x1509 {
-                        let content = &first[4..];
-                        let reference = if kind == 0x1515 {
-                            let at = 20;
-                            let length = c_string_length(content, at).saturating_sub(1);
-                            String::from_utf8_lossy(content.get(at..at + length).unwrap_or(&[]))
-                                .to_string()
-                        } else {
-                            let at = 12;
-                            let length = c_string_length(content, at).saturating_sub(1);
-                            String::from_utf8_lossy(content.get(at..at + length).unwrap_or(&[]))
-                                .to_string()
-                        };
-                        source.failure = Some(reference);
-                        source.records.clear();
-                    }
+                        None => Err("No such file or directory".to_string()),
+                    };
+                    loaded.push((path.clone(), result));
                 }
             }
-            sources.push(source);
+            located.push(path);
         }
-        let function_types = merge_type_sources(&mut sources, database);
-        for source in sources {
+        let mut by_guid: BTreeMap<[u8; 16], Option<usize>> = BTreeMap::new();
+        for (index, (_, result)) in loaded.iter().enumerate() {
+            if let Ok(server) = result {
+                by_guid
+                    .entry(server.guid)
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(index));
+            }
+        }
+        let global_hashes = self.options.debug_global_hashes;
+        let object_count = objects.len();
+        let mut sources: Vec<TypeSource> = Vec::new();
+        let mut object_slots = vec![0usize; object_count];
+        for (position, source) in objects.iter().enumerate() {
+            if source.precompiled_header {
+                object_slots[position] = sources.len();
+                sources.push(source.clone());
+            }
+        }
+        let mut server_slots: Vec<Option<(usize, Option<usize>)>> = vec![None; loaded.len()];
+        for (index, (_, result)) in loaded.iter().enumerate() {
+            let Ok(server) = result else {
+                continue;
+            };
+            let types = sources.len();
+            sources.push(TypeSource {
+                records: server.types.clone(),
+                input_records: server.types.len() as u64,
+                input_bytes: server.type_bytes as u64,
+                ..TypeSource::default()
+            });
+            let items = server.identifiers.as_ref().map(|identifiers| {
+                sources.push(TypeSource {
+                    records: identifiers.clone(),
+                    type_parent: Some(types),
+                    input_records: identifiers.len() as u64,
+                    input_bytes: server.identifier_bytes as u64,
+                    ..TypeSource::default()
+                });
+                sources.len() - 1
+            });
+            server_slots[index] = Some((types, items));
+        }
+        for (position, source) in objects.iter().enumerate() {
+            if !source.precompiled_header {
+                object_slots[position] = sources.len();
+                sources.push(source.clone());
+            }
+        }
+        for (position, slot) in object_slots.iter().enumerate() {
+            sources[*slot].rank = if global_hashes { position } else { *slot };
+        }
+        let mut server_rank = object_count;
+        for slot in server_slots.iter().flatten() {
+            for index in [Some(slot.0), slot.1].into_iter().flatten() {
+                sources[index].rank = if global_hashes { server_rank } else { index };
+                server_rank += 1;
+            }
+        }
+        for slot in object_slots.iter().copied() {
+            let Some((count, signature, path)) = sources[slot].precompiled_reference.clone() else {
+                continue;
+            };
+            let headers: Vec<usize> = (0..sources.len())
+                .filter(|index| sources[*index].precompiled_header)
+                .collect();
+            let by_signature = headers
+                .iter()
+                .copied()
+                .find(|index| signature != 0 && sources[*index].end_signature == signature);
+            let header = by_signature.or_else(|| {
+                headers.iter().copied().find(|index| {
+                    let name = self.file_label(Some(sources[*index].file));
+                    windows_base_name(&name) == windows_base_name(&path)
+                })
+            });
+            match header {
+                None => {
+                    sources[slot].failure = Some(format!(
+                        "'{path}': No matching precompiled header could be located."
+                    ));
+                    sources[slot].records.clear();
+                    sources[slot].input_records = 0;
+                    sources[slot].input_bytes = 0;
+                }
+                Some(header) if sources[header].skipped != Some(count) => {
+                    let label = self.file_label(Some(sources[slot].file));
+                    sources[slot].failure = Some(format!(
+                        "'{label}': No matching precompiled header could be located."
+                    ));
+                    sources[slot].records.clear();
+                    sources[slot].input_records = 0;
+                    sources[slot].input_bytes = 0;
+                }
+                Some(header) => sources[slot].prefix = Some((header, count)),
+            }
+        }
+        let mut merged = merge_type_sources(&mut sources, database);
+        for position in 0..object_count {
+            let slot = object_slots[position];
+            let Some((record, guid)) = sources[slot].server_reference.clone() else {
+                continue;
+            };
+            let mut chosen = by_guid.get(&guid).copied().flatten();
+            if chosen.is_none() {
+                let found = located[position]
+                    .as_ref()
+                    .and_then(|path| loaded.iter().position(|(known, _)| known == path));
+                match found {
+                    None => {
+                        sources[slot].failure =
+                            Some(format!("'{record}': No such file or directory"));
+                    }
+                    Some(index) => match &loaded[index].1 {
+                        Err(message) => {
+                            sources[slot].failure = Some(format!("'{record}': {message}"));
+                        }
+                        Ok(server) if server.guid != guid => {
+                            sources[slot].failure = Some(format!(
+                                "'{record}': The signature does not match; the file(s) might be out of date."
+                            ));
+                        }
+                        Ok(_) => chosen = Some(index),
+                    },
+                }
+            }
+            if let Some((types, items)) = chosen.and_then(|index| server_slots[index]) {
+                sources[slot].map = sources[types].own_map.clone();
+                sources[slot].item_map = items
+                    .map(|items| sources[items].own_map.clone())
+                    .unwrap_or_default();
+            }
+        }
+        if let Some(summary) = self.debug_summary.as_mut() {
+            summary.type_servers = by_guid.len() as u64;
+            summary.precompiled_objects = sources
+                .iter()
+                .filter(|source| source.precompiled_header && source.end_signature != 0)
+                .count() as u64;
+            for source in &sources {
+                if source.failure.is_none() {
+                    summary.input_records += source.input_records;
+                    summary.input_bytes += source.input_bytes;
+                }
+            }
+        }
+        for position in 0..object_count {
+            let source = sources[object_slots[position]].clone();
             let file = source.file;
             let module = modules[&file] as usize;
             if let Some(reference) = source.failure.clone() {
@@ -25355,13 +26160,15 @@ impl<'s> CoffContext<'s> {
                     caution("EI282", "The linker cannot use the debug information of an input file.")
                         .with_context(format!("File: {label}"))
                         .with_context(format!(
-                            "Cause: Cannot use debug info for '{label}' [LNK4099]\n>>> failed to load reference '{reference}': No such file or directory"
+                            "Cause: Cannot use debug info for '{label}' [LNK4099]\n>>> failed to load reference {reference}"
                         )),
                 );
                 continue;
             }
-            self.add_debug_symbols(database, &source, module, &function_types);
+            self.add_debug_symbols(database, &source, module, &merged.function_types);
         }
+        merged.function_types.clear();
+        merged
     }
 
     fn add_debug_symbols(
@@ -25422,7 +26229,7 @@ impl<'s> CoffContext<'s> {
                                 let value = code_view_u32(&body, offset);
                                 if value >= 0x1000 {
                                     let mapped = source
-                                        .map
+                                        .item_map
                                         .get((value - 0x1000) as usize)
                                         .copied()
                                         .unwrap_or(value);
@@ -25626,7 +26433,9 @@ impl<'s> CoffContext<'s> {
             record.resize(size, 0);
             record[..2].copy_from_slice(&((size - 2) as u16).to_le_bytes());
             match symbol_type_references(&record) {
-                Some(references) => remap_record(&mut record, &references, &source.map),
+                Some(references) => {
+                    remap_record(&mut record, &references, &source.map, &source.item_map)
+                }
                 None => {
                     record.iter_mut().for_each(|byte| *byte = 0);
                     record[..2].copy_from_slice(&((size - 2) as u16).to_le_bytes());
@@ -25664,6 +26473,9 @@ impl<'s> CoffContext<'s> {
             }
             let offset = base + storage.len();
             if goes_in_globals_stream(kind, depth) {
+                if let Some(summary) = self.debug_summary.as_mut() {
+                    summary.globals += 1;
+                }
                 let global_kind = code_view_kind(&record);
                 match global_kind {
                     0x1110 | 0x110f => {
@@ -25689,6 +26501,9 @@ impl<'s> CoffContext<'s> {
             }
             if !goes_in_module_stream(kind, depth) {
                 continue;
+            }
+            if let Some(summary) = self.debug_summary.as_mut() {
+                summary.module_symbols += 1;
             }
             if kind == 0x1153 {
                 file_static_fixups.push((offset + 8, code_view_u32(original, 8)));
@@ -25834,6 +26649,7 @@ impl<'s> CoffContext<'s> {
                 )));
                 return profile;
             };
+            self.tape_append(&path, &bytes);
             let mut names: BTreeMap<String, SymbolIndex> = BTreeMap::new();
             for file in self.object_order.clone() {
                 for id in self.objects[file].symbols.iter().flatten() {
@@ -26085,6 +26901,7 @@ impl<'s> CoffContext<'s> {
             )));
             return priorities;
         };
+        self.tape_append(path, &bytes);
         let mut known: BTreeSet<String> = BTreeSet::new();
         for chunk in &self.chunks {
             if let Some(leader) = chunk.leader {
@@ -26797,12 +27614,49 @@ impl<'s> CoffContext<'s> {
         contribution
     }
 
+    fn print_summary(&mut self) {
+        use crate::compilers::pe::program_database::group_digits;
+        let summary = self.debug_summary.clone().unwrap_or_default();
+        let input_objects = self.object_order.len() as u64;
+        let mut text = format!("{:^80}\n{}\n", "Summary", "-".repeat(80));
+        for (value, label) in [
+            (
+                input_objects,
+                "Input OBJ files (expanded from all cmd-line inputs)",
+            ),
+            (
+                self.consumed_bytes,
+                "Size of all consumed OBJ files (non-lazy), in bytes",
+            ),
+            (summary.type_servers, "PDB type server dependencies"),
+            (summary.precompiled_objects, "Precomp OBJ dependencies"),
+            (summary.input_records, "Input debug type records"),
+            (
+                summary.input_bytes,
+                "Size of all input debug type records, in bytes",
+            ),
+            (summary.type_records, "Merged TPI records"),
+            (summary.item_records, "Merged IPI records"),
+            (summary.strings, "Output PDB strings"),
+            (summary.globals, "Global symbol records"),
+            (summary.module_symbols, "Module symbol records"),
+            (summary.publics, "Public symbol records"),
+        ] {
+            text.push_str(&format!("{:>20} {label}\n", group_digits(value)));
+        }
+        text.push_str(&summary.large_records);
+        self.messages.push(text);
+    }
+
     fn create_program_database(&mut self, image: &mut [u8]) {
         use crate::compilers::pe::program_database::{ProgramDatabase, Public};
         use crate::compilers::pe::{put_u16, put_u32, read_u16};
         let pdb_path = self.program_database_path();
         let mut database = ProgramDatabase::new(self.options.pdb_page_size);
         database.strings.insert(b"");
+        if self.options.summary {
+            self.debug_summary = Some(DebugSummary::default());
+        }
         database.information.age = 1;
         database.information.build_number = 0x8000 | (14 << 8) | 11;
         database.information.machine = self.machine;
@@ -26832,8 +27686,9 @@ impl<'s> CoffContext<'s> {
                 database.information.modules[module as usize].first_contribution = contribution;
             }
         }
-        self.add_program_database_debug_information(&mut database, &modules);
+        let merged = self.add_program_database_debug_information(&mut database, &modules);
         self.add_import_modules(&mut database, &modules);
+        let string_count = database.strings.len() as u64;
         let native = self.program_database_absolute(&pdb_path);
         let path_index = database.information.edit_names.insert(native.as_bytes());
         let linker = database.information.add_module("* Linker *");
@@ -26925,9 +27780,37 @@ impl<'s> CoffContext<'s> {
         database.information.create_section_map(&headers);
         database.information.debug_streams
             [crate::compilers::pe::program_database::DEBUG_STREAM_SECTION_HEADERS] = Some(table);
+        for file in self.options.natvis_files.clone() {
+            let Some(content) = (self.source)(&file) else {
+                self.warn(
+                    caution(
+                        "EI278",
+                        "The linker cannot open a file that the PDB should contain.",
+                    )
+                    .with_context(format!("Path: {file}"))
+                    .with_context(format!("Cause: Cannot open input file: {file}")),
+                );
+                continue;
+            };
+            self.tape_append(&file, &content);
+            let virtual_name = file.to_ascii_lowercase().replace('/', "\\");
+            let name_index = database.strings.insert(file.as_bytes());
+            let virtual_name_index = database.strings.insert(virtual_name.as_bytes());
+            database
+                .injected
+                .push(crate::compilers::pe::program_database::InjectedSource {
+                    stream_name: format!("/src/files/{virtual_name}"),
+                    content,
+                    name_index,
+                    virtual_name_index,
+                });
+        }
         for (name, path) in self.options.pdb_streams.clone() {
             match (self.source)(&path) {
-                Some(data) => database.named_data.push((name, data)),
+                Some(data) => {
+                    self.tape_append(&path, &data);
+                    database.named_data.push((name, data))
+                }
                 None => self.warn(
                     caution(
                         "EI278",
@@ -26986,6 +27869,27 @@ impl<'s> CoffContext<'s> {
                 public.segment = self.outputs[output].index as u16;
             }
             publics.push(public);
+        }
+        let global_hashes = self.options.debug_global_hashes;
+        if let Some(summary) = self.debug_summary.as_mut() {
+            summary.publics = publics.len() as u64;
+            summary.type_records = database.types.records.len() as u64;
+            summary.item_records = database.identifiers.records.len() as u64;
+            summary.strings = string_count;
+            if !global_hashes {
+                summary.large_records = top_input_records(
+                    "TPI",
+                    &merged.type_counts,
+                    &database.types.records,
+                    &pdb_path,
+                );
+                summary.large_records.push_str(&top_input_records(
+                    "IPI",
+                    &merged.item_counts,
+                    &database.identifiers.records,
+                    &pdb_path,
+                ));
+            }
         }
         if !publics.is_empty() {
             database.set_publics(publics);
@@ -27966,6 +28870,9 @@ impl<'s> CoffContext<'s> {
             let at = self.coff_header_offset() + 4;
             let stamp = crate::compilers::pe::read_u32(&bytes, at).unwrap_or(0);
             self.write_program_map(stamp);
+        }
+        if self.options.summary {
+            self.print_summary();
         }
         if self.write_check_sum {
             let offset = self.coff_header_offset() + 20 + 64;

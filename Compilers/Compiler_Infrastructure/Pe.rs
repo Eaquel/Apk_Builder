@@ -2411,6 +2411,105 @@ pub fn write_coff_archive(members: &[ArchiveMember]) -> Vec<u8> {
     out
 }
 
+pub fn write_library_archive(members: &[ArchiveMember], thin: bool, index: bool) -> Vec<u8> {
+    if !thin && index {
+        return write_coff_archive(members);
+    }
+    let mut table: Vec<u8> = Vec::new();
+    let mut table_offsets: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut headers: Vec<String> = Vec::new();
+    for member in members {
+        let name = if thin || member.name.len() >= 16 || member.name.contains('/') {
+            let offset = if thin {
+                let offset = table.len();
+                table.extend_from_slice(member.name.as_bytes());
+                table.extend_from_slice(b"/\n");
+                offset
+            } else {
+                *table_offsets.entry(member.name.clone()).or_insert_with(|| {
+                    let offset = table.len();
+                    table.extend_from_slice(member.name.as_bytes());
+                    table.extend_from_slice(b"/\n");
+                    offset
+                })
+            };
+            format!("/{offset}")
+        } else {
+            format!("{}/", member.name)
+        };
+        headers.push(archive_header(&name, "644", member.data.len()));
+    }
+    let mut symbol_members: Vec<usize> = Vec::new();
+    let mut symbol_names: Vec<u8> = Vec::new();
+    if index {
+        for (position, member) in members.iter().enumerate() {
+            for symbol in archive_symbols(&member.data) {
+                symbol_members.push(position);
+                symbol_names.extend_from_slice(symbol.as_bytes());
+                symbol_names.push(0);
+            }
+        }
+    }
+    let mut symbol_size = 4 + symbol_members.len() * 4 + symbol_names.len();
+    let symbol_padding = symbol_size % 2;
+    symbol_size += symbol_padding;
+    let table_padding = table.len() % 2;
+    let mut position = 8;
+    if index {
+        position += 60 + symbol_size;
+    }
+    if !table.is_empty() {
+        position += 60 + table.len() + table_padding;
+    }
+    let mut positions = Vec::new();
+    for (header, member) in headers.iter().zip(members) {
+        positions.push(position as u32);
+        position += header.len();
+        if !thin {
+            position += member.data.len() + member.data.len() % 2;
+        }
+    }
+    let mut out = if thin {
+        b"!<thin>\n".to_vec()
+    } else {
+        b"!<arch>\n".to_vec()
+    };
+    if index {
+        out.extend_from_slice(archive_header("/", "0", symbol_size).as_bytes());
+        out.extend_from_slice(&(symbol_members.len() as u32).to_be_bytes());
+        for member in &symbol_members {
+            out.extend_from_slice(&positions[*member].to_be_bytes());
+        }
+        out.extend_from_slice(&symbol_names);
+        out.extend(std::iter::repeat_n(0u8, symbol_padding));
+    }
+    if !table.is_empty() {
+        out.extend_from_slice(
+            format!(
+                "{}{}`\n",
+                padded("//", 48),
+                padded(&(table.len() + table_padding).to_string(), 10)
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&table);
+        if table_padding == 1 {
+            out.push(b'\n');
+        }
+    }
+    for (header, member) in headers.iter().zip(members) {
+        out.extend_from_slice(header.as_bytes());
+        if !thin {
+            out.extend_from_slice(&member.data);
+            if member.data.len() % 2 == 1 {
+                out.push(b'\n');
+            }
+        }
+    }
+    out
+}
+
 pub mod program_database {
     use super::{put_u16, put_u32};
     use std::collections::{BTreeMap, BTreeSet};
@@ -2888,7 +2987,7 @@ pub mod program_database {
         }
     }
 
-    fn group_digits(value: u64) -> String {
+    pub fn group_digits(value: u64) -> String {
         let text = value.to_string();
         let mut out = String::new();
         for (index, character) in text.chars().enumerate() {
@@ -3593,6 +3692,218 @@ pub mod program_database {
                 .unwrap_or(0);
             Ok((bytes, information_offset))
         }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct ServerDatabase {
+        pub guid: [u8; 16],
+        pub age: u32,
+        pub types: Vec<Vec<u8>>,
+        pub type_bytes: usize,
+        pub identifiers: Option<Vec<Vec<u8>>>,
+        pub identifier_bytes: usize,
+    }
+
+    const CORRUPT_FILE: &str = "The PDB file is corrupt.";
+    const UNEXPECTED_FORMAT: &str = "The data is in an unexpected format.";
+    const STREAM_TOO_SHORT: &str =
+        "Stream Error: The stream is too short to perform the requested operation.";
+    const MISSING_STREAM: &str = "The specified stream could not be loaded.";
+    const MINIMUM_TYPE_BUCKETS: u32 = 0x1000;
+    const MAXIMUM_TYPE_BUCKETS: u32 = 0x40000;
+
+    fn word_at(bytes: &[u8], at: usize) -> Option<u32> {
+        let slice = bytes.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    }
+
+    fn split_type_records(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        let mut records = Vec::new();
+        let mut at = 0usize;
+        while at < data.len() {
+            if at + 4 > data.len() {
+                return Err(STREAM_TOO_SHORT.to_string());
+            }
+            let length = u16::from_le_bytes([data[at], data[at + 1]]) as usize + 2;
+            if length < 4 || at + length > data.len() {
+                return Err(STREAM_TOO_SHORT.to_string());
+            }
+            records.push(data[at..at + length].to_vec());
+            at += length;
+        }
+        Ok(records)
+    }
+
+    fn read_type_stream(data: &[u8]) -> Result<(Vec<Vec<u8>>, usize), String> {
+        if data.len() < 56 {
+            return Err(format!(
+                "{CORRUPT_FILE} TPI Stream does not contain a header."
+            ));
+        }
+        let field = |at: usize| word_at(data, at).unwrap_or(0);
+        if field(0) != 20_040_203 {
+            return Err(format!("{CORRUPT_FILE} Unsupported TPI Version."));
+        }
+        if field(4) != 56 {
+            return Err(format!("{CORRUPT_FILE} Corrupt TPI Header size."));
+        }
+        if field(24) != 4 {
+            return Err(format!(
+                "{CORRUPT_FILE} TPI Stream expected 4 byte hash key size."
+            ));
+        }
+        let buckets = field(28);
+        if !(MINIMUM_TYPE_BUCKETS..=MAXIMUM_TYPE_BUCKETS).contains(&buckets) {
+            return Err(format!(
+                "{CORRUPT_FILE} TPI Stream Invalid number of hash buckets."
+            ));
+        }
+        let length = field(16) as usize;
+        let Some(records) = data.get(56..56 + length) else {
+            return Err(STREAM_TOO_SHORT.to_string());
+        };
+        Ok((split_type_records(records)?, length))
+    }
+
+    fn skip_bit_vector(data: &[u8], at: &mut usize) -> Result<Vec<u32>, String> {
+        let count = word_at(data, *at).ok_or(STREAM_TOO_SHORT)? as usize;
+        *at += 4;
+        let mut words = Vec::new();
+        for _ in 0..count {
+            words.push(word_at(data, *at).ok_or(STREAM_TOO_SHORT)?);
+            *at += 4;
+        }
+        Ok(words)
+    }
+
+    pub fn read_server_database(bytes: &[u8]) -> Result<ServerDatabase, String> {
+        if bytes.len() < 56 {
+            return Err(format!("{CORRUPT_FILE} MSF superblock is missing"));
+        }
+        if bytes[..32] != MAGIC[..] {
+            return Err(format!(
+                "{UNEXPECTED_FORMAT} MSF magic header doesn't match"
+            ));
+        }
+        let field = |at: usize| word_at(bytes, at).unwrap_or(0);
+        let block_size = field(32);
+        let free_block_map = field(36);
+        let block_count = field(40);
+        let directory_bytes = field(44);
+        let block_map_address = field(52);
+        if !matches!(block_size, 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768) {
+            return Err(format!("{UNEXPECTED_FORMAT} Unsupported block size."));
+        }
+        if !directory_bytes.is_multiple_of(4) {
+            return Err(format!(
+                "{UNEXPECTED_FORMAT} Directory size is not multiple of 4."
+            ));
+        }
+        let directory_blocks = directory_bytes.div_ceil(block_size);
+        if directory_blocks > block_size / 4 {
+            return Err(format!("{UNEXPECTED_FORMAT} Too many directory blocks."));
+        }
+        if block_map_address == 0 {
+            return Err(format!("{UNEXPECTED_FORMAT} Block 0 is reserved"));
+        }
+        if block_map_address >= block_count {
+            return Err(format!("{UNEXPECTED_FORMAT} Block map address is invalid."));
+        }
+        if free_block_map != 1 && free_block_map != 2 {
+            return Err(format!(
+                "{UNEXPECTED_FORMAT} The free block map isn't at block 1 or block 2."
+            ));
+        }
+        let block_size = block_size as usize;
+        if !bytes.len().is_multiple_of(block_size) {
+            return Err(format!(
+                "{CORRUPT_FILE} File size is not a multiple of block size"
+            ));
+        }
+        let block = |index: u32| -> Result<&[u8], String> {
+            let start = index as usize * block_size;
+            bytes
+                .get(start..start + block_size)
+                .ok_or_else(|| STREAM_TOO_SHORT.to_string())
+        };
+        let map_start = block_map_address as usize * block_size;
+        let mut directory = Vec::new();
+        for position in 0..directory_blocks as usize {
+            let index = word_at(bytes, map_start + position * 4).ok_or(STREAM_TOO_SHORT)?;
+            directory.extend_from_slice(block(index)?);
+        }
+        directory.truncate(directory_bytes as usize);
+        let stream_count = word_at(&directory, 0).ok_or(STREAM_TOO_SHORT)? as usize;
+        let mut sizes = Vec::new();
+        for index in 0..stream_count {
+            sizes.push(word_at(&directory, 4 + index * 4).ok_or(STREAM_TOO_SHORT)?);
+        }
+        let mut at = 4 + stream_count * 4;
+        let mut streams: Vec<Vec<u8>> = Vec::new();
+        for size in &sizes {
+            let length = if *size == u32::MAX { 0 } else { *size };
+            let mut data = Vec::new();
+            for _ in 0..length.div_ceil(block_size as u32) {
+                let index = word_at(&directory, at).ok_or(STREAM_TOO_SHORT)?;
+                at += 4;
+                if (index as u64 + 1) * block_size as u64 > bytes.len() as u64 {
+                    return Err(format!("{CORRUPT_FILE} Stream block map is corrupt."));
+                }
+                data.extend_from_slice(block(index)?);
+            }
+            data.truncate(length as usize);
+            streams.push(data);
+        }
+        let Some(information) = streams.get(STREAM_INFORMATION) else {
+            return Err(MISSING_STREAM.to_string());
+        };
+        if information.len() < 28 {
+            return Err(format!(
+                "{STREAM_TOO_SHORT}\n{CORRUPT_FILE} PDB Stream does not contain a header."
+            ));
+        }
+        let version = word_at(information, 0).unwrap_or(0);
+        if !matches!(version, 20_000_404 | 20_030_901 | 20_091_201 | 20_140_508) {
+            return Err(format!("{CORRUPT_FILE} Unsupported PDB stream version."));
+        }
+        let mut database = ServerDatabase {
+            age: word_at(information, 8).unwrap_or(0),
+            ..ServerDatabase::default()
+        };
+        database.guid.copy_from_slice(&information[12..28]);
+        let mut at = 28usize;
+        let buffer = word_at(information, at).ok_or(STREAM_TOO_SHORT)? as usize;
+        at += 4 + buffer;
+        at += 8;
+        let present = skip_bit_vector(information, &mut at)?;
+        skip_bit_vector(information, &mut at)?;
+        let entries: u32 = present.iter().map(|word| word.count_ones()).sum();
+        at += entries as usize * 8;
+        let mut identifiers = false;
+        while let Some(signature) = word_at(information, at) {
+            at += 4;
+            if signature == 20_091_201 {
+                identifiers = true;
+                break;
+            }
+            if signature == 20_140_508 {
+                identifiers = true;
+            }
+        }
+        let Some(types) = streams.get(STREAM_TYPES).filter(|data| !data.is_empty()) else {
+            return Err(MISSING_STREAM.to_string());
+        };
+        let (records, length) = read_type_stream(types)?;
+        database.types = records;
+        database.type_bytes = length;
+        if identifiers {
+            if let Some(items) = streams.get(STREAM_IDENTIFIERS) {
+                let (records, length) = read_type_stream(items)?;
+                database.identifiers = Some(records);
+                database.identifier_bytes = length;
+            }
+        }
+        Ok(database)
     }
 }
 

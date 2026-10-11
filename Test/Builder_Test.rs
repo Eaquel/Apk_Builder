@@ -69417,6 +69417,9 @@ mod linker_lit {
             Some("COFF/pdb-relative-source-lines.test") => {
                 Some("the test copies the lld-link executable, which this linker is not")
             }
+            Some("COFF/thin-archive.s") => Some(
+                "the thin archive keeps absolute member paths that the host llvm-nm reads outside the test sandbox",
+            ),
             _ => None,
         };
         if let Some(reason) = newer_tool {
