@@ -76,6 +76,7 @@ pub enum InputItem {
     DefaultScript(String),
     JustSymbols(String),
     Defsym(String),
+    Format(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +126,8 @@ pub struct Options {
     pub export_dynamic: bool,
     pub strip: Strip,
     pub section_header: bool,
+    pub no_warnings: bool,
+    pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
     pub defined_symbols: Vec<(String, String)>,
@@ -268,6 +271,8 @@ impl Default for Options {
             export_dynamic: false,
             strip: Strip::None,
             section_header: true,
+            no_warnings: false,
+            dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
             defined_symbols: Vec::new(),
@@ -1060,7 +1065,12 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--threads"])? {
-            options.threads = value.parse().ok();
+            options.threads = value.parse().ok().filter(|threads: &usize| *threads > 0);
+            if options.threads.is_none() {
+                return Err(invalid_value("--threads", &value).with_context(format!(
+                    "Cause: --threads: {POSITIVE_INTEGER_EXPECTED} '{value}'"
+                )));
+            }
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--error-limit"])? {
@@ -1241,6 +1251,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-xosegment" => options.execute_only_segment = false,
             "--noinhibit-exec" => options.no_inhibit_executable = true,
             "--fatal-warnings" => options.fatal_warnings = true,
+            "--no-warnings" => options.no_warnings = true,
             "--no-fatal-warnings" => options.fatal_warnings = false,
             "--no-undefined" => {
                 options.no_undefined = true;
@@ -1405,6 +1416,19 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     options.undefined_glob.push(value.to_string());
                     continue;
                 }
+                if let Some(value) = argument.strip_prefix("--format=") {
+                    let binary = match value {
+                        "binary" => true,
+                        "elf" | "default" => false,
+                        other => {
+                            return Err(invalid_value("--format", other).with_context(format!(
+                                "Cause: unknown --format value: {other}{SUPPORTED_FORMATS}"
+                            )))
+                        }
+                    };
+                    options.inputs.push(InputItem::Format(binary));
+                    continue;
+                }
                 if let Some(value) = argument.strip_prefix("--compress-debug-sections=") {
                     options.compress_debug_sections = Some(value.to_string());
                     continue;
@@ -1468,6 +1492,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
     } else {
         OutputKind::Executable
     };
+    if options.no_warnings {
+        options.fatal_warnings = false;
+    }
     if relocatable && !options.section_header {
         return Err(invalid_value("-z", "nosectionheader").with_context(
             "Cause: -r and -z nosectionheader may not be used together".to_string(),
@@ -1575,6 +1602,8 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "muldefs" => options.allow_multiple_definition = true,
         "keep-text-section-prefix" => options.keep_text_section_prefix = true,
         "nokeep-text-section-prefix" => options.keep_text_section_prefix = false,
+        "dynamic-undefined-weak" => options.dynamic_undefined_weak = Some(true),
+        "nodynamic-undefined-weak" => options.dynamic_undefined_weak = Some(false),
         "sectionheader" => options.section_header = true,
         "nosectionheader" => options.section_header = false,
         "pack-relative-relocs" => options.pack_relative_flag = Some(true),
@@ -2810,6 +2839,8 @@ pub enum CompressionKind {
     Zstd,
 }
 
+const SUPPORTED_FORMATS: &str = " (supported formats: elf, default, binary)";
+const POSITIVE_INTEGER_EXPECTED: &str = "expected a positive integer, but got";
 const COMPRESSION_PARSE_ERROR: &str = "parse error, not 'section-glob=[none|zlib|zstd]'";
 const COMPRESSION_LEVEL_ERROR: &str = "expected a non-negative integer compression level, but got";
 const ZSTD_MISSING: &str =
@@ -2980,6 +3011,7 @@ pub struct Context<'s> {
     pub deferred_duplicates: Vec<Diagnostic>,
     pub archive_statistics: Vec<(String, usize)>,
     pub loading_just_symbols: bool,
+    pub pending_binaries: Vec<(String, Vec<u8>, LoadState, usize)>,
     pub gdb_index: Option<GdbIndex>,
     pub debug_names: Option<DebugNames>,
     pub debug_compression: CompressionKind,
@@ -3112,6 +3144,7 @@ impl<'s> Context<'s> {
             deferred_duplicates: Vec::new(),
             archive_statistics: Vec::new(),
             loading_just_symbols: false,
+            pending_binaries: Vec::new(),
             gdb_index: None,
             debug_names: None,
             debug_compression: CompressionKind::None,
@@ -3372,7 +3405,8 @@ impl<'s> Context<'s> {
                     let name = self.symbols[symbol].name.clone();
                     self.warn(
                         caution("EI251", "A common symbol is overridden.")
-                            .with_context(format!("Symbol: {name}")),
+                            .with_context(format!("Symbol: {name}"))
+                            .with_context(format!("Cause: common {name} is overridden")),
                     );
                 }
                 binding != symbol_binding::WEAK
@@ -3410,7 +3444,8 @@ impl<'s> Context<'s> {
                 let name = self.symbols[symbol].name.clone();
                 self.warn(
                     caution("EI251", "A common symbol is overridden.")
-                        .with_context(format!("Symbol: {name}")),
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!("Cause: common {name} is overridden")),
                 );
             }
             return;
@@ -3420,7 +3455,8 @@ impl<'s> Context<'s> {
                 let name = self.symbols[symbol].name.clone();
                 self.warn(
                     caution("EI252", "A common symbol is declared more than once.")
-                        .with_context(format!("Symbol: {name}")),
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!("Cause: multiple common of {name}")),
                 );
             }
             self.symbols[symbol].state = SymbolState::Common {
@@ -5764,6 +5800,7 @@ impl<'s> Context<'s> {
         let mut group = 0usize;
         let items = self.options.inputs.clone();
         let mut files_seen = 0usize;
+        let files_before = self.files.len();
         let mut default_script: Option<(String, String)> = None;
         let has_script = items
             .iter()
@@ -5854,6 +5891,7 @@ impl<'s> Context<'s> {
                     ),
                 },
                 InputItem::Defsym(text) => self.read_defsym(&text),
+                InputItem::Format(binary) => self.options.format_binary = binary,
                 InputItem::PushState => stack.push(state),
                 InputItem::PopState => {
                     if let Some(previous) = stack.pop() {
@@ -5934,7 +5972,40 @@ impl<'s> Context<'s> {
                 }
             }
         }
-        if files_seen == 0 && !self.failed() {
+        for (name, bytes, state, group) in std::mem::take(&mut self.pending_binaries) {
+            if target_reference.is_none() {
+                let format = self
+                    .options
+                    .output_format_machine
+                    .as_deref()
+                    .and_then(bfd_emulation)
+                    .and_then(emulation_target);
+                match format {
+                    Some((architecture, endian)) => {
+                        self.target = Target::for_architecture(architecture, endian);
+                        target_reference = Some(name.clone());
+                    }
+                    None => {
+                        self.error(problem("EI209", "The input targets a different machine than the output.")
+                            .with_context(format!("File: {name}"))
+                            .with_context("Cause: target emulation unknown: -m or at least one .o file required".to_string()));
+                        continue;
+                    }
+                }
+            }
+            let object = self.binary_object(&name, &bytes);
+            self.add_elf(
+                &name,
+                None,
+                object,
+                state,
+                group,
+                false,
+                false,
+                &mut target_reference,
+            );
+        }
+        if files_seen == 0 && self.files.len() == files_before && !self.failed() {
             self.error(problem("EI213", "No input files were given."));
         }
     }
@@ -5946,10 +6017,28 @@ impl<'s> Context<'s> {
         path.to_string()
     }
 
+    fn resolve_folder(&self, folder: &str) -> String {
+        if let Some(rest) = folder.strip_prefix('=') {
+            let root = self.options.sysroot.clone().unwrap_or_default();
+            if root.is_empty() {
+                return rest.to_string();
+            }
+            if rest.is_empty() {
+                return root;
+            }
+            return format!(
+                "{}/{}",
+                root.trim_end_matches('/'),
+                rest.trim_start_matches('/')
+            );
+        }
+        folder.to_string()
+    }
+
     fn find_library(&self, name: &str, is_static: bool) -> Option<(String, Vec<u8>)> {
         let mut candidates: Vec<String> = Vec::new();
         for folder in &self.options.library_paths {
-            let folder = self.resolve_path(folder);
+            let folder = self.resolve_folder(folder);
             if let Some(exact) = name.strip_prefix(':') {
                 candidates.push(format!("{folder}/{exact}"));
                 continue;
@@ -5967,6 +6056,122 @@ impl<'s> Context<'s> {
         None
     }
 
+    fn binary_object(&self, name: &str, data: &[u8]) -> Vec<u8> {
+        let encoding = self.target.encoding;
+        let word = if encoding.is_64() { 8u64 } else { 4 };
+        let stem: String = format!("_binary_{name}")
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() {
+                    byte as char
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let mut strings = vec![0u8];
+        let mut symbols = Vec::new();
+        elf::encode_symbol(encoding, &elf::Symbol::default(), &mut symbols);
+        for (suffix, value, section) in [
+            ("_start", 0u64, 1u32),
+            ("_end", data.len() as u64, 1),
+            ("_size", data.len() as u64, section_index::ABSOLUTE),
+        ] {
+            let symbol = elf::Symbol {
+                name_offset: strings.len() as u32,
+                value,
+                binding: symbol_binding::GLOBAL,
+                kind: symbol_type::OBJECT,
+                section,
+                ..elf::Symbol::default()
+            };
+            strings.extend_from_slice(format!("{stem}{suffix}").as_bytes());
+            strings.push(0);
+            elf::encode_symbol(encoding, &symbol, &mut symbols);
+        }
+        let names = b"\0.data\0.symtab\0.strtab\0.shstrtab\0".to_vec();
+        let header_size = encoding.header_size() as u64;
+        let data_offset = align_to(header_size, 8);
+        let symbols_offset = align_to(data_offset + data.len() as u64, word);
+        let strings_offset = symbols_offset + symbols.len() as u64;
+        let names_offset = strings_offset + strings.len() as u64;
+        let headers_offset = align_to(names_offset + names.len() as u64, word);
+        let mut out = vec![0u8; headers_offset as usize];
+        let mut header = b"\x7fELF".to_vec();
+        header.push(if encoding.is_64() { 2 } else { 1 });
+        header.push(if encoding.endian == Endian::Little {
+            1
+        } else {
+            2
+        });
+        header.push(1);
+        header.extend_from_slice(&[0; 9]);
+        encoding.put_u16(&mut header, file_type::RELOCATABLE);
+        encoding.put_u16(&mut header, self.target.architecture.machine());
+        encoding.put_u32(&mut header, 1);
+        encoding.put_word(&mut header, 0);
+        encoding.put_word(&mut header, 0);
+        encoding.put_word(&mut header, headers_offset);
+        encoding.put_u32(&mut header, 0);
+        encoding.put_u16(&mut header, header_size as u16);
+        encoding.put_u16(&mut header, 0);
+        encoding.put_u16(&mut header, 0);
+        encoding.put_u16(&mut header, encoding.section_header_size() as u16);
+        encoding.put_u16(&mut header, 5);
+        encoding.put_u16(&mut header, 4);
+        out[..header.len()].copy_from_slice(&header);
+        let place = |out: &mut Vec<u8>, at: u64, bytes: &[u8]| {
+            out[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+        };
+        place(&mut out, data_offset, data);
+        place(&mut out, symbols_offset, &symbols);
+        place(&mut out, strings_offset, &strings);
+        place(&mut out, names_offset, &names);
+        let sections = [
+            Section::default(),
+            Section {
+                name_offset: 1,
+                kind: section_type::PROGRAM_BITS,
+                flags: section_flag::ALLOCATE | section_flag::WRITE,
+                offset: data_offset,
+                size: data.len() as u64,
+                alignment: 8,
+                ..Section::default()
+            },
+            Section {
+                name_offset: 7,
+                kind: section_type::SYMBOL_TABLE,
+                offset: symbols_offset,
+                size: symbols.len() as u64,
+                link: 3,
+                info: 1,
+                alignment: word,
+                entry_size: encoding.symbol_size() as u64,
+                ..Section::default()
+            },
+            Section {
+                name_offset: 15,
+                kind: section_type::STRING_TABLE,
+                offset: strings_offset,
+                size: strings.len() as u64,
+                alignment: 1,
+                ..Section::default()
+            },
+            Section {
+                name_offset: 23,
+                kind: section_type::STRING_TABLE,
+                offset: names_offset,
+                size: names.len() as u64,
+                alignment: 1,
+                ..Section::default()
+            },
+        ];
+        for section in &sections {
+            elf::encode_section_header(encoding, section, &mut out);
+        }
+        out
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_file(
         &mut self,
@@ -5978,6 +6183,25 @@ impl<'s> Context<'s> {
         from_library: bool,
         target_reference: &mut Option<String>,
     ) {
+        if self.options.format_binary {
+            if target_reference.is_none() {
+                self.pending_binaries
+                    .push((display.to_string(), bytes, state, group));
+            } else {
+                let object = self.binary_object(display, &bytes);
+                self.add_elf(
+                    display,
+                    None,
+                    object,
+                    state,
+                    group,
+                    false,
+                    from_library,
+                    target_reference,
+                );
+            }
+            return;
+        }
         if is_archive(&bytes) {
             let members = match read_archive(path, &bytes, self.source) {
                 Ok(members) => members,
@@ -6306,7 +6530,7 @@ impl<'s> Context<'s> {
 
     fn find_dependent_library(&self, specifier: &str, is_static: bool) -> Option<(String, bool)> {
         for folder in &self.options.library_paths {
-            let folder = self.resolve_path(folder);
+            let folder = self.resolve_folder(folder);
             let mut candidates = Vec::new();
             if !is_static {
                 candidates.push(format!("{folder}/lib{specifier}.so"));
@@ -6319,7 +6543,7 @@ impl<'s> Context<'s> {
             }
         }
         for folder in &self.options.library_paths {
-            let candidate = format!("{}/{specifier}", self.resolve_path(folder));
+            let candidate = format!("{}/{specifier}", self.resolve_folder(folder));
             if (self.source)(&candidate).is_some() {
                 return Some((candidate, true));
             }
@@ -9898,7 +10122,11 @@ impl<'s> Context<'s> {
     }
 
     pub fn dynamic_undefined_weak(&self) -> bool {
-        self.has_dynamic_symbols && (!self.shared_files.is_empty() || self.is_shared())
+        self.has_dynamic_symbols
+            && self
+                .options
+                .dynamic_undefined_weak
+                .unwrap_or(!self.shared_files.is_empty() || self.is_shared())
     }
 
     pub fn compute_is_preemptible(&self, id: SymbolIndex) -> bool {
@@ -9976,7 +10204,7 @@ impl<'s> Context<'s> {
             return Some(bytes);
         }
         for folder in &self.options.library_paths {
-            let folder = self.resolve_path(folder);
+            let folder = self.resolve_folder(folder);
             if let Some(bytes) = (self.source)(&format!("{folder}/{path}")) {
                 return Some(bytes);
             }
@@ -20461,6 +20689,9 @@ fn link_elf_rooted(
     let bytes = context.run();
     let limit = context.options.error_limit.unwrap_or(20);
     let mut diagnostics = std::mem::take(&mut context.diagnostics);
+    if context.options.no_warnings {
+        diagnostics.retain(|diagnostic| diagnostic.severity != Severity::Warning);
+    }
     if limit > 0 {
         let mut count = 0usize;
         let cut = diagnostics.iter().position(|diagnostic| {
@@ -36110,12 +36341,15 @@ impl<'s> Context<'s> {
         index
     }
 
+    fn under_sysroot(&self, path: &str) -> bool {
+        self.options.sysroot.as_ref().is_some_and(|root| {
+            let root = root.trim_end_matches('/');
+            !root.is_empty() && (path == root || path.starts_with(&format!("{root}/")))
+        })
+    }
+
     pub fn read_linker_script(&mut self, text: &str, name: &str, load: &mut ScriptLoad) {
-        let under_sysroot = self
-            .options
-            .sysroot
-            .as_ref()
-            .is_some_and(|root| !root.is_empty() && name.starts_with(root.as_str()));
+        let under_sysroot = self.under_sysroot(name);
         let mut lexer = LinkerScriptLexer::new(text, name, under_sysroot);
         self.read_script_statements(&mut lexer, load, IncludeKind::Statements, &mut Vec::new());
         if let Some(failure) = lexer.failure.take() {
@@ -36449,7 +36683,7 @@ impl<'s> Context<'s> {
             return;
         }
         for folder in self.options.library_paths.clone() {
-            let folder = self.resolve_path(&folder);
+            let folder = self.resolve_folder(&folder);
             let path = format!("{folder}/{name}");
             if let Some(bytes) = (self.source)(&path) {
                 self.add_file(
@@ -36472,7 +36706,7 @@ impl<'s> Context<'s> {
             return Some(name.to_string());
         }
         for folder in &self.options.library_paths {
-            let folder = self.resolve_path(folder);
+            let folder = self.resolve_folder(folder);
             let path = format!("{folder}/{name}");
             if (self.source)(&path).is_some() {
                 return Some(path);
@@ -36502,7 +36736,7 @@ impl<'s> Context<'s> {
         };
         let text = String::from_utf8_lossy(&bytes).to_string();
         lexer.active_names.insert(name.clone());
-        let under = lexer.under_sysroot();
+        let under = self.under_sysroot(&path);
         lexer.push_buffer(&text, &path, under);
         self.read_script_statements(lexer, load, kind, sections);
         if lexer.failed() {
