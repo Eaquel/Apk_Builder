@@ -105,6 +105,7 @@ pub struct Options {
     pub emulation: Option<String>,
     pub entry: Option<String>,
     pub image_base: Option<u64>,
+    pub image_base_text: String,
     pub maximum_page_size: Option<u64>,
     pub common_page_size: Option<u64>,
     pub inputs: Vec<InputItem>,
@@ -138,6 +139,9 @@ pub struct Options {
     pub gcs_report_dynamic: Option<u8>,
     pub pauth_report: u8,
     pub pending_errors: Vec<Diagnostic>,
+    pub pic_veneer: bool,
+    pub shuffle_sections: Vec<(String, u32)>,
+    pub exclude_libraries: Vec<String>,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -261,6 +265,7 @@ impl Default for Options {
             emulation: None,
             entry: None,
             image_base: None,
+            image_base_text: String::new(),
             maximum_page_size: None,
             common_page_size: None,
             inputs: Vec::new(),
@@ -294,6 +299,9 @@ impl Default for Options {
             gcs_report_dynamic: None,
             pauth_report: 0,
             pending_errors: Vec::new(),
+            pic_veneer: false,
+            shuffle_sections: Vec::new(),
+            exclude_libraries: Vec::new(),
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -437,6 +445,10 @@ pub fn parse_integer_any_radix(text: &str) -> Option<u64> {
 }
 
 const NUMBER_EXPECTED: &str = "number expected, but got";
+
+const SHUFFLE_PREFIX: &str = "--shuffle-sections=: ";
+
+const MAGIC_DISABLES_PAGING: &str = ", but paging disabled by omagic or nmagic";
 
 const ARM_ONLY: u8 = 1;
 const AARCH64_ONLY: u8 = 2;
@@ -1061,6 +1073,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                 invalid_value("--image-base", &value)
                     .with_context(format!("Cause: --image-base: {NUMBER_EXPECTED} {value}"))
             })?);
+            options.image_base_text = value;
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--hash-style"])? {
@@ -1266,6 +1279,16 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--static" | "-static" | "-Bstatic" | "--Bstatic" | "-dn" | "-non_shared" => {
                 options.inputs.push(InputItem::Static(true))
             }
+            "--omagic" | "-omagic" | "-N" => {
+                options.omagic = true;
+                options.inputs.push(InputItem::Static(true));
+            }
+            "--nmagic" | "-nmagic" | "-n" => {
+                options.nmagic = true;
+                options.inputs.push(InputItem::Static(true));
+            }
+            "--no-omagic" | "-no-omagic" => options.omagic = false,
+            "--no-nmagic" | "-no-nmagic" => options.nmagic = false,
             "-Bdynamic" | "--Bdynamic" | "-dy" | "-call_shared" => {
                 options.inputs.push(InputItem::Static(false))
             }
@@ -1325,6 +1348,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--xosegment" => options.execute_only_segment = true,
             "--no-xosegment" => options.execute_only_segment = false,
             "--noinhibit-exec" => options.no_inhibit_executable = true,
+            "--pic-veneer" => options.pic_veneer = true,
             "--fatal-warnings" => options.fatal_warnings = true,
             "--no-warnings" => options.no_warnings = true,
             "--no-fatal-warnings" => options.fatal_warnings = false,
@@ -1520,6 +1544,73 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     options
                         .inputs
                         .push(InputItem::JustSymbols(value.to_string()));
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--exclude-libs=") {
+                    options
+                        .exclude_libraries
+                        .extend(value.split([',', ':']).map(str::to_string));
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--shuffle-sections=") {
+                    let shuffle_error = |cause: String| {
+                        invalid_value("--shuffle-sections", value)
+                            .with_context(format!("Cause: {SHUFFLE_PREFIX}{cause}"))
+                    };
+                    match value.split_once('=') {
+                        Some((pattern, seed)) if !pattern.is_empty() && !seed.is_empty() => {
+                            let (negative, digits) = match seed.strip_prefix('-') {
+                                Some(rest) => (true, rest),
+                                None => (false, seed),
+                            };
+                            match parse_integer_any_radix(digits) {
+                                None => options.pending_errors.push(shuffle_error(format!(
+                                    "expected an integer, but got '{seed}'"
+                                ))),
+                                Some(number) => match glob_problem(pattern) {
+                                    Some(problem) => options
+                                        .pending_errors
+                                        .push(shuffle_error(format!("{problem}: {pattern}"))),
+                                    None => {
+                                        let number = if negative {
+                                            number.wrapping_neg()
+                                        } else {
+                                            number
+                                        };
+                                        options
+                                            .shuffle_sections
+                                            .push((pattern.to_string(), number as u32));
+                                    }
+                                },
+                            }
+                        }
+                        _ => options.pending_errors.push(shuffle_error(format!(
+                            "expected <section_glob>=<seed>, but got '{value}'"
+                        ))),
+                    }
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--sort-section=") {
+                    options.sort_section = match value {
+                        "alignment" => SortPolicy::Alignment,
+                        "name" => SortPolicy::Name,
+                        _ => {
+                            return Err(invalid_value("--sort-section", value).with_context(
+                                format!("Cause: unknown --sort-section rule: {value}"),
+                            ))
+                        }
+                    };
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--oformat=") {
+                    if value == "binary" {
+                        options.output_binary = true;
+                    } else if value.starts_with("elf") {
+                        options.output_binary = false;
+                    } else {
+                        return Err(invalid_value("--oformat", value)
+                            .with_context(format!("Cause: unknown --oformat value: {value}")));
+                    }
                     continue;
                 }
                 if let Some(value) = argument.strip_prefix("--default-script=") {
@@ -8675,6 +8766,50 @@ const BOTH_SCOPES: &str =
 const MULTIPLE_DEFINITIONS: &str =
     "wildcard pattern '*' is used for multiple version definitions in version script";
 
+struct MersenneTwister {
+    state: [u32; 624],
+    index: usize,
+}
+
+impl MersenneTwister {
+    fn new(seed: u32) -> MersenneTwister {
+        let mut state = [0u32; 624];
+        state[0] = seed;
+        for position in 1..624 {
+            let previous = state[position - 1];
+            state[position] = 1_812_433_253u32
+                .wrapping_mul(previous ^ (previous >> 30))
+                .wrapping_add(position as u32);
+        }
+        MersenneTwister { state, index: 624 }
+    }
+
+    fn twist(&mut self) {
+        for position in 0..624 {
+            let combined = (self.state[position] & 0x8000_0000)
+                | (self.state[(position + 1) % 624] & 0x7fff_ffff);
+            let mut shifted = combined >> 1;
+            if combined & 1 != 0 {
+                shifted ^= 0x9908_b0df;
+            }
+            self.state[position] = self.state[(position + 397) % 624] ^ shifted;
+        }
+        self.index = 0;
+    }
+
+    fn next(&mut self) -> u32 {
+        if self.index >= 624 {
+            self.twist();
+        }
+        let mut value = self.state[self.index];
+        self.index += 1;
+        value ^= value >> 11;
+        value ^= (value << 7) & 0x9d2c_5680;
+        value ^= (value << 15) & 0xefc6_0000;
+        value ^ (value >> 18)
+    }
+}
+
 fn glob_problem(pattern: &str) -> Option<&'static str> {
     let bytes = pattern.as_bytes();
     let mut at = 0usize;
@@ -15758,21 +15893,31 @@ impl<'s> Context<'s> {
             .find(|output| self.outputs[*output].name == name)
     }
 
+    fn magic_segment_flags(&self, flags: u32) -> u32 {
+        if self.options.omagic {
+            segment_flag::READ | segment_flag::WRITE | segment_flag::EXECUTE
+        } else {
+            flags
+        }
+    }
+
     pub fn create_segments(&mut self) {
         let header = self.elf_header_output;
         let programs = self.program_header_output;
-        let phdr = self.add_segment(segment_type::PROGRAM_HEADERS, segment_flag::READ);
-        self.segment_add(phdr, programs);
-        if let Some(interpreter) = self.find_output(".interp") {
-            let flags = self.segment_flags_of(interpreter);
-            let segment = self.add_segment(segment_type::INTERPRETER, flags);
-            self.segment_add(segment, interpreter);
-        }
-        let mut flags = segment_flag::READ;
-        let mut load = Some(self.add_segment(segment_type::LOAD, flags));
-        if let Some(segment) = load {
+        let mut flags = self.magic_segment_flags(segment_flag::READ);
+        let mut load = None;
+        if !self.options.omagic && !self.options.nmagic {
+            let phdr = self.add_segment(segment_type::PROGRAM_HEADERS, segment_flag::READ);
+            self.segment_add(phdr, programs);
+            if let Some(interpreter) = self.find_output(".interp") {
+                let flags = self.segment_flags_of(interpreter);
+                let segment = self.add_segment(segment_type::INTERPRETER, flags);
+                self.segment_add(segment, interpreter);
+            }
+            let segment = self.add_segment(segment_type::LOAD, flags);
             self.segment_add(segment, header);
             self.segment_add(segment, programs);
+            load = Some(segment);
         }
         let mut relocation_segments: Vec<Segment> = Vec::new();
         let mut relocation_ends: BTreeSet<OutputIndex> = BTreeSet::new();
@@ -15803,7 +15948,7 @@ impl<'s> Context<'s> {
             if !self.needs_load(output) {
                 continue;
             }
-            let new_flags = self.segment_flags_of(output);
+            let new_flags = self.magic_segment_flags(self.segment_flags_of(output));
             let mut incompatible = flags ^ new_flags;
             if new_flags & segment_flag::WRITE == 0 {
                 if !self.options.read_only_segment {
@@ -16254,7 +16399,36 @@ impl<'s> Context<'s> {
         changed
     }
 
+    fn assign_binary_file_offsets(&mut self) {
+        let placed: Vec<OutputIndex> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|output| {
+                let section = &self.outputs[*output];
+                section.kind != section_type::NO_BITS
+                    && section.flags & section_flag::ALLOCATE != 0
+                    && section.size > 0
+            })
+            .collect();
+        let minimum = placed
+            .iter()
+            .map(|output| self.load_address_of(*output))
+            .min()
+            .unwrap_or(0);
+        self.file_size = 0;
+        for output in placed {
+            let offset = self.load_address_of(output) - minimum;
+            self.outputs[output].offset = offset;
+            self.file_size = self.file_size.max(offset + self.outputs[output].size);
+        }
+    }
+
     pub fn assign_file_offsets(&mut self) {
+        if self.options.output_binary {
+            self.assign_binary_file_offsets();
+            return;
+        }
         let header = self.elf_header_output;
         let programs = self.program_header_output;
         self.outputs[header].offset = 0;
@@ -20073,7 +20247,31 @@ impl<'s> Context<'s> {
         ranges
     }
 
+    fn write_binary_output(&mut self) -> Vec<u8> {
+        let mut out = vec![0u8; self.file_size as usize];
+        for output in self.order.clone() {
+            let section = &self.outputs[output];
+            if section.kind == section_type::NO_BITS
+                || section.flags & section_flag::ALLOCATE == 0
+                || section.size == 0
+            {
+                continue;
+            }
+            let start = section.offset as usize;
+            let contents = self.output_contents(output);
+            let end = (start + contents.len()).min(out.len());
+            if start < end {
+                out[start..end].copy_from_slice(&contents[..end - start]);
+            }
+        }
+        self.write_build_identifier(&mut out);
+        out
+    }
+
     pub fn write_output(&mut self) -> Vec<u8> {
+        if self.options.output_binary {
+            return self.write_binary_output();
+        }
         let encoding = self.encoding();
         let mut out = vec![0u8; self.file_size as usize];
         let mut headers = self.program_headers();
@@ -20533,6 +20731,9 @@ impl<'s> Context<'s> {
     }
 
     pub fn run(&mut self) -> Option<Vec<u8>> {
+        if self.options.omagic || self.options.nmagic {
+            self.options.relocation_read_only = false;
+        }
         self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
         for diagnostic in std::mem::take(&mut self.options.pending_errors) {
             self.error(diagnostic);
@@ -20656,6 +20857,7 @@ impl<'s> Context<'s> {
             return None;
         }
         self.declare_script_symbols();
+        self.exclude_libraries();
         let relocatable = self.is_relocatable();
         self.read_security_notes();
         self.apply_feature_plt_sizes();
@@ -20665,6 +20867,7 @@ impl<'s> Context<'s> {
             self.parse_versions_and_compute_preemptible();
             self.combine_versioned_symbols();
         }
+        self.exclude_libraries();
         if self.failed() {
             return None;
         }
@@ -20679,6 +20882,43 @@ impl<'s> Context<'s> {
             .common_page_size
             .unwrap_or(self.target.default_common_page_size)
             .min(self.maximum_page_size);
+        if self.options.omagic || self.options.nmagic {
+            let defaults = [
+                (
+                    "-z max-page-size",
+                    self.options.maximum_page_size,
+                    self.target.default_maximum_page_size,
+                ),
+                (
+                    "-z common-page-size",
+                    self.options.common_page_size,
+                    self.target.default_common_page_size,
+                ),
+            ];
+            for (option, given, default) in defaults {
+                if given.is_some_and(|value| value != default) {
+                    self.warn(
+                        caution("EI287", "An option has no effect in this link.")
+                            .with_context(format!("Option: {option}"))
+                            .with_context(format!("Cause: {option} set{MAGIC_DISABLES_PAGING}")),
+                    );
+                }
+            }
+            self.maximum_page_size = 1;
+            self.common_page_size = 1;
+        }
+        if let Some(base) = self.options.image_base {
+            if base % self.maximum_page_size != 0 {
+                let text = self.options.image_base_text.clone();
+                self.warn(
+                    caution("EI287", "An option has no effect in this link.")
+                        .with_context("Option: --image-base".to_string())
+                        .with_context(format!(
+                            "Cause: --image-base: address isn't multiple of page size: {text}"
+                        )),
+                );
+            }
+        }
         self.image_base = self.options.image_base.unwrap_or(if self.is_pic() {
             0
         } else {
@@ -20820,7 +21060,7 @@ impl<'s> Context<'s> {
         programs.alignment = self.word_size();
         self.program_header_output = self.outputs.len();
         self.outputs.push(programs);
-        if !relocatable {
+        if !relocatable && !self.options.output_binary {
             if self.script.program_header_commands.is_empty() {
                 self.create_segments();
             } else {
@@ -21366,6 +21606,7 @@ fn link_elf_rooted(
 pub enum ThunkKind {
     Aarch64AbsoluteLong,
     Aarch64PagedLong,
+    Aarch64LandingPad,
     ArmV7AbsoluteLong,
     ArmV7PositionIndependentLong,
     ThumbV7AbsoluteLong,
@@ -21408,6 +21649,7 @@ impl ThunkKind {
         match self {
             ThunkKind::Aarch64AbsoluteLong => 16,
             ThunkKind::Aarch64PagedLong => 12,
+            ThunkKind::Aarch64LandingPad => 8,
             ThunkKind::ArmV7AbsoluteLong => 12,
             ThunkKind::ArmV7PositionIndependentLong => 16,
             ThunkKind::ThumbV7AbsoluteLong => 10,
@@ -21429,6 +21671,7 @@ impl ThunkKind {
         match self {
             ThunkKind::Aarch64AbsoluteLong => "__AArch64AbsLongThunk_",
             ThunkKind::Aarch64PagedLong => "__AArch64ADRPThunk_",
+            ThunkKind::Aarch64LandingPad => "__AArch64BTIThunk_",
             ThunkKind::ArmV7AbsoluteLong => "__ARMv7ABSLongThunk_",
             ThunkKind::ArmV7PositionIndependentLong => "__ARMV7PILongThunk_",
             ThunkKind::ThumbV7AbsoluteLong => "__Thumbv7ABSLongThunk_",
@@ -21467,6 +21710,7 @@ impl ThunkKind {
         !matches!(
             self,
             ThunkKind::Aarch64PagedLong
+                | ThunkKind::Aarch64LandingPad
                 | ThunkKind::ArmV7AbsoluteLong
                 | ThunkKind::ArmV7PositionIndependentLong
                 | ThunkKind::ThumbV7AbsoluteLong
@@ -21485,6 +21729,8 @@ pub struct Thunk {
     pub symbols: Vec<SymbolIndex>,
     pub may_use_short: bool,
     pub section: SectionIndex,
+    pub may_need_landing_pad: bool,
+    pub landing_pad: Option<SymbolIndex>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -21495,6 +21741,9 @@ pub struct ThunkState {
     pub by_symbol: BTreeMap<(SymbolIndex, i64), Vec<usize>>,
     pub by_target: BTreeMap<SymbolIndex, usize>,
     pub thunk_of_section: BTreeMap<SectionIndex, Vec<usize>>,
+    pub landing_pads: BTreeMap<(SectionIndex, u64, i64), usize>,
+    pub prefix_sections: BTreeMap<SectionIndex, SectionIndex>,
+    pub rounded_for_errata: BTreeMap<SectionIndex, u64>,
 }
 
 impl<'s> Context<'s> {
@@ -21660,7 +21909,7 @@ impl<'s> Context<'s> {
         addend: i64,
         section: SectionIndex,
     ) -> ThunkKind {
-        let position_independent = self.is_pic();
+        let position_independent = self.is_pic() || self.options.pic_veneer;
         if self.target.architecture == Architecture::Aarch64 {
             return if position_independent {
                 ThunkKind::Aarch64PagedLong
@@ -21731,6 +21980,22 @@ impl<'s> Context<'s> {
         !matches!(kind, 51 | 30)
     }
 
+    fn thunk_section_compatible(&self, source: SectionIndex, thunk: usize) -> bool {
+        let target = self.thunk_state.thunks[thunk].symbols[0];
+        let Some(target_section) = self.symbols[target].section else {
+            return true;
+        };
+        match (
+            self.sections[source].output,
+            self.sections[target_section].output,
+        ) {
+            (Some(source_output), Some(target_output)) => {
+                source_output == target_output || !self.outputs[target_output].script.in_overlay
+            }
+            _ => true,
+        }
+    }
+
     fn thunk_target_address(&self, thunk: usize) -> u64 {
         self.symbol_address(self.thunk_state.thunks[thunk].symbols[0], 0)
     }
@@ -21770,6 +22035,16 @@ impl<'s> Context<'s> {
         }
         let kind = self.thunk_state.thunks[thunk].kind;
         let destination_symbol = self.thunk_state.thunks[thunk].destination;
+        if kind == ThunkKind::Aarch64LandingPad {
+            let addend = self.thunk_state.thunks[thunk].addend;
+            let destination = self.symbol_address(destination_symbol, addend);
+            let place = self.thunk_target_address(thunk);
+            let distance = destination.wrapping_sub(place);
+            let short =
+                distance.wrapping_add(self.thunk_state.thunks[thunk].offset) == 0 || distance <= 4;
+            self.thunk_state.thunks[thunk].may_use_short = short;
+            return short;
+        }
         let short = if kind.is_aarch64() {
             let destination = self.thunk_destination(thunk);
             let place = self.thunk_target_address(thunk);
@@ -21839,6 +22114,7 @@ impl<'s> Context<'s> {
         offset: u64,
         pass: u32,
         description: usize,
+        prefix: bool,
     ) -> SectionIndex {
         let mut section = InputSection::synthetic(
             ".text.thunk",
@@ -21858,7 +22134,129 @@ impl<'s> Context<'s> {
             .or_default()
             .push((index, pass));
         self.thunk_state.thunk_of_section.insert(index, Vec::new());
+        let errata =
+            self.target_option("--fix-cortex-a53-843419") || self.target_option("--fix-cortex-a8");
+        if errata && !prefix {
+            let members: Vec<SectionIndex> = self.outputs[output]
+                .members
+                .iter()
+                .copied()
+                .filter(|member| self.sections[*member].description == description)
+                .collect();
+            if let (Some(first), Some(last)) = (members.first(), members.last()) {
+                let span = self.sections[*last].offset_in_output + self.sections[*last].size
+                    - self.sections[*first].offset_in_output;
+                if self.outputs[output].size > self.thunk_spacing() && span > 4096 {
+                    self.thunk_state.rounded_for_errata.insert(index, 0);
+                }
+            }
+        }
         index
+    }
+
+    fn input_thunk_section(&mut self, section: SectionIndex, pass: u32) -> Option<SectionIndex> {
+        if let Some(found) = self.thunk_state.prefix_sections.get(&section) {
+            return Some(*found);
+        }
+        let output = self.sections[section].output?;
+        let description = self.sections[section].description;
+        let offset = self.sections[section].offset_in_output;
+        let thunk_section = self.add_thunk_section(output, offset, pass, description, true);
+        self.thunk_state
+            .prefix_sections
+            .insert(section, thunk_section);
+        Some(thunk_section)
+    }
+
+    fn is_landing_pad(&self, symbol: SymbolIndex, addend: i64) -> bool {
+        let data = &self.symbols[symbol];
+        if data.plt_index.is_some() || !data.is_defined() {
+            return true;
+        }
+        let Some(section) = data.section else {
+            return true;
+        };
+        let input = &self.sections[section];
+        if input.is_merge || input.is_exception_frame {
+            return true;
+        }
+        let offset = data.value.wrapping_add(addend as u64);
+        if offset >= input.size {
+            return true;
+        }
+        if input.synthetic.is_some() {
+            return false;
+        }
+        let start = offset as usize;
+        let Some(bytes) = input.data.get(start..start + 4) else {
+            return false;
+        };
+        let instruction = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        instruction & 0xd503_201f == 0xd503_201f
+            && [
+                0xd503_233f,
+                0xd503_237f,
+                0xd503_245f,
+                0xd503_249f,
+                0xd503_24df,
+            ]
+            .contains(&instruction)
+    }
+
+    fn add_synthetic_landing_pads(&mut self, pass: u32) -> bool {
+        let mut changed = false;
+        for thunk in 0..self.thunk_state.thunks.len() {
+            if !self.thunk_state.thunks[thunk].may_need_landing_pad
+                || self.may_use_short_thunk(thunk)
+            {
+                continue;
+            }
+            let destination = self.thunk_state.thunks[thunk].destination;
+            let addend = self.thunk_state.thunks[thunk].addend;
+            let Some(section) = self.symbols[destination].section else {
+                continue;
+            };
+            let key = (section, self.symbols[destination].value, addend);
+            let pad = match self.thunk_state.landing_pads.get(&key) {
+                Some(pad) => *pad,
+                None => {
+                    let Some(thunk_section) = self.input_thunk_section(section, pass) else {
+                        continue;
+                    };
+                    let pad = self.thunk_state.thunks.len();
+                    self.thunk_state.thunks.push(Thunk {
+                        kind: ThunkKind::Aarch64LandingPad,
+                        destination,
+                        addend,
+                        offset: 0,
+                        alignment: 4,
+                        symbols: Vec::new(),
+                        may_use_short: true,
+                        section: thunk_section,
+                        may_need_landing_pad: false,
+                        landing_pad: None,
+                    });
+                    self.thunk_state
+                        .thunk_of_section
+                        .entry(thunk_section)
+                        .or_default()
+                        .push(pad);
+                    let name = format!(
+                        "{}{}",
+                        ThunkKind::Aarch64LandingPad.name_prefix(),
+                        self.symbols[destination].name
+                    );
+                    self.add_thunk_local(pad, &name, symbol_type::FUNCTION, 0);
+                    self.add_thunk_local(pad, "$x", symbol_type::NO_TYPE, 0);
+                    self.thunk_state.landing_pads.insert(key, pad);
+                    changed = true;
+                    pad
+                }
+            };
+            let target = self.thunk_state.thunks[pad].symbols[0];
+            self.thunk_state.thunks[thunk].landing_pad = Some(target);
+        }
+        changed
     }
 
     fn create_initial_thunk_sections(&mut self) {
@@ -21886,7 +22284,7 @@ impl<'s> Context<'s> {
                 for member in &members {
                     limit = self.sections[*member].offset_in_output + self.sections[*member].size;
                     if limit > upper_bound {
-                        self.add_thunk_section(output, previous_limit, 0, description);
+                        self.add_thunk_section(output, previous_limit, 0, description, false);
                         upper_bound = previous_limit + spacing;
                     }
                     if limit > last_lower_bound {
@@ -21894,7 +22292,7 @@ impl<'s> Context<'s> {
                     }
                     previous_limit = limit;
                 }
-                self.add_thunk_section(output, limit, 0, description);
+                self.add_thunk_section(output, limit, 0, description, false);
             }
         }
     }
@@ -21936,7 +22334,7 @@ impl<'s> Context<'s> {
         ) {
             offset += self.sections[section].size;
         }
-        self.add_thunk_section(output, offset, pass, description)
+        self.add_thunk_section(output, offset, pass, description, false)
     }
 
     pub fn assign_thunk_offsets(&mut self, thunk_section: SectionIndex) -> bool {
@@ -21965,11 +22363,20 @@ impl<'s> Context<'s> {
             self.symbols[target].size = size;
             offset += size;
         }
-        if offset != self.sections[thunk_section].size {
-            changed = true;
-        }
-        self.sections[thunk_section].size = offset;
-        changed
+        let previous = match self.thunk_state.rounded_for_errata.get_mut(&thunk_section) {
+            Some(raw) => {
+                let previous = *raw;
+                *raw = offset;
+                self.sections[thunk_section].size = align_to(offset, 4096);
+                previous
+            }
+            None => {
+                let previous = self.sections[thunk_section].size;
+                self.sections[thunk_section].size = offset;
+                previous
+            }
+        };
+        changed || offset != previous
     }
 
     fn sort_thunks_by_destination(&mut self, thunk_section: SectionIndex) {
@@ -21998,6 +22405,9 @@ impl<'s> Context<'s> {
         let mut changed = false;
         if pass == 0 && self.thunk_spacing() != 0 {
             self.create_initial_thunk_sections();
+        }
+        if self.target.architecture == Architecture::Aarch64 {
+            changed = self.add_synthetic_landing_pads(pass);
         }
         for output in self.order.clone() {
             let flags = self.outputs[output].flags;
@@ -22080,7 +22490,9 @@ impl<'s> Context<'s> {
                     };
                     let mut chosen = None;
                     for thunk in existing {
-                        if self.thunk_compatible(&self.thunk_state.thunks[thunk], relocation.kind)
+                        if self.thunk_section_compatible(member, thunk)
+                            && self
+                                .thunk_compatible(&self.thunk_state.thunks[thunk], relocation.kind)
                             && self.in_branch_range(
                                 relocation.kind,
                                 source,
@@ -22115,6 +22527,11 @@ impl<'s> Context<'s> {
                                 symbols: Vec::new(),
                                 may_use_short: true,
                                 section: thunk_section,
+                                may_need_landing_pad: self.target.architecture
+                                    == Architecture::Aarch64
+                                    && self.and_features & 1 != 0
+                                    && !self.is_landing_pad(relocation.symbol, relocation.addend),
+                                landing_pad: None,
                             });
                             match place_key {
                                 Some(key) => self
@@ -22265,6 +22682,15 @@ impl<'s> Context<'s> {
         let data = self.thunk_state.thunks[thunk].clone();
         let place = self.thunk_target_address(thunk);
         let encoding = self.encoding();
+        if data.kind == ThunkKind::Aarch64LandingPad {
+            out[0..4].copy_from_slice(&0xd503_245fu32.to_le_bytes());
+            if !short {
+                let destination = self.symbol_address(data.destination, data.addend);
+                out[4..8].copy_from_slice(&0x1400_0000u32.to_le_bytes());
+                self.encode_no_symbol(out, 4, 283, destination.wrapping_sub(place + 4));
+            }
+            return;
+        }
         if data.kind.is_aarch64() {
             let destination = self.thunk_destination(thunk);
             if short {
@@ -22272,6 +22698,10 @@ impl<'s> Context<'s> {
                 self.encode_no_symbol(out, 0, 283, destination.wrapping_sub(place));
                 return;
             }
+            let destination = match data.landing_pad {
+                Some(pad) if data.may_need_landing_pad => self.symbol_address(pad, 0),
+                _ => destination,
+            };
             match data.kind {
                 ThunkKind::Aarch64AbsoluteLong => {
                     out[0..8].copy_from_slice(&[0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6]);
@@ -22436,7 +22866,9 @@ impl<'s> Context<'s> {
                     destination.wrapping_sub(aligned_place).wrapping_sub(16) as u32,
                 );
             }
-            ThunkKind::Aarch64AbsoluteLong | ThunkKind::Aarch64PagedLong => {}
+            ThunkKind::Aarch64AbsoluteLong
+            | ThunkKind::Aarch64PagedLong
+            | ThunkKind::Aarch64LandingPad => {}
         }
     }
 }
@@ -47301,8 +47733,121 @@ impl<'s> Context<'s> {
         self.ordering_warning(format!("{file}: unable to order {what} symbol: {name}"));
     }
 
+    fn exclude_libraries(&mut self) {
+        if self.options.exclude_libraries.is_empty() {
+            return;
+        }
+        let all = self
+            .options
+            .exclude_libraries
+            .iter()
+            .any(|name| name == "ALL");
+        for file in self.object_files.clone() {
+            let Some(archive) = self.files[file].archive_name.clone() else {
+                continue;
+            };
+            let base = archive.rsplit('/').next().unwrap_or(&archive).to_string();
+            if !all && !self.options.exclude_libraries.contains(&base) {
+                continue;
+            }
+            let first_global = self.files[file].first_global;
+            let symbols: Vec<SymbolIndex> = self.files[file]
+                .symbols
+                .iter()
+                .skip(first_global)
+                .copied()
+                .filter(|id| *id != usize::MAX)
+                .collect();
+            for id in symbols {
+                let symbol = &mut self.symbols[id];
+                if !symbol.is_undefined() && symbol.file == Some(file) {
+                    symbol.version = elf::version_index::LOCAL;
+                    symbol.exported = false;
+                }
+            }
+        }
+    }
+
+    fn shuffle_candidates(&self) -> Vec<SectionIndex> {
+        let skipped = [
+            section_type::NULL,
+            section_type::SYMBOL_TABLE,
+            section_type::STRING_TABLE,
+            section_type::GROUP,
+            section_type::RELOCATIONS,
+            section_type::RELOCATIONS_WITH_ADDENDS,
+        ];
+        let regular = (0..self.sections.len()).filter(|section| {
+            let data = &self.sections[*section];
+            data.synthetic.is_none()
+                && data.live
+                && !data.is_merge
+                && !data.is_exception_frame
+                && data.name != ".comment"
+                && !skipped.contains(&data.kind)
+        });
+        let synthetic = (0..self.sections.len()).filter(|section| {
+            let data = &self.sections[*section];
+            data.synthetic.is_some()
+                && data.synthetic != Some(Synthetic::Merge)
+                && data.live
+                && data.output.is_some()
+        });
+        regular.chain(synthetic).collect()
+    }
+
+    fn shuffle_section_order(&mut self) {
+        if self.options.shuffle_sections.is_empty() {
+            return;
+        }
+        let mut sections = self.shuffle_candidates();
+        for (pattern, seed) in self.options.shuffle_sections.clone() {
+            let mut matched: Vec<SectionIndex> = sections
+                .iter()
+                .copied()
+                .filter(|section| glob_match(&pattern, &self.sections[*section].name))
+                .collect();
+            if seed == u32::MAX {
+                matched.reverse();
+            } else {
+                let mut generator = MersenneTwister::new(if seed == 0 { 5489 } else { seed });
+                let mut first = 0usize;
+                let mut size = matched.len();
+                while size > 1 {
+                    let offset = (u64::from(generator.next()) % size as u64) as usize;
+                    if offset != 0 {
+                        matched.swap(first, first + offset);
+                    }
+                    first += 1;
+                    size -= 1;
+                }
+            }
+            let mut next = 0usize;
+            for slot in sections.iter_mut() {
+                if glob_match(&pattern, &self.sections[*slot].name) {
+                    *slot = matched[next];
+                    next += 1;
+                }
+            }
+        }
+        let mut priority = 0i64;
+        for section in sections {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                self.section_order.entry(section)
+            {
+                entry.insert(priority);
+                priority += 1;
+            }
+        }
+    }
+
     pub fn build_section_order(&mut self) {
         self.call_graph_order();
+        self.read_symbol_ordering_file();
+        self.shuffle_section_order();
+    }
+
+    fn read_symbol_ordering_file(&mut self) {
         let Some(path) = self.options.symbol_ordering_file.clone() else {
             return;
         };
