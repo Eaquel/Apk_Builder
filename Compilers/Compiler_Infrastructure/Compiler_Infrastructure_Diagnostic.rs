@@ -18,6 +18,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI208", "A relocation value does not fit in its field."),
     ("EI209", "The input targets a different machine than the output."),
     ("EI210", "The linker does not support this relocation."),
+    ("EI211", "An input lacks a security property that the link requires."),
     ("EI212", "The linker does not support what this input asks for yet."),
     ("EI213", "No input files were given."),
     ("EI214", "A shared library cannot be linked statically."),

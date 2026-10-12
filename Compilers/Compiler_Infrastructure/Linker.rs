@@ -127,6 +127,17 @@ pub struct Options {
     pub strip: Strip,
     pub section_header: bool,
     pub no_warnings: bool,
+    pub force_bti: bool,
+    pub force_ibt: bool,
+    pub pac_plt: bool,
+    pub shadow_stack: bool,
+    pub guarded_stack: u8,
+    pub bti_report: Option<u8>,
+    pub cet_report: u8,
+    pub gcs_report: Option<u8>,
+    pub gcs_report_dynamic: Option<u8>,
+    pub pauth_report: u8,
+    pub pending_errors: Vec<Diagnostic>,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -272,6 +283,17 @@ impl Default for Options {
             strip: Strip::None,
             section_header: true,
             no_warnings: false,
+            force_bti: false,
+            force_ibt: false,
+            pac_plt: false,
+            shadow_stack: false,
+            guarded_stack: 0,
+            bti_report: None,
+            cet_report: 0,
+            gcs_report: None,
+            gcs_report_dynamic: None,
+            pauth_report: 0,
+            pending_errors: Vec::new(),
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -562,14 +584,44 @@ fn record_target_option(options: &mut Options, key: &str) -> bool {
 fn apply_target_keyword(options: &mut Options, keyword: &str) -> Result<bool, Diagnostic> {
     let (name, value) = keyword.split_once('=').unwrap_or((keyword, ""));
     if REPORT_KEYWORDS.contains(&name) {
-        if !matches!(value, "none" | "warning" | "error") {
-            return Err(invalid_value("-z", keyword)
-                .with_context(format!("Cause: unknown -z {name}= value '{value}'")));
+        let level = match value {
+            "none" => 0u8,
+            "warning" => 1,
+            "error" => 2,
+            _ => {
+                options.pending_errors.push(
+                    invalid_value("-z", keyword)
+                        .with_context(format!("Cause: unknown -z {name}= value '{value}'")),
+                );
+                return Ok(true);
+            }
+        };
+        match name {
+            "bti-report" => options.bti_report = Some(level),
+            "cet-report" => options.cet_report = level,
+            "gcs-report" => options.gcs_report = Some(level),
+            "gcs-report-dynamic" => options.gcs_report_dynamic = Some(level),
+            "pauth-report" => options.pauth_report = level,
+            _ => {}
         }
         if value != "none" {
             record_target_option(options, &format!("-z {name}"));
         }
         return Ok(true);
+    }
+    if name == "gcs" && !value.is_empty() {
+        options.guarded_stack = match value {
+            "implicit" => 0,
+            "never" => 1,
+            "always" => 2,
+            _ => {
+                options.pending_errors.push(
+                    invalid_value("-z", keyword)
+                        .with_context(format!("Cause: unknown -z gcs= value '{value}'")),
+                );
+                return Ok(true);
+            }
+        };
     }
     if matches!(name, "gcs" | "zicfilp" | "zicfiss") && !value.is_empty() {
         if value != "implicit" {
@@ -578,7 +630,30 @@ fn apply_target_keyword(options: &mut Options, keyword: &str) -> Result<bool, Di
         return Ok(true);
     }
     if value.is_empty() && matches!(name, "pac-plt" | "force-bti") {
+        if name == "pac-plt" {
+            options.pac_plt = true;
+        } else {
+            options.force_bti = true;
+        }
         record_target_option(options, &format!("-z {name}"));
+        return Ok(true);
+    }
+    if value.is_empty() && name == "nopac-plt" {
+        options.pac_plt = false;
+        if let Some(index) = TARGET_OPTIONS
+            .iter()
+            .position(|entry| entry.0 == "-z pac-plt")
+        {
+            options.target_options.remove(&index);
+        }
+        return Ok(true);
+    }
+    if value.is_empty() && name == "force-ibt" {
+        options.force_ibt = true;
+        return Ok(true);
+    }
+    if value.is_empty() && name == "shstk" {
+        options.shadow_stack = true;
         return Ok(true);
     }
     Ok(false)
@@ -1495,6 +1570,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
     if options.no_warnings {
         options.fatal_warnings = false;
     }
+    if options.force_ibt && options.retpoline_plt {
+        return Err(invalid_value("-z", "force-ibt")
+            .with_context("Cause: -z force-ibt may not be used with -z retpolineplt".to_string()));
+    }
     if relocatable && !options.section_header {
         return Err(invalid_value("-z", "nosectionheader").with_context(
             "Cause: -r and -z nosectionheader may not be used together".to_string(),
@@ -2082,6 +2161,7 @@ pub enum Synthetic {
     PltRelocations,
     Plt,
     IndirectPlt,
+    IndirectBranchPlt,
     GnuProperty,
     SymbolTable,
     SectionNameTable,
@@ -2212,6 +2292,8 @@ pub struct InputFile {
     pub elf_symbols: Vec<elf::Symbol>,
     pub executable_stack_requested: bool,
     pub and_features: u32,
+    pub pauth_core: Option<(u64, u64)>,
+    pub binary: bool,
     pub required_symbols: Vec<SymbolIndex>,
     pub just_symbols: bool,
 }
@@ -2839,6 +2921,8 @@ pub enum CompressionKind {
     Zstd,
 }
 
+const GCS_DYNAMIC_NOTE: &str = "GCS is required by -z gcs, but this shared library lacks the necessary property note. The dynamic loader might not enable GCS or refuse to load the program unless all shared library dependencies have the GCS marking.";
+const PAUTH_SIZE_SEPARATOR: &str = ", but got ";
 const SUPPORTED_FORMATS: &str = " (supported formats: elf, default, binary)";
 const POSITIVE_INTEGER_EXPECTED: &str = "expected a positive integer, but got";
 const COMPRESSION_PARSE_ERROR: &str = "parse error, not 'section-glob=[none|zlib|zstd]'";
@@ -3038,6 +3122,7 @@ pub struct Context<'s> {
     pub frame_header_large: bool,
     pub frame_header_size: u64,
     pub and_features: u32,
+    pub pauth_core: Option<(u64, u64)>,
     pub elf_header_output: OutputIndex,
     pub program_header_output: OutputIndex,
     pub string_table: Vec<u8>,
@@ -3184,6 +3269,7 @@ impl<'s> Context<'s> {
             frame_header_large: false,
             frame_header_size: 0,
             and_features: 0,
+            pauth_core: None,
             elf_header_output: usize::MAX,
             program_header_output: usize::MAX,
             string_table: vec![0],
@@ -5994,6 +6080,7 @@ impl<'s> Context<'s> {
                 }
             }
             let object = self.binary_object(&name, &bytes);
+            let before = self.files.len();
             self.add_elf(
                 &name,
                 None,
@@ -6004,6 +6091,11 @@ impl<'s> Context<'s> {
                 false,
                 &mut target_reference,
             );
+            if self.files.len() > before {
+                if let Some(file) = self.files.last_mut() {
+                    file.binary = true;
+                }
+            }
         }
         if files_seen == 0 && self.files.len() == files_before && !self.failed() {
             self.error(problem("EI213", "No input files were given."));
@@ -6189,6 +6281,7 @@ impl<'s> Context<'s> {
                     .push((display.to_string(), bytes, state, group));
             } else {
                 let object = self.binary_object(display, &bytes);
+                let before = self.files.len();
                 self.add_elf(
                     display,
                     None,
@@ -6199,6 +6292,11 @@ impl<'s> Context<'s> {
                     from_library,
                     target_reference,
                 );
+                if self.files.len() > before {
+                    if let Some(file) = self.files.last_mut() {
+                        file.binary = true;
+                    }
+                }
             }
             return;
         }
@@ -6424,6 +6522,8 @@ impl<'s> Context<'s> {
             elf_symbols: Vec::new(),
             executable_stack_requested: false,
             and_features: 0,
+            pauth_core: None,
+            binary: false,
             required_symbols: Vec::new(),
             just_symbols: self.loading_just_symbols,
         });
@@ -7952,6 +8052,299 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn encode_gnu_property(&self) -> Vec<u8> {
+        let encoding = self.encoding();
+        let feature = match self.target.architecture {
+            Architecture::Aarch64 => 0xc000_0000u32,
+            _ => 0xc000_0002,
+        };
+        let mut content = Vec::new();
+        if self.and_features != 0 {
+            encoding.put_u32(&mut content, feature);
+            encoding.put_u32(&mut content, 4);
+            encoding.put_u32(&mut content, self.and_features);
+            if encoding.is_64() {
+                encoding.put_u32(&mut content, 0);
+            }
+        }
+        if let Some((platform, version)) = self.pauth_core {
+            encoding.put_u32(&mut content, 0xc000_0001);
+            encoding.put_u32(&mut content, 16);
+            encoding.put_u64(&mut content, platform);
+            encoding.put_u64(&mut content, version);
+        }
+        let mut out = Vec::new();
+        encoding.put_u32(&mut out, 4);
+        encoding.put_u32(&mut out, content.len() as u32);
+        encoding.put_u32(&mut out, elf::note_type::GNU_PROPERTY);
+        out.extend_from_slice(b"GNU\0");
+        out.extend_from_slice(&content);
+        out
+    }
+
+    fn security_report(&mut self, level: u8, cause: String) {
+        let diagnostic = problem(
+            "EI211",
+            "An input lacks a security property that the link requires.",
+        )
+        .with_context(format!("Cause: {cause}"));
+        match level {
+            0 => {}
+            1 => self.warn(diagnostic),
+            _ => self.error_always(diagnostic),
+        }
+    }
+
+    fn shared_features(&self, file: FileIndex) -> u32 {
+        let elf = &self.files[file].elf;
+        let encoding = elf.encoding();
+        let mut features = 0u32;
+        for program in &elf.program_headers {
+            if program.kind != segment_type::GNU_PROPERTY {
+                continue;
+            }
+            let Some(section) = elf
+                .sections
+                .iter()
+                .find(|section| section.offset == program.offset && !section.data.is_empty())
+            else {
+                continue;
+            };
+            let Ok(notes) = elf::decode_notes(encoding, &section.data, program.alignment) else {
+                continue;
+            };
+            for note in notes {
+                if note.kind != elf::note_type::GNU_PROPERTY || note.name != b"GNU" {
+                    continue;
+                }
+                let data = &note.description;
+                let mut at = 0usize;
+                while at + 8 <= data.len() {
+                    let kind = encoding.read_u32(data, at).unwrap_or(0);
+                    let size = encoding.read_u32(data, at + 4).unwrap_or(0) as usize;
+                    at += 8;
+                    if at + size > data.len() {
+                        break;
+                    }
+                    if kind == 0xc000_0000 && size >= 4 {
+                        features |= encoding.read_u32(data, at).unwrap_or(0);
+                    }
+                    at += align_to(size as u64, encoding.word_size() as u64) as usize;
+                }
+            }
+        }
+        features
+    }
+
+    fn read_security_notes(&mut self) {
+        let architecture = self.target.architecture;
+        if !matches!(
+            architecture,
+            Architecture::X86 | Architecture::X86_64 | Architecture::Aarch64
+        ) {
+            self.and_features = 0;
+            return;
+        }
+        let objects: Vec<FileIndex> = self
+            .object_files
+            .iter()
+            .copied()
+            .filter(|file| !self.files[*file].binary)
+            .collect();
+        let mut reference = String::new();
+        if architecture == Architecture::Aarch64 {
+            if let Some(file) = objects
+                .iter()
+                .find(|file| self.files[**file].pauth_core.is_some())
+            {
+                self.pauth_core = self.files[*file].pauth_core;
+                reference = self.file_name(Some(*file));
+            }
+        }
+        let valid_pauth = self
+            .pauth_core
+            .is_some_and(|(platform, version)| platform != 0 || version != 0);
+        let options = self.options.clone();
+        let bti_report = options
+            .bti_report
+            .unwrap_or(if options.force_bti { 1 } else { 0 });
+        let bti_source = if options.bti_report.is_some() {
+            "-z bti-report"
+        } else {
+            "-z force-bti"
+        };
+        let gcs_report =
+            options
+                .gcs_report
+                .unwrap_or(if options.guarded_stack == 2 { 1 } else { 0 });
+        let gcs_source = if options.gcs_report.is_some() {
+            "-z gcs-report"
+        } else {
+            "-z gcs"
+        };
+        let gcs_report_dynamic =
+            options
+                .gcs_report_dynamic
+                .unwrap_or(if gcs_report != 0 { 1 } else { 0 });
+        let mut combined = u32::MAX;
+        for file in objects {
+            let display = self.file_name(Some(file));
+            let mut features = self.files[file].and_features;
+            if features & 1 == 0 {
+                self.security_report(
+                    bti_report,
+                    format!("{display}: {bti_source}: file does not have GNU_PROPERTY_AARCH64_FEATURE_1_BTI property"),
+                );
+            }
+            if features & 4 == 0 {
+                self.security_report(
+                    gcs_report,
+                    format!("{display}: {gcs_source}: file does not have GNU_PROPERTY_AARCH64_FEATURE_1_GCS property"),
+                );
+            }
+            if features & 1 == 0 {
+                self.security_report(
+                    options.cet_report,
+                    format!("{display}: -z cet-report: file does not have GNU_PROPERTY_X86_FEATURE_1_IBT property"),
+                );
+            }
+            if features & 2 == 0 {
+                self.security_report(
+                    options.cet_report,
+                    format!("{display}: -z cet-report: file does not have GNU_PROPERTY_X86_FEATURE_1_SHSTK property"),
+                );
+            }
+            if options.force_bti && features & 1 == 0 {
+                features |= 1;
+            } else if options.force_ibt && features & 1 == 0 {
+                if options.cet_report == 0 {
+                    self.security_report(
+                        1,
+                        format!("{display}: -z force-ibt: file does not have GNU_PROPERTY_X86_FEATURE_1_IBT property"),
+                    );
+                }
+                features |= 1;
+            }
+            if options.pac_plt && !(valid_pauth || features & 2 != 0) {
+                self.security_report(
+                    1,
+                    format!("{display}: -z pac-plt: file does not have GNU_PROPERTY_AARCH64_FEATURE_1_PAC property and no valid PAuth core info present for this link job"),
+                );
+                features |= 2;
+            }
+            combined &= features;
+            let Some((platform, version)) = self.pauth_core else {
+                continue;
+            };
+            match self.files[file].pauth_core {
+                None => self.security_report(
+                    options.pauth_report,
+                    format!("{display}: -z pauth-report: file does not have AArch64 PAuth core info while '{reference}' has one"),
+                ),
+                Some((own_platform, own_version)) => {
+                    if (own_platform, own_version) != (platform, version) {
+                        self.error(
+                            problem(
+                                "EI211",
+                                "An input lacks a security property that the link requires.",
+                            )
+                            .with_context(format!(
+                                "Cause: incompatible values of AArch64 PAuth core info found\nplatform:\n>>> {reference}: 0x{platform:016x}\n>>> {display}: 0x{own_platform:016x}\nversion:\n>>> {reference}: 0x{version:016x}\n>>> {display}: 0x{own_version:016x}"
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+        if options.shadow_stack {
+            combined |= 2;
+        }
+        if options.guarded_stack == 2 {
+            combined |= 4;
+        } else if options.guarded_stack == 1 {
+            combined &= !4;
+        }
+        if combined & 4 != 0 && architecture == Architecture::Aarch64 {
+            for file in self.shared_files.clone() {
+                if self.shared_features(file) & 4 == 0 {
+                    let display = self.file_name(Some(file));
+                    self.security_report(
+                        gcs_report_dynamic,
+                        format!("{display}: {GCS_DYNAMIC_NOTE}"),
+                    );
+                }
+            }
+        }
+        self.and_features = combined;
+    }
+
+    fn property_error(&mut self, index: FileIndex, section: &str, offset: usize, text: &str) {
+        let display = self.file_name(Some(index));
+        self.error(
+            problem("EI200", "The object file could not be read.")
+                .with_context(format!("File: {display}"))
+                .with_context(format!("Cause: {display}:({section}+0x{offset:x}): {text}")),
+        );
+    }
+
+    fn parse_property_note(
+        &mut self,
+        index: FileIndex,
+        feature: u32,
+        description: (usize, usize),
+        data: &[u8],
+        note_start: usize,
+    ) {
+        let encoding = self.encoding();
+        let aarch64 = self.target.architecture == Architecture::Aarch64;
+        let (mut at, end) = description;
+        let section = ".note.gnu.property";
+        while at < end {
+            let place = at;
+            if end - at < 8 {
+                return self.property_error(index, section, place, "program property is too short");
+            }
+            let kind = encoding.read_u32(data, at).unwrap_or(0);
+            let size = encoding.read_u32(data, at + 4).unwrap_or(0) as usize;
+            at += 8;
+            if end - at < size {
+                return self.property_error(index, section, place, "program property is too short");
+            }
+            if kind == feature {
+                if size < 4 {
+                    return self.property_error(
+                        index,
+                        section,
+                        place,
+                        "FEATURE_1_AND entry is too short",
+                    );
+                }
+                self.files[index].and_features |= encoding.read_u32(data, at).unwrap_or(0);
+            } else if aarch64 && kind == 0xc000_0001 {
+                if self.files[index].pauth_core.is_some() {
+                    return self.property_error(
+                        index,
+                        section,
+                        note_start,
+                        "multiple GNU_PROPERTY_AARCH64_FEATURE_PAUTH entries are not supported",
+                    );
+                }
+                if size != 16 {
+                    let text = format!(
+                        "GNU_PROPERTY_AARCH64_FEATURE_PAUTH entry is invalid: expected 16 bytes{PAUTH_SIZE_SEPARATOR}{size}"
+                    );
+                    return self.property_error(index, section, note_start, &text);
+                }
+                self.files[index].pauth_core = Some((
+                    encoding.read_u64(data, at).unwrap_or(0),
+                    encoding.read_u64(data, at + 8).unwrap_or(0),
+                ));
+            }
+            let step = align_to(size as u64, encoding.word_size() as u64) as usize;
+            at = (at + step).min(end);
+        }
+    }
+
     fn read_gnu_property(&mut self, index: FileIndex, header: &Section) {
         let feature = match self.target.architecture {
             Architecture::X86 | Architecture::X86_64 => 0xc000_0002u32,
@@ -7959,27 +8352,27 @@ impl<'s> Context<'s> {
             Architecture::Arm => return,
         };
         let encoding = self.encoding();
-        let Ok(notes) = elf::decode_notes(encoding, &header.data, header.alignment) else {
-            return;
-        };
-        for note in notes {
-            if note.kind != elf::note_type::GNU_PROPERTY || note.name != b"GNU" {
-                continue;
+        let data = header.data.clone();
+        let alignment = header.alignment.max(1) as usize;
+        let align = |value: usize| value.div_ceil(alignment) * alignment;
+        let mut at = 0usize;
+        while at < data.len() {
+            let rest = data.len() - at;
+            let name_size = encoding.read_u32(&data, at).unwrap_or(0) as usize;
+            let description_size = encoding.read_u32(&data, at + 4).unwrap_or(0) as usize;
+            let kind = encoding.read_u32(&data, at + 8).unwrap_or(0);
+            let size = align(12 + name_size) + align(description_size);
+            if rest < 12 || rest < size {
+                return self.property_error(index, &header.name, at, "data is too short");
             }
-            let mut at = 0usize;
-            let data = &note.description;
-            while at + 8 <= data.len() {
-                let kind = encoding.read_u32(data, at).unwrap_or(0);
-                let size = encoding.read_u32(data, at + 4).unwrap_or(0) as usize;
-                at += 8;
-                if at + size > data.len() {
-                    break;
-                }
-                if kind == feature && size >= 4 {
-                    self.files[index].and_features |= encoding.read_u32(data, at).unwrap_or(0);
-                }
-                at += align_to(size as u64, encoding.word_size() as u64) as usize;
+            let name_end = (at + 12 + name_size.saturating_sub(1)).min(data.len());
+            let name = &data[(at + 12).min(name_end)..name_end];
+            if kind == elf::note_type::GNU_PROPERTY && name == b"GNU" {
+                let start = at + align(12 + name_size);
+                let end = (start + description_size).min(data.len());
+                self.parse_property_note(index, feature, (start, end), &data, at);
             }
+            at += size;
         }
     }
 
@@ -8482,6 +8875,17 @@ impl<'s> Context<'s> {
             1,
             Synthetic::BssRelocationReadOnly,
         );
+        if self.indirect_branch_plt() {
+            let index = self.add_synthetic(
+                ".plt",
+                section_type::PROGRAM_BITS,
+                section_flag::ALLOCATE | section_flag::EXECUTE,
+                16,
+                Synthetic::IndirectBranchPlt,
+            );
+            self.synthetic.remove(".plt");
+            self.synthetic.insert("ibtplt".to_string(), index);
+        }
         if self.options.build_identifier != BuildIdentifier::None {
             let index = self.add_synthetic(
                 ".note.gnu.build-id",
@@ -8683,13 +9087,25 @@ impl<'s> Context<'s> {
         if self.target.architecture == Architecture::Aarch64 {
             plt_flags |= section_flag::AARCH64_PURE_CODE;
         }
-        self.add_synthetic(
-            ".plt",
-            section_type::PROGRAM_BITS,
-            plt_flags,
-            16,
-            Synthetic::Plt,
-        );
+        if self.indirect_branch_plt() {
+            let index = self.add_synthetic(
+                ".plt.sec",
+                section_type::PROGRAM_BITS,
+                plt_flags,
+                16,
+                Synthetic::Plt,
+            );
+            self.synthetic.remove(".plt.sec");
+            self.synthetic.insert(".plt".to_string(), index);
+        } else {
+            self.add_synthetic(
+                ".plt",
+                section_type::PROGRAM_BITS,
+                plt_flags,
+                16,
+                Synthetic::Plt,
+            );
+        }
         self.add_synthetic(
             ".iplt",
             section_type::PROGRAM_BITS,
@@ -8697,14 +9113,15 @@ impl<'s> Context<'s> {
             16,
             Synthetic::IndirectPlt,
         );
-        if self.and_features != 0 {
-            self.add_synthetic(
+        if self.and_features != 0 || self.pauth_core.is_some() {
+            let index = self.add_synthetic(
                 ".note.gnu.property",
                 section_type::NOTE,
                 section_flag::ALLOCATE,
                 word,
                 Synthetic::GnuProperty,
             );
+            self.sections[index].size = self.encode_gnu_property().len() as u64;
         }
         if self.options.debug_names {
             if let Some(names) = self.create_debug_names() {
@@ -8839,6 +9256,7 @@ impl<'s> Context<'s> {
                     || (self.retpoline() && !self.indirect_plt_entries.is_empty())
             }
             Synthetic::IndirectPlt => !self.indirect_plt_entries.is_empty(),
+            Synthetic::IndirectBranchPlt => !self.plt_entries.is_empty(),
             Synthetic::PltRelocations => !self.plt_relocations.is_empty(),
             Synthetic::DynamicRelocations => !self.dynamic_relocations.is_empty(),
             Synthetic::RelativeRelocations => !self.relative_relocations.is_empty(),
@@ -9240,6 +9658,14 @@ impl<'s> Context<'s> {
                     tag::RELOCATIONS as u64
                 },
             );
+        }
+        if self.target.architecture == Architecture::Aarch64 {
+            if self.and_features & 1 != 0 {
+                add(0x7000_0001, 0);
+            }
+            if self.options.pac_plt {
+                add(0x7000_0003, 0);
+            }
         }
         add(
             tag::SYMBOL_TABLE,
@@ -16100,6 +16526,14 @@ impl<'s> Context<'s> {
             ),
             ("igot", self.indirect_got_plt_entries.len() as u64 * entry),
             (
+                "ibtplt",
+                if self.plt_entries.is_empty() {
+                    0
+                } else {
+                    16 + self.plt_entries.len() as u64 * 16
+                },
+            ),
+            (
                 ".plt",
                 if self.plt_entries.is_empty()
                     && !(self.retpoline() && !self.indirect_plt_entries.is_empty())
@@ -18589,6 +19023,11 @@ impl<'s> Context<'s> {
                     self.plt_address(*id) + 17
                 }
                 Architecture::X86 if self.retpoline() => self.plt_address(*id) + 16,
+                Architecture::X86_64 | Architecture::X86 if self.indirect_branch_plt() => {
+                    self.synthetic_address("ibtplt")
+                        + 16
+                        + self.symbols[*id].plt_index.unwrap_or(0) * 16
+                }
                 Architecture::X86_64 | Architecture::X86 => self.plt_address(*id) + 6,
                 _ => plt,
             };
@@ -18620,7 +19059,7 @@ impl<'s> Context<'s> {
         let got_plt = self.synthetic_address(".got.plt");
         let header = self.target.plt_header_size as usize;
         let size = self.target.plt_entry_size as usize;
-        if buffer.len() >= header {
+        if header > 0 && buffer.len() >= header {
             self.write_plt_header(&mut buffer[..header], plt, got_plt);
         }
         for (position, id) in self.plt_entries.clone().into_iter().enumerate() {
@@ -18798,9 +19237,146 @@ impl<'s> Context<'s> {
         put(out, 22, 0u64.wrapping_sub(offset).wrapping_sub(26));
     }
 
+    fn indirect_branch_plt(&self) -> bool {
+        matches!(
+            self.target.architecture,
+            Architecture::X86_64 | Architecture::X86
+        ) && self.and_features & 1 != 0
+            && !self.options.retpoline_plt
+    }
+
+    fn aarch64_protected_plt(&self) -> bool {
+        self.target.architecture == Architecture::Aarch64
+            && (self.and_features & 1 != 0 || self.options.pac_plt)
+    }
+
+    fn apply_feature_plt_sizes(&mut self) {
+        if self.indirect_branch_plt() {
+            self.target.plt_header_size = 0;
+        }
+        if self.aarch64_protected_plt() {
+            self.target.plt_entry_size = 24;
+            self.target.indirect_plt_entry_size = 24;
+        }
+    }
+
+    fn write_indirect_branch_plt(&self, buffer: &mut [u8]) {
+        if buffer.len() < 16 {
+            return;
+        }
+        let ibt = self.synthetic_address("ibtplt");
+        let got_plt = self.synthetic_address(".got.plt");
+        self.write_plt_header(&mut buffer[..16], ibt, got_plt);
+        let x86 = self.target.architecture == Architecture::X86;
+        for position in 0..self.plt_entries.len() {
+            let at = 16 + position * 16;
+            if at + 16 > buffer.len() {
+                break;
+            }
+            let out = &mut buffer[at..at + 16];
+            out.copy_from_slice(&[
+                0xf3,
+                0x0f,
+                0x1e,
+                if x86 { 0xfb } else { 0xfa },
+                0x68,
+                0,
+                0,
+                0,
+                0,
+                0xe9,
+                0,
+                0,
+                0,
+                0,
+                0x66,
+                0x90,
+            ]);
+            let pushed = if x86 { position * 8 } else { position } as u32;
+            out[5..9].copy_from_slice(&pushed.to_le_bytes());
+            let back = (-(16 * position as i64) - 30) as u32;
+            out[10..14].copy_from_slice(&back.to_le_bytes());
+        }
+    }
+
+    fn write_protected_plt_entry(
+        &self,
+        out: &mut [u8],
+        id: SymbolIndex,
+        entry_address: u64,
+        got_plt_entry: u64,
+    ) {
+        let symbol = &self.symbols[id];
+        let thunk_accessed = self
+            .thunk_state
+            .thunks
+            .iter()
+            .any(|thunk| thunk.destination == id);
+        let has_bti = self.and_features & 1 != 0
+            && (symbol.needs & needs::COPY != 0 || symbol.in_indirect_plt || thunk_accessed);
+        let mut words: Vec<u32> = Vec::new();
+        let mut address = entry_address;
+        if has_bti {
+            words.push(0xd503_245f);
+            address += 4;
+        }
+        let first = words.len() * 4;
+        words.extend_from_slice(&[0x9000_0010, 0xf940_0211, 0x9100_0210]);
+        let valid = self
+            .pauth_core
+            .is_some_and(|(platform, version)| platform != 0 || version != 0);
+        if !self.options.pac_plt {
+            words.extend_from_slice(&[0xd61f_0220, 0xd503_201f]);
+        } else if valid {
+            words.extend_from_slice(&[0xd71f_0a30, 0xd503_201f]);
+        } else {
+            words.extend_from_slice(&[0xd503_219f, 0xd61f_0220]);
+        }
+        if !has_bti {
+            words.push(0xd503_201f);
+        }
+        for (index, word) in words.iter().enumerate() {
+            out[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        aarch64_encode_page(
+            out,
+            first,
+            aarch64_page(got_plt_entry).wrapping_sub(aarch64_page(address)),
+        );
+        aarch64_encode_low12(out, first + 4, (got_plt_entry >> 3) & 0x1ff);
+        aarch64_encode_low12(out, first + 8, got_plt_entry & 0xfff);
+    }
+
     fn write_plt_header(&self, out: &mut [u8], plt: u64, got_plt: u64) {
         if self.retpoline() {
             self.write_retpoline_header(out, plt, got_plt);
+            return;
+        }
+        if self.target.architecture == Architecture::Aarch64
+            && self.aarch64_protected_plt()
+            && self.and_features & 1 != 0
+        {
+            let words: [u32; 8] = [
+                0xd503_245f,
+                0xa9bf_7bf0,
+                0x9000_0010,
+                0xf940_0211,
+                0x9100_0210,
+                0xd61f_0220,
+                0xd503_201f,
+                0xd503_201f,
+            ];
+            for (index, word) in words.iter().enumerate() {
+                out[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            let target = got_plt + 16;
+            aarch64_encode_page(
+                out,
+                8,
+                aarch64_page(target).wrapping_sub(aarch64_page(plt + 8)),
+            );
+            aarch64_encode_low12(out, 12, (target >> 3) & 0x1ff);
+            aarch64_encode_low12(out, 16, target & 0xfff);
             return;
         }
         let encoding = self.encoding();
@@ -18888,6 +19464,41 @@ impl<'s> Context<'s> {
         let encoding = self.encoding();
         let got_plt_entry = self.got_plt_address(id);
         let plt = self.synthetic_address(".plt");
+        if self.indirect_branch_plt() {
+            let x86 = self.target.architecture == Architecture::X86;
+            out.copy_from_slice(&[
+                0xf3,
+                0x0f,
+                0x1e,
+                if x86 { 0xfb } else { 0xfa },
+                0xff,
+                0x25,
+                0,
+                0,
+                0,
+                0,
+                0x66,
+                0x0f,
+                0x1f,
+                0x44,
+                0,
+                0,
+            ]);
+            let value = if !x86 {
+                got_plt_entry.wrapping_sub(entry_address).wrapping_sub(10)
+            } else if self.is_pic() {
+                out[5] = 0xa3;
+                got_plt_entry.wrapping_sub(self.synthetic_address(".got.plt"))
+            } else {
+                got_plt_entry
+            };
+            out[6..10].copy_from_slice(&(value as u32).to_le_bytes());
+            return;
+        }
+        if self.target.architecture == Architecture::Aarch64 && self.aarch64_protected_plt() {
+            self.write_protected_plt_entry(out, id, entry_address, got_plt_entry);
+            return;
+        }
         match self.target.architecture {
             Architecture::X86_64 => {
                 out.copy_from_slice(&[0xff, 0x25, 0, 0, 0, 0, 0x68, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0]);
@@ -19195,6 +19806,8 @@ impl<'s> Context<'s> {
             }
             Synthetic::StringTable => buffer = self.string_table.clone(),
             Synthetic::GdbIndex => buffer = self.encode_gdb_index(),
+            Synthetic::GnuProperty => buffer = self.encode_gnu_property(),
+            Synthetic::IndirectBranchPlt => self.write_indirect_branch_plt(&mut buffer),
             Synthetic::RelativeRelocations => {
                 let encoding = self.encoding();
                 buffer = Vec::new();
@@ -19686,7 +20299,19 @@ impl<'s> Context<'s> {
                         .with_context(format!("Option: {key}"))
                         .with_context(format!("Cause: {message}")),
                 );
-            } else if key != "--be8" && key != "--fix-cortex-a53-843419" {
+            } else if !matches!(
+                key,
+                "--be8"
+                    | "--fix-cortex-a53-843419"
+                    | "-z pac-plt"
+                    | "-z force-bti"
+                    | "-z bti-report"
+                    | "-z pauth-report"
+                    | "-z gcs-report"
+                    | "-z gcs-report-dynamic"
+                    | "-z gcs"
+                    | "-z cet-report"
+            ) {
                 self.error_always(not_supported(key));
             }
         }
@@ -19909,6 +20534,12 @@ impl<'s> Context<'s> {
 
     pub fn run(&mut self) -> Option<Vec<u8>> {
         self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
+        for diagnostic in std::mem::take(&mut self.options.pending_errors) {
+            self.error(diagnostic);
+        }
+        if self.failed() {
+            return None;
+        }
         self.read_compression_options();
         if self.options.symbol_ordering_file.is_some()
             && self.options.call_graph_ordering_file.is_some()
@@ -20026,15 +20657,8 @@ impl<'s> Context<'s> {
         }
         self.declare_script_symbols();
         let relocatable = self.is_relocatable();
-        self.and_features = self
-            .object_files
-            .iter()
-            .map(|file| self.files[*file].and_features)
-            .fold(u32::MAX, |left, right| left & right);
-        if self.object_files.is_empty() {
-            self.and_features = 0;
-        }
-        self.and_features = 0;
+        self.read_security_notes();
+        self.apply_feature_plt_sizes();
         if !relocatable {
             self.add_reserved_symbols();
             self.scan_version_script();

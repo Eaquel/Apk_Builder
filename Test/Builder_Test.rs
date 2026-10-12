@@ -69540,6 +69540,19 @@ mod linker_lit {
             ) => Some(
                 "the installed LLVM 18 llvm-mc and llvm-objdump do not emit APX relocations or decode APX registers",
             ),
+            Some(
+                "ELF/gnu-property-align.s"
+                | "ELF/gnu-property-align-32.s"
+                | "ELF/gnu-build-attributes.s",
+            ) => Some(
+                "the installed LLVM 18 llvm-readobj prints notes without the NoteSections and Notes lists",
+            ),
+            Some("ELF/aarch64-feature-pauth.s") => Some(
+                "the installed LLVM 18 llvm-readelf does not decode the AArch64 PAuth core info property",
+            ),
+            Some("ELF/aarch64-cortex-a53-843419-thunk-relocation-crash.s") => Some(
+                "the installed LLVM 18 llvm-objdump prints every zero word of the 128 MiB data gap as about 2.7 GB of text",
+            ),
             Some("ELF/compress-sections-special.s") => Some(
                 "the lit runner appends stderr after stdout under 2>&1 and the test needs llvm-readelf warnings interleaved with its hex dump",
             ),
