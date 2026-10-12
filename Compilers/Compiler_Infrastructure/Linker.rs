@@ -74,6 +74,7 @@ pub enum InputItem {
     PopState,
     Script(String),
     DefaultScript(String),
+    JustSymbols(String),
     Defsym(String),
 }
 
@@ -1386,6 +1387,12 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     options.dependency_file = Some(value.to_string());
                     continue;
                 }
+                if let Some(value) = argument.strip_prefix("--just-symbols=") {
+                    options
+                        .inputs
+                        .push(InputItem::JustSymbols(value.to_string()));
+                    continue;
+                }
                 if let Some(value) = argument.strip_prefix("--default-script=") {
                     options
                         .inputs
@@ -2108,6 +2115,7 @@ pub struct InputFile {
     pub executable_stack_requested: bool,
     pub and_features: u32,
     pub required_symbols: Vec<SymbolIndex>,
+    pub just_symbols: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2883,6 +2891,10 @@ pub struct Context<'s> {
     pub exception_index_inputs: Vec<SectionIndex>,
     pub deferred_duplicates: Vec<Diagnostic>,
     pub archive_statistics: Vec<(String, usize)>,
+    pub loading_just_symbols: bool,
+    erratum_map: Option<ErratumMap>,
+    pub erratum_patches: BTreeSet<SectionIndex>,
+    erratum_patch_addresses: BTreeMap<SectionIndex, u64>,
     pub traced_symbols: BTreeSet<SymbolIndex>,
     pub extraction_records: Vec<(String, FileIndex, SymbolIndex)>,
     pub pending_dependent_libraries: Vec<(FileIndex, String)>,
@@ -3005,6 +3017,10 @@ impl<'s> Context<'s> {
             exception_index_inputs: Vec::new(),
             deferred_duplicates: Vec::new(),
             archive_statistics: Vec::new(),
+            loading_just_symbols: false,
+            erratum_map: None,
+            erratum_patches: BTreeSet::new(),
+            erratum_patch_addresses: BTreeMap::new(),
             traced_symbols: BTreeSet::new(),
             extraction_records: Vec::new(),
             pending_dependent_libraries: Vec::new(),
@@ -3497,6 +3513,491 @@ fn incompatible(file: &str, reference: &str) -> Diagnostic {
     .with_context(format!("Cause: {file} is incompatible with {reference}"))
 }
 
+fn is_aarch64_page_address(instruction: u32) -> bool {
+    instruction & 0x9f00_0000 == 0x9000_0000
+}
+
+fn is_aarch64_load_store_class(instruction: u32) -> bool {
+    instruction & 0x0a00_0000 == 0x0800_0000
+}
+
+fn is_aarch64_store_one_multiple_opcode(instruction: u32) -> bool {
+    matches!(
+        instruction & 0x0000_f000,
+        0x0000_2000 | 0x0000_6000 | 0x0000_7000 | 0x0000_a000
+    )
+}
+
+fn is_aarch64_store_one_single_opcode(instruction: u32) -> bool {
+    matches!(
+        instruction & 0x0040_e000,
+        0x0000_0000 | 0x0000_4000 | 0x0000_8000
+    )
+}
+
+fn is_aarch64_store_one_multiple_post(instruction: u32) -> bool {
+    instruction & 0xbfe0_0000 == 0x0c80_0000 && is_aarch64_store_one_multiple_opcode(instruction)
+}
+
+fn is_aarch64_store_one_single_post(instruction: u32) -> bool {
+    instruction & 0xbfe0_0000 == 0x0d80_0000 && is_aarch64_store_one_single_opcode(instruction)
+}
+
+fn is_aarch64_store_one(instruction: u32) -> bool {
+    (instruction & 0xbfff_0000 == 0x0c00_0000 && is_aarch64_store_one_multiple_opcode(instruction))
+        || is_aarch64_store_one_multiple_post(instruction)
+        || (instruction & 0xbfff_0000 == 0x0d00_0000
+            && is_aarch64_store_one_single_opcode(instruction))
+        || is_aarch64_store_one_single_post(instruction)
+}
+
+fn is_aarch64_load_store_exclusive(instruction: u32) -> bool {
+    instruction & 0x3f00_0000 == 0x0800_0000
+}
+
+fn is_aarch64_load_exclusive(instruction: u32) -> bool {
+    instruction & 0x3f40_0000 == 0x0840_0000
+}
+
+fn is_aarch64_load_literal(instruction: u32) -> bool {
+    instruction & 0x3b00_0000 == 0x1800_0000
+}
+
+fn is_aarch64_store_pair_no_allocate(instruction: u32) -> bool {
+    instruction & 0x3bc0_0000 == 0x2800_0000
+}
+
+fn is_aarch64_store_pair_post(instruction: u32) -> bool {
+    instruction & 0x3bc0_0000 == 0x2880_0000
+}
+
+fn is_aarch64_store_pair_pre(instruction: u32) -> bool {
+    instruction & 0x3bc0_0000 == 0x2980_0000
+}
+
+fn is_aarch64_store_pair(instruction: u32) -> bool {
+    is_aarch64_store_pair_post(instruction)
+        || instruction & 0x3bc0_0000 == 0x2900_0000
+        || is_aarch64_store_pair_pre(instruction)
+}
+
+fn is_aarch64_immediate_post(instruction: u32) -> bool {
+    instruction & 0x3b20_0c00 == 0x3800_0400
+}
+
+fn is_aarch64_immediate_pre(instruction: u32) -> bool {
+    instruction & 0x3b20_0c00 == 0x3800_0c00
+}
+
+fn is_aarch64_register_unsigned(instruction: u32) -> bool {
+    instruction & 0x3b00_0000 == 0x3900_0000
+}
+
+fn is_aarch64_branch(instruction: u32) -> bool {
+    instruction & 0xfe00_0000 == 0xd600_0000
+        || instruction & 0xfe00_0000 == 0x5400_0000
+        || instruction & 0x7c00_0000 == 0x1400_0000
+        || instruction & 0x7c00_0000 == 0x3400_0000
+}
+
+fn is_aarch64_single_register_load_store(instruction: u32) -> bool {
+    instruction & 0x3b00_0c00 == 0x3800_0000
+        || is_aarch64_immediate_post(instruction)
+        || instruction & 0x3b20_0c00 == 0x3800_0800
+        || is_aarch64_immediate_pre(instruction)
+        || instruction & 0x3b20_0c00 == 0x3820_0800
+        || is_aarch64_register_unsigned(instruction)
+}
+
+fn is_aarch64_non_structure_load(instruction: u32) -> bool {
+    if is_aarch64_load_exclusive(instruction) || is_aarch64_load_literal(instruction) {
+        return true;
+    }
+    if is_aarch64_single_register_load_store(instruction) {
+        let size = (instruction >> 30) & 0xff;
+        let vector = (instruction >> 26) & 1;
+        let operation = (instruction >> 22) & 3;
+        return operation != 0
+            && !(size == 0 && vector == 1 && operation == 2)
+            && !(size == 3 && vector == 0 && operation == 2);
+    }
+    false
+}
+
+fn aarch64_writes_register(instruction: u32, register: u32) -> bool {
+    let writeback = is_aarch64_immediate_pre(instruction)
+        || is_aarch64_immediate_post(instruction)
+        || is_aarch64_store_pair_pre(instruction)
+        || is_aarch64_store_pair_post(instruction)
+        || is_aarch64_store_one_single_post(instruction)
+        || is_aarch64_store_one_multiple_post(instruction);
+    (is_aarch64_non_structure_load(instruction) && instruction & 0x1f == register)
+        || (writeback && (instruction >> 5) & 0x1f == register)
+}
+
+fn is_cortex_a53_sequence(first: u32, second: u32, last: u32) -> bool {
+    if !is_aarch64_page_address(first) {
+        return false;
+    }
+    let register = first & 0x1f;
+    is_aarch64_load_store_class(second)
+        && (is_aarch64_load_store_exclusive(second)
+            || is_aarch64_load_literal(second)
+            || is_aarch64_single_register_load_store(second)
+            || is_aarch64_store_pair(second)
+            || is_aarch64_store_pair_no_allocate(second)
+            || is_aarch64_store_one(second))
+        && !aarch64_writes_register(second, register)
+        && is_aarch64_register_unsigned(last)
+        && (last >> 5) & 0x1f == register
+}
+
+type ErratumMap = BTreeMap<SectionIndex, (Option<SymbolIndex>, Vec<SymbolIndex>)>;
+
+impl<'s> Context<'s> {
+    fn erratum_mapping_symbols(&self) -> ErratumMap {
+        let code = |name: &str| name == "$x" || name.starts_with("$x.");
+        let data = |name: &str| name == "$d" || name.starts_with("$d.");
+        let mut map: ErratumMap = BTreeMap::new();
+        for file in &self.object_files {
+            let count = self.files[*file]
+                .first_global
+                .min(self.files[*file].symbols.len());
+            for id in self.files[*file].symbols[..count].iter().copied() {
+                let symbol = &self.symbols[id];
+                if symbol.state != SymbolState::Defined {
+                    continue;
+                }
+                let Some(section) = symbol.section else {
+                    continue;
+                };
+                if symbol.kind == symbol_type::SECTION {
+                    map.entry(section).or_default().0 = Some(id);
+                } else if (code(&symbol.name) || data(&symbol.name))
+                    && self.sections[section].flags & section_flag::EXECUTE != 0
+                {
+                    map.entry(section).or_default().1.push(id);
+                }
+            }
+        }
+        for (_, list) in map.values_mut() {
+            list.sort_by_key(|id| self.symbols[*id].value);
+            list.dedup_by(|later, earlier| {
+                code(&self.symbols[*later].name) == code(&self.symbols[*earlier].name)
+            });
+            if list
+                .first()
+                .is_some_and(|first| !code(&self.symbols[*first].name))
+            {
+                list.remove(0);
+            }
+        }
+        map
+    }
+
+    fn add_synthetic_local(
+        &mut self,
+        name: &str,
+        kind: u8,
+        value: u64,
+        size: u64,
+        section: SectionIndex,
+    ) -> SymbolIndex {
+        let mut data = SymbolData::new(name);
+        data.state = SymbolState::Defined;
+        data.is_local = true;
+        data.binding = symbol_binding::LOCAL;
+        data.kind = kind;
+        data.file = Some(INTERNAL);
+        data.section = Some(section);
+        data.value = value;
+        data.size = size;
+        data.used_in_regular_object = true;
+        let id = self.symbols.len();
+        self.symbols.push(data);
+        if self.options.strip != Strip::All {
+            self.add_to_symbol_table(id);
+        }
+        id
+    }
+
+    fn scan_cortex_a53(&self, section: SectionIndex, offset: &mut u64, limit: u64) -> u64 {
+        let base = self.section_address(section, 0);
+        let initial = (base + *offset) & 0xfff;
+        if initial < 0xff8 {
+            *offset += 0xff8 - initial;
+        }
+        let optional = limit.saturating_sub(*offset) > 12;
+        if *offset >= limit || limit - *offset < 12 {
+            *offset = limit;
+            return 0;
+        }
+        let data = &self.sections[section].data;
+        let word = |at: u64| -> u32 {
+            let at = at as usize;
+            data.get(at..at + 4)
+                .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .unwrap_or(0)
+        };
+        let first = word(*offset);
+        let second = word(*offset + 4);
+        let third = word(*offset + 8);
+        let mut patch = 0;
+        if is_cortex_a53_sequence(first, second, third) {
+            patch = *offset + 8;
+        } else if optional && !is_aarch64_branch(third) {
+            let fourth = word(*offset + 12);
+            if is_cortex_a53_sequence(first, second, fourth) {
+                patch = *offset + 12;
+            }
+        }
+        if (base + *offset) & 0xfff == 0xff8 {
+            *offset += 4;
+        } else {
+            *offset += 0xffc;
+        }
+        patch
+    }
+
+    fn implement_cortex_a53_patch(
+        &mut self,
+        page_address: u64,
+        patchee_offset: u64,
+        section: SectionIndex,
+        anchor: SymbolIndex,
+        patches: &mut Vec<SectionIndex>,
+    ) {
+        let found = self.sections[section]
+            .relocations
+            .iter()
+            .position(|relocation| relocation.offset == patchee_offset);
+        if let Some(position) = found {
+            let relocation = &self.sections[section].relocations[position];
+            if relocation.kind == 282
+                || ((relocation.kind == 541 || relocation.kind == 542)
+                    && relocation.expression == Expression::ThreadPointerRelative)
+            {
+                return;
+            }
+        }
+        self.log(format!(
+            "detected cortex-a53-843419 erratum sequence starting at {page_address:X} in unpatched output."
+        ));
+        let output = self.sections[section].output;
+        let patchee_address = self.section_address(section, patchee_offset);
+        let start = patchee_offset as usize;
+        let original = self.sections[section]
+            .data
+            .get(start..start + 4)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_else(|| vec![0; 4]);
+        let mut patch = InputSection::synthetic(
+            ".text.patch",
+            section_type::PROGRAM_BITS,
+            section_flag::ALLOCATE | section_flag::EXECUTE,
+            4,
+            Synthetic::Thunks,
+        );
+        patch.synthetic = None;
+        patch.data = original;
+        patch.data.extend_from_slice(&0x1400_0000u32.to_le_bytes());
+        patch.size = 8;
+        patch.output = output;
+        patch.live = true;
+        patch.description = self.sections[section].description;
+        let index = self.sections.len();
+        self.sections.push(patch);
+        self.erratum_patches.insert(index);
+        self.erratum_patch_addresses.insert(index, patchee_address);
+        let target = self.add_synthetic_local(
+            &format!("__CortexA53843419_{patchee_address:X}"),
+            symbol_type::FUNCTION,
+            0,
+            8,
+            index,
+        );
+        self.add_synthetic_local("$x", symbol_type::NO_TYPE, 0, 0, index);
+        let anchor_value = self.symbols[anchor].value;
+        self.sections[index].relocations.push(Relocation {
+            expression: Expression::ProgramCounter,
+            kind: 282,
+            offset: 4,
+            addend: patchee_offset as i64 - anchor_value as i64 + 4,
+            symbol: anchor,
+        });
+        let branch = Relocation {
+            expression: Expression::ProgramCounter,
+            kind: 282,
+            offset: patchee_offset,
+            addend: 0,
+            symbol: target,
+        };
+        match found {
+            Some(position) => {
+                let mut moved = self.sections[section].relocations[position].clone();
+                moved.offset = 0;
+                self.sections[index].relocations.insert(0, moved);
+                self.sections[section].relocations[position] = branch;
+            }
+            None => self.sections[section].relocations.push(branch),
+        }
+        patches.push(index);
+    }
+
+    fn patch_cortex_a53_description(
+        &mut self,
+        members: &[SectionIndex],
+        map: &mut ErratumMap,
+    ) -> Vec<SectionIndex> {
+        let mut patches = Vec::new();
+        for member in members.iter().copied() {
+            if self.sections[member].synthetic.is_some() || self.erratum_patches.contains(&member) {
+                continue;
+            }
+            let (known, mapping) = map.get(&member).cloned().unwrap_or_default();
+            let anchor = match known {
+                Some(anchor) => anchor,
+                None => {
+                    let anchor = self.add_synthetic_local("", symbol_type::NO_TYPE, 0, 0, member);
+                    map.entry(member).or_default().0 = Some(anchor);
+                    anchor
+                }
+            };
+            let mut position = 0usize;
+            while position < mapping.len() {
+                let mut offset = self.symbols[mapping[position]].value;
+                let limit = match mapping.get(position + 1) {
+                    Some(data) => self.symbols[*data].value,
+                    None => self.sections[member].data.len() as u64,
+                };
+                while offset < limit {
+                    let start = self.section_address(member, offset);
+                    let patchee = self.scan_cortex_a53(member, &mut offset, limit);
+                    if patchee != 0 {
+                        self.implement_cortex_a53_patch(
+                            start,
+                            patchee,
+                            member,
+                            anchor,
+                            &mut patches,
+                        );
+                    }
+                }
+                position += 2;
+            }
+        }
+        patches
+    }
+
+    fn insert_cortex_a53_patches(
+        &mut self,
+        output: OutputIndex,
+        range: (usize, usize),
+        patches: &[SectionIndex],
+    ) {
+        let members: Vec<SectionIndex> = self.outputs[output].members[range.0..range.1].to_vec();
+        let spacing = self.thunk_spacing();
+        let address = self.outputs[output].address;
+        let mut previous_limit = self.sections[members[0]].offset_in_output;
+        let mut upper_bound = previous_limit + spacing;
+        let mut limit = previous_limit;
+        let mut next = 0usize;
+        for member in &members {
+            limit = self.sections[*member].offset_in_output + self.sections[*member].size;
+            if limit > upper_bound {
+                while next < patches.len() {
+                    let patch = patches[next];
+                    let patchee = self
+                        .erratum_patch_addresses
+                        .get(&patch)
+                        .copied()
+                        .unwrap_or(0)
+                        .wrapping_sub(address);
+                    if patchee >= previous_limit {
+                        break;
+                    }
+                    self.sections[patch].offset_in_output = previous_limit;
+                    next += 1;
+                }
+                upper_bound = previous_limit + spacing;
+            }
+            previous_limit = limit;
+        }
+        for patch in &patches[next..] {
+            self.sections[*patch].offset_in_output = limit;
+        }
+        let mut merged = Vec::with_capacity(members.len() + patches.len());
+        let mut left = members.iter().copied().peekable();
+        let mut right = patches.iter().copied().peekable();
+        loop {
+            match (left.peek().copied(), right.peek().copied()) {
+                (Some(member), Some(patch)) => {
+                    let member_offset = self.sections[member].offset_in_output;
+                    let patch_offset = self.sections[patch].offset_in_output;
+                    let member_is_patch = self.erratum_patches.contains(&member);
+                    if patch_offset < member_offset
+                        || (patch_offset == member_offset && !member_is_patch)
+                    {
+                        merged.push(patch);
+                        right.next();
+                    } else {
+                        merged.push(member);
+                        left.next();
+                    }
+                }
+                (Some(member), None) => {
+                    merged.push(member);
+                    left.next();
+                }
+                (None, Some(patch)) => {
+                    merged.push(patch);
+                    right.next();
+                }
+                (None, None) => break,
+            }
+        }
+        let mut all = self.outputs[output].members[..range.0].to_vec();
+        all.extend(merged);
+        all.extend_from_slice(&self.outputs[output].members[range.1..]);
+        self.outputs[output].members = all;
+    }
+
+    pub fn create_cortex_a53_fixes(&mut self) -> bool {
+        let mut map = match self.erratum_map.take() {
+            Some(map) => map,
+            None => self.erratum_mapping_symbols(),
+        };
+        let mut changed = false;
+        for output in self.order.clone() {
+            let flags = self.outputs[output].flags;
+            if flags & section_flag::ALLOCATE == 0 || flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            let mut start = 0usize;
+            while start < self.outputs[output].members.len() {
+                let description = self.sections[self.outputs[output].members[start]].description;
+                let mut end = start + 1;
+                while end < self.outputs[output].members.len()
+                    && self.sections[self.outputs[output].members[end]].description == description
+                {
+                    end += 1;
+                }
+                let members = self.outputs[output].members[start..end].to_vec();
+                let patches = self.patch_cortex_a53_description(&members, &mut map);
+                if patches.is_empty() {
+                    start = end;
+                    continue;
+                }
+                self.insert_cortex_a53_patches(output, (start, end), &patches);
+                changed = true;
+                start = end + patches.len();
+            }
+        }
+        self.erratum_map = Some(map);
+        changed
+    }
+}
+
 fn bfd_emulation(name: &str) -> Option<&'static str> {
     Some(match name {
         "elf64-aarch64" | "elf64-littleaarch64" => "aarch64linux",
@@ -3601,6 +4102,26 @@ impl<'s> Context<'s> {
             .any(|item| matches!(item, InputItem::Script(_)));
         for item in items {
             match item {
+                InputItem::JustSymbols(path) => match (self.source)(&path) {
+                    Some(bytes) => {
+                        files_seen += 1;
+                        self.loading_just_symbols = true;
+                        self.add_elf(
+                            &path,
+                            None,
+                            bytes,
+                            state,
+                            group,
+                            false,
+                            false,
+                            &mut target_reference,
+                        );
+                        self.loading_just_symbols = false;
+                    }
+                    None => self.error(file_missing(&path).with_context(format!(
+                        "Cause: cannot open {path}: No such file or directory"
+                    ))),
+                },
                 InputItem::DefaultScript(path) => match self.search_script(&path) {
                     Some(found) => {
                         let bytes = (self.source)(&found).unwrap_or_default();
@@ -3934,7 +4455,10 @@ impl<'s> Context<'s> {
             );
             return;
         }
-        if elf.header.file_type != file_type::RELOCATABLE && !is_shared {
+        if elf.header.file_type != file_type::RELOCATABLE
+            && !is_shared
+            && !self.loading_just_symbols
+        {
             self.error(
                 problem(
                     "EI215",
@@ -3980,6 +4504,7 @@ impl<'s> Context<'s> {
             executable_stack_requested: false,
             and_features: 0,
             required_symbols: Vec::new(),
+            just_symbols: self.loading_just_symbols,
         });
         if is_shared {
             self.parse_shared(index);
@@ -5071,8 +5596,9 @@ impl<'s> Context<'s> {
         let count = self.files[index].elf.sections.len();
         let mut map: Vec<Option<SectionIndex>> = vec![None; count];
         let relocatable = self.is_relocatable();
+        let just_symbols = self.files[index].just_symbols;
         for position in 1..count {
-            if self.files[index].discarded[position] {
+            if just_symbols || self.files[index].discarded[position] {
                 continue;
             }
             let header = self.files[index].elf.sections[position].clone();
@@ -6641,6 +7167,19 @@ impl<'s> Context<'s> {
             add(tag::DEBUG, 0);
         }
         let dynamic_name = if rela { ".rela.dyn" } else { ".rel.dyn" };
+        let plt_relocation_name = if rela { ".rela.plt" } else { ".rel.plt" };
+        let output_of = |name: &str| {
+            self.synthetic_section(name)
+                .and_then(|section| self.sections[section].output)
+        };
+        let mut combined_size =
+            self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64;
+        if output_of(dynamic_name).is_some()
+            && output_of(dynamic_name) == output_of(plt_relocation_name)
+        {
+            combined_size +=
+                self.plt_relocations.len() as u64 * encoding.relocation_size(rela) as u64;
+        }
         if self.live_synthetic(dynamic_name) && !self.dynamic_relocations.is_empty() {
             add(
                 if rela {
@@ -6656,7 +7195,7 @@ impl<'s> Context<'s> {
                 } else {
                     tag::RELOCATIONS_SIZE
                 },
-                self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64,
+                combined_size,
             );
             add(
                 if rela {
@@ -16690,6 +17229,13 @@ impl<'s> Context<'s> {
         }
     }
 
+    pub fn target_option(&self, key: &str) -> bool {
+        self.options
+            .target_options
+            .iter()
+            .any(|index| TARGET_OPTIONS[*index].0 == key)
+    }
+
     fn check_target_options(&mut self) {
         let bit = match self.target.architecture {
             Architecture::Arm => ARM_ONLY,
@@ -16705,7 +17251,7 @@ impl<'s> Context<'s> {
                         .with_context(format!("Option: {key}"))
                         .with_context(format!("Cause: {message}")),
                 );
-            } else if key != "--be8" {
+            } else if key != "--be8" && key != "--fix-cortex-a53-843419" {
                 self.error_always(not_supported(key));
             }
         }
@@ -16865,6 +17411,18 @@ impl<'s> Context<'s> {
                     .map(|output| context.outputs[output].index as u32)
                     .unwrap_or(0)
             };
+            let holds_plt_relocations = which != Some(Synthetic::PltRelocations)
+                && self.outputs[output].members.iter().any(|member| {
+                    self.sections[*member].synthetic == Some(Synthetic::PltRelocations)
+                        && self.sections[*member].size != 0
+                });
+            if holds_plt_relocations {
+                let target = index_of(".got.plt", self);
+                if target != 0 && self.has_dynamic_symbols {
+                    self.outputs[output].info = target;
+                    self.outputs[output].flags |= section_flag::INFO_LINK;
+                }
+            }
             match which {
                 Some(Synthetic::SymbolTable) => {
                     self.outputs[output].link = index_of(".strtab", self);
@@ -17214,6 +17772,14 @@ impl<'s> Context<'s> {
                         .with_context("Reason: address assignment did not converge".to_string()),
                 );
                 break;
+            }
+            if self.target_option("--fix-cortex-a53-843419")
+                && self.target.architecture == Architecture::Aarch64
+            {
+                if changed {
+                    self.layout_addresses();
+                }
+                changed |= self.create_cortex_a53_fixes();
             }
             self.finalize_synthetic_sizes();
             changed |= self.update_frame_header();
@@ -18121,7 +18687,29 @@ impl<'s> Context<'s> {
         }
     }
 
-    fn add_thunk_section(&mut self, output: OutputIndex, offset: u64, pass: u32) -> SectionIndex {
+    fn description_groups(&self, output: OutputIndex) -> Vec<(usize, usize)> {
+        let members = &self.outputs[output].members;
+        let mut groups = Vec::new();
+        let mut start = 0usize;
+        while start < members.len() {
+            let description = self.sections[members[start]].description;
+            let mut end = start + 1;
+            while end < members.len() && self.sections[members[end]].description == description {
+                end += 1;
+            }
+            groups.push((start, end));
+            start = end;
+        }
+        groups
+    }
+
+    fn add_thunk_section(
+        &mut self,
+        output: OutputIndex,
+        offset: u64,
+        pass: u32,
+        description: usize,
+    ) -> SectionIndex {
         let mut section = InputSection::synthetic(
             ".text.thunk",
             section_type::PROGRAM_BITS,
@@ -18131,6 +18719,7 @@ impl<'s> Context<'s> {
         );
         section.output = Some(output);
         section.offset_in_output = offset;
+        section.description = description;
         let index = self.sections.len();
         self.sections.push(section);
         self.thunk_state
@@ -18149,31 +18738,34 @@ impl<'s> Context<'s> {
             if flags & section_flag::ALLOCATE == 0 || flags & section_flag::EXECUTE == 0 {
                 continue;
             }
-            let members = self.outputs[output].members.clone();
-            let (Some(first), Some(last)) = (members.first(), members.last()) else {
-                continue;
-            };
-            let begin = self.sections[*first].offset_in_output;
-            let end = self.sections[*last].offset_in_output + self.sections[*last].size;
-            let mut last_lower_bound = u64::from(u32::MAX);
-            if end - begin > spacing * 2 {
-                last_lower_bound = end - spacing;
-            }
-            let mut limit = begin;
-            let mut previous_limit = begin;
-            let mut upper_bound = begin + spacing;
-            for member in &members {
-                limit = self.sections[*member].offset_in_output + self.sections[*member].size;
-                if limit > upper_bound {
-                    self.add_thunk_section(output, previous_limit, 0);
-                    upper_bound = previous_limit + spacing;
+            for (start, end) in self.description_groups(output) {
+                let members = self.outputs[output].members[start..end].to_vec();
+                let (Some(first), Some(last)) = (members.first(), members.last()) else {
+                    continue;
+                };
+                let description = self.sections[*first].description;
+                let begin = self.sections[*first].offset_in_output;
+                let end = self.sections[*last].offset_in_output + self.sections[*last].size;
+                let mut last_lower_bound = u64::from(u32::MAX);
+                if end - begin > spacing * 2 {
+                    last_lower_bound = end - spacing;
                 }
-                if limit > last_lower_bound {
-                    break;
+                let mut limit = begin;
+                let mut previous_limit = begin;
+                let mut upper_bound = begin + spacing;
+                for member in &members {
+                    limit = self.sections[*member].offset_in_output + self.sections[*member].size;
+                    if limit > upper_bound {
+                        self.add_thunk_section(output, previous_limit, 0, description);
+                        upper_bound = previous_limit + spacing;
+                    }
+                    if limit > last_lower_bound {
+                        break;
+                    }
+                    previous_limit = limit;
                 }
-                previous_limit = limit;
+                self.add_thunk_section(output, limit, 0, description);
             }
-            self.add_thunk_section(output, limit, 0);
         }
     }
 
@@ -18187,6 +18779,7 @@ impl<'s> Context<'s> {
     ) -> SectionIndex {
         let bias = self.program_counter_bias(relocation.kind);
         let base_address = self.outputs[output].address;
+        let description = self.sections[section].description;
         let candidates = self
             .thunk_state
             .sections
@@ -18194,6 +18787,9 @@ impl<'s> Context<'s> {
             .cloned()
             .unwrap_or_default();
         for (thunk_section, _) in candidates {
+            if self.sections[thunk_section].description != description {
+                continue;
+            }
             let base = (base_address + self.sections[thunk_section].offset_in_output)
                 .wrapping_sub(bias as u64);
             let limit = base + self.sections[thunk_section].size;
@@ -18210,7 +18806,7 @@ impl<'s> Context<'s> {
         ) {
             offset += self.sections[section].size;
         }
-        self.add_thunk_section(output, offset, pass)
+        self.add_thunk_section(output, offset, pass, description)
     }
 
     pub fn assign_thunk_offsets(&mut self, thunk_section: SectionIndex) -> bool {

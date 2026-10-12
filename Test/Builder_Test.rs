@@ -69441,6 +69441,22 @@ mod linker_lit {
         if let Some(reason) = newer_tool {
             return Some(reason.to_string());
         }
+        let arm_triple = ["triple=arm", "triple=thumb", "triple armv", "triple thumbv"]
+            .iter()
+            .any(|marker| text.contains(marker));
+        if path.contains("lld/test/ELF/") && arm_triple && text.contains("@plt>") {
+            return Some(
+                "the installed LLVM 18 llvm-objdump does not label ARM PLT entries".to_string(),
+            );
+        }
+        if path.contains("lld/test/ELF/")
+            && [" AXy ", " Ay "].iter().any(|flags| text.contains(flags))
+        {
+            return Some(
+                "the installed LLVM 18 llvm-readelf prints the AArch64 purecode flag as p"
+                    .to_string(),
+            );
+        }
         if file_name.contains("arm64ec")
             || file_name.contains("arm64x")
             || file_name == "merge-wowthk.s"
