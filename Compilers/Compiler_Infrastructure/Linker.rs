@@ -99,6 +99,7 @@ pub struct Options {
     pub chroot: Option<String>,
     pub verbose: bool,
     pub gdb_index: bool,
+    pub debug_names: bool,
     pub kind: OutputKind,
     pub emulation: Option<String>,
     pub entry: Option<String>,
@@ -123,6 +124,7 @@ pub struct Options {
     pub run_paths: Vec<String>,
     pub export_dynamic: bool,
     pub strip: Strip,
+    pub section_header: bool,
     pub discard: Discard,
     pub undefined: Vec<String>,
     pub defined_symbols: Vec<(String, String)>,
@@ -194,6 +196,10 @@ pub struct Options {
     pub export_dynamic_symbols: Vec<String>,
     pub dynamic_list: Vec<String>,
     pub pack_relative_relocations: bool,
+    pub android_packing: bool,
+    pub glibc_relative_relocations: bool,
+    pub pack_dynamic: Option<String>,
+    pub pack_relative_flag: Option<bool>,
     pub apply_dynamic_relocations: bool,
     pub arm_target1_relative: bool,
     pub arm_target2: String,
@@ -236,6 +242,7 @@ impl Default for Options {
             chroot: None,
             verbose: false,
             gdb_index: false,
+            debug_names: false,
             kind: OutputKind::Executable,
             emulation: None,
             entry: None,
@@ -260,6 +267,7 @@ impl Default for Options {
             run_paths: Vec::new(),
             export_dynamic: false,
             strip: Strip::None,
+            section_header: true,
             discard: Discard::Default,
             undefined: Vec::new(),
             defined_symbols: Vec::new(),
@@ -331,6 +339,10 @@ impl Default for Options {
             export_dynamic_symbols: Vec::new(),
             dynamic_list: Vec::new(),
             pack_relative_relocations: false,
+            android_packing: false,
+            glibc_relative_relocations: false,
+            pack_dynamic: None,
+            pack_relative_flag: None,
             apply_dynamic_relocations: false,
             arm_target1_relative: false,
             arm_target2: "got-rel".to_string(),
@@ -1148,11 +1160,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             continue;
         }
         if let Some(value) = option_value(&mut cursor, argument, &["--pack-dyn-relocs"])? {
-            match value.as_str() {
-                "none" => {}
-                "relr" => options.pack_relative_relocations = true,
-                _ => return Err(not_supported(&format!("--pack-dyn-relocs={value}"))),
-            }
+            options.pack_dynamic = Some(value);
             continue;
         }
         if let Some(value) = joined_value(argument, &["--plugin-opt", "-plugin-opt"]) {
@@ -1366,6 +1374,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     options.trace_files = true;
                     continue;
                 }
+                if argument == "--debug-names" || argument == "--no-debug-names" {
+                    options.debug_names = argument == "--debug-names";
+                    continue;
+                }
                 if argument == "--gdb-index" || argument == "--no-gdb-index" {
                     options.gdb_index = argument == "--gdb-index";
                     continue;
@@ -1417,7 +1429,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                         .push(InputItem::DefaultScript(value.to_string()));
                     continue;
                 }
-                if argument.starts_with("--lto-sample-profile=") {
+                if argument.starts_with("--lto-sample-profile=")
+                    || argument.starts_with("--rsp-quoting=")
+                {
                     continue;
                 }
                 if argument == "--rpath-link" || argument == "-rpath-link" {
@@ -1454,6 +1468,39 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
     } else {
         OutputKind::Executable
     };
+    if relocatable && !options.section_header {
+        return Err(invalid_value("-z", "nosectionheader").with_context(
+            "Cause: -r and -z nosectionheader may not be used together".to_string(),
+        ));
+    }
+    if relocatable {
+        options.strip = Strip::None;
+    } else if !options.section_header {
+        options.strip = Strip::All;
+    }
+    if options.strip == Strip::All && options.emit_relocations {
+        return Err(invalid_value("--strip-all", "--emit-relocs").with_context(
+            "Cause: --strip-all and --emit-relocs may not be used together".to_string(),
+        ));
+    }
+    if options.pack_relative_flag == Some(true) {
+        options.glibc_relative_relocations = true;
+        options.pack_relative_relocations = true;
+    } else {
+        match options.pack_dynamic.as_deref().unwrap_or("none") {
+            "android" => options.android_packing = true,
+            "relr" => options.pack_relative_relocations = true,
+            "android+relr" => {
+                options.android_packing = true;
+                options.pack_relative_relocations = true;
+            }
+            "none" => {}
+            other => {
+                return Err(invalid_value("--pack-dyn-relocs", other)
+                    .with_context(format!("Cause: unknown --pack-dyn-relocs format: {other}")))
+            }
+        }
+    }
     if relocatable && (shared || pie == Some(true)) {
         return Err(invalid_value("-r", if shared { "-shared" } else { "-pie" }));
     }
@@ -1462,9 +1509,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
 
 fn parse_build_identifier(value: &str) -> Result<BuildIdentifier, Diagnostic> {
     Ok(match value {
-        "fast" | "tree" => BuildIdentifier::Fast,
+        "fast" => BuildIdentifier::Fast,
         "md5" => BuildIdentifier::Md5,
-        "sha1" => BuildIdentifier::Sha1,
+        "sha1" | "tree" => BuildIdentifier::Sha1,
         "uuid" => BuildIdentifier::Uuid,
         "none" => BuildIdentifier::None,
         _ => {
@@ -1528,8 +1575,10 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "muldefs" => options.allow_multiple_definition = true,
         "keep-text-section-prefix" => options.keep_text_section_prefix = true,
         "nokeep-text-section-prefix" => options.keep_text_section_prefix = false,
-        "pack-relative-relocs" => options.pack_relative_relocations = true,
-        "nopack-relative-relocs" => options.pack_relative_relocations = false,
+        "sectionheader" => options.section_header = true,
+        "nosectionheader" => options.section_header = false,
+        "pack-relative-relocs" => options.pack_relative_flag = Some(true),
+        "nopack-relative-relocs" => options.pack_relative_flag = Some(false),
         _ => {
             if let Some(value) = keyword.strip_prefix("stack-size=") {
                 options.stack_size =
@@ -2015,6 +2064,7 @@ pub enum Synthetic {
     Thunks,
     GnuStack,
     GdbIndex,
+    DebugNames,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2716,6 +2766,9 @@ pub fn read_archive(
                 source(&path).ok_or_else(|| {
                     archive_problem(name, "a thin archive member could not be found")
                         .with_context(format!("Member: {member_name}"))
+                        .with_context(format!(
+                            "Cause: {name}: could not get the buffer for a child of the archive: '{path}': No such file or directory"
+                        ))
                 })?
             } else {
                 body.to_vec()
@@ -2880,6 +2933,8 @@ pub struct Context<'s> {
     pub synthetic: BTreeMap<String, SectionIndex>,
     pub dynamic_relocations: Vec<DynamicRelocation>,
     pub relative_relocations: Vec<DynamicRelocation>,
+    pub relative_words: Vec<u64>,
+    pub android_relocations: Vec<u8>,
     pub plt_relocations: Vec<DynamicRelocation>,
     pub got_entries: Vec<SymbolIndex>,
     pub dummy: Option<SymbolIndex>,
@@ -2926,6 +2981,7 @@ pub struct Context<'s> {
     pub archive_statistics: Vec<(String, usize)>,
     pub loading_just_symbols: bool,
     pub gdb_index: Option<GdbIndex>,
+    pub debug_names: Option<DebugNames>,
     pub debug_compression: CompressionKind,
     pub compression_rules: Vec<(String, CompressionKind, usize)>,
     erratum_map: Option<ErratumMap>,
@@ -3009,6 +3065,8 @@ impl<'s> Context<'s> {
             synthetic: BTreeMap::new(),
             dynamic_relocations: Vec::new(),
             relative_relocations: Vec::new(),
+            relative_words: Vec::new(),
+            android_relocations: Vec::new(),
             plt_relocations: Vec::new(),
             got_entries: Vec::new(),
             dummy: None,
@@ -3055,6 +3113,7 @@ impl<'s> Context<'s> {
             archive_statistics: Vec::new(),
             loading_just_symbols: false,
             gdb_index: None,
+            debug_names: None,
             debug_compression: CompressionKind::None,
             compression_rules: Vec::new(),
             erratum_map: None,
@@ -4053,6 +4112,466 @@ pub struct GdbSymbol {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct NamesEntry {
+    pub abbreviation: u32,
+    pub pool_offset: u32,
+    pub parent_offset: u64,
+    pub parent: Option<usize>,
+    pub values: Vec<(u32, u8)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamesName {
+    pub name: Vec<u8>,
+    pub hash: u32,
+    pub string_offset: u64,
+    pub entry_offset: u32,
+    pub chunk: usize,
+    pub entries: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamesHeader {
+    pub format64: bool,
+    pub unit_length: u64,
+    pub version: u16,
+    pub unit_count: u32,
+    pub local_type_units: u32,
+    pub foreign_type_units: u32,
+    pub bucket_count: u32,
+    pub name_count: u32,
+    pub abbreviation_size: u32,
+    pub augmentation: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamesAbbreviation {
+    pub code: u32,
+    pub tag: u32,
+    pub attributes: Vec<(u32, u32)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamesOffsets {
+    pub units: u64,
+    pub buckets: u64,
+    pub hashes: u64,
+    pub strings: u64,
+    pub entry_offsets: u64,
+    pub entries: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamesTable {
+    pub header: NamesHeader,
+    pub offsets: NamesOffsets,
+    pub abbreviations: Vec<NamesAbbreviation>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamesData {
+    pub header: NamesHeader,
+    pub codes: BTreeMap<u32, u32>,
+    pub names: Vec<NamesName>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamesChunk {
+    pub section: SectionIndex,
+    pub units: Vec<u64>,
+    pub base_unit: u32,
+    pub tables: Vec<NamesTable>,
+    pub data: Vec<NamesData>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DebugNames {
+    pub header: NamesHeader,
+    pub chunks: Vec<NamesChunk>,
+    pub abbreviation_table: Vec<u8>,
+    pub abbreviations: Vec<NamesAbbreviation>,
+    pub entries: Vec<NamesEntry>,
+    pub shards: Vec<Vec<NamesName>>,
+    pub size: u64,
+}
+
+const DWARF_INDEX_COMPILE_UNIT: u32 = 1;
+const DWARF_INDEX_PARENT: u32 = 4;
+const DWARF_FORM_DATA_ONE: u32 = 0x0b;
+const DWARF_FORM_DATA_TWO: u32 = 0x05;
+const DWARF_FORM_DATA_FOUR: u32 = 0x06;
+const DWARF_FORM_REFERENCE_ONE: u32 = 0x11;
+const DWARF_FORM_REFERENCE_TWO: u32 = 0x12;
+const DWARF_FORM_REFERENCE_FOUR: u32 = 0x13;
+const DWARF_FORM_FLAG_PRESENT: u32 = 0x19;
+const NAMES_DWARF64: &str = "found DWARF64, which is currently unsupported";
+
+fn push_signed_leb(out: &mut Vec<u8>, value: i64) {
+    let mut rest = value;
+    loop {
+        let low = (rest & 0x7f) as u8;
+        rest >>= 7;
+        let done = (rest == 0 && low & 0x40 == 0) || (rest == -1 && low & 0x40 != 0);
+        if done {
+            out.push(low);
+            return;
+        }
+        out.push(low | 0x80);
+    }
+}
+
+fn push_unsigned_leb(out: &mut Vec<u8>, value: u64) {
+    let mut rest = value;
+    loop {
+        let low = (rest & 0x7f) as u8;
+        rest >>= 7;
+        if rest == 0 {
+            out.push(low);
+            return;
+        }
+        out.push(low | 0x80);
+    }
+}
+
+fn unsigned_leb_size(value: u64) -> u32 {
+    let mut size = 1;
+    let mut rest = value >> 7;
+    while rest != 0 {
+        size += 1;
+        rest >>= 7;
+    }
+    size
+}
+
+fn names_leb(data: &[u8], at: &mut u64) -> Result<u64, String> {
+    let mut position = *at as usize;
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let Some(byte) = data.get(position) else {
+            let start = *at;
+            return Err(format!(
+                "unable to decode LEB128 at offset 0x{start:08x}: malformed uleb128{NAMES_LEB_END}"
+            ));
+        };
+        position += 1;
+        if shift < 64 {
+            value |= u64::from(byte & 0x7f) << shift;
+        }
+        shift += 7;
+        if byte & 0x80 == 0 {
+            *at = position as u64;
+            return Ok(value);
+        }
+    }
+}
+
+const NAMES_LEB_END: &str = ", extends past end";
+const NAMES_SEPARATOR: &str = ", ";
+
+fn names_end_of_data(size: usize, start: u64, length: u64) -> String {
+    let end = start + length;
+    format!("unexpected end of data at offset 0x{size:x} while reading [0x{start:x}{NAMES_SEPARATOR}0x{end:x})")
+}
+
+fn names_read(data: &[u8], encoding: Encoding, at: &mut u64, size: u64) -> Result<u64, String> {
+    let start = *at as usize;
+    if start as u64 + size > data.len() as u64 {
+        return Err(names_end_of_data(data.len(), *at, size));
+    }
+    let value = match size {
+        1 => u64::from(data[start]),
+        2 => u64::from(encoding.read_u16(data, start).unwrap_or(0)),
+        4 => u64::from(encoding.read_u32(data, start).unwrap_or(0)),
+        _ => encoding.read_u64(data, start).unwrap_or(0),
+    };
+    *at += size;
+    Ok(value)
+}
+
+fn dense_set_order(hashes: &[u32]) -> Vec<usize> {
+    let mut buckets: Vec<Option<usize>> = Vec::new();
+    let insert = |buckets: &mut Vec<Option<usize>>, item: usize| {
+        let mask = buckets.len() - 1;
+        let mut slot = hashes[item] as usize & mask;
+        let mut probe = 1usize;
+        while buckets[slot].is_some() {
+            slot = (slot + probe) & mask;
+            probe += 1;
+        }
+        buckets[slot] = Some(item);
+    };
+    for (count, item) in (0..hashes.len()).enumerate() {
+        if (count + 1) * 4 >= buckets.len() * 3 {
+            let size = (buckets.len() * 2).max(64);
+            let old = std::mem::replace(&mut buckets, vec![None; size]);
+            for moved in old.into_iter().flatten() {
+                insert(&mut buckets, moved);
+            }
+        }
+        insert(&mut buckets, item);
+    }
+    buckets.into_iter().flatten().collect()
+}
+
+fn case_folding_hash(name: &[u8]) -> u32 {
+    let mut hash = 5381u32;
+    if name.is_ascii() {
+        for byte in name {
+            hash = hash
+                .wrapping_mul(33)
+                .wrapping_add(u32::from(byte.to_ascii_lowercase()));
+        }
+        return hash;
+    }
+    for character in String::from_utf8_lossy(name).chars() {
+        let folded = match character {
+            '\u{130}' | '\u{131}' => 'i',
+            other => other
+                .to_lowercase()
+                .next()
+                .filter(|_| other.to_lowercase().count() == 1)
+                .unwrap_or(other),
+        };
+        let mut buffer = [0u8; 4];
+        for byte in folded.encode_utf8(&mut buffer).bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(byte));
+        }
+    }
+    hash
+}
+
+fn names_offsets(end_of_header: u64, header: &NamesHeader) -> NamesOffsets {
+    let size = if header.format64 { 8 } else { 4 };
+    let units = end_of_header;
+    let buckets = units
+        + u64::from(header.unit_count) * size
+        + u64::from(header.local_type_units) * size
+        + u64::from(header.foreign_type_units) * 8;
+    let hashes = buckets + u64::from(header.bucket_count) * 4;
+    let strings = hashes
+        + if header.bucket_count > 0 {
+            u64::from(header.name_count) * 4
+        } else {
+            0
+        };
+    let entry_offsets = strings + u64::from(header.name_count) * size;
+    let entries =
+        entry_offsets + u64::from(header.name_count) * size + u64::from(header.abbreviation_size);
+    NamesOffsets {
+        units,
+        buckets,
+        hashes,
+        strings,
+        entry_offsets,
+        entries,
+    }
+}
+
+fn names_bucket_count(names: u32) -> u32 {
+    if names > 1024 {
+        names / 4
+    } else if names > 16 {
+        names / 2
+    } else {
+        names.max(1)
+    }
+}
+
+fn read_names_tables(data: &[u8], encoding: Encoding) -> (Vec<NamesTable>, Option<String>) {
+    let mut tables = Vec::new();
+    let mut base = 0u64;
+    while base < data.len() as u64 {
+        match read_names_table(data, encoding, base) {
+            Ok((table, next)) => {
+                tables.push(table);
+                base = next;
+            }
+            Err(message) => return (tables, Some(message)),
+        }
+    }
+    (tables, None)
+}
+
+fn read_names_header(
+    data: &[u8],
+    encoding: Encoding,
+    base: u64,
+) -> Result<(NamesHeader, u64), String> {
+    let mut at = base;
+    let mut header = NamesHeader::default();
+    let fields = (|| -> Result<(), String> {
+        let length = names_read(data, encoding, &mut at, 4)?;
+        if length == 0xffff_ffff {
+            header.format64 = true;
+            header.unit_length = names_read(data, encoding, &mut at, 8)?;
+        } else if length >= 0xffff_fff0 {
+            return Err(format!(
+                "unsupported reserved unit length of value 0x{length:08x}"
+            ));
+        } else {
+            header.unit_length = length;
+        }
+        header.version = names_read(data, encoding, &mut at, 2)? as u16;
+        names_read(data, encoding, &mut at, 2)?;
+        header.unit_count = names_read(data, encoding, &mut at, 4)? as u32;
+        header.local_type_units = names_read(data, encoding, &mut at, 4)? as u32;
+        header.foreign_type_units = names_read(data, encoding, &mut at, 4)? as u32;
+        header.bucket_count = names_read(data, encoding, &mut at, 4)? as u32;
+        header.name_count = names_read(data, encoding, &mut at, 4)? as u32;
+        header.abbreviation_size = names_read(data, encoding, &mut at, 4)? as u32;
+        let augmentation = names_read(data, encoding, &mut at, 4)?;
+        let augmentation = (augmentation + 3) & !3;
+        if at + augmentation > data.len() as u64 {
+            return Err("cannot read header augmentation".to_string());
+        }
+        header.augmentation = data[at as usize..(at + augmentation) as usize].to_vec();
+        at += augmentation;
+        Ok(())
+    })();
+    match fields {
+        Ok(()) => Ok((header, at)),
+        Err(message) => Err(format!(
+            "parsing .debug_names header at 0x{base:x}: {message}"
+        )),
+    }
+}
+
+fn read_names_table(
+    data: &[u8],
+    encoding: Encoding,
+    base: u64,
+) -> Result<(NamesTable, u64), String> {
+    let (header, end_of_header) = read_names_header(data, encoding, base)?;
+    let mut offsets = names_offsets(end_of_header, &header);
+    let size = if header.format64 { 8 } else { 4 };
+    let mut at = offsets.entry_offsets + u64::from(header.name_count) * size;
+    if at + u64::from(header.abbreviation_size) > data.len() as u64 {
+        return Err("Section too small: cannot read abbreviations.".to_string());
+    }
+    offsets.entries = at + u64::from(header.abbreviation_size);
+    let unterminated = || "Incorrectly terminated abbreviation table.".to_string();
+    let mut abbreviations: Vec<NamesAbbreviation> = Vec::new();
+    loop {
+        if at >= offsets.entries {
+            return Err(unterminated());
+        }
+        let code = names_leb(data, &mut at).unwrap_or(0) as u32;
+        if code == 0 {
+            break;
+        }
+        let tag = names_leb(data, &mut at).unwrap_or(0) as u32;
+        let mut attributes = Vec::new();
+        loop {
+            if at >= offsets.entries {
+                return Err(unterminated());
+            }
+            let index = names_leb(data, &mut at).unwrap_or(0) as u32;
+            let form = names_leb(data, &mut at).unwrap_or(0) as u32;
+            if index == 0 && form == 0 {
+                break;
+            }
+            attributes.push((index, form));
+        }
+        if abbreviations.iter().any(|known| known.code == code) {
+            return Err("Duplicate abbreviation code.".to_string());
+        }
+        abbreviations.push(NamesAbbreviation {
+            code,
+            tag,
+            attributes,
+        });
+    }
+    let hashes: Vec<u32> = abbreviations
+        .iter()
+        .map(|abbreviation| abbreviation.code.wrapping_mul(37))
+        .collect();
+    let abbreviations = dense_set_order(&hashes)
+        .into_iter()
+        .map(|position| abbreviations[position].clone())
+        .collect();
+    let next = base + if header.format64 { 12 } else { 4 } + header.unit_length;
+    Ok((
+        NamesTable {
+            header,
+            offsets,
+            abbreviations,
+        },
+        next,
+    ))
+}
+
+fn read_names_entry(
+    data: &[u8],
+    encoding: Encoding,
+    at: &mut u64,
+    table: &NamesTable,
+) -> Result<NamesEntry, String> {
+    let mut entry = NamesEntry {
+        pool_offset: *at as u32,
+        ..NamesEntry::default()
+    };
+    let code = names_leb(data, at).map_err(|message| format!("invalid abbrev code: {message}"))?;
+    if code > u64::from(u32::MAX) {
+        return Err(format!("abbrev code too large for DWARF32: {code}"));
+    }
+    entry.abbreviation = code as u32;
+    let Some(abbreviation) = table
+        .abbreviations
+        .iter()
+        .find(|abbreviation| abbreviation.code == entry.abbreviation)
+    else {
+        return Err(format!("abbrev code not found in abbrev table: {code}"));
+    };
+    let mut value = (0u32, 0u8);
+    let mut unit = (0u32, 0u8);
+    let mut failure: Option<String> = None;
+    for (index, form) in &abbreviation.attributes {
+        let mut read = |size: u64| -> u32 {
+            if failure.is_some() {
+                return 0;
+            }
+            match names_read(data, encoding, at, size) {
+                Ok(read) => read as u32,
+                Err(message) => {
+                    failure = Some(message);
+                    0
+                }
+            }
+        };
+        if *index == DWARF_INDEX_PARENT {
+            if *form == DWARF_FORM_REFERENCE_FOUR {
+                value = (read(4), 4);
+                entry.parent_offset = table.offsets.entries + u64::from(value.0);
+            } else if *form != DWARF_FORM_FLAG_PRESENT {
+                return Err("invalid form for DW_IDX_parent".to_string());
+            }
+        } else {
+            value = match *form {
+                DWARF_FORM_DATA_ONE | DWARF_FORM_REFERENCE_ONE => (read(1), 1),
+                DWARF_FORM_DATA_TWO | DWARF_FORM_REFERENCE_TWO => (read(2), 2),
+                DWARF_FORM_DATA_FOUR | DWARF_FORM_REFERENCE_FOUR => (read(4), 4),
+                other => {
+                    return Err(format!(
+                        "unrecognized form encoding {other} in abbrev table"
+                    ))
+                }
+            };
+        }
+        if let Some(message) = failure.take() {
+            return Err(format!("error while reading attributes: {message}"));
+        }
+        if *index == DWARF_INDEX_COMPILE_UNIT {
+            unit = value;
+        } else if *form != DWARF_FORM_FLAG_PRESENT {
+            entry.values.push(value);
+        }
+    }
+    entry.values.push(unit);
+    Ok(entry)
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct GdbIndex {
     pub chunks: Vec<GdbChunk>,
     pub symbols: Vec<GdbSymbol>,
@@ -4514,6 +5033,464 @@ impl<'s> Context<'s> {
         (chunk, names)
     }
 
+    fn names_error(&mut self, file: FileIndex, text: String) {
+        let display = self.file_name(Some(file));
+        self.error(
+            problem(
+                "EI282",
+                "The linker cannot use the debug information of an input file.",
+            )
+            .with_context(format!("File: {display}"))
+            .with_context(format!("Cause: {display}:(.debug_names): {text}")),
+        );
+    }
+
+    fn parse_debug_names(
+        &mut self,
+        file: FileIndex,
+        section: SectionIndex,
+        entries: &mut Vec<NamesEntry>,
+    ) -> NamesChunk {
+        let encoding = self.encoding();
+        let sections = self.debug_sections_kept(file, true);
+        let names = sections.get(".debug_names").cloned().unwrap_or_default();
+        let strings = sections.get(".debug_str").cloned().unwrap_or_default();
+        let data = &names.data;
+        let mut chunk = NamesChunk {
+            section,
+            ..NamesChunk::default()
+        };
+        let (tables, failure) = read_names_tables(data, encoding);
+        if let Some(message) = failure {
+            self.names_error(file, message);
+        }
+        chunk.tables = tables.clone();
+        for table in &tables {
+            chunk.data.push(NamesData {
+                header: table.header.clone(),
+                ..NamesData::default()
+            });
+            if table.header.format64 {
+                self.names_error(file, NAMES_DWARF64.to_string());
+                return chunk;
+            }
+            if table.header.version != 5 {
+                let version = table.header.version;
+                self.names_error(file, format!("unsupported version: {version}"));
+                return chunk;
+            }
+            if table.offsets.entries > data.len() as u64 {
+                self.names_error(
+                    file,
+                    "entry pool start is beyond end of section".to_string(),
+                );
+                return chunk;
+            }
+            for position in 0..u64::from(table.header.unit_count) {
+                chunk.units.push(table.offsets.units + position * 4);
+            }
+            let name_count = table.header.name_count as usize;
+            let offsets: Vec<u32> = (0..name_count)
+                .map(|position| {
+                    encoding
+                        .read_u32(data, table.offsets.entry_offsets as usize + position * 4)
+                        .unwrap_or(0)
+                })
+                .collect();
+            let first_entry = entries.len();
+            let mut pool: BTreeMap<u32, usize> = BTreeMap::new();
+            let mut list = vec![NamesName::default(); name_count];
+            let mut stopped = false;
+            for (position, name) in list.iter_mut().enumerate() {
+                let string_at = table.offsets.strings + position as u64 * 4;
+                name.string_offset = string_at;
+                let pointer = encoding.read_u32(data, string_at as usize).unwrap_or(0) as usize;
+                let text = strings
+                    .data
+                    .get(pointer..)
+                    .and_then(|rest| {
+                        rest.iter()
+                            .position(|byte| *byte == 0)
+                            .map(|end| &rest[..end])
+                    })
+                    .unwrap_or(&[]);
+                name.name = text.to_vec();
+                name.hash = case_folding_hash(text);
+                let mut at = table.offsets.entries + u64::from(offsets[position]);
+                while (at as usize) < data.len() && data[at as usize] != 0 {
+                    match read_names_entry(data, encoding, &mut at, table) {
+                        Ok(entry) => {
+                            name.entries.push(entries.len());
+                            entries.push(entry);
+                        }
+                        Err(message) => {
+                            self.names_error(file, message);
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+                if stopped {
+                    break;
+                }
+                if at as usize >= data.len() {
+                    self.names_error(file, "index entry is out of bounds".to_string());
+                }
+                for entry in &name.entries {
+                    pool.insert(entries[*entry].pool_offset, *entry);
+                }
+            }
+            if let Some(last) = chunk.data.last_mut() {
+                last.names = list;
+            }
+            if stopped {
+                return chunk;
+            }
+            for entry in entries.iter_mut().skip(first_entry) {
+                entry.parent = u32::try_from(entry.parent_offset)
+                    .ok()
+                    .and_then(|offset| pool.get(&offset).copied());
+            }
+        }
+        chunk
+    }
+
+    pub fn create_debug_names(&mut self) -> Option<DebugNames> {
+        let mut files: Vec<(FileIndex, SectionIndex)> = Vec::new();
+        let mut dead: BTreeSet<SectionIndex> = BTreeSet::new();
+        for section in self.input_order.clone() {
+            if self.sections[section].flags & section_flag::ALLOCATE != 0
+                || self.sections[section].name != ".debug_names"
+                || !self.sections[section].live
+                || self.sections[section].synthetic.is_some()
+            {
+                continue;
+            }
+            self.sections[section].live = false;
+            dead.insert(section);
+            if let Some(file) = self.sections[section].file {
+                if !files.iter().any(|(known, _)| *known == file) {
+                    files.push((file, section));
+                }
+            }
+        }
+        for section in 0..self.sections.len() {
+            if self.sections[section]
+                .relocated_section
+                .is_some_and(|target| dead.contains(&target))
+            {
+                self.sections[section].live = false;
+            }
+        }
+        if files.is_empty() {
+            return None;
+        }
+        let mut names = DebugNames::default();
+        let mut entries = Vec::new();
+        for (file, section) in files {
+            let chunk = self.parse_debug_names(file, section, &mut entries);
+            names.chunks.push(chunk);
+        }
+        names.entries = entries;
+        names.header.version = 5;
+        let mut unit_total = 0u32;
+        for position in 0..names.chunks.len() {
+            names.chunks[position].base_unit = unit_total;
+            unit_total += names.chunks[position].units.len() as u32;
+            let file_section = names.chunks[position].section;
+            for data in names.chunks[position].data.clone() {
+                names.header.unit_count =
+                    names.header.unit_count.wrapping_add(data.header.unit_count);
+                if data.header.local_type_units != 0 || data.header.foreign_type_units != 0 {
+                    let file = self.sections[file_section].file;
+                    let display = self.file_name(file);
+                    self.warn(
+                        caution(
+                            "EI282",
+                            "The linker cannot use the debug information of an input file.",
+                        )
+                        .with_context(format!("File: {display}"))
+                        .with_context(format!(
+                            "Cause: {display}:(.debug_names): type units are not implemented"
+                        )),
+                    );
+                }
+                if position == 0 {
+                    names.header.augmentation = data.header.augmentation.clone();
+                } else if names.header.augmentation != data.header.augmentation {
+                    names.header.augmentation.clear();
+                }
+            }
+        }
+        let (unit_size, unit_form) = if names.header.unit_count > 0xffff {
+            (4u8, DWARF_FORM_DATA_FOUR)
+        } else if names.header.unit_count > 0xff {
+            (2u8, DWARF_FORM_DATA_TWO)
+        } else {
+            (1u8, DWARF_FORM_DATA_ONE)
+        };
+        for chunk in names.chunks.iter_mut() {
+            for (position, table) in chunk.tables.iter().enumerate() {
+                for old in &table.abbreviations {
+                    let mut attributes: Vec<(u32, u32)> = old
+                        .attributes
+                        .iter()
+                        .filter(|(index, _)| *index != DWARF_INDEX_COMPILE_UNIT)
+                        .copied()
+                        .collect();
+                    attributes.push((DWARF_INDEX_COMPILE_UNIT, unit_form));
+                    let code = match names
+                        .abbreviations
+                        .iter()
+                        .find(|known| known.tag == old.tag && known.attributes == attributes)
+                    {
+                        Some(known) => known.code,
+                        None => {
+                            let code = names.abbreviations.len() as u32 + 1;
+                            names.abbreviations.push(NamesAbbreviation {
+                                code,
+                                tag: old.tag,
+                                attributes,
+                            });
+                            code
+                        }
+                    };
+                    if let Some(data) = chunk.data.get_mut(position) {
+                        data.codes.insert(old.code, code);
+                    }
+                }
+            }
+        }
+        for abbreviation in &names.abbreviations {
+            push_unsigned_leb(&mut names.abbreviation_table, u64::from(abbreviation.code));
+            push_unsigned_leb(&mut names.abbreviation_table, u64::from(abbreviation.tag));
+            for (index, form) in &abbreviation.attributes {
+                push_unsigned_leb(&mut names.abbreviation_table, u64::from(*index));
+                push_unsigned_leb(&mut names.abbreviation_table, u64::from(*form));
+            }
+            names.abbreviation_table.extend_from_slice(&[0, 0]);
+        }
+        names.abbreviation_table.push(0);
+        names.header.abbreviation_size = names.abbreviation_table.len() as u32;
+        let mut shards: Vec<Vec<NamesName>> = vec![Vec::new(); 32];
+        let mut lookup: Vec<BTreeMap<(u32, Vec<u8>), usize>> = vec![BTreeMap::new(); 32];
+        for (chunk_position, chunk) in names.chunks.iter().enumerate() {
+            for (data_position, data) in chunk.data.iter().enumerate() {
+                for name in &data.names {
+                    let shard = (name.hash >> 27) as usize;
+                    for entry in &name.entries {
+                        let entry = &mut names.entries[*entry];
+                        entry.abbreviation =
+                            data.codes.get(&entry.abbreviation).copied().unwrap_or(0);
+                        if let Some(last) = entry.values.last_mut() {
+                            last.0 = last
+                                .0
+                                .wrapping_add(chunk.base_unit)
+                                .wrapping_add(data_position as u32);
+                            last.1 = unit_size;
+                        }
+                    }
+                    let key = (name.hash, name.name.clone());
+                    match lookup[shard].get(&key) {
+                        Some(existing) => {
+                            let existing = *existing;
+                            shards[shard][existing]
+                                .entries
+                                .extend(name.entries.iter().copied());
+                        }
+                        None => {
+                            lookup[shard].insert(key, shards[shard].len());
+                            let mut merged = name.clone();
+                            merged.chunk = chunk_position;
+                            shards[shard].push(merged);
+                        }
+                    }
+                }
+            }
+        }
+        let mut offset = 0u32;
+        for shard in shards.iter_mut() {
+            for name in shard.iter_mut() {
+                name.entry_offset = offset;
+                for entry in &name.entries {
+                    let entry = &mut names.entries[*entry];
+                    entry.pool_offset = offset;
+                    offset += unsigned_leb_size(u64::from(entry.abbreviation));
+                    for (_, size) in &entry.values {
+                        offset += u32::from(*size);
+                    }
+                }
+                offset += 1;
+            }
+        }
+        for shard in &shards {
+            for name in shard {
+                for entry in &name.entries {
+                    let Some(parent) = names.entries[*entry].parent else {
+                        continue;
+                    };
+                    let parent_offset = names.entries[parent].pool_offset;
+                    let code = names.entries[*entry].abbreviation;
+                    let Some(abbreviation) = code
+                        .checked_sub(1)
+                        .and_then(|index| names.abbreviations.get(index as usize))
+                    else {
+                        continue;
+                    };
+                    let attributes = abbreviation.attributes.clone();
+                    for ((index, form), value) in attributes
+                        .iter()
+                        .zip(names.entries[*entry].values.iter_mut())
+                    {
+                        if *index == DWARF_INDEX_PARENT && *form == DWARF_FORM_REFERENCE_FOUR {
+                            value.0 = parent_offset;
+                        }
+                    }
+                }
+            }
+        }
+        names.header.name_count = lookup.iter().map(|map| map.len() as u32).sum();
+        names.header.bucket_count = names_bucket_count(names.header.name_count);
+        names.shards = shards;
+        let header_size = 36 + names.header.augmentation.len() as u64;
+        names.size = names_offsets(header_size, &names.header).entries + u64::from(offset);
+        names.header.unit_length = names.size - 4;
+        Some(names)
+    }
+
+    pub fn encode_debug_names(&mut self) -> Vec<u8> {
+        let Some(names) = self.debug_names.clone() else {
+            return Vec::new();
+        };
+        let encoding = self.encoding();
+        let mut relocated: Vec<BTreeMap<u64, u32>> = Vec::new();
+        for chunk in &names.chunks {
+            let mut map = BTreeMap::new();
+            for entry in self.raw_relocations(chunk.section) {
+                if let Some(symbol) = self.symbol_of(chunk.section, entry.symbol) {
+                    map.insert(
+                        entry.offset,
+                        self.symbol_address(symbol, entry.addend) as u32,
+                    );
+                }
+            }
+            relocated.push(map);
+        }
+        let header = &names.header;
+        let mut out = Vec::with_capacity(names.size as usize);
+        encoding.put_u32(&mut out, header.unit_length as u32);
+        encoding.put_u16(&mut out, header.version);
+        encoding.put_u16(&mut out, 0);
+        encoding.put_u32(&mut out, header.unit_count);
+        encoding.put_u32(&mut out, 0);
+        encoding.put_u32(&mut out, 0);
+        encoding.put_u32(&mut out, header.bucket_count);
+        encoding.put_u32(&mut out, header.name_count);
+        encoding.put_u32(&mut out, header.abbreviation_size);
+        encoding.put_u32(&mut out, header.augmentation.len() as u32);
+        out.extend_from_slice(&header.augmentation);
+        for (position, chunk) in names.chunks.iter().enumerate() {
+            for unit in &chunk.units {
+                encoding.put_u32(
+                    &mut out,
+                    relocated[position].get(unit).copied().unwrap_or(0),
+                );
+            }
+        }
+        let bucket_count = header.bucket_count as usize;
+        let mut buckets: Vec<Vec<&NamesName>> = vec![Vec::new(); bucket_count];
+        for shard in &names.shards {
+            for name in shard {
+                buckets[name.hash as usize % bucket_count].push(name);
+            }
+        }
+        let mut index = 1u32;
+        for bucket in &buckets {
+            encoding.put_u32(&mut out, if bucket.is_empty() { 0 } else { index });
+            index += bucket.len() as u32;
+        }
+        for name in buckets.iter().flatten() {
+            encoding.put_u32(&mut out, name.hash);
+        }
+        for name in buckets.iter().flatten() {
+            let value = relocated[name.chunk]
+                .get(&name.string_offset)
+                .copied()
+                .unwrap_or(0);
+            encoding.put_u32(&mut out, value);
+        }
+        for name in buckets.iter().flatten() {
+            encoding.put_u32(&mut out, name.entry_offset);
+        }
+        out.extend_from_slice(&names.abbreviation_table);
+        for name in names.shards.iter().flatten() {
+            for entry in &name.entries {
+                let entry = &names.entries[*entry];
+                push_unsigned_leb(&mut out, u64::from(entry.abbreviation));
+                for (value, size) in &entry.values {
+                    match size {
+                        1 => out.push(*value as u8),
+                        2 => encoding.put_u16(&mut out, *value as u16),
+                        _ => encoding.put_u32(&mut out, *value),
+                    }
+                }
+            }
+            out.push(0);
+        }
+        out
+    }
+
+    fn relax_got_once(&mut self) -> bool {
+        let mut minimum = u64::MAX;
+        let mut maximum = 0u64;
+        for output in self.order.clone() {
+            let data = &self.outputs[output];
+            if data.flags & section_flag::ALLOCATE == 0 {
+                continue;
+            }
+            minimum = minimum.min(data.address);
+            maximum = maximum.max(data.address.wrapping_add(data.size));
+        }
+        if maximum < 1 << 31 || (maximum.wrapping_sub(minimum) < 1 << 31 && self.is_pic()) {
+            return false;
+        }
+        let mut changed = false;
+        for output in self.order.clone() {
+            if self.outputs[output].flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            for section in self.outputs[output].members.clone() {
+                for position in 0..self.sections[section].relocations.len() {
+                    let relocation = self.sections[section].relocations[position].clone();
+                    let no_pic = match relocation.expression {
+                        Expression::RelaxGotProgramCounter => false,
+                        Expression::RelaxGotProgramCounterNoPic => true,
+                        _ => continue,
+                    };
+                    let mut probe = relocation.clone();
+                    if no_pic {
+                        probe.addend = 0;
+                    }
+                    let place = self.section_address(section, relocation.offset);
+                    let value = self.evaluate(&probe, place) as i64;
+                    if i32::try_from(value).is_ok() {
+                        continue;
+                    }
+                    let symbol = relocation.symbol;
+                    if self.symbols[symbol].got_index.is_none()
+                        && self.symbols[symbol].plt_index.is_none()
+                    {
+                        self.add_got_entry(symbol);
+                        changed = true;
+                    }
+                    self.sections[section].relocations[position].expression =
+                        Expression::GotProgramCounter;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn create_gdb_index(&mut self) -> Option<GdbIndex> {
         let mut files: Vec<(FileIndex, SectionIndex)> = Vec::new();
         let mut dead: BTreeSet<SectionIndex> = BTreeSet::new();
@@ -4780,7 +5757,7 @@ impl<'s> Context<'s> {
         let mut state = LoadState {
             whole_archive: false,
             as_needed: false,
-            is_static: false,
+            is_static: self.is_relocatable(),
             in_library: false,
         };
         let mut stack: Vec<LoadState> = Vec::new();
@@ -4791,6 +5768,7 @@ impl<'s> Context<'s> {
         let has_script = items
             .iter()
             .any(|item| matches!(item, InputItem::Script(_)));
+        let mut in_group = false;
         for item in items {
             match item {
                 InputItem::JustSymbols(path) => match (self.source)(&path) {
@@ -4825,10 +5803,38 @@ impl<'s> Context<'s> {
                 },
                 InputItem::WholeArchive(value) => state.whole_archive = value,
                 InputItem::AsNeeded(value) => state.as_needed = value,
-                InputItem::Static(value) => state.is_static = value,
-                InputItem::StartLibrary => state.in_library = true,
-                InputItem::EndLibrary => state.in_library = false,
-                InputItem::StartGroup | InputItem::EndGroup => group += 1,
+                InputItem::Static(value) => state.is_static = value || self.is_relocatable(),
+                InputItem::StartLibrary => {
+                    if state.in_library {
+                        self.grouping_error("nested --start-lib");
+                    }
+                    if in_group {
+                        self.grouping_error("may not nest --start-lib in --start-group");
+                    }
+                    state.in_library = true;
+                    in_group = true;
+                }
+                InputItem::EndLibrary => {
+                    if !state.in_library {
+                        self.grouping_error("stray --end-lib");
+                    }
+                    state.in_library = false;
+                    in_group = false;
+                }
+                InputItem::StartGroup => {
+                    if in_group {
+                        self.grouping_error("nested --start-group");
+                    }
+                    in_group = true;
+                    group += 1;
+                }
+                InputItem::EndGroup => {
+                    if !in_group {
+                        self.grouping_error("stray --end-group");
+                    }
+                    in_group = false;
+                    group += 1;
+                }
                 InputItem::Script(path) => match self.search_script(&path) {
                     Some(found) => {
                         let bytes = (self.source)(&found).unwrap_or_default();
@@ -7340,18 +8346,24 @@ impl<'s> Context<'s> {
                 );
             }
             let name = if rela { ".rela.dyn" } else { ".rel.dyn" };
+            let android = self.options.android_packing;
             let index = self.add_synthetic(
                 name,
-                if rela {
-                    section_type::RELOCATIONS_WITH_ADDENDS
-                } else {
-                    section_type::RELOCATIONS
+                match (android, rela) {
+                    (true, true) => 0x6000_0002,
+                    (true, false) => 0x6000_0001,
+                    (false, true) => section_type::RELOCATIONS_WITH_ADDENDS,
+                    (false, false) => section_type::RELOCATIONS,
                 },
                 section_flag::ALLOCATE,
                 word,
                 Synthetic::DynamicRelocations,
             );
-            self.sections[index].entry_size = encoding.relocation_size(rela) as u64;
+            self.sections[index].entry_size = if android {
+                1
+            } else {
+                encoding.relocation_size(rela) as u64
+            };
             if self.options.pack_relative_relocations {
                 let index = self.add_synthetic(
                     ".relr.dyn",
@@ -7470,6 +8482,20 @@ impl<'s> Context<'s> {
                 Synthetic::GnuProperty,
             );
         }
+        if self.options.debug_names {
+            if let Some(names) = self.create_debug_names() {
+                let size = names.size;
+                let section = self.add_synthetic(
+                    ".debug_names",
+                    section_type::PROGRAM_BITS,
+                    0,
+                    4,
+                    Synthetic::DebugNames,
+                );
+                self.sections[section].size = size;
+                self.debug_names = Some(names);
+            }
+        }
         if self.options.gdb_index {
             if let Some(index) = self.create_gdb_index() {
                 let size = self.gdb_index_size(&index);
@@ -7503,13 +8529,15 @@ impl<'s> Context<'s> {
             );
             self.sections[index].entry_size = encoding.symbol_size() as u64;
         }
-        self.add_synthetic(
-            ".shstrtab",
-            section_type::STRING_TABLE,
-            0,
-            1,
-            Synthetic::SectionNameTable,
-        );
+        if self.options.section_header {
+            self.add_synthetic(
+                ".shstrtab",
+                section_type::STRING_TABLE,
+                0,
+                1,
+                Synthetic::SectionNameTable,
+            );
+        }
         if self.options.strip != Strip::All {
             self.add_synthetic(
                 ".strtab",
@@ -7573,7 +8601,10 @@ impl<'s> Context<'s> {
         match which {
             Synthetic::Bss | Synthetic::BssRelocationReadOnly => data.size != 0,
             Synthetic::Got => {
-                self.has_got_offset_relocation || !self.got_entries.is_empty() || self.got_size > 0
+                self.has_got_offset_relocation
+                    || self.got_has_deferred_entries
+                    || !self.got_entries.is_empty()
+                    || self.got_size > 0
             }
             Synthetic::GotPlt => {
                 !self.got_plt_entries.is_empty() || self.has_got_plt_offset_relocation
@@ -7752,6 +8783,7 @@ impl<'s> Context<'s> {
             let file_name = self.files[file].shared_object_name.clone();
             let file_name = self.add_dynamic_string(&file_name);
             let mut entries = Vec::new();
+            let mut glibc_two = false;
             for slot in 0..self.files[file].version_need_information.len() {
                 let (identifier, weak) = self.files[file].version_need_information[slot];
                 if identifier == 0 {
@@ -7760,8 +8792,25 @@ impl<'s> Context<'s> {
                 let (name, hash) = self.files[file].version_definitions[slot]
                     .clone()
                     .unwrap_or_default();
+                let glibc = name.starts_with("GLIBC_2.");
                 let name = self.add_dynamic_string(&name);
                 entries.push((hash, identifier, weak, name));
+                glibc_two |= glibc;
+            }
+            if glibc_two
+                && self.options.glibc_relative_relocations
+                && self.files[file].shared_object_name.starts_with("libc.so.")
+            {
+                self.version_auxiliary_count += 1;
+                let identifier =
+                    (self.version_auxiliary_count + self.version_definition_count()) as u16;
+                let name = self.add_dynamic_string("GLIBC_ABI_DT_RELR");
+                entries.push((
+                    elf::system_five_hash(b"GLIBC_ABI_DT_RELR"),
+                    identifier,
+                    false,
+                    name,
+                ));
             }
             self.version_needs
                 .push(VersionNeedOutput { file_name, entries });
@@ -7877,8 +8926,12 @@ impl<'s> Context<'s> {
             self.synthetic_section(name)
                 .and_then(|section| self.sections[section].output)
         };
-        let mut combined_size =
-            self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64;
+        let android = self.options.android_packing;
+        let mut combined_size = if android {
+            self.android_relocations.len() as u64
+        } else {
+            self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64
+        };
         if output_of(dynamic_name).is_some()
             && output_of(dynamic_name) == output_of(plt_relocation_name)
         {
@@ -7887,18 +8940,20 @@ impl<'s> Context<'s> {
         }
         if self.live_synthetic(dynamic_name) && !self.dynamic_relocations.is_empty() {
             add(
-                if rela {
-                    tag::RELOCATIONS_WITH_ADDENDS
-                } else {
-                    tag::RELOCATIONS
+                match (android, rela) {
+                    (true, true) => 0x6000_0011,
+                    (true, false) => 0x6000_000f,
+                    (false, true) => tag::RELOCATIONS_WITH_ADDENDS,
+                    (false, false) => tag::RELOCATIONS,
                 },
                 self.dynamic_tables_section_address(dynamic_name),
             );
             add(
-                if rela {
-                    tag::RELOCATIONS_WITH_ADDENDS_SIZE
-                } else {
-                    tag::RELOCATIONS_SIZE
+                match (android, rela) {
+                    (true, true) => 0x6000_0012,
+                    (true, false) => 0x6000_0010,
+                    (false, true) => tag::RELOCATIONS_WITH_ADDENDS_SIZE,
+                    (false, false) => tag::RELOCATIONS_SIZE,
                 },
                 combined_size,
             );
@@ -7915,7 +8970,7 @@ impl<'s> Context<'s> {
                 .iter()
                 .filter(|entry| entry.kind == self.target.relative_relocation)
                 .count();
-            if self.options.combine_relocations && relative > 0 {
+            if self.options.combine_relocations && relative > 0 && !android {
                 add(
                     if rela {
                         tag::RELATIVE_WITH_ADDEND_COUNT
@@ -11069,6 +12124,202 @@ impl<'s> Context<'s> {
         });
     }
 
+    fn grouping_error(&mut self, cause: &str) {
+        self.error_always(
+            problem("EI297", "Library grouping options are not balanced.")
+                .with_context(format!("Cause: {cause}")),
+        );
+    }
+
+    pub fn update_android_relocations(&mut self) -> bool {
+        if !self.options.android_packing {
+            return false;
+        }
+        let Some(section) = self.synthetic_section(if self.target.uses_addends {
+            ".rela.dyn"
+        } else {
+            ".rel.dyn"
+        }) else {
+            return false;
+        };
+        let old = self.android_relocations.len();
+        let rela = self.target.uses_addends;
+        let word = self.word_size();
+        let wide = self.encoding().is_64();
+        let relative_kind = self.target.relative_relocation;
+        let entries = self.dynamic_relocations.clone();
+        let mut relatives: Vec<(u64, u64, i64)> = Vec::new();
+        let mut others: Vec<(u64, u64, i64)> = Vec::new();
+        for relocation in self.finalized_dynamic_relocations(&entries, false) {
+            let information = if wide {
+                (u64::from(relocation.symbol) << 32) | u64::from(relocation.kind)
+            } else {
+                (u64::from(relocation.symbol) << 8) | u64::from(relocation.kind & 0xff)
+            };
+            let addend = if rela { relocation.addend } else { 0 };
+            let entry = (relocation.offset, information, addend);
+            if relocation.kind == relative_kind {
+                relatives.push(entry);
+            } else {
+                others.push(entry);
+            }
+        }
+        let mut data = b"APS2".to_vec();
+        push_signed_leb(&mut data, (relatives.len() + others.len()) as i64);
+        push_signed_leb(&mut data, 0);
+        relatives.sort_by_key(|entry| entry.0);
+        let mut ungrouped_relatives = Vec::new();
+        let mut relative_groups: Vec<Vec<(u64, u64, i64)>> = Vec::new();
+        let mut position = 0usize;
+        while position < relatives.len() {
+            let mut group = vec![relatives[position]];
+            position += 1;
+            while position < relatives.len()
+                && relatives[position - 1].0.wrapping_add(word) == relatives[position].0
+            {
+                group.push(relatives[position]);
+                position += 1;
+            }
+            if group.len() < 8 {
+                ungrouped_relatives.extend(group);
+            } else {
+                relative_groups.push(group);
+            }
+        }
+        others.sort_by_key(|entry| (entry.1, entry.2, entry.0));
+        let mut ungrouped_others = Vec::new();
+        let mut other_groups: Vec<Vec<(u64, u64, i64)>> = Vec::new();
+        let mut start = 0usize;
+        while start < others.len() {
+            let mut end = start + 1;
+            while end < others.len()
+                && others[start].1 == others[end].1
+                && (!rela || others[start].2 == others[end].2)
+            {
+                end += 1;
+            }
+            if end - start < 3 || (rela && others[start].2 != 0) {
+                ungrouped_others.extend_from_slice(&others[start..end]);
+            } else {
+                other_groups.push(others[start..end].to_vec());
+            }
+            start = end;
+        }
+        ungrouped_others.sort_by_key(|entry| entry.0);
+        let has_addend: i64 = if rela { 8 } else { 0 };
+        let mut offset = 0u64;
+        let mut addend = 0i64;
+        for group in &relative_groups {
+            push_signed_leb(&mut data, 1);
+            push_signed_leb(&mut data, 2 | 1 | has_addend);
+            push_signed_leb(&mut data, group[0].0.wrapping_sub(offset) as i64);
+            push_signed_leb(&mut data, i64::from(relative_kind));
+            if rela {
+                push_signed_leb(&mut data, group[0].2.wrapping_sub(addend));
+                addend = group[0].2;
+            }
+            push_signed_leb(&mut data, group.len() as i64 - 1);
+            push_signed_leb(&mut data, 2 | 1 | has_addend);
+            push_signed_leb(&mut data, word as i64);
+            push_signed_leb(&mut data, i64::from(relative_kind));
+            if rela {
+                for entry in group.iter().skip(1) {
+                    push_signed_leb(&mut data, entry.2.wrapping_sub(addend));
+                    addend = entry.2;
+                }
+            }
+            offset = group[group.len() - 1].0;
+        }
+        if !ungrouped_relatives.is_empty() {
+            push_signed_leb(&mut data, ungrouped_relatives.len() as i64);
+            push_signed_leb(&mut data, 1 | has_addend);
+            push_signed_leb(&mut data, i64::from(relative_kind));
+            for entry in &ungrouped_relatives {
+                push_signed_leb(&mut data, entry.0.wrapping_sub(offset) as i64);
+                offset = entry.0;
+                if rela {
+                    push_signed_leb(&mut data, entry.2.wrapping_sub(addend));
+                    addend = entry.2;
+                }
+            }
+        }
+        for group in &other_groups {
+            push_signed_leb(&mut data, group.len() as i64);
+            push_signed_leb(&mut data, 1);
+            push_signed_leb(&mut data, group[0].1 as i64);
+            for entry in group {
+                push_signed_leb(&mut data, entry.0.wrapping_sub(offset) as i64);
+                offset = entry.0;
+            }
+            addend = 0;
+        }
+        if !ungrouped_others.is_empty() {
+            push_signed_leb(&mut data, ungrouped_others.len() as i64);
+            push_signed_leb(&mut data, has_addend);
+            for entry in &ungrouped_others {
+                push_signed_leb(&mut data, entry.0.wrapping_sub(offset) as i64);
+                offset = entry.0;
+                push_signed_leb(&mut data, entry.1 as i64);
+                if rela {
+                    push_signed_leb(&mut data, entry.2.wrapping_sub(addend));
+                    addend = entry.2;
+                }
+            }
+        }
+        if data.len() < old {
+            data.resize(old, 0);
+        }
+        self.android_relocations = data;
+        self.sections[section].size = self.android_relocations.len() as u64;
+        self.android_relocations.len() != old
+    }
+
+    pub fn update_relative_words(&mut self) -> bool {
+        let Some(section) = self.synthetic_section(".relr.dyn") else {
+            return false;
+        };
+        let old = self.relative_words.len();
+        let word = self.word_size();
+        let bits = word * 8 - 1;
+        let mut offsets: Vec<u64> = self
+            .relative_relocations
+            .iter()
+            .map(|relocation| self.section_address(relocation.section, relocation.offset))
+            .collect();
+        offsets.sort_unstable();
+        let mut words = Vec::new();
+        let mut position = 0usize;
+        while position < offsets.len() {
+            words.push(offsets[position]);
+            let mut base = offsets[position].wrapping_add(word);
+            position += 1;
+            loop {
+                let mut bitmap = 0u64;
+                while position < offsets.len() {
+                    let distance = offsets[position].wrapping_sub(base);
+                    if distance >= bits * word || !distance.is_multiple_of(word) {
+                        break;
+                    }
+                    bitmap |= 1u64 << (distance / word);
+                    position += 1;
+                }
+                if bitmap == 0 {
+                    break;
+                }
+                words.push((bitmap << 1) | 1);
+                base = base.wrapping_add(bits * word);
+            }
+        }
+        if words.len() < old {
+            let padding = old - words.len();
+            self.log(format!(".relr.dyn needs {padding} padding word(s)"));
+            words.resize(old, 1);
+        }
+        self.relative_words = words;
+        self.sections[section].size = self.relative_words.len() as u64 * word;
+        self.relative_words.len() != old
+    }
+
     pub fn add_relative_relocation(
         &mut self,
         section: SectionIndex,
@@ -13285,7 +14536,11 @@ impl<'s> Context<'s> {
             addend: 0,
             expression: Expression::Absolute,
         };
-        self.dynamic_relocations.push(relocation);
+        if self.options.android_packing {
+            self.plt_relocations.push(relocation);
+        } else {
+            self.dynamic_relocations.push(relocation);
+        }
     }
 
     fn handle_non_preemptible_indirect(&mut self, id: SymbolIndex, flags: u32) -> bool {
@@ -13709,6 +14964,9 @@ impl<'s> Context<'s> {
                 seen_relocation_read_only = true;
             }
             kept.push(output);
+        }
+        if !self.options.section_header {
+            kept.retain(|output| self.outputs[*output].flags & section_flag::ALLOCATE != 0);
         }
         self.order = kept;
         for output in self.order.clone() {
@@ -14630,7 +15888,11 @@ impl<'s> Context<'s> {
             ),
             (
                 if rela { ".rela.dyn" } else { ".rel.dyn" },
-                self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64,
+                if self.options.android_packing {
+                    self.android_relocations.len() as u64
+                } else {
+                    self.dynamic_relocations.len() as u64 * encoding.relocation_size(rela) as u64
+                },
             ),
             (
                 if rela { ".rela.plt" } else { ".rel.plt" },
@@ -14735,7 +15997,10 @@ impl<'s> Context<'s> {
         } else {
             symbol.value
         };
-        let address = if symbol.is_thread_local() && !self.is_relocatable() {
+        let positioned = symbol.section.is_some()
+            || symbol.output_section_symbol.is_some()
+            || symbol.header_relative;
+        let address = if symbol.is_thread_local() && !self.is_relocatable() && positioned {
             match self
                 .tls_segment
                 .and_then(|segment| self.segments[segment].first)
@@ -17676,8 +18941,12 @@ impl<'s> Context<'s> {
             Synthetic::ArmExceptionIndex => self.write_exception_index(section, &mut buffer),
             Synthetic::ExceptionFrameHeader => self.write_frame_header(&mut buffer),
             Synthetic::DynamicRelocations => {
-                let entries = self.dynamic_relocations.clone();
-                buffer = self.encode_dynamic_relocations(&entries, true);
+                if self.options.android_packing {
+                    buffer = self.android_relocations.clone();
+                } else {
+                    let entries = self.dynamic_relocations.clone();
+                    buffer = self.encode_dynamic_relocations(&entries, true);
+                }
             }
             Synthetic::PltRelocations => {
                 let entries = self.plt_relocations.clone();
@@ -17698,6 +18967,17 @@ impl<'s> Context<'s> {
             }
             Synthetic::StringTable => buffer = self.string_table.clone(),
             Synthetic::GdbIndex => buffer = self.encode_gdb_index(),
+            Synthetic::RelativeRelocations => {
+                let encoding = self.encoding();
+                buffer = Vec::new();
+                for word in self.relative_words.clone() {
+                    encoding.put_word(&mut buffer, word);
+                }
+            }
+            Synthetic::DebugNames => {
+                buffer = self.encode_debug_names();
+                buffer.resize(self.sections[section].size as usize, 0);
+            }
             Synthetic::SectionNameTable => buffer = self.section_names.bytes().to_vec(),
             Synthetic::BuildIdentifier => {
                 let encoding = self.encoding();
@@ -17908,10 +19188,64 @@ impl<'s> Context<'s> {
         out
     }
 
+    fn separate_trap_ranges(&self, headers: &mut [ProgramHeader]) -> Vec<(u64, u64)> {
+        let mut ranges = Vec::new();
+        let mut previous: Option<OutputIndex> = None;
+        for output in self.order.clone() {
+            let Some(segment) = self.outputs[output].load_segment else {
+                continue;
+            };
+            if self.segments[segment].flags & segment_flag::EXECUTE == 0 {
+                continue;
+            }
+            if let Some(before) =
+                previous.filter(|before| self.outputs[*before].load_segment == Some(segment))
+            {
+                let end = self.outputs[before]
+                    .offset
+                    .wrapping_add(self.outputs[before].size);
+                ranges.push((end & !3, self.outputs[output].offset));
+            }
+            previous = Some(output);
+        }
+        for (position, segment) in self.segments.iter().enumerate() {
+            if segment.kind != segment_type::LOAD || segment.flags & segment_flag::EXECUTE == 0 {
+                continue;
+            }
+            if let Some(first) = segment.first {
+                let end = self.outputs[first]
+                    .offset
+                    .wrapping_add(headers[position].file_size);
+                ranges.push((end & !3, align_to(end, self.maximum_page_size)));
+            }
+        }
+        let last = self
+            .segments
+            .iter()
+            .rposition(|segment| segment.kind == segment_type::LOAD);
+        if let Some(last) =
+            last.filter(|last| self.segments[*last].flags & segment_flag::EXECUTE != 0)
+        {
+            headers[last].file_size = align_to(headers[last].file_size, self.maximum_page_size);
+            headers[last].memory_size = headers[last].memory_size.max(headers[last].file_size);
+        }
+        ranges
+    }
+
     pub fn write_output(&mut self) -> Vec<u8> {
         let encoding = self.encoding();
         let mut out = vec![0u8; self.file_size as usize];
-        let headers = self.program_headers();
+        let mut headers = self.program_headers();
+        if self.options.separate_code != SeparateCode::None && !self.is_relocatable() {
+            let trap = self.target.trap;
+            for (start, end) in self.separate_trap_ranges(&mut headers) {
+                let mut at = start as usize;
+                while at + 4 <= (end as usize).min(out.len()) {
+                    out[at..at + 4].copy_from_slice(&trap);
+                    at += 4;
+                }
+            }
+        }
         let mut header = Vec::new();
         out[..4].copy_from_slice(b"\x7fELF");
         header.extend_from_slice(b"\x7fELF");
@@ -17944,7 +19278,15 @@ impl<'s> Context<'s> {
                 encoding.header_size() as u64
             },
         );
-        encoding.put_word(&mut header, self.section_header_offset);
+        let section_header = self.options.section_header;
+        encoding.put_word(
+            &mut header,
+            if section_header {
+                self.section_header_offset
+            } else {
+                0
+            },
+        );
         encoding.put_u32(&mut header, self.header_flags());
         encoding.put_u16(&mut header, encoding.header_size() as u16);
         encoding.put_u16(
@@ -17960,7 +19302,7 @@ impl<'s> Context<'s> {
         let count = self.order.len() + 1;
         encoding.put_u16(
             &mut header,
-            if count >= section_index::RESERVED_LOW as usize {
+            if count >= section_index::RESERVED_LOW as usize || !section_header {
                 0
             } else {
                 count as u16
@@ -18022,7 +19364,9 @@ impl<'s> Context<'s> {
             elf::encode_section_header(encoding, &section, &mut section_headers);
         }
         let at = self.section_header_offset as usize;
-        out[at..at + section_headers.len()].copy_from_slice(&section_headers);
+        if section_header {
+            out[at..at + section_headers.len()].copy_from_slice(&section_headers);
+        }
         self.write_build_identifier(&mut out);
         out
     }
@@ -18301,7 +19645,7 @@ impl<'s> Context<'s> {
                 Some(Synthetic::PltRelocations) => {
                     self.outputs[output].link = index_of(".dynsym", self);
                     let target = index_of(".got.plt", self);
-                    if target != 0 && self.has_dynamic_symbols {
+                    if target != 0 && (self.has_dynamic_symbols || self.options.android_packing) {
                         self.outputs[output].info = target;
                         self.outputs[output].flags |= section_flag::INFO_LINK;
                     }
@@ -18547,6 +19891,25 @@ impl<'s> Context<'s> {
                 self.indirect_relocation_bounds = Some((start, end));
             }
         }
+        if !relocatable
+            && matches!(
+                self.target.architecture,
+                Architecture::X86 | Architecture::X86_64
+            )
+        {
+            if let Some(id) = self.find("_TLS_MODULE_BASE_") {
+                if self.symbols[id].is_undefined() {
+                    self.define_synthesized(
+                        id,
+                        SymbolPlace::Absolute,
+                        0,
+                        visibility::HIDDEN,
+                        symbol_type::THREAD_LOCAL,
+                        symbol_binding::GLOBAL,
+                    );
+                }
+            }
+        }
         if self.options.export_dynamic {
             for id in self.synthesized.clone() {
                 if self.compute_binding(id) != symbol_binding::LOCAL {
@@ -18626,6 +19989,8 @@ impl<'s> Context<'s> {
         loop {
             let mut changed = if self.needs_thunks() && !relocatable {
                 self.create_thunks(pass)
+            } else if self.target.architecture == Architecture::X86_64 && !relocatable {
+                self.relax_got_once()
             } else {
                 false
             };
@@ -18648,6 +20013,16 @@ impl<'s> Context<'s> {
             self.finalize_synthetic_sizes();
             changed |= self.update_frame_header();
             changed |= self.update_indirect_relocation_bounds();
+            changed |= self.update_android_relocations();
+            changed |= self.update_relative_words();
+            if self.has_dynamic_symbols && self.live_synthetic(".dynamic") {
+                let count = self.dynamic_entries().len();
+                if count != self.dynamic_entry_count {
+                    self.dynamic_entry_count = count;
+                    changed = true;
+                    self.finalize_synthetic_sizes();
+                }
+            }
             self.changed_output = None;
             self.changed_symbol = None;
             let moved = self.layout_addresses();
@@ -18852,6 +20227,17 @@ pub fn link_elf_in(
     directory: &str,
     environment: &[(String, String)],
 ) -> LinkOutcome {
+    let expanded = match expand_elf_response_files(arguments, source) {
+        Ok(expanded) => expanded,
+        Err(diagnostic) => {
+            return LinkOutcome {
+                outputs: Vec::new(),
+                diagnostics: vec![diagnostic],
+                messages: Vec::new(),
+            }
+        }
+    };
+    let arguments = expanded.as_slice();
     let Ok(parsed) = parse_command_line(arguments) else {
         return link_elf_plain(arguments, source, identity);
     };
@@ -19073,9 +20459,30 @@ fn link_elf_rooted(
     context.messages = messages;
     context.identity = identity.to_string();
     let bytes = context.run();
+    let limit = context.options.error_limit.unwrap_or(20);
+    let mut diagnostics = std::mem::take(&mut context.diagnostics);
+    if limit > 0 {
+        let mut count = 0usize;
+        let cut = diagnostics.iter().position(|diagnostic| {
+            if diagnostic.severity.is_blocking() {
+                count += 1;
+            }
+            count > limit
+        });
+        if let Some(cut) = cut {
+            diagnostics.truncate(cut);
+            diagnostics.push(
+                problem("EI288", "The linker stops after too many errors.")
+                    .with_context(format!("Limit: {limit}"))
+                    .with_context(format!(
+                        "Cause: too many errors emitted{TOO_MANY_ERRORS} (use --error-limit=0 to see all errors)"
+                    )),
+            );
+        }
+    }
     let mut outcome = LinkOutcome {
         outputs: std::mem::take(&mut context.extra_outputs),
-        diagnostics: context.diagnostics,
+        diagnostics,
         messages: context.messages,
     };
     if let Some(bytes) = bytes {
@@ -20177,6 +21584,61 @@ impl<'s> Context<'s> {
             ThunkKind::Aarch64AbsoluteLong | ThunkKind::Aarch64PagedLong => {}
         }
     }
+}
+
+pub fn expand_elf_response_files(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Vec<String>, Diagnostic> {
+    let mut posix = true;
+    for argument in arguments {
+        let Some(style) = argument
+            .strip_prefix("--rsp-quoting=")
+            .or_else(|| argument.strip_prefix("-rsp-quoting="))
+        else {
+            continue;
+        };
+        match style {
+            "windows" => posix = false,
+            "posix" => posix = true,
+            _ => {
+                return Err(invalid_value("--rsp-quoting", style)
+                    .with_context(format!("Cause: invalid response file quoting: {style}")))
+            }
+        }
+    }
+    let mut expanded: Vec<String> = Vec::new();
+    let mut pending: Vec<(String, Vec<String>)> = arguments
+        .iter()
+        .rev()
+        .map(|argument| (argument.clone(), Vec::new()))
+        .collect();
+    while let Some((argument, chain)) = pending.pop() {
+        let Some(path) = argument.strip_prefix('@') else {
+            expanded.push(argument);
+            continue;
+        };
+        let Some(bytes) = source(path) else {
+            expanded.push(argument);
+            continue;
+        };
+        if chain.iter().any(|seen| seen == path) {
+            return Err(invalid_value("@", path)
+                .with_context(format!("Cause: recursive expansion of: '{path}'")));
+        }
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let tokens = if posix {
+            tokenize_posix_command_line(&text)
+        } else {
+            tokenize_windows_command_line(&text)
+        };
+        let mut next = chain.clone();
+        next.push(path.to_string());
+        for token in tokens.into_iter().rev() {
+            pending.push((token, next.clone()));
+        }
+    }
+    Ok(expanded)
 }
 
 pub fn tokenize_posix_command_line(text: &str) -> Vec<String> {
@@ -39842,6 +41304,13 @@ pub const ELF_OPTIONS: &[OptionSpelling] = &[
         name: "reproduce",
         shape: OptionShape::Separate,
         canonical: "reproduce",
+        alias_value: "",
+    },
+    OptionSpelling {
+        prefixes: &["--", "-"],
+        name: "rsp-quoting=",
+        shape: OptionShape::Joined,
+        canonical: "rsp-quoting",
         alias_value: "",
     },
     OptionSpelling {

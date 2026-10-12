@@ -68842,6 +68842,100 @@ mod linker_lit {
         out
     }
 
+    fn unroot_thin_archive(bytes: &[u8], root_text: &str) -> Option<Vec<u8>> {
+        if !bytes.starts_with(b"!<thin>\n") || root_text.is_empty() {
+            return None;
+        }
+        let needle = root_text.as_bytes();
+        if !bytes.windows(needle.len()).any(|window| window == needle) {
+            return None;
+        }
+        let mut members: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        let mut at = 8usize;
+        while at + 60 <= bytes.len() {
+            let header = bytes[at..at + 60].to_vec();
+            let name = String::from_utf8_lossy(&header[..16])
+                .trim_end()
+                .to_string();
+            let size: usize = String::from_utf8_lossy(&header[48..58])
+                .trim()
+                .parse()
+                .ok()?;
+            let stored = name == "/" || name == "//" || name == "/SYM64/";
+            let body = if stored {
+                Some(bytes.get(at + 60..at + 60 + size)?.to_vec())
+            } else {
+                None
+            };
+            members.push((at, header, body));
+            at += 60 + if stored { size + size % 2 } else { 0 };
+        }
+        let mut name_offsets: BTreeMap<usize, usize> = BTreeMap::new();
+        for member in members.iter_mut() {
+            if &member.1[..16] != b"//              " {
+                continue;
+            }
+            let table = member.2.clone()?;
+            let mut rebuilt = Vec::new();
+            let mut start = 0usize;
+            while start < table.len() {
+                let end = table[start..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map(|position| start + position + 1)
+                    .unwrap_or(table.len());
+                name_offsets.insert(start, rebuilt.len());
+                let entry = String::from_utf8_lossy(&table[start..end]).replace(root_text, "");
+                rebuilt.extend_from_slice(entry.as_bytes());
+                start = end;
+            }
+            member.2 = Some(rebuilt);
+        }
+        let mut positions: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut cursor = 8usize;
+        for member in members.iter_mut() {
+            positions.insert(member.0, cursor);
+            let name = String::from_utf8_lossy(&member.1[..16])
+                .trim_end()
+                .to_string();
+            if let Some(offset) = name
+                .strip_prefix('/')
+                .and_then(|rest| rest.parse::<usize>().ok())
+            {
+                let renamed = format!("/{}", name_offsets.get(&offset).copied().unwrap_or(offset));
+                member.1[..16].copy_from_slice(format!("{renamed:<16}").as_bytes());
+            }
+            if let Some(body) = &member.2 {
+                member.1[48..58].copy_from_slice(format!("{:<10}", body.len()).as_bytes());
+                cursor += 60 + body.len() + body.len() % 2;
+            } else {
+                cursor += 60;
+            }
+        }
+        let mut out = b"!<thin>\n".to_vec();
+        for (_, header, body) in &members {
+            out.extend_from_slice(header);
+            if let Some(body) = body {
+                let mut body = body.clone();
+                if &header[..16] == b"/               " && body.len() >= 4 {
+                    let count = u32::from_be_bytes(body[..4].try_into().ok()?) as usize;
+                    for index in 0..count {
+                        let place = 4 + index * 4;
+                        let old = u32::from_be_bytes(body.get(place..place + 4)?.try_into().ok()?)
+                            as usize;
+                        let new = positions.get(&old).copied().unwrap_or(old) as u32;
+                        body[place..place + 4].copy_from_slice(&new.to_be_bytes());
+                    }
+                }
+                out.extend_from_slice(&body);
+                if body.len() % 2 == 1 {
+                    out.push(b'\n');
+                }
+            }
+        }
+        Some(out)
+    }
+
     fn read_back(world: &mut World, root: &Path, folder: &Path) {
         let Ok(entries) = std::fs::read_dir(folder) else {
             return;
@@ -68863,6 +68957,8 @@ mod linker_lit {
                 world.folders.insert(virtual_path);
                 read_back(world, root, &path);
             } else if let Ok(bytes) = std::fs::read(&path) {
+                let root_text = root.to_string_lossy().to_string();
+                let bytes = unroot_thin_archive(&bytes, &root_text).unwrap_or(bytes);
                 if world.read(&virtual_path).as_deref() != Some(bytes.as_slice()) {
                     world.write(&virtual_path, bytes, false);
                 }
@@ -69436,6 +69532,14 @@ mod linker_lit {
             Some("COFF/thin-archive.s") => Some(
                 "the thin archive keeps absolute member paths that the host llvm-nm reads outside the test sandbox",
             ),
+            Some(
+                "ELF/x86-64-gotpc-no-relax-err.s"
+                | "ELF/x86-64-gotpc-relax-nopic.s"
+                | "ELF/tls-opt.s"
+                | "ELF/x86-64-tlsdesc-gd.s",
+            ) => Some(
+                "the installed LLVM 18 llvm-mc and llvm-objdump do not emit APX relocations or decode APX registers",
+            ),
             Some("ELF/compress-sections-special.s") => Some(
                 "the lit runner appends stderr after stdout under 2>&1 and the test needs llvm-readelf warnings interleaved with its hex dump",
             ),
@@ -69450,6 +69554,25 @@ mod linker_lit {
         if path.contains("lld/test/ELF/") && arm_triple && text.contains("@plt>") {
             return Some(
                 "the installed LLVM 18 llvm-objdump does not label ARM PLT entries".to_string(),
+            );
+        }
+        if path.contains("lld/test/ELF/") && text.contains("Symbolic Address") {
+            return Some(
+                "the installed LLVM 18 llvm-readelf prints RELR entries only as decoded relocations"
+                    .to_string(),
+            );
+        }
+        if path.contains("lld/test/ELF/")
+            && [
+                "DW_IDX_parent: <parent not indexed>",
+                "DW_IDX_parent: Entry @",
+            ]
+            .iter()
+            .any(|form| text.contains(form))
+        {
+            return Some(
+                "the installed LLVM 18 llvm-dwarfdump prints DW_IDX_parent in an older form and lists abbreviations in hash order"
+                    .to_string(),
             );
         }
         if path.contains("lld/test/ELF/")
