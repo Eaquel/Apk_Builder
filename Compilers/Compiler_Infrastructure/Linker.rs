@@ -73,12 +73,28 @@ pub enum InputItem {
     PushState,
     PopState,
     Script(String),
+    DefaultScript(String),
     Defsym(String),
 }
 
 #[derive(Clone, Debug)]
 pub struct Options {
     pub output: String,
+    pub reproduce: Option<String>,
+    pub dependency_file: Option<String>,
+    pub print_archive_stats: Option<String>,
+    pub why_extract: Option<String>,
+    pub undefined_glob: Vec<String>,
+    pub trace_symbols: Vec<String>,
+    pub trace_files: bool,
+    pub time_trace: Option<String>,
+    pub auxiliary_libraries: Vec<String>,
+    pub filter_libraries: Vec<String>,
+    pub stack_size: Option<u64>,
+    pub start_stop_visibility: u8,
+    pub keep_text_section_prefix: bool,
+    pub chroot: Option<String>,
+    pub verbose: bool,
     pub kind: OutputKind,
     pub emulation: Option<String>,
     pub entry: Option<String>,
@@ -198,6 +214,21 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             output: "a.out".to_string(),
+            reproduce: None,
+            dependency_file: None,
+            print_archive_stats: None,
+            why_extract: None,
+            undefined_glob: Vec::new(),
+            trace_symbols: Vec::new(),
+            trace_files: false,
+            time_trace: None,
+            auxiliary_libraries: Vec::new(),
+            filter_libraries: Vec::new(),
+            stack_size: None,
+            start_stop_visibility: 3,
+            keep_text_section_prefix: false,
+            chroot: None,
+            verbose: false,
             kind: OutputKind::Executable,
             emulation: None,
             entry: None,
@@ -1283,6 +1314,87 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             | "-dp"
             | "--eh-frame-hdr=" => {}
             _ => {
+                if let Some(value) = argument.strip_prefix("--reproduce=") {
+                    options.reproduce = Some(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--print-archive-stats=") {
+                    options.print_archive_stats = Some(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--why-extract=") {
+                    options.why_extract = Some(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--auxiliary=") {
+                    options.auxiliary_libraries.push(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--filter=") {
+                    options.filter_libraries.push(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--chroot=") {
+                    options.chroot = Some(value.to_string());
+                    continue;
+                }
+                if argument == "-d" || argument == "--define-common" {
+                    continue;
+                }
+                if argument == "--EB" {
+                    options.big_endian_requested = true;
+                    options.little_endian_requested = false;
+                    continue;
+                }
+                if argument == "--EL" {
+                    options.little_endian_requested = true;
+                    options.big_endian_requested = false;
+                    continue;
+                }
+                if argument == "-G" {
+                    cursor.next();
+                    continue;
+                }
+                if argument == "--trace" {
+                    options.trace_files = true;
+                    continue;
+                }
+                if argument == "--verbose" {
+                    options.verbose = true;
+                    continue;
+                }
+                if argument == "--time-trace" {
+                    options.time_trace = Some(String::new());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--time-trace=") {
+                    options.time_trace = Some(value.to_string());
+                    continue;
+                }
+                if argument.starts_with("--time-trace-granularity=") {
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--trace-symbol=") {
+                    options.trace_symbols.push(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--undefined-glob=") {
+                    options.undefined_glob.push(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--dependency-file=") {
+                    options.dependency_file = Some(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--default-script=") {
+                    options
+                        .inputs
+                        .push(InputItem::DefaultScript(value.to_string()));
+                    continue;
+                }
+                if argument.starts_with("--lto-sample-profile=") {
+                    continue;
+                }
                 if argument == "--rpath-link" || argument == "-rpath-link" {
                     cursor.next();
                     continue;
@@ -1301,6 +1413,13 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
         }
     }
     options.no_standard_library = nostdlib;
+    if options
+        .emulation
+        .as_deref()
+        .is_some_and(|emulation| emulation.ends_with("_fbsd"))
+    {
+        options.operating_system_abi = Some(9);
+    }
     options.kind = if relocatable {
         OutputKind::Relocatable
     } else if shared {
@@ -1381,10 +1500,28 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
             options.diagnose_regular = Some(false);
         }
         "nognustack" | "noexecstack-ignored" => {}
+        "muldefs" => options.allow_multiple_definition = true,
+        "keep-text-section-prefix" => options.keep_text_section_prefix = true,
+        "nokeep-text-section-prefix" => options.keep_text_section_prefix = false,
         "pack-relative-relocs" => options.pack_relative_relocations = true,
         "nopack-relative-relocs" => options.pack_relative_relocations = false,
         _ => {
-            if let Some(value) = keyword.strip_prefix("max-page-size=") {
+            if let Some(value) = keyword.strip_prefix("stack-size=") {
+                options.stack_size =
+                    Some(parse_number(value).ok_or_else(|| invalid_value("-z", keyword))?);
+            } else if let Some(value) = keyword.strip_prefix("start-stop-visibility=") {
+                options.start_stop_visibility = match value {
+                    "default" => visibility::DEFAULT,
+                    "internal" => visibility::INTERNAL,
+                    "hidden" => visibility::HIDDEN,
+                    "protected" => visibility::PROTECTED,
+                    _ => {
+                        return Err(invalid_value("-z", keyword).with_context(format!(
+                            "Cause: unknown -z start-stop-visibility= value '{value}'"
+                        )))
+                    }
+                };
+            } else if let Some(value) = keyword.strip_prefix("max-page-size=") {
                 options.maximum_page_size =
                     Some(parse_number(value).ok_or_else(|| invalid_value("-z", keyword))?);
             } else if let Some(value) = keyword.strip_prefix("common-page-size=") {
@@ -2745,6 +2882,9 @@ pub struct Context<'s> {
     pub input_order: Vec<SectionIndex>,
     pub exception_index_inputs: Vec<SectionIndex>,
     pub deferred_duplicates: Vec<Diagnostic>,
+    pub archive_statistics: Vec<(String, usize)>,
+    pub traced_symbols: BTreeSet<SymbolIndex>,
+    pub extraction_records: Vec<(String, FileIndex, SymbolIndex)>,
     pub pending_dependent_libraries: Vec<(FileIndex, String)>,
     pub exception_index_code: Vec<SectionIndex>,
     pub exception_index_order: Vec<SectionIndex>,
@@ -2864,6 +3004,9 @@ impl<'s> Context<'s> {
             input_order: Vec::new(),
             exception_index_inputs: Vec::new(),
             deferred_duplicates: Vec::new(),
+            archive_statistics: Vec::new(),
+            traced_symbols: BTreeSet::new(),
+            extraction_records: Vec::new(),
             pending_dependent_libraries: Vec::new(),
             exception_index_code: Vec::new(),
             exception_index_order: Vec::new(),
@@ -3016,6 +3159,14 @@ impl<'s> Context<'s> {
         other: u8,
         kind: u8,
     ) {
+        let description = match &state {
+            SymbolState::Undefined => "reference to",
+            SymbolState::Common { .. } => "common definition of",
+            SymbolState::Shared => "shared definition of",
+            SymbolState::Lazy { .. } => "lazy definition of",
+            _ => "definition of",
+        };
+        self.trace_symbol(symbol, file, description);
         let entry = &mut self.symbols[symbol];
         if entry.file.is_some_and(|index| {
             matches!(
@@ -3062,13 +3213,16 @@ impl<'s> Context<'s> {
             self.symbols[symbol].discarded_section = discarded_section;
             return;
         }
+        self.trace_symbol(symbol, Some(file), "reference to");
         if let SymbolState::Lazy { source } = current {
             if binding == symbol_binding::WEAK {
                 self.symbols[symbol].binding = symbol_binding::WEAK;
                 self.symbols[symbol].kind = kind;
                 return;
             }
-            self.extract(source);
+            let extracted = self.extract(source);
+            let reference = self.file_name(Some(file));
+            self.record_extraction(reference, extracted, symbol);
             return;
         }
         if file_is_shared {
@@ -3181,9 +3335,28 @@ impl<'s> Context<'s> {
         self.symbols[symbol].section = None;
     }
 
+    pub fn log(&mut self, text: String) {
+        if self.options.verbose {
+            self.diagnostics.push(
+                remark("EI299", "The linker reports a detail of the link.")
+                    .with_context(format!("Cause: {text}")),
+            );
+        }
+    }
+
+    fn trace_symbol(&mut self, symbol: SymbolIndex, file: Option<FileIndex>, description: &str) {
+        if !self.traced_symbols.contains(&symbol) {
+            return;
+        }
+        let name = self.symbols[symbol].name.clone();
+        let shown = self.file_name(file);
+        self.messages.push(format!("{shown}: {description} {name}"));
+    }
+
     pub fn resolve_lazy(&mut self, symbol: SymbolIndex, file: FileIndex) {
         let current = self.symbols[symbol].state.clone();
         if current == SymbolState::Placeholder {
+            self.trace_symbol(symbol, Some(file), "lazy definition of");
             self.symbols[symbol].state = SymbolState::Lazy {
                 source: LazySource::LazyObject { file },
             };
@@ -3195,6 +3368,7 @@ impl<'s> Context<'s> {
             return;
         }
         if self.symbols[symbol].is_weak() {
+            self.trace_symbol(symbol, Some(file), "lazy definition of");
             let kind = self.symbols[symbol].kind;
             self.symbols[symbol].state = SymbolState::Lazy {
                 source: LazySource::LazyObject { file },
@@ -3204,7 +3378,9 @@ impl<'s> Context<'s> {
             self.symbols[symbol].binding = symbol_binding::WEAK;
             return;
         }
-        self.extract(LazySource::LazyObject { file });
+        let reference = self.file_name(self.symbols[symbol].file);
+        let extracted = self.extract(LazySource::LazyObject { file });
+        self.record_extraction(reference, extracted, symbol);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3223,6 +3399,7 @@ impl<'s> Context<'s> {
         self.symbols[symbol].exported = true;
         let current = self.symbols[symbol].state.clone();
         if current == SymbolState::Placeholder {
+            self.trace_symbol(symbol, Some(file), "shared definition of");
             self.set_shared(
                 symbol, file, binding, other, kind, value, size, alignment, version,
             );
@@ -3234,6 +3411,7 @@ impl<'s> Context<'s> {
             }
             return;
         }
+        self.trace_symbol(symbol, Some(file), "shared definition of");
         if self.symbols[symbol].visibility() == visibility::DEFAULT
             && (current == SymbolState::Undefined || self.symbols[symbol].is_lazy())
         {
@@ -3278,15 +3456,30 @@ impl<'s> Context<'s> {
         }
     }
 
-    pub fn extract(&mut self, source: LazySource) {
+    pub fn extract(&mut self, source: LazySource) -> Option<FileIndex> {
         let LazySource::LazyObject { file } = source else {
-            return;
+            return None;
         };
         if !matches!(self.files[file].state, FileState::LazyObject) {
-            return;
+            return None;
         }
         self.files[file].state = FileState::Object;
         self.parse_object(file);
+        Some(file)
+    }
+
+    fn record_extraction(
+        &mut self,
+        reference: String,
+        extracted: Option<FileIndex>,
+        symbol: SymbolIndex,
+    ) {
+        if self.options.why_extract.is_none() {
+            return;
+        }
+        if let Some(extracted) = extracted {
+            self.extraction_records.push((reference, extracted, symbol));
+        }
     }
 }
 
@@ -3302,6 +3495,31 @@ fn incompatible(file: &str, reference: &str) -> Diagnostic {
     .with_context(format!("File: {file}"))
     .with_context(format!("Reference: {reference}"))
     .with_context(format!("Cause: {file} is incompatible with {reference}"))
+}
+
+fn bfd_emulation(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "elf64-aarch64" | "elf64-littleaarch64" => "aarch64linux",
+        "elf64-bigaarch64" => "aarch64linuxb",
+        "elf32-i386" => "elf_i386",
+        "elf64-x86-64" => "elf_x86_64",
+        "elf32-x86-64" => "elf32_x86_64",
+        "elf32-littlearm" => "armelf",
+        "elf32-bigarm" => "armelfb",
+        "elf32-powerpc" => "elf32ppc",
+        "elf32-powerpcle" => "elf32lppc",
+        "elf64-powerpc" => "elf64ppc",
+        "elf64-powerpcle" => "elf64lppc",
+        "elf32-tradbigmips" | "elf32-bigmips" => "elf32btsmip",
+        "elf32-tradlittlemips" => "elf32ltsmip",
+        "elf32-ntradbigmips" => "elf32btsmipn32",
+        "elf32-ntradlittlemips" => "elf32ltsmipn32",
+        "elf64-tradbigmips" => "elf64btsmip",
+        "elf64-tradlittlemips" => "elf64ltsmip",
+        "elf32-littleriscv" => "elf32lriscv",
+        "elf64-littleriscv" => "elf64lriscv",
+        _ => return None,
+    })
 }
 
 pub fn emulation_target(emulation: &str) -> Option<(Architecture, Endian)> {
@@ -3377,8 +3595,22 @@ impl<'s> Context<'s> {
         let mut group = 0usize;
         let items = self.options.inputs.clone();
         let mut files_seen = 0usize;
+        let mut default_script: Option<(String, String)> = None;
+        let has_script = items
+            .iter()
+            .any(|item| matches!(item, InputItem::Script(_)));
         for item in items {
             match item {
+                InputItem::DefaultScript(path) => match self.search_script(&path) {
+                    Some(found) => {
+                        let bytes = (self.source)(&found).unwrap_or_default();
+                        default_script = Some((String::from_utf8_lossy(&bytes).to_string(), found));
+                    }
+                    None => self.error_always(
+                        problem("EI205", "An input file could not be found.")
+                            .with_context(format!("Script: {path}")),
+                    ),
+                },
                 InputItem::WholeArchive(value) => state.whole_archive = value,
                 InputItem::AsNeeded(value) => state.as_needed = value,
                 InputItem::Static(value) => state.is_static = value,
@@ -3445,6 +3677,15 @@ impl<'s> Context<'s> {
                     }
                 }
             }
+        }
+        if let (Some((text, found)), false) = (default_script, has_script) {
+            let mut load = ScriptLoad {
+                state,
+                group,
+                target_reference: &mut target_reference,
+                in_group: false,
+            };
+            self.read_linker_script(&text, &found, &mut load);
         }
         while !self.pending_dependent_libraries.is_empty() {
             let pending = std::mem::take(&mut self.pending_dependent_libraries);
@@ -3527,6 +3768,8 @@ impl<'s> Context<'s> {
                     return;
                 }
             };
+            let statistic = self.archive_statistics.len();
+            self.archive_statistics.push((display.to_string(), 0));
             for member in members {
                 let relocatable_object = elf::identify(&member.bytes)
                     .and_then(|encoding| encoding.read_u16(&member.bytes, 16))
@@ -3543,6 +3786,7 @@ impl<'s> Context<'s> {
                     continue;
                 }
                 let lazy = !state.whole_archive;
+                self.archive_statistics[statistic].1 += 1;
                 self.add_elf(
                     &member.name,
                     Some(display.to_string()),
@@ -3631,6 +3875,22 @@ impl<'s> Context<'s> {
         let encoding = elf.encoding();
         match target_reference {
             None => {
+                let format = self
+                    .options
+                    .output_format_machine
+                    .as_deref()
+                    .and_then(bfd_emulation)
+                    .and_then(emulation_target);
+                if let Some((architecture, endian)) = format {
+                    let expected = Target::for_architecture(architecture, endian);
+                    if elf.header.machine != expected.architecture.machine()
+                        || encoding.endian != expected.encoding.endian
+                    {
+                        let reference = self.options.output_format.clone().unwrap_or_default();
+                        self.error(incompatible(&display, &reference));
+                        return;
+                    }
+                }
                 if !self.set_target_from(encoding, elf.header.machine, &display) {
                     return;
                 }
@@ -3849,6 +4109,10 @@ impl<'s> Context<'s> {
     }
 
     pub fn parse_object(&mut self, index: FileIndex) {
+        if self.options.trace_files {
+            let shown = self.file_name(Some(index));
+            self.messages.push(shown);
+        }
         self.object_files.push(index);
         self.queue_dependent_libraries(index);
         let Some(symbols) = (if self.files[index].elf_symbols.is_empty() {
@@ -3977,6 +4241,10 @@ impl<'s> Context<'s> {
     }
 
     fn parse_shared(&mut self, index: FileIndex) {
+        if self.options.trace_files {
+            let shown = self.file_name(Some(index));
+            self.messages.push(shown);
+        }
         let elf = self.files[index].elf.clone();
         if let Ok(Some(name)) = elf.shared_object_name() {
             self.files[index].shared_object_name = name;
@@ -6290,6 +6558,14 @@ impl<'s> Context<'s> {
         let mut add = |tag: i64, value: u64| entries.push(elf::DynamicEntry { tag, value });
         let encoding = self.encoding();
         let rela = self.target.uses_addends;
+        for name in self.options.filter_libraries.clone() {
+            let offset = self.add_dynamic_string(&name);
+            add(0x7fff_ffff, u64::from(offset));
+        }
+        for name in self.options.auxiliary_libraries.clone() {
+            let offset = self.add_dynamic_string(&name);
+            add(0x7fff_fffd, u64::from(offset));
+        }
         if !self.options.run_paths.is_empty() {
             let joined = self.options.run_paths.join(":");
             let offset = self.add_dynamic_string(&joined);
@@ -7033,11 +7309,18 @@ pub struct UndefinedReference {
 impl<'s> Context<'s> {
     pub fn add_unused_undefined(&mut self, name: &str) -> SymbolIndex {
         let id = self.insert(name);
-        if self.symbols[id].state == SymbolState::Placeholder {
-            let entry = &mut self.symbols[id];
-            entry.state = SymbolState::Undefined;
-            entry.file = Some(INTERNAL);
-            entry.binding = symbol_binding::GLOBAL;
+        match self.symbols[id].state.clone() {
+            SymbolState::Placeholder => {
+                let entry = &mut self.symbols[id];
+                entry.state = SymbolState::Undefined;
+                entry.file = Some(INTERNAL);
+                entry.binding = symbol_binding::GLOBAL;
+            }
+            SymbolState::Lazy { source } if !self.symbols[id].is_weak() => {
+                let extracted = self.extract(source);
+                self.record_extraction("<internal>".to_string(), extracted, id);
+            }
+            _ => {}
         }
         id
     }
@@ -7052,7 +7335,8 @@ impl<'s> Context<'s> {
                 entry.binding = binding;
             }
             SymbolState::Lazy { source } if binding != symbol_binding::WEAK => {
-                self.extract(source);
+                let extracted = self.extract(source);
+                self.record_extraction("<internal>".to_string(), extracted, id);
             }
             _ => {}
         }
@@ -7118,10 +7402,72 @@ impl<'s> Context<'s> {
         }
     }
 
-    pub fn handle_undefined(&mut self, id: SymbolIndex) {
+    pub fn handle_undefined(&mut self, id: SymbolIndex, option: &str) {
         self.symbols[id].used_in_regular_object = true;
         if let SymbolState::Lazy { source } = self.symbols[id].state.clone() {
-            self.extract(source);
+            let extracted = self.extract(source);
+            self.record_extraction(option.to_string(), extracted, id);
+        }
+    }
+
+    fn write_archive_statistics(&mut self) {
+        let Some(path) = self.options.print_archive_stats.clone() else {
+            return;
+        };
+        if path.ends_with('/') {
+            self.error_always(
+                problem("EI205", "An input file could not be found.")
+                    .with_context(format!("File: {path}"))
+                    .with_context(format!(
+                        "Cause: --print-archive-stats=: cannot open {path}: Is a directory"
+                    )),
+            );
+            return;
+        }
+        let mut extracted: BTreeMap<String, usize> = BTreeMap::new();
+        for file in &self.object_files {
+            if let Some(archive) = &self.files[*file].archive_name {
+                *extracted.entry(archive.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut text = String::from("members\textracted\tarchive\n");
+        for (archive, members) in self.archive_statistics.clone() {
+            let count = extracted.insert(archive.clone(), 0).unwrap_or(0);
+            text.push_str(&format!("{members}\t{count}\t{archive}\n"));
+        }
+        self.auxiliary_output(path, text);
+    }
+
+    fn write_extraction_reasons(&mut self) {
+        let Some(path) = self.options.why_extract.clone() else {
+            return;
+        };
+        if path.ends_with('/') {
+            self.error_always(
+                problem("EI205", "An input file could not be found.")
+                    .with_context(format!("File: {path}"))
+                    .with_context(format!(
+                        "Cause: cannot open --why-extract= file {path}: Is a directory"
+                    )),
+            );
+            return;
+        }
+        let mut text = String::from("reference\textracted\tsymbol\n");
+        for (reference, file, symbol) in self.extraction_records.clone() {
+            let name = self.shown_name(&self.symbols[symbol].name.clone());
+            text.push_str(&format!(
+                "{reference}\t{}\t{name}\n",
+                self.file_name(Some(file))
+            ));
+        }
+        self.auxiliary_output(path, text);
+    }
+
+    fn auxiliary_output(&mut self, path: String, text: String) {
+        if path == "-" {
+            self.messages.push(text.trim_end_matches('\n').to_string());
+        } else {
+            self.extra_outputs.push((path, text.into_bytes()));
         }
     }
 
@@ -12371,7 +12717,7 @@ impl<'s> Context<'s> {
             stack_flags |= segment_flag::EXECUTE;
         }
         let stack = self.add_segment(segment_type::GNU_STACK, stack_flags);
-        self.segments[stack].memory_size_override = Some(0);
+        self.segments[stack].memory_size_override = Some(self.options.stack_size.unwrap_or(0));
         if let Some(property) = self.find_output(".note.gnu.property") {
             let segment = self.add_segment(segment_type::GNU_PROPERTY, segment_flag::READ);
             self.segment_add(segment, property);
@@ -12599,17 +12945,18 @@ impl<'s> Context<'s> {
             if !is_c_identifier(&name) {
                 continue;
             }
+            let shown = self.options.start_stop_visibility;
             let first = self.add_optional_regular(
                 &format!("__start_{name}"),
                 SymbolPlace::OutputStart(output),
                 0,
-                visibility::PROTECTED,
+                shown,
             );
             let second = self.add_optional_regular(
                 &format!("__stop_{name}"),
                 SymbolPlace::OutputEnd(output),
                 0,
-                visibility::PROTECTED,
+                shown,
             );
             if first.is_some() || second.is_some() {
                 self.outputs[output].used_in_expression = true;
@@ -16308,6 +16655,9 @@ impl<'s> Context<'s> {
     }
 
     pub fn operating_system_abi(&self) -> u8 {
+        if let Some(abi) = self.options.operating_system_abi {
+            return abi;
+        }
         let mut abi = 0;
         for file in &self.files {
             if file.archive_name.is_some() {
@@ -16574,6 +16924,22 @@ impl<'s> Context<'s> {
                     .with_context(format!("Cause: {ORDERING_CONFLICT}")),
             );
         }
+        if !self.is_shared() {
+            for (list, option) in [
+                (self.options.filter_libraries.is_empty(), "-F"),
+                (self.options.auxiliary_libraries.is_empty(), "-f"),
+            ] {
+                if !list {
+                    self.error_always(
+                        problem("EI204", "An option value is not valid.")
+                            .with_context(format!("Option: {option}"))
+                            .with_context(format!(
+                                "Cause: {option} may not be used without -shared"
+                            )),
+                    );
+                }
+            }
+        }
         if let Some(path) = self.options.retain_symbols_file.clone() {
             let mut names = BTreeSet::new();
             match (self.source)(&path) {
@@ -16590,6 +16956,10 @@ impl<'s> Context<'s> {
                 ))),
             }
             self.retained_symbols = Some(names);
+        }
+        for name in self.options.trace_symbols.clone() {
+            let id = self.insert(&name);
+            self.traced_symbols.insert(id);
         }
         for name in self.options.undefined.clone() {
             let id = self.add_unused_undefined(&name);
@@ -16615,7 +16985,26 @@ impl<'s> Context<'s> {
             (None, None) => "_start".to_string(),
         };
         if let Some(id) = self.find(&self.entry_name.clone()) {
-            self.handle_undefined(id);
+            self.handle_undefined(id, "--entry");
+        }
+        for pattern in self.options.undefined_glob.clone() {
+            if let Some(reason) = glob_problem(&pattern) {
+                self.error_always(
+                    problem("EI204", "An option value is not valid.")
+                        .with_context("Option: --undefined-glob".to_string())
+                        .with_context(format!("Cause: --undefined-glob: {reason}: {pattern}")),
+                );
+                continue;
+            }
+            let matching: Vec<SymbolIndex> = (0..self.symbols.len())
+                .filter(|id| {
+                    self.symbols[*id].state != SymbolState::Placeholder
+                        && glob_match(&pattern, &self.symbols[*id].name)
+                })
+                .collect();
+            for id in matching {
+                self.handle_undefined(id, "--undefined-glob");
+            }
         }
         self.add_script_referenced_symbols();
         for name in self.options.undefined.clone() {
@@ -16636,6 +17025,8 @@ impl<'s> Context<'s> {
             self.error(diagnostic);
         }
         self.redirect_wrapped_symbols(&wrapped);
+        self.write_archive_statistics();
+        self.write_extraction_reasons();
         if self.failed() {
             return None;
         }
@@ -16922,6 +17313,305 @@ pub fn link_as(
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
     identity: &str,
 ) -> LinkOutcome {
+    let exists = |path: &str| source(path).is_some();
+    link_elf_in(arguments, source, &exists, identity, "", &[])
+}
+
+fn elf_option_base(canonical: &str) -> Option<&'static OptionSpelling> {
+    ELF_OPTIONS
+        .iter()
+        .find(|option| option.canonical == canonical && option.name == canonical)
+        .or_else(|| {
+            ELF_OPTIONS.iter().find(|option| {
+                option.canonical == canonical && option.name.trim_end_matches('=') == canonical
+            })
+        })
+}
+
+pub fn elf_reproduce_response(
+    arguments: &[String],
+    exists: &dyn Fn(&str) -> bool,
+    directory: &str,
+) -> String {
+    let rewrite = |path: &str| -> String {
+        if exists(path) {
+            quote_spaced(&relative_to_root(path, directory))
+        } else {
+            quote_spaced(path)
+        }
+    };
+    let mut text = String::from("--chroot .\n");
+    let mut index = 0usize;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "-" || !argument.starts_with('-') {
+            text.push_str(&format!("{}\n", rewrite(argument)));
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let matched = match match_elf_option(arguments, &mut index) {
+            Ok(Some(matched)) => matched,
+            _ => {
+                index = start + 1;
+                text.push_str(&format!("{argument}\n"));
+                continue;
+            }
+        };
+        let base = elf_option_base(matched.canonical).unwrap_or(matched.option);
+        let (spelling, shape) = if std::ptr::eq(base, matched.option) {
+            (format!("{}{}", matched.prefix, base.name), base.shape)
+        } else {
+            (
+                format!(
+                    "{}{}",
+                    base.prefixes.first().copied().unwrap_or("--"),
+                    base.name
+                ),
+                base.shape,
+            )
+        };
+        let joined = shape == OptionShape::Joined;
+        let separator = if joined { "" } else { " " };
+        let value = matched.value.clone().unwrap_or_default();
+        match matched.canonical {
+            "reproduce" => {}
+            "o" | "Map" | "dependency-file" | "print-archive-stats" | "why-extract" => {
+                let file = value.rsplit('/').next().unwrap_or(&value);
+                text.push_str(&format!("{spelling}{separator}{}\n", quote_spaced(file)));
+            }
+            "lto-sample-profile" => {
+                text.push_str(&format!("{spelling}{}\n", rewrite(&value)));
+            }
+            "call-graph-ordering-file"
+            | "default-script"
+            | "dynamic-list"
+            | "export-dynamic-symbol-list"
+            | "just-symbols"
+            | "L"
+            | "remap-inputs-file"
+            | "retain-symbols-file"
+            | "rpath"
+            | "script"
+            | "symbol-ordering-file"
+            | "sysroot"
+            | "version-script" => {
+                text.push_str(&format!("{spelling} {}\n", rewrite(&value)));
+            }
+            _ => {
+                if shape == OptionShape::Flag || matched.value.is_none() {
+                    text.push_str(&format!("{spelling}\n"));
+                } else {
+                    text.push_str(&format!("{spelling}{separator}{}\n", quote_spaced(&value)));
+                }
+            }
+        }
+    }
+    text
+}
+
+pub fn link_elf_in(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    exists: &dyn Fn(&str) -> bool,
+    identity: &str,
+    directory: &str,
+    environment: &[(String, String)],
+) -> LinkOutcome {
+    let Ok(parsed) = parse_command_line(arguments) else {
+        return link_elf_plain(arguments, source, identity);
+    };
+    let reproduce = parsed.reproduce.clone().or_else(|| {
+        environment
+            .iter()
+            .find(|(key, _)| key == "LLD_REPRODUCE")
+            .map(|(_, value)| value.clone())
+    });
+    let dependency = parsed.dependency_file.clone();
+    if reproduce.is_none() && dependency.is_none() {
+        return link_elf_plain(arguments, source, identity);
+    }
+    let tape = std::cell::RefCell::new(reproduce.as_deref().map(TapeArchive::new));
+    let reads: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    if let Some(tape) = tape.borrow_mut().as_mut() {
+        let version = VERSION_BANNER.trim_end_matches(" (compatible with GNU linkers)");
+        tape.append(
+            "response.txt",
+            elf_reproduce_response(arguments, exists, directory).as_bytes(),
+        );
+        tape.append("version.txt", format!("{version}\n").as_bytes());
+    }
+    let recording = |file: &str| -> Option<Vec<u8>> {
+        let bytes = source(file)?;
+        if let Some(tape) = tape.borrow_mut().as_mut() {
+            tape.append(&relative_to_root(file, directory), &bytes);
+        }
+        let mut reads = reads.borrow_mut();
+        if !reads.iter().any(|known| known == file) {
+            reads.push(file.to_string());
+        }
+        Some(bytes)
+    };
+    let mut early: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    let mut last: BTreeMap<&'static str, String> = BTreeMap::new();
+    let mut lists: Vec<String> = Vec::new();
+    let mut versions: Vec<String> = Vec::new();
+    let mut remaps: Vec<String> = Vec::new();
+    while index < arguments.len() {
+        if !arguments[index].starts_with('-') || arguments[index] == "-" {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let Ok(Some(matched)) = match_elf_option(arguments, &mut index) else {
+            index = start + 1;
+            continue;
+        };
+        let value = matched.value.clone().unwrap_or_default();
+        match matched.canonical {
+            "lto-sample-profile" | "symbol-ordering-file" | "retain-symbols-file" => {
+                last.insert(matched.canonical, value);
+            }
+            "dynamic-list" | "export-dynamic-symbol-list" => lists.push(value),
+            "version-script" => versions.push(value),
+            "remap-inputs-file" => remaps.push(value),
+            _ => {}
+        }
+    }
+    if reproduce.is_some() {
+        if let Some(profile) = last.get("lto-sample-profile") {
+            early.push(profile.clone());
+        }
+    }
+    early.extend(remaps);
+    for key in ["symbol-ordering-file", "retain-symbols-file"] {
+        if let Some(file) = last.get(key) {
+            early.push(file.clone());
+        }
+    }
+    early.extend(lists);
+    early.extend(versions);
+    for file in &early {
+        recording(file);
+    }
+    let mut outcome = link_elf_plain(arguments, &recording, identity);
+    if let Some(path) = dependency.filter(|_| outcome.succeeded()) {
+        outcome.outputs.push((
+            path,
+            dependency_file_text(&parsed.output, &reads.borrow()).into_bytes(),
+        ));
+    }
+    let Some(mut tape) = tape.into_inner() else {
+        return outcome;
+    };
+    let mut anchor = 0usize;
+    let mut members: Vec<String> = Vec::new();
+    for argument in arguments {
+        if argument.starts_with('-') && argument != "-" {
+            continue;
+        }
+        let relative = relative_to_root(argument, directory);
+        let Some(position) = tape.entry_position(&relative) else {
+            continue;
+        };
+        anchor = anchor.max(position);
+        if !tape.entry_contents(position).starts_with(b"!<thin>\n") {
+            continue;
+        }
+        if let Ok(archive) = read_coff_archive(argument, tape.entry_contents(position)) {
+            for member in archive.members {
+                if let Some(full) = member.thin_path {
+                    members.push(relative_to_root(&full, directory));
+                }
+            }
+        }
+    }
+    if !members.is_empty() {
+        tape.defer_entries(&members, anchor);
+    }
+    if let Some(path) = reproduce {
+        outcome.outputs.push((path, tape.finish()));
+    }
+    outcome
+}
+
+fn dependency_file_name(path: &str) -> String {
+    let rooted = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|last| *last != "..") {
+                    parts.pop();
+                } else if !rooted {
+                    parts.push("..");
+                }
+            }
+            _ => parts.push(part),
+        }
+    }
+    let normalized = format!("{}{}", if rooted { "/" } else { "" }, parts.join("/"));
+    let characters: Vec<char> = normalized.chars().collect();
+    let mut out = String::new();
+    for (position, character) in characters.iter().enumerate() {
+        match character {
+            '#' => out.push('\\'),
+            ' ' => {
+                out.push('\\');
+                let mut back = position;
+                while back > 0 && characters[back - 1] == '\\' {
+                    out.push('\\');
+                    back -= 1;
+                }
+            }
+            '$' => out.push('$'),
+            _ => {}
+        }
+        out.push(*character);
+    }
+    out
+}
+
+fn dependency_file_text(output: &str, reads: &[String]) -> String {
+    let mut text = format!("{output}:");
+    for path in reads {
+        text.push_str(&format!(" \\\n {}", dependency_file_name(path)));
+    }
+    text.push('\n');
+    for path in reads {
+        text.push_str(&format!("\n{}:\n", dependency_file_name(path)));
+    }
+    text
+}
+
+fn link_elf_plain(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    identity: &str,
+) -> LinkOutcome {
+    if let Some(root) = parse_command_line(arguments)
+        .ok()
+        .and_then(|options| options.chroot)
+    {
+        let rooted = |path: &str| -> Option<Vec<u8>> {
+            if path.starts_with('/') {
+                source(&format!("{root}{path}"))
+            } else {
+                source(path)
+            }
+        };
+        return link_elf_rooted(arguments, &rooted, identity);
+    }
+    link_elf_rooted(arguments, source, identity)
+}
+
+fn link_elf_rooted(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    identity: &str,
+) -> LinkOutcome {
     let options = match parse_command_line(arguments) {
         Ok(options) => options,
         Err(diagnostic) => {
@@ -16955,7 +17645,23 @@ pub fn link_as(
         messages: context.messages,
     };
     if let Some(bytes) = bytes {
-        outcome.outputs.push((output, bytes));
+        outcome.outputs.push((output.clone(), bytes));
+    }
+    if let Some(requested) = context.options.time_trace.clone() {
+        let text = time_trace_text(
+            "ld.lld",
+            &["Link", "ExecuteLinker", "Total Link", "Total ExecuteLinker"],
+        );
+        if requested == "-" {
+            outcome.messages.push(text);
+        } else {
+            let path = if requested.is_empty() {
+                format!("{output}.time-trace.json")
+            } else {
+                requested
+            };
+            outcome.outputs.push((path, text.into_bytes()));
+        }
     }
     outcome
 }
@@ -24995,7 +25701,16 @@ pub fn link_coff_in(
         outcome.outputs.push((path, tape.finish()));
     }
     if let Some(requested) = context.options.time_trace.clone() {
-        let text = time_trace_text("lld-link");
+        let text = time_trace_text(
+            "lld-link",
+            &[
+                "Parse arguments",
+                "Read input files",
+                "Write output file",
+                "Total Read input files",
+                "Total Write output file",
+            ],
+        );
         if requested == "-" {
             outcome.messages.push(text);
         } else {
@@ -25013,7 +25728,7 @@ pub fn link_coff_in(
 #[derive(Clone, Debug, Default)]
 pub struct TapeArchive {
     base: String,
-    data: Vec<u8>,
+    entries: Vec<(String, Vec<u8>)>,
     seen: BTreeSet<String>,
 }
 
@@ -25074,36 +25789,67 @@ impl TapeArchive {
         if !self.seen.insert(full.clone()) {
             return;
         }
-        match split_tape_path(&full) {
-            Some((prefix, name)) => {
-                let header = tape_header(prefix, name, contents.len(), 0);
-                self.data.extend_from_slice(&header);
-            }
-            None => {
-                let length = full.len() + 7;
-                let mut total = length + length.to_string().len();
-                total = length + total.to_string().len();
-                let record = format!("{total} path={full}\n");
-                self.data
-                    .extend_from_slice(&tape_header("", "", record.len(), b'x'));
-                self.data.extend_from_slice(record.as_bytes());
-                self.pad();
-                let header = tape_header("", "", contents.len(), 0);
-                self.data.extend_from_slice(&header);
-            }
-        }
-        self.data.extend_from_slice(contents);
-        self.pad();
+        self.entries.push((full, contents.to_vec()));
     }
 
-    fn pad(&mut self) {
-        let size = self.data.len().div_ceil(TAPE_BLOCK) * TAPE_BLOCK;
-        self.data.resize(size, 0);
+    pub fn entry_position(&self, path: &str) -> Option<usize> {
+        let full = format!("{}/{path}", self.base);
+        self.entries.iter().position(|(name, _)| *name == full)
+    }
+
+    pub fn entry_contents(&self, position: usize) -> &[u8] {
+        &self.entries[position].1
+    }
+
+    pub fn defer_entries(&mut self, paths: &[String], anchor: usize) {
+        let keys: Vec<String> = paths
+            .iter()
+            .map(|path| format!("{}/{path}", self.base))
+            .collect();
+        let mut moved: Vec<(String, Vec<u8>)> = Vec::new();
+        for key in &keys {
+            if let Some(position) = self.entries.iter().position(|(name, _)| name == key) {
+                moved.push(self.entries.remove(position));
+            }
+        }
+        let anchor_name = self
+            .entries
+            .get(anchor.min(self.entries.len().saturating_sub(1)))
+            .map(|(name, _)| name.clone());
+        let at = anchor_name
+            .and_then(|name| self.entries.iter().position(|(entry, _)| *entry == name))
+            .map_or(self.entries.len(), |position| position + 1);
+        for (offset, entry) in moved.into_iter().enumerate() {
+            self.entries.insert(at + offset, entry);
+        }
     }
 
     pub fn finish(&self) -> Vec<u8> {
-        let mut out = self.data.clone();
-        if !self.seen.is_empty() {
+        let mut out = Vec::new();
+        let pad = |out: &mut Vec<u8>| {
+            let size = out.len().div_ceil(TAPE_BLOCK) * TAPE_BLOCK;
+            out.resize(size, 0);
+        };
+        for (full, contents) in &self.entries {
+            match split_tape_path(full) {
+                Some((prefix, name)) => {
+                    out.extend_from_slice(&tape_header(prefix, name, contents.len(), 0));
+                }
+                None => {
+                    let length = full.len() + 7;
+                    let mut total = length + length.to_string().len();
+                    total = length + total.to_string().len();
+                    let record = format!("{total} path={full}\n");
+                    out.extend_from_slice(&tape_header("", "", record.len(), b'x'));
+                    out.extend_from_slice(record.as_bytes());
+                    pad(&mut out);
+                    out.extend_from_slice(&tape_header("", "", contents.len(), 0));
+                }
+            }
+            out.extend_from_slice(contents);
+            pad(&mut out);
+        }
+        if !self.entries.is_empty() {
             out.resize(out.len() + TAPE_BLOCK * 2, 0);
         }
         out
@@ -25137,21 +25883,17 @@ fn quote_spaced(text: &str) -> String {
     }
 }
 
-pub fn time_trace_text(program: &str) -> String {
+pub fn time_trace_text(program: &str, names: &[&str]) -> String {
     let event = |name: &str| {
         format!("{{\"pid\":1,\"tid\":0,\"ph\":\"X\",\"ts\":0,\"dur\":0,\"name\":\"{name}\"}}")
     };
-    let events = [
-        event("Parse arguments"),
-        event("Read input files"),
-        event("Write output file"),
-        event("Total Read input files"),
-        event("Total Write output file"),
+    let mut events: Vec<String> = names.iter().map(|name| event(name)).collect();
+    events.extend([
         format!(
             "{{\"cat\":\"\",\"pid\":1,\"tid\":0,\"ts\":0,\"ph\":\"M\",\"name\":\"process_name\",\"args\":{{\"name\":\"{program}\"}}}}"
         ),
         "{\"cat\":\"\",\"pid\":1,\"tid\":0,\"ts\":0,\"ph\":\"M\",\"name\":\"thread_name\",\"args\":{\"name\":\"\"}}".to_string(),
-    ];
+    ]);
     format!(
         "{{\"traceEvents\":[{}],\"beginningOfTime\":1000000000000000}}\n",
         events.join(",")
@@ -32220,6 +32962,7 @@ pub struct LinkerScript {
     pub regions: Vec<MemoryRegion>,
     pub inserts: Vec<InsertCommand>,
     pub overwrite_sections: Vec<OutputIndex>,
+    pub overwrite_locations: BTreeMap<OutputIndex, String>,
     pub no_cross_references: Vec<(Vec<String>, bool)>,
     pub referenced_symbols: Vec<String>,
     pub provide_map: Vec<(String, Vec<String>)>,
@@ -32539,8 +33282,10 @@ impl<'s> Context<'s> {
             "OVERWRITE_SECTIONS" => {
                 lexer.expect("{");
                 while let Some(token) = lexer.till("}") {
+                    let location = lexer.location();
                     let output = self.read_output_section_description(lexer, load, &token);
                     self.script.overwrite_sections.push(output);
+                    self.script.overwrite_locations.insert(output, location);
                 }
             }
             "PHDRS" => self.read_program_headers(lexer),
@@ -35147,6 +35892,15 @@ impl<'s> Context<'s> {
             if let ScriptCommand::Output(output) = *command {
                 let name = self.outputs[output].name.clone();
                 if let Some(replacement) = overwrite.get(&name).copied() {
+                    if self.options.verbose {
+                        let location = self
+                            .script
+                            .overwrite_locations
+                            .get(&replacement)
+                            .cloned()
+                            .unwrap_or_default();
+                        self.log(format!("{location} overwrites {name}"));
+                    }
                     self.outputs[replacement].script.section_index = index;
                     index += 1;
                     used_overwrite.insert(replacement);
@@ -35217,6 +35971,25 @@ impl<'s> Context<'s> {
         }
         if self.script.has_sections {
             return name.clone();
+        }
+        if self.options.keep_text_section_prefix {
+            for (prefix, size) in [(".text", 5), (".ltext", 6)] {
+                if !is_section_prefix(prefix, name) {
+                    continue;
+                }
+                for kind in [
+                    ".hot",
+                    ".unknown",
+                    ".unlikely",
+                    ".startup",
+                    ".exit",
+                    ".split",
+                ] {
+                    if is_section_prefix(kind, &name[size..]) {
+                        return format!("{prefix}{kind}");
+                    }
+                }
+            }
         }
         output_section_name(name)
     }
@@ -39293,6 +40066,8 @@ pub struct MatchedOption {
     pub canonical: &'static str,
     pub value: Option<String>,
     pub spelling: String,
+    pub option: &'static OptionSpelling,
+    pub prefix: &'static str,
 }
 
 pub fn match_elf_option(
@@ -39300,7 +40075,7 @@ pub fn match_elf_option(
     index: &mut usize,
 ) -> Result<Option<MatchedOption>, Diagnostic> {
     let argument = arguments[*index].clone();
-    let mut candidates: Vec<(&OptionSpelling, &str)> = Vec::new();
+    let mut candidates: Vec<(&'static OptionSpelling, &'static str)> = Vec::new();
     for option in ELF_OPTIONS {
         for prefix in option.prefixes {
             if argument.starts_with(prefix) && argument[prefix.len()..].starts_with(option.name) {
@@ -39354,6 +40129,8 @@ pub fn match_elf_option(
             canonical: option.canonical,
             value,
             spelling: argument,
+            option,
+            prefix,
         }));
     }
     Ok(None)

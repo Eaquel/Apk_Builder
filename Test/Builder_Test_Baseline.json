@@ -19,9 +19,9 @@
       "total": 565
     },
     "lld-elf": {
-      "failed": 371,
+      "failed": 338,
       "out_of_scope": 639,
-      "passed": 1046,
+      "passed": 1079,
       "total": 2056
     },
     "regex-oracle": {

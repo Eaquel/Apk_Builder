@@ -104,6 +104,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI296", "The image exports more symbols than ordinals allow."),
     ("EI297", "Library grouping options are not balanced."),
     ("EI298", "Two resources share a type, name and language."),
+    ("EI299", "The linker reports a detail of the link."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

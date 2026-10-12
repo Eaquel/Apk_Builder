@@ -68695,7 +68695,7 @@ mod linker_lit {
         catalogue, lit_tests, run_parallel, standard_tools, LitSuite, SuiteReport, ToolFunction,
         ToolOutcome, Tree, World,
     };
-    use crate::compilers::linker::{link_as, link_coff_in, LinkOutcome};
+    use crate::compilers::linker::{link_coff_in, link_elf_in, LinkOutcome};
     use crate::diag::Severity;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -69352,9 +69352,25 @@ mod linker_lit {
             .get("LLD_VERSION")
             .cloned()
             .unwrap_or_else(|| "LLD 1.0".to_string());
+        let directory = world.directory.clone();
+        let environment: Vec<(String, String)> = world
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         let outcome = {
             let reader = |path: &str| world.read(path);
-            link_as(&arguments[1..], &reader, &identity)
+            let exists = |path: &str| {
+                world.folders.contains(&world.absolute(path)) || world.read(path).is_some()
+            };
+            link_elf_in(
+                &arguments[1..],
+                &reader,
+                &exists,
+                &identity,
+                &directory,
+                &environment,
+            )
         };
         let visual = arguments
             .iter()
