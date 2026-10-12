@@ -86,6 +86,8 @@ pub struct Options {
     pub print_archive_stats: Option<String>,
     pub why_extract: Option<String>,
     pub undefined_glob: Vec<String>,
+    pub compress_debug_sections: Option<String>,
+    pub compress_sections: Vec<String>,
     pub trace_symbols: Vec<String>,
     pub trace_files: bool,
     pub time_trace: Option<String>,
@@ -96,6 +98,7 @@ pub struct Options {
     pub keep_text_section_prefix: bool,
     pub chroot: Option<String>,
     pub verbose: bool,
+    pub gdb_index: bool,
     pub kind: OutputKind,
     pub emulation: Option<String>,
     pub entry: Option<String>,
@@ -220,6 +223,8 @@ impl Default for Options {
             print_archive_stats: None,
             why_extract: None,
             undefined_glob: Vec::new(),
+            compress_debug_sections: None,
+            compress_sections: Vec::new(),
             trace_symbols: Vec::new(),
             trace_files: false,
             time_trace: None,
@@ -230,6 +235,7 @@ impl Default for Options {
             keep_text_section_prefix: false,
             chroot: None,
             verbose: false,
+            gdb_index: false,
             kind: OutputKind::Executable,
             emulation: None,
             entry: None,
@@ -1360,6 +1366,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     options.trace_files = true;
                     continue;
                 }
+                if argument == "--gdb-index" || argument == "--no-gdb-index" {
+                    options.gdb_index = argument == "--gdb-index";
+                    continue;
+                }
                 if argument == "--verbose" {
                     options.verbose = true;
                     continue;
@@ -1381,6 +1391,14 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                 }
                 if let Some(value) = argument.strip_prefix("--undefined-glob=") {
                     options.undefined_glob.push(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--compress-debug-sections=") {
+                    options.compress_debug_sections = Some(value.to_string());
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--compress-sections=") {
+                    options.compress_sections.push(value.to_string());
                     continue;
                 }
                 if let Some(value) = argument.strip_prefix("--dependency-file=") {
@@ -1996,6 +2014,7 @@ pub enum Synthetic {
     ArmAttributes,
     Thunks,
     GnuStack,
+    GdbIndex,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2731,6 +2750,18 @@ impl LinkOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompressionKind {
+    None,
+    Zlib,
+    Zstd,
+}
+
+const COMPRESSION_PARSE_ERROR: &str = "parse error, not 'section-glob=[none|zlib|zstd]'";
+const COMPRESSION_LEVEL_ERROR: &str = "expected a non-negative integer compression level, but got";
+const ZSTD_MISSING: &str =
+    "LLVM was not built with LLVM_ENABLE_ZSTD or did not find zstd at build time";
+
 #[derive(Clone, Debug)]
 pub struct OutputSection {
     pub name: String,
@@ -2756,6 +2787,7 @@ pub struct OutputSection {
     pub live: bool,
     pub relocation_for: Option<OutputIndex>,
     pub script: OutputScript,
+    pub compressed: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2791,6 +2823,7 @@ impl OutputSection {
             live: true,
             relocation_for: None,
             script: OutputScript::default(),
+            compressed: None,
         }
     }
 }
@@ -2892,6 +2925,9 @@ pub struct Context<'s> {
     pub deferred_duplicates: Vec<Diagnostic>,
     pub archive_statistics: Vec<(String, usize)>,
     pub loading_just_symbols: bool,
+    pub gdb_index: Option<GdbIndex>,
+    pub debug_compression: CompressionKind,
+    pub compression_rules: Vec<(String, CompressionKind, usize)>,
     erratum_map: Option<ErratumMap>,
     pub erratum_patches: BTreeSet<SectionIndex>,
     erratum_patch_addresses: BTreeMap<SectionIndex, u64>,
@@ -3018,6 +3054,9 @@ impl<'s> Context<'s> {
             deferred_duplicates: Vec::new(),
             archive_statistics: Vec::new(),
             loading_just_symbols: false,
+            gdb_index: None,
+            debug_compression: CompressionKind::None,
+            compression_rules: Vec::new(),
             erratum_map: None,
             erratum_patches: BTreeSet::new(),
             erratum_patch_addresses: BTreeMap::new(),
@@ -3995,6 +4034,658 @@ impl<'s> Context<'s> {
         }
         self.erratum_map = Some(map);
         changed
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GdbChunk {
+    pub info: SectionIndex,
+    pub units: Vec<(u64, u64)>,
+    pub areas: Vec<(SectionIndex, u64, u64, u32)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GdbSymbol {
+    pub name: String,
+    pub vector: Vec<u32>,
+    pub vector_offset: u32,
+    pub name_offset: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GdbIndex {
+    pub chunks: Vec<GdbChunk>,
+    pub symbols: Vec<GdbSymbol>,
+    pub pool_size: u64,
+}
+
+fn gdb_hash(name: &str) -> u32 {
+    let mut hash = 0u32;
+    for byte in name.bytes() {
+        hash = hash
+            .wrapping_mul(67)
+            .wrapping_add(u32::from(byte.to_ascii_lowercase()))
+            .wrapping_sub(113);
+    }
+    hash
+}
+
+#[derive(Clone, Debug, Default)]
+struct UnitAddressing {
+    version: u16,
+    address_size: usize,
+    offset_size: usize,
+    compile: bool,
+    low: Option<(u64, Option<u32>)>,
+    low_index: Option<u64>,
+    high: Option<(u64, bool)>,
+    high_index: Option<u64>,
+    ranges: Option<(u64, bool)>,
+    ranges_base: Option<u64>,
+    address_base: u64,
+    string_base: Option<u64>,
+}
+
+fn read_unit_addressing(
+    info: &DebugSection,
+    abbreviations: &DebugSection,
+    encoding: Encoding,
+    start: usize,
+    end: usize,
+    offset_size: usize,
+) -> Option<UnitAddressing> {
+    let mut reader = DwarfReader {
+        data: &info.data[..end.min(info.data.len())],
+        at: start,
+        encoding,
+    };
+    let mut unit = UnitAddressing {
+        offset_size,
+        compile: true,
+        ..UnitAddressing::default()
+    };
+    unit.version = reader.sized(2)? as u16;
+    let abbreviation_offset = if unit.version >= 5 {
+        let unit_type = reader.byte()?;
+        unit.address_size = reader.byte()? as usize;
+        let offset = reader.sized(offset_size)?;
+        match unit_type {
+            1 | 3 => {}
+            4 | 5 => reader.skip(8)?,
+            _ => unit.compile = false,
+        }
+        offset
+    } else {
+        let offset = reader.sized(offset_size)?;
+        unit.address_size = reader.byte()? as usize;
+        offset
+    };
+    if !unit.compile {
+        return Some(unit);
+    }
+    let mut table_reader = DwarfReader {
+        data: &abbreviations.data,
+        at: abbreviation_offset as usize,
+        encoding,
+    };
+    let code = reader.unsigned()?;
+    let mut attributes = None;
+    loop {
+        let entry = table_reader.unsigned()?;
+        if entry == 0 {
+            break;
+        }
+        table_reader.unsigned()?;
+        table_reader.byte()?;
+        let mut list = Vec::new();
+        loop {
+            let name = table_reader.unsigned()?;
+            let form = table_reader.unsigned()?;
+            if name == 0 && form == 0 {
+                break;
+            }
+            let implicit = if form == 0x21 {
+                table_reader.signed()?
+            } else {
+                0
+            };
+            list.push((name, form, implicit));
+        }
+        if entry == code {
+            attributes = Some(list);
+            break;
+        }
+    }
+    for (name, form, implicit) in attributes? {
+        let at = reader.at;
+        let value = read_form(
+            &mut reader,
+            form,
+            offset_size,
+            unit.address_size,
+            unit.version,
+            implicit,
+        )?;
+        let FormValue::Number(number) = value else {
+            continue;
+        };
+        let indexed = matches!(form, 0x1b | 0x29 | 0x2a | 0x2b | 0x2c);
+        match name {
+            0x11 if indexed => unit.low_index = Some(number),
+            0x11 => unit.low = Some((number, info.targets.get(&at).copied())),
+            0x12 if indexed => unit.high_index = Some(number),
+            0x12 => unit.high = Some((number, form != 0x01)),
+            0x55 => unit.ranges = Some((number, form == 0x23)),
+            0x74 => unit.ranges_base = Some(number),
+            0x73 => unit.address_base = number,
+            0x72 => unit.string_base = Some(number),
+            _ => {}
+        }
+    }
+    Some(unit)
+}
+
+fn indexed_address(
+    addresses: &DebugSection,
+    encoding: Encoding,
+    unit: &UnitAddressing,
+    index: u64,
+) -> Option<(u64, Option<u32>)> {
+    let at = unit.address_base as usize + index as usize * unit.address_size;
+    let mut reader = DwarfReader {
+        data: &addresses.data,
+        at,
+        encoding,
+    };
+    let value = reader.sized(unit.address_size)?;
+    Some((value, addresses.targets.get(&at).copied()))
+}
+
+impl<'s> Context<'s> {
+    fn gdb_warning(&mut self, file: FileIndex, section: &str, text: String) {
+        let display = self.file_name(Some(file));
+        self.warn(
+            caution(
+                "EI282",
+                "The linker cannot use the debug information of an input file.",
+            )
+            .with_context(format!("File: {display}"))
+            .with_context(format!("Cause: {display}:({section}): {text}")),
+        );
+    }
+
+    fn unit_ranges(
+        &self,
+        sections: &BTreeMap<String, DebugSection>,
+        unit: &UnitAddressing,
+    ) -> Result<Vec<(u64, u64, Option<u32>)>, String> {
+        let empty = DebugSection::default();
+        let encoding = self.encoding();
+        let addresses = sections.get(".debug_addr").unwrap_or(&empty);
+        let resolve = |index: u64| indexed_address(addresses, encoding, unit, index);
+        let base = match (unit.low, unit.low_index) {
+            (Some(low), _) => Some(low),
+            (None, Some(index)) => resolve(index),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        let Some((offset, indexed)) = unit.ranges else {
+            let Some((low, section)) = base else {
+                return Ok(out);
+            };
+            let high = match (unit.high, unit.high_index) {
+                (Some((value, true)), _) => Some(low.wrapping_add(value)),
+                (Some((value, false)), _) => Some(value),
+                (None, Some(index)) => resolve(index).map(|value| value.0),
+                _ => None,
+            };
+            if let Some(high) = high {
+                out.push((low, high, section));
+            }
+            return Ok(out);
+        };
+        let size = unit.address_size;
+        if unit.version < 5 {
+            let ranges = sections.get(".debug_ranges").unwrap_or(&empty);
+            let mut reader = DwarfReader {
+                data: &ranges.data,
+                at: offset as usize,
+                encoding,
+            };
+            let mut base = base;
+            let all_ones = if size == 8 {
+                u64::MAX
+            } else {
+                u64::from(u32::MAX)
+            };
+            loop {
+                let at = reader.at;
+                let (Some(start), Some(end)) = (reader.sized(size), reader.sized(size)) else {
+                    return Err(format!(
+                        "decoding address ranges: invalid range list entry at offset 0x{at:x}"
+                    ));
+                };
+                if start == 0 && end == 0 {
+                    break;
+                }
+                if start == all_ones {
+                    base = Some((end, ranges.targets.get(&(at + size)).copied()));
+                    continue;
+                }
+                let mut section = ranges.targets.get(&at).copied();
+                let mut low = start;
+                let mut high = end;
+                if let Some((base_address, base_section)) = base {
+                    low = low.wrapping_add(base_address);
+                    high = high.wrapping_add(base_address);
+                    if section.is_none() {
+                        section = base_section;
+                    }
+                }
+                out.push((low, high, section));
+            }
+            return Ok(out);
+        }
+        let lists = sections.get(".debug_rnglists").unwrap_or(&empty);
+        let mut at = offset as usize;
+        if indexed {
+            let list_base = unit.ranges_base.unwrap_or(0) as usize;
+            let mut reader = DwarfReader {
+                data: &lists.data,
+                at: list_base + offset as usize * unit.offset_size,
+                encoding,
+            };
+            at = list_base
+                + reader.sized(unit.offset_size).ok_or_else(|| {
+                    "decoding address ranges: invalid range list offset".to_string()
+                })? as usize;
+        }
+        let mut reader = DwarfReader {
+            data: &lists.data,
+            at,
+            encoding,
+        };
+        let mut base = base;
+        let failure = |at: usize| {
+            format!("decoding address ranges: invalid range list entry at offset 0x{at:x}")
+        };
+        loop {
+            let entry = reader.at;
+            let kind = reader.byte().ok_or_else(|| failure(entry))?;
+            match kind {
+                0 => break,
+                1 => {
+                    let index = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    base = resolve(index);
+                }
+                2 => {
+                    let first = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    let second = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    if let (Some(low), Some(high)) = (resolve(first), resolve(second)) {
+                        out.push((low.0, high.0, low.1));
+                    }
+                }
+                3 => {
+                    let first = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    let length = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    if let Some(low) = resolve(first) {
+                        out.push((low.0, low.0.wrapping_add(length), low.1));
+                    }
+                }
+                4 => {
+                    let first = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    let second = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    let (base_address, section) = base.unwrap_or((0, None));
+                    out.push((
+                        base_address.wrapping_add(first),
+                        base_address.wrapping_add(second),
+                        section,
+                    ));
+                }
+                5 => {
+                    let address_at = reader.at;
+                    let value = reader.sized(size).ok_or_else(|| failure(entry))?;
+                    base = Some((value, lists.targets.get(&address_at).copied()));
+                }
+                6 => {
+                    let address_at = reader.at;
+                    let low = reader.sized(size).ok_or_else(|| failure(entry))?;
+                    let high = reader.sized(size).ok_or_else(|| failure(entry))?;
+                    out.push((low, high, lists.targets.get(&address_at).copied()));
+                }
+                7 => {
+                    let address_at = reader.at;
+                    let low = reader.sized(size).ok_or_else(|| failure(entry))?;
+                    let length = reader.unsigned().ok_or_else(|| failure(entry))?;
+                    out.push((
+                        low,
+                        low.wrapping_add(length),
+                        lists.targets.get(&address_at).copied(),
+                    ));
+                }
+                _ => return Err(failure(entry)),
+            }
+        }
+        Ok(out)
+    }
+
+    fn gdb_chunk(
+        &mut self,
+        file: FileIndex,
+        info: SectionIndex,
+    ) -> (GdbChunk, Vec<(String, u32, u32)>) {
+        let sections = self.debug_sections_kept(file, true);
+        let encoding = self.encoding();
+        let empty = DebugSection::default();
+        let data = sections.get(".debug_info").cloned().unwrap_or_default();
+        let abbreviations = sections.get(".debug_abbrev").unwrap_or(&empty);
+        let mut chunk = GdbChunk {
+            info,
+            ..GdbChunk::default()
+        };
+        let mut addressing = Vec::new();
+        let mut start = 0usize;
+        while start + 4 <= data.data.len() {
+            let mut reader = DwarfReader {
+                data: &data.data,
+                at: start,
+                encoding,
+            };
+            let Some(mut length) = reader.sized(4) else {
+                break;
+            };
+            let mut offset_size = 4;
+            if length == 0xffff_ffff {
+                let Some(long) = reader.sized(8) else {
+                    break;
+                };
+                length = long;
+                offset_size = 8;
+            }
+            let body = reader.at;
+            let end = (body as u64).saturating_add(length) as usize;
+            let unit = read_unit_addressing(&data, abbreviations, encoding, body, end, offset_size);
+            if unit.as_ref().is_none_or(|unit| unit.compile) {
+                chunk.units.push((start as u64, length + 4));
+                addressing.push(unit);
+            }
+            start = end;
+        }
+        let mut failure = None;
+        let mut areas = Vec::new();
+        for (index, unit) in addressing.iter().enumerate() {
+            let Some(unit) = unit else {
+                continue;
+            };
+            if let Some(base) = unit.string_base.filter(|_| unit.version >= 5) {
+                let prefix = if unit.offset_size == 8 { 16 } else { 8 };
+                if base < prefix {
+                    failure = Some(format!(
+                        "invalid reference to or invalid content in .debug_str_offsets[.dwo]: insufficient space for {} bit header prefix",
+                        prefix * 4
+                    ));
+                    break;
+                }
+            }
+            match self.unit_ranges(&sections, unit) {
+                Ok(ranges) => {
+                    for (low, high, section) in ranges {
+                        let Some(section) = section else {
+                            continue;
+                        };
+                        let Some(Some(target)) = self.files[file].sections.get(section as usize)
+                        else {
+                            continue;
+                        };
+                        if !self.sections[*target].live || low == high {
+                            continue;
+                        }
+                        areas.push((*target, low, high, index as u32));
+                    }
+                }
+                Err(text) => {
+                    failure = Some(text);
+                    break;
+                }
+            }
+        }
+        match failure {
+            Some(text) => self.gdb_warning(file, ".debug_info", text),
+            None => chunk.areas = areas,
+        }
+        let mut names = Vec::new();
+        for name in [".debug_gnu_pubnames", ".debug_gnu_pubtypes"] {
+            let Some(table) = sections.get(name) else {
+                continue;
+            };
+            let mut at = 0usize;
+            while at < table.data.len() {
+                let set_start = at;
+                let mut reader = DwarfReader {
+                    data: &table.data,
+                    at,
+                    encoding,
+                };
+                let Some(mut length) = reader.sized(4) else {
+                    let end = table.data.len();
+                    self.gdb_warning(
+                        file,
+                        name,
+                        format!(
+                            "name lookup table at offset 0x{set_start:x} parsing failed: unexpected end of data at offset 0x{end:x} while reading [0x{set_start:x}, 0x{:x})",
+                            set_start + 4
+                        ),
+                    );
+                    break;
+                };
+                let mut offset_size = 4;
+                if length == 0xffff_ffff {
+                    length = reader.sized(8).unwrap_or(0);
+                    offset_size = 8;
+                }
+                let end = (reader.at as u64).saturating_add(length) as usize;
+                at = end;
+                let (Some(_), Some(unit_offset), Some(_)) = (
+                    reader.sized(2),
+                    reader.sized(offset_size),
+                    reader.sized(offset_size),
+                ) else {
+                    break;
+                };
+                let unit_index = chunk
+                    .units
+                    .iter()
+                    .take_while(|unit| unit.0 < unit_offset)
+                    .count() as u32;
+                while reader.at < end.min(table.data.len()) {
+                    let Some(die) = reader.sized(offset_size) else {
+                        break;
+                    };
+                    if die == 0 {
+                        break;
+                    }
+                    let (Some(descriptor), Some(text)) = (reader.byte(), reader.text()) else {
+                        break;
+                    };
+                    names.push((text, u32::from(descriptor) << 24, unit_index));
+                }
+            }
+        }
+        (chunk, names)
+    }
+
+    pub fn create_gdb_index(&mut self) -> Option<GdbIndex> {
+        let mut files: Vec<(FileIndex, SectionIndex)> = Vec::new();
+        let mut dead: BTreeSet<SectionIndex> = BTreeSet::new();
+        for section in self.input_order.clone() {
+            let name = self.sections[section].name.clone();
+            if name == ".debug_gnu_pubnames" || name == ".debug_gnu_pubtypes" {
+                self.sections[section].live = false;
+                dead.insert(section);
+            } else if name == ".debug_info" && self.sections[section].live {
+                if let Some(file) = self.sections[section].file {
+                    let elf_index = self.sections[section].elf_index;
+                    if self.files[file]
+                        .elf
+                        .sections
+                        .get(elf_index)
+                        .is_some_and(|header| header.flags & section_flag::GROUP != 0)
+                    {
+                        continue;
+                    }
+                    match files.iter_mut().find(|(known, _)| *known == file) {
+                        Some(entry) => {
+                            if self.sections[section].elf_index > self.sections[entry.1].elf_index {
+                                entry.1 = section;
+                            }
+                        }
+                        None => files.push((file, section)),
+                    }
+                }
+            }
+        }
+        for section in 0..self.sections.len() {
+            if self.sections[section]
+                .relocated_section
+                .is_some_and(|target| dead.contains(&target))
+            {
+                self.sections[section].live = false;
+            }
+        }
+        if files.is_empty() {
+            return None;
+        }
+        let mut chunks = Vec::new();
+        let mut names = Vec::new();
+        for (file, info) in files {
+            let (chunk, list) = self.gdb_chunk(file, info);
+            chunks.push(chunk);
+            names.push(list);
+        }
+        let mut unit_bases = Vec::new();
+        let mut total = 0u32;
+        for chunk in &chunks {
+            unit_bases.push(total);
+            total += chunk.units.len() as u32;
+        }
+        let mut shards: Vec<Vec<GdbSymbol>> = vec![Vec::new(); 32];
+        let mut lookup: Vec<BTreeMap<String, usize>> = vec![BTreeMap::new(); 32];
+        for (position, list) in names.iter().enumerate() {
+            for (name, attributes, unit) in list {
+                let shard = (gdb_hash(name) >> 27) as usize;
+                let value = attributes + unit + unit_bases[position];
+                match lookup[shard].get(name) {
+                    Some(index) => shards[shard][*index].vector.push(value),
+                    None => {
+                        lookup[shard].insert(name.clone(), shards[shard].len());
+                        shards[shard].push(GdbSymbol {
+                            name: name.clone(),
+                            vector: vec![value],
+                            ..GdbSymbol::default()
+                        });
+                    }
+                }
+            }
+        }
+        let mut symbols: Vec<GdbSymbol> = shards.into_iter().flatten().collect();
+        let mut offset = 0u64;
+        for symbol in symbols.iter_mut() {
+            symbol.vector_offset = offset as u32;
+            offset += (symbol.vector.len() as u64 + 1) * 4;
+        }
+        for symbol in symbols.iter_mut() {
+            symbol.name_offset = offset as u32;
+            offset += symbol.name.len() as u64 + 1;
+        }
+        Some(GdbIndex {
+            chunks,
+            symbols,
+            pool_size: offset,
+        })
+    }
+
+    fn gdb_symbol_table_size(&self, index: &GdbIndex) -> usize {
+        ((index.symbols.len() * 4 / 3) + 1)
+            .next_power_of_two()
+            .max(1024)
+    }
+
+    pub fn gdb_index_size(&self, index: &GdbIndex) -> u64 {
+        let mut size = index.pool_size + 24 + self.gdb_symbol_table_size(index) as u64 * 8;
+        for chunk in &index.chunks {
+            size += chunk.units.len() as u64 * 16 + chunk.areas.len() as u64 * 20;
+        }
+        size
+    }
+
+    pub fn encode_gdb_index(&self) -> Vec<u8> {
+        let Some(index) = &self.gdb_index else {
+            return Vec::new();
+        };
+        let put = |out: &mut Vec<u8>, value: u32| out.extend_from_slice(&value.to_le_bytes());
+        let mut out = vec![0u8; 24];
+        out[0..4].copy_from_slice(&7u32.to_le_bytes());
+        let list = out.len() as u32;
+        for chunk in &index.chunks {
+            let base = self.sections[chunk.info].offset_in_output;
+            for (offset, length) in &chunk.units {
+                out.extend_from_slice(&(base + offset).to_le_bytes());
+                out.extend_from_slice(&length.to_le_bytes());
+            }
+        }
+        let areas = out.len() as u32;
+        let mut unit_offset = 0u32;
+        for chunk in &index.chunks {
+            for (section, low, high, unit) in &chunk.areas {
+                let target = self.sections[*section].replacement.unwrap_or(*section);
+                let base = self.section_address(target, 0);
+                out.extend_from_slice(&base.wrapping_add(*low).to_le_bytes());
+                out.extend_from_slice(&base.wrapping_add(*high).to_le_bytes());
+                put(&mut out, unit + unit_offset);
+            }
+            unit_offset += chunk.units.len() as u32;
+        }
+        let table = out.len() as u32;
+        let size = self.gdb_symbol_table_size(index);
+        let mask = size as u32 - 1;
+        let mut slots = vec![(0u32, 0u32); size];
+        for symbol in &index.symbols {
+            let hash = gdb_hash(&symbol.name);
+            let mut slot = hash & mask;
+            let step = (hash.wrapping_mul(17) & mask) | 1;
+            while slots[slot as usize].0 != 0 {
+                slot = (slot + step) & mask;
+            }
+            slots[slot as usize] = (symbol.name_offset, symbol.vector_offset);
+        }
+        for (name, vector) in slots {
+            put(&mut out, name);
+            put(&mut out, vector);
+        }
+        let pool = out.len() as u32;
+        let start = out.len();
+        out.resize(start + index.pool_size as usize, 0);
+        let mut cursor = start;
+        for symbol in &index.symbols {
+            out[cursor..cursor + 4].copy_from_slice(&(symbol.vector.len() as u32).to_le_bytes());
+            cursor += 4;
+            for value in &symbol.vector {
+                out[cursor..cursor + 4].copy_from_slice(&value.to_le_bytes());
+                cursor += 4;
+            }
+        }
+        for symbol in &index.symbols {
+            let at = start + symbol.name_offset as usize;
+            out[at..at + symbol.name.len()].copy_from_slice(symbol.name.as_bytes());
+        }
+        for (position, value) in [list, list, areas, areas, table, pool]
+            .iter()
+            .enumerate()
+            .skip(1)
+        {
+            out[position * 4..position * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        out
     }
 }
 
@@ -6778,6 +7469,20 @@ impl<'s> Context<'s> {
                 word,
                 Synthetic::GnuProperty,
             );
+        }
+        if self.options.gdb_index {
+            if let Some(index) = self.create_gdb_index() {
+                let size = self.gdb_index_size(&index);
+                let section = self.add_synthetic(
+                    ".gdb_index",
+                    section_type::PROGRAM_BITS,
+                    0,
+                    1,
+                    Synthetic::GdbIndex,
+                );
+                self.sections[section].size = size;
+                self.gdb_index = Some(index);
+            }
         }
         if relocatable {
             self.add_synthetic(
@@ -9710,12 +10415,32 @@ fn read_unit_variables(
 
 impl<'s> Context<'s> {
     fn debug_sections(&self, file: FileIndex) -> BTreeMap<String, DebugSection> {
+        self.debug_sections_kept(file, false)
+    }
+
+    fn debug_sections_kept(
+        &self,
+        file: FileIndex,
+        kept_only: bool,
+    ) -> BTreeMap<String, DebugSection> {
         let elf = &self.files[file].elf;
         let encoding = elf.encoding();
         let symbols = &self.files[file].elf_symbols;
         let mut result = BTreeMap::new();
         for (index, header) in elf.sections.iter().enumerate() {
             if !header.name.starts_with(".debug_") {
+                continue;
+            }
+            if kept_only
+                && self.files[file]
+                    .discarded
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if header.name == ".debug_info" && header.flags & section_flag::GROUP != 0 {
                 continue;
             }
             let data = if header.flags & section_flag::COMPRESSED != 0 {
@@ -16972,6 +17697,7 @@ impl<'s> Context<'s> {
                 elf::encode_dynamic(self.encoding(), &entries, &mut buffer);
             }
             Synthetic::StringTable => buffer = self.string_table.clone(),
+            Synthetic::GdbIndex => buffer = self.encode_gdb_index(),
             Synthetic::SectionNameTable => buffer = self.section_names.bytes().to_vec(),
             Synthetic::BuildIdentifier => {
                 let encoding = self.encoding();
@@ -16991,6 +17717,195 @@ impl<'s> Context<'s> {
             self.apply_relocations(section, &mut buffer);
         }
         buffer
+    }
+
+    fn compression_option_error(&mut self, cause: String) {
+        self.error_always(
+            problem("EI204", "An option value is not valid.")
+                .with_context(format!("Cause: {cause}")),
+        );
+    }
+
+    fn compression_kind(&mut self, value: &str, option: &str) -> CompressionKind {
+        match value {
+            "zlib" => CompressionKind::Zlib,
+            "zstd" => {
+                self.compression_option_error(format!("{option}: {ZSTD_MISSING}"));
+                CompressionKind::Zstd
+            }
+            "none" => CompressionKind::None,
+            _ => {
+                self.compression_option_error(format!("unknown {option} value: {value}"));
+                CompressionKind::None
+            }
+        }
+    }
+
+    fn read_compression_options(&mut self) {
+        if let Some(value) = self.options.compress_debug_sections.clone() {
+            self.debug_compression = self.compression_kind(&value, "--compress-debug-sections");
+        }
+        for value in self.options.compress_sections.clone() {
+            let fields: Vec<&str> = value.split('=').collect();
+            if fields.len() != 2 || fields[1].is_empty() {
+                self.compression_option_error(format!(
+                    "--compress-sections: {COMPRESSION_PARSE_ERROR}"
+                ));
+                continue;
+            }
+            let (kind_text, level_text) = match fields[1].split_once(':') {
+                Some((kind, level)) => (kind, Some(level)),
+                None => (fields[1], None),
+            };
+            let kind = self.compression_kind(kind_text, "--compress-sections");
+            let mut level = 0usize;
+            if let Some(text) = level_text {
+                match parse_integer_any_radix(text).filter(|_| !text.starts_with('-')) {
+                    Some(value) => level = value as usize,
+                    None => self.compression_option_error(format!(
+                        "--compress-sections: {COMPRESSION_LEVEL_ERROR} '{text}'"
+                    )),
+                }
+            }
+            if let Some(reason) = glob_problem(fields[0]) {
+                self.compression_option_error(format!("--compress-sections: {reason}"));
+                continue;
+            }
+            self.compression_rules
+                .push((fields[0].to_string(), kind, level));
+        }
+    }
+
+    pub fn compress_outputs(&mut self) {
+        for output in self.order.clone() {
+            let name = self.outputs[output].name.clone();
+            let flags = self.outputs[output].flags;
+            let mut kind = CompressionKind::None;
+            let mut level = 0usize;
+            if flags & section_flag::ALLOCATE == 0
+                && self.debug_compression != CompressionKind::None
+                && name.starts_with(".debug_")
+            {
+                kind = self.debug_compression;
+            }
+            for (pattern, rule, rule_level) in &self.compression_rules {
+                if glob_match(pattern, &name) {
+                    kind = *rule;
+                    level = *rule_level;
+                }
+            }
+            if kind != CompressionKind::Zlib {
+                continue;
+            }
+            if flags & section_flag::ALLOCATE != 0 {
+                self.error(
+                    problem("EI204", "An option value is not valid.").with_context(format!(
+                        "Cause: --compress-sections: section '{name}' with the SHF_ALLOC flag cannot be compressed"
+                    )),
+                );
+                continue;
+            }
+            let contents = self.output_contents(output);
+            self.outputs[output].alignment = 1;
+            if level == 0 {
+                level = 1;
+            }
+            let encoding = self.encoding();
+            let mut compressed = Vec::new();
+            encoding.put_u32(&mut compressed, 1);
+            if encoding.is_64() {
+                encoding.put_u32(&mut compressed, 0);
+            }
+            encoding.put_word(&mut compressed, contents.len() as u64);
+            encoding.put_word(&mut compressed, 1);
+            compressed.extend_from_slice(&[0x78, 0x01]);
+            if level > 9 {
+                self.error(
+                    problem("EI204", "An option value is not valid.").with_context(
+                        "Cause: --compress-sections: deflateInit2 returned -2".to_string(),
+                    ),
+                );
+            } else {
+                let shards: Vec<&[u8]> = contents.chunks(1 << 20).collect();
+                for (position, shard) in shards.iter().enumerate() {
+                    compressed.extend(elf::deflate_raw(shard, level, position + 1 == shards.len()));
+                }
+            }
+            compressed.extend_from_slice(&elf::adler_checksum(&contents).to_be_bytes());
+            if compressed.len() as u64 >= self.outputs[output].size {
+                continue;
+            }
+            self.outputs[output].size = compressed.len() as u64;
+            self.outputs[output].flags |= section_flag::COMPRESSED;
+            self.outputs[output].compressed = Some(compressed);
+        }
+    }
+
+    fn output_contents(&mut self, output: OutputIndex) -> Vec<u8> {
+        let encoding = self.encoding();
+        let size = self.outputs[output].size as usize;
+        let mut out = vec![0u8; size];
+        let start = 0usize;
+        let executable = self.outputs[output].flags & section_flag::EXECUTE != 0;
+        let filler = match self.outputs[output].script.filler {
+            Some(filler) => filler,
+            None if executable => self.target.trap,
+            None => [0; 4],
+        };
+        let fill = filler != [0; 4];
+        let members = self.outputs[output].members.clone();
+        let mut cursor = 0usize;
+        let code_states = if executable && self.byte_invariant() {
+            self.arm_code_states()
+        } else {
+            BTreeMap::new()
+        };
+        for member in members {
+            let begin = self.sections[member].offset_in_output as usize;
+            if fill {
+                for position in cursor..begin.min(size) {
+                    out[start + position] = filler[(position - cursor) % 4];
+                }
+            }
+            let mut contents = self.section_contents(member);
+            if let Some(states) = code_states.get(&member) {
+                let size = self.sections[member].size;
+                self.convert_to_byte_invariant(states, &mut contents, size);
+            }
+            let length = contents.len().min(size.saturating_sub(begin));
+            if self.sections[member].kind != section_type::NO_BITS {
+                out[start + begin..start + begin + length].copy_from_slice(&contents[..length]);
+            }
+            cursor = begin + self.sections[member].size as usize;
+        }
+        if fill {
+            for position in cursor..size {
+                out[start + position] = filler[(position - cursor) % 4];
+            }
+        }
+        for command in self.outputs[output].script.commands.clone() {
+            if let OutputCommand::Data {
+                expression,
+                size: width,
+                offset,
+                ..
+            } = command
+            {
+                let value = self.evaluate_value(&expression);
+                let mut bytes = Vec::new();
+                match width {
+                    1 => bytes.push(value as u8),
+                    2 => encoding.put_u16(&mut bytes, value as u16),
+                    4 => encoding.put_u32(&mut bytes, value as u32),
+                    _ => encoding.put_u64(&mut bytes, value),
+                }
+                let at = start + offset as usize;
+                if at + bytes.len() <= out.len() {
+                    out[at..at + bytes.len()].copy_from_slice(&bytes);
+                }
+            }
+        }
+        out
     }
 
     pub fn write_output(&mut self) -> Vec<u8> {
@@ -17078,65 +17993,13 @@ impl<'s> Context<'s> {
                 continue;
             }
             let start = self.outputs[output].offset as usize;
-            let size = self.outputs[output].size as usize;
-            let executable = self.outputs[output].flags & section_flag::EXECUTE != 0;
-            let filler = match self.outputs[output].script.filler {
-                Some(filler) => filler,
-                None if executable => self.target.trap,
-                None => [0; 4],
+            let contents = match self.outputs[output].compressed.clone() {
+                Some(compressed) => compressed,
+                None => self.output_contents(output),
             };
-            let fill = filler != [0; 4];
-            let members = self.outputs[output].members.clone();
-            let mut cursor = 0usize;
-            let code_states = if executable && self.byte_invariant() {
-                self.arm_code_states()
-            } else {
-                BTreeMap::new()
-            };
-            for member in members {
-                let begin = self.sections[member].offset_in_output as usize;
-                if fill {
-                    for position in cursor..begin.min(size) {
-                        out[start + position] = filler[(position - cursor) % 4];
-                    }
-                }
-                let mut contents = self.section_contents(member);
-                if let Some(states) = code_states.get(&member) {
-                    let size = self.sections[member].size;
-                    self.convert_to_byte_invariant(states, &mut contents, size);
-                }
-                let length = contents.len().min(size.saturating_sub(begin));
-                if self.sections[member].kind != section_type::NO_BITS {
-                    out[start + begin..start + begin + length].copy_from_slice(&contents[..length]);
-                }
-                cursor = begin + self.sections[member].size as usize;
-            }
-            if fill {
-                for position in cursor..size {
-                    out[start + position] = filler[(position - cursor) % 4];
-                }
-            }
-            for command in self.outputs[output].script.commands.clone() {
-                if let OutputCommand::Data {
-                    expression,
-                    size: width,
-                    offset,
-                    ..
-                } = command
-                {
-                    let value = self.evaluate_value(&expression);
-                    let mut bytes = Vec::new();
-                    match width {
-                        1 => bytes.push(value as u8),
-                        2 => encoding.put_u16(&mut bytes, value as u16),
-                        4 => encoding.put_u32(&mut bytes, value as u32),
-                        _ => encoding.put_u64(&mut bytes, value),
-                    }
-                    let at = start + offset as usize;
-                    if at + bytes.len() <= out.len() {
-                        out[at..at + bytes.len()].copy_from_slice(&bytes);
-                    }
-                }
+            let end = (start + contents.len()).min(out.len());
+            if start < end {
+                out[start..end].copy_from_slice(&contents[..end - start]);
             }
         }
         let mut section_headers = Vec::new();
@@ -17474,6 +18337,7 @@ impl<'s> Context<'s> {
 
     pub fn run(&mut self) -> Option<Vec<u8>> {
         self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
+        self.read_compression_options();
         if self.options.symbol_ordering_file.is_some()
             && self.options.call_graph_ordering_file.is_some()
         {
@@ -17835,6 +18699,10 @@ impl<'s> Context<'s> {
         }
         if self.script.has_sections {
             self.allocate_script_headers();
+        }
+        self.compress_outputs();
+        if self.failed() {
+            return None;
         }
         self.remove_empty_loads();
         self.assign_file_offsets();

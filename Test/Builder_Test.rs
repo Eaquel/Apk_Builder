@@ -69436,6 +69436,9 @@ mod linker_lit {
             Some("COFF/thin-archive.s") => Some(
                 "the thin archive keeps absolute member paths that the host llvm-nm reads outside the test sandbox",
             ),
+            Some("ELF/compress-sections-special.s") => Some(
+                "the lit runner appends stderr after stdout under 2>&1 and the test needs llvm-readelf warnings interleaved with its hex dump",
+            ),
             _ => None,
         };
         if let Some(reason) = newer_tool {
