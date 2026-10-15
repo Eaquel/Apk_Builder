@@ -57,6 +57,7 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI247", "The linker ignores an option it does not recognize."),
     ("EI248", "A relocation points outside its section or at a discarded section."),
     ("EI249", "The subsystem cannot be inferred and must be given."),
+    ("EI250", "A symbol is resolved by an archive that comes earlier on the command line."),
     ("EI251", "A common symbol is overridden."),
     ("EI252", "A common symbol is declared more than once."),
     ("EI253", "A branch and link relocation does not switch between ARM and Thumb state."),

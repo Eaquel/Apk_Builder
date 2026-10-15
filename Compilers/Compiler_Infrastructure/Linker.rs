@@ -152,6 +152,9 @@ pub struct Options {
     pub mark_plt: bool,
     pub ifunc_noplt: bool,
     pub check_dynamic_relocations: bool,
+    pub print_memory_usage: bool,
+    pub warn_backrefs: bool,
+    pub warn_backrefs_exclude: Vec<String>,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -322,6 +325,9 @@ impl Default for Options {
             mark_plt: false,
             ifunc_noplt: false,
             check_dynamic_relocations: false,
+            print_memory_usage: false,
+            warn_backrefs: false,
+            warn_backrefs_exclude: Vec::new(),
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -1440,6 +1446,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--relax" => options.relax = true,
             "--no-relax" => options.relax = false,
             "--no-dynamic-linker" => options.no_dynamic_linker = true,
+            "--print-memory-usage" | "-print-memory-usage" => options.print_memory_usage = true,
+            "--warn-backrefs" | "-warn-backrefs" => options.warn_backrefs = true,
+            "--no-warn-backrefs" | "-no-warn-backrefs" => options.warn_backrefs = false,
             "--check-dynamic-relocations" => options.check_dynamic_relocations = true,
             "--no-check-dynamic-relocations" => options.check_dynamic_relocations = false,
             "--apply-dynamic-relocs" => options.apply_dynamic_relocations = true,
@@ -1627,6 +1636,17 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                                 "Cause: --package-metadata=: invalid % escape at byte {position}{PACKAGE_ESCAPE}"
                             )),
                         ),
+                    }
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--warn-backrefs-exclude=") {
+                    match glob_problem(value) {
+                        Some(problem) => options.pending_errors.push(
+                            invalid_value("--warn-backrefs-exclude", value).with_context(format!(
+                                "Cause: --warn-backrefs-exclude: {problem}: {value}"
+                            )),
+                        ),
+                        None => options.warn_backrefs_exclude.push(value.to_string()),
                     }
                     continue;
                 }
@@ -1949,7 +1969,7 @@ pub enum Architecture {
 impl Architecture {
     pub fn of_machine(machine_number: u16) -> Option<Architecture> {
         match machine_number {
-            machine::X86 => Some(Architecture::X86),
+            machine::X86 | 6 => Some(Architecture::X86),
             machine::X86_64 => Some(Architecture::X86_64),
             machine::ARM => Some(Architecture::Arm),
             machine::AARCH64 => Some(Architecture::Aarch64),
@@ -1969,6 +1989,7 @@ impl Architecture {
 
 #[derive(Clone, Debug)]
 pub struct Target {
+    pub machine: u16,
     pub architecture: Architecture,
     pub encoding: Encoding,
     pub default_image_base: u64,
@@ -1996,11 +2017,28 @@ pub struct Target {
 }
 
 impl Target {
+    pub fn iamcu() -> Target {
+        let mut target = Target::for_architecture(Architecture::X86, Endian::Little);
+        target.machine = 6;
+        target
+    }
+
+    pub fn x32() -> Target {
+        let mut target = Target::for_architecture(Architecture::X86_64, Endian::Little);
+        target.encoding = Encoding {
+            class: elf::Class::Elf32,
+            endian: Endian::Little,
+        };
+        target.symbolic_relocation = 10;
+        target
+    }
+
     pub fn for_architecture(architecture: Architecture, endian: Endian) -> Target {
         let encoding = |class| Encoding { class, endian };
         match architecture {
             Architecture::X86_64 => Target {
                 architecture,
+                machine: machine::X86_64,
                 encoding: encoding(elf::Class::Elf64),
                 default_image_base: 0x20_0000,
                 default_maximum_page_size: 4096,
@@ -2027,6 +2065,7 @@ impl Target {
             },
             Architecture::X86 => Target {
                 architecture,
+                machine: machine::X86,
                 encoding: encoding(elf::Class::Elf32),
                 default_image_base: 0x40_0000,
                 default_maximum_page_size: 4096,
@@ -2053,6 +2092,7 @@ impl Target {
             },
             Architecture::Aarch64 => Target {
                 architecture,
+                machine: machine::AARCH64,
                 encoding: encoding(elf::Class::Elf64),
                 default_image_base: 0x20_0000,
                 default_maximum_page_size: 65536,
@@ -2079,6 +2119,7 @@ impl Target {
             },
             Architecture::Arm => Target {
                 architecture,
+                machine: machine::ARM,
                 encoding: encoding(elf::Class::Elf32),
                 default_image_base: 0x1_0000,
                 default_maximum_page_size: 65536,
@@ -2494,6 +2535,7 @@ pub enum FileState {
 
 #[derive(Clone, Debug)]
 pub struct InputFile {
+    pub group_id: usize,
     pub name: String,
     pub archive_name: Option<String>,
     pub elf: ElfFile,
@@ -3346,6 +3388,8 @@ pub struct Context<'s> {
     pub frame_header_size: u64,
     pub and_features: u32,
     pub foreign_emulation: bool,
+    pub next_group_id: usize,
+    pub backward_references: Vec<(SymbolIndex, FileIndex, FileIndex)>,
     pub pauth_core: Option<(u64, u64)>,
     pub elf_header_output: OutputIndex,
     pub program_header_output: OutputIndex,
@@ -3494,6 +3538,8 @@ impl<'s> Context<'s> {
             frame_header_size: 0,
             and_features: 0,
             foreign_emulation: false,
+            next_group_id: 0,
+            backward_references: Vec::new(),
             pauth_core: None,
             elf_header_output: usize::MAX,
             program_header_output: usize::MAX,
@@ -3679,9 +3725,29 @@ impl<'s> Context<'s> {
                 self.symbols[symbol].kind = kind;
                 return;
             }
+            let lazy_file = match source {
+                LazySource::LazyObject { file } => Some(file),
+                LazySource::ArchiveMember { .. } => None,
+            };
+            let backward = self.options.warn_backrefs
+                && lazy_file.is_some_and(|lazy| {
+                    lazy < self.files.len()
+                        && file < self.files.len()
+                        && self.files[lazy].group_id < self.files[file].group_id
+                });
             let extracted = self.extract(source);
             let reference = self.file_name(Some(file));
             self.record_extraction(reference, extracted, symbol);
+            if let (true, Some(lazy)) = (backward, lazy_file) {
+                if !self.symbols[symbol].is_weak()
+                    && !self
+                        .backward_references
+                        .iter()
+                        .any(|(known, _, _)| *known == symbol)
+                {
+                    self.backward_references.push((symbol, file, lazy));
+                }
+            }
             return;
         }
         if file_is_shared {
@@ -3827,6 +3893,10 @@ impl<'s> Context<'s> {
             return;
         }
         if current != SymbolState::Undefined {
+            if current == SymbolState::Defined {
+                self.backward_references
+                    .retain(|(known, _, _)| *known != symbol);
+            }
             return;
         }
         if self.symbols[symbol].is_weak() {
@@ -6019,6 +6089,7 @@ fn bfd_emulation(name: &str) -> Option<&'static str> {
         "elf64-aarch64" | "elf64-littleaarch64" => "aarch64linux",
         "elf64-bigaarch64" => "aarch64linuxb",
         "elf32-i386" => "elf_i386",
+        "elf32-iamcu" => "elf_iamcu",
         "elf64-x86-64" => "elf_x86_64",
         "elf32-x86-64" => "elf32_x86_64",
         "elf32-littlearm" => "armelf",
@@ -6043,8 +6114,7 @@ fn is_foreign_emulation(emulation: &str) -> bool {
     let trimmed = emulation.strip_suffix("_fbsd").unwrap_or(emulation);
     matches!(
         trimmed,
-        "elf32_x86_64"
-            | "elf32btsmip"
+        "elf32btsmip"
             | "elf32btsmipn32"
             | "elf32ltsmip"
             | "elf32ltsmipn32"
@@ -6068,13 +6138,22 @@ fn is_foreign_emulation(emulation: &str) -> bool {
     )
 }
 
+pub fn target_for_emulation(emulation: &str) -> Option<Target> {
+    match emulation.strip_suffix("_fbsd").unwrap_or(emulation) {
+        "elf32_x86_64" => Some(Target::x32()),
+        "elf_iamcu" => Some(Target::iamcu()),
+        _ => emulation_target(emulation)
+            .map(|(architecture, endian)| Target::for_architecture(architecture, endian)),
+    }
+}
+
 pub fn emulation_target(emulation: &str) -> Option<(Architecture, Endian)> {
     let trimmed = emulation
         .strip_suffix("_fbsd")
         .or_else(|| emulation.strip_suffix("_freebsd"))
         .unwrap_or(emulation);
     Some(match trimmed {
-        "elf_x86_64" | "elf_amd64" => (Architecture::X86_64, Endian::Little),
+        "elf_x86_64" | "elf_amd64" | "elf32_x86_64" => (Architecture::X86_64, Endian::Little),
         "elf_i386" | "elf_iamcu" => (Architecture::X86, Endian::Little),
         "aarch64linux" | "aarch64elf" => (Architecture::Aarch64, Endian::Little),
         "aarch64linuxb" | "aarch64elfb" => (Architecture::Aarch64, Endian::Big),
@@ -6101,7 +6180,14 @@ impl<'s> Context<'s> {
             );
             return false;
         };
-        let target = Target::for_architecture(architecture, encoding.endian);
+        let target = if architecture == Architecture::X86_64 && encoding.class == elf::Class::Elf32
+        {
+            Target::x32()
+        } else if machine_number == 6 {
+            Target::iamcu()
+        } else {
+            Target::for_architecture(architecture, encoding.endian)
+        };
         if target.encoding.class != encoding.class {
             self.error(
                 not_supported("ELF class for machine").with_context(format!("File: {file}")),
@@ -6115,9 +6201,9 @@ impl<'s> Context<'s> {
     pub fn load_inputs(&mut self) {
         let mut chosen_by_emulation = false;
         if let Some(emulation) = self.options.emulation.clone() {
-            match emulation_target(&emulation) {
-                Some((architecture, endian)) => {
-                    self.target = Target::for_architecture(architecture, endian);
+            match target_for_emulation(&emulation) {
+                Some(target) => {
+                    self.target = target;
                     chosen_by_emulation = true;
                 }
                 None if is_foreign_emulation(&emulation) => {
@@ -6205,6 +6291,7 @@ impl<'s> Context<'s> {
                     }
                     state.in_library = false;
                     in_group = false;
+                    self.next_group_id += 1;
                 }
                 InputItem::StartGroup => {
                     if in_group {
@@ -6219,6 +6306,7 @@ impl<'s> Context<'s> {
                     }
                     in_group = false;
                     group += 1;
+                    self.next_group_id += 1;
                 }
                 InputItem::Script(path) => match self.search_script(&path) {
                     Some(found) => {
@@ -6264,6 +6352,9 @@ impl<'s> Context<'s> {
                         ),
                         None => self.error(file_missing(&path)),
                     }
+                    if !in_group {
+                        self.next_group_id += 1;
+                    }
                 }
                 InputItem::Library(name) => {
                     files_seen += 1;
@@ -6281,6 +6372,9 @@ impl<'s> Context<'s> {
                             problem("EI205", "An input file could not be found.")
                                 .with_context(format!("Library: -l{name}")),
                         ),
+                    }
+                    if !in_group {
+                        self.next_group_id += 1;
                     }
                 }
             }
@@ -6330,10 +6424,10 @@ impl<'s> Context<'s> {
                     .output_format_machine
                     .as_deref()
                     .and_then(bfd_emulation)
-                    .and_then(emulation_target);
+                    .and_then(target_for_emulation);
                 match format {
-                    Some((architecture, endian)) => {
-                        self.target = Target::for_architecture(architecture, endian);
+                    Some(target) => {
+                        self.target = target;
                         target_reference = Some(name.clone());
                     }
                     None => {
@@ -6363,8 +6457,35 @@ impl<'s> Context<'s> {
             }
         }
         self.check_output_format_machines();
+        self.report_backward_references();
         if files_seen == 0 && self.files.len() == files_before && !self.failed() {
             self.error(problem("EI213", "No input files were given."));
+        }
+    }
+
+    fn report_backward_references(&mut self) {
+        for (symbol, reference, target) in std::mem::take(&mut self.backward_references) {
+            let to = self.file_name(Some(target));
+            if self
+                .options
+                .warn_backrefs_exclude
+                .iter()
+                .any(|pattern| glob_match(pattern, &to))
+            {
+                continue;
+            }
+            let name = self.symbols[symbol].name.clone();
+            let from = self.file_name(Some(reference));
+            self.warn(
+                caution(
+                    "EI250",
+                    "A symbol is resolved by an archive that comes earlier on the command line.",
+                )
+                .with_context(format!("Symbol: {name}"))
+                .with_context(format!(
+                    "Cause: backward reference detected: {name} in {from} refers to {to}"
+                )),
+            );
         }
     }
 
@@ -6377,7 +6498,7 @@ impl<'s> Context<'s> {
         else {
             return;
         };
-        let expected = emulation_target(emulation);
+        let expected = target_for_emulation(emulation);
         let reference = self.options.output_format.clone().unwrap_or_default();
         let mut loaded = self.object_files.clone();
         loaded.extend(self.shared_files.clone());
@@ -6387,11 +6508,9 @@ impl<'s> Context<'s> {
                 continue;
             }
             let machine = self.files[file].elf.header.machine;
-            let endian = self.files[file].elf.encoding().endian;
-            let mismatch = match expected {
-                Some((architecture, wanted)) => {
-                    machine != architecture.machine() || endian != wanted
-                }
+            let encoding = self.files[file].elf.encoding();
+            let mismatch = match &expected {
+                Some(target) => machine != target.machine || encoding != target.encoding,
                 None => true,
             };
             if mismatch {
@@ -6498,7 +6617,7 @@ impl<'s> Context<'s> {
         header.push(1);
         header.extend_from_slice(&[0; 9]);
         encoding.put_u16(&mut header, file_type::RELOCATABLE);
-        encoding.put_u16(&mut header, self.target.architecture.machine());
+        encoding.put_u16(&mut header, self.target.machine);
         encoding.put_u32(&mut header, 1);
         encoding.put_word(&mut header, 0);
         encoding.put_word(&mut header, 0);
@@ -6719,7 +6838,7 @@ impl<'s> Context<'s> {
                     .output_format_machine
                     .as_deref()
                     .and_then(bfd_emulation)
-                    .and_then(emulation_target);
+                    .and_then(target_for_emulation);
                 let foreign_format = format.is_none()
                     && self
                         .options
@@ -6732,11 +6851,8 @@ impl<'s> Context<'s> {
                     self.error(incompatible(&display, &reference));
                     return;
                 }
-                if let Some((architecture, endian)) = format {
-                    let expected = Target::for_architecture(architecture, endian);
-                    if elf.header.machine != expected.architecture.machine()
-                        || encoding.endian != expected.encoding.endian
-                    {
+                if let Some(expected) = format {
+                    if elf.header.machine != expected.machine || encoding != expected.encoding {
                         let reference = self.options.output_format.clone().unwrap_or_default();
                         self.error(incompatible(&display, &reference));
                         return;
@@ -6749,7 +6865,7 @@ impl<'s> Context<'s> {
             }
             Some(reference) => {
                 if self.foreign_emulation
-                    || elf.header.machine != self.target.architecture.machine()
+                    || elf.header.machine != self.target.machine
                     || encoding != self.target.encoding
                 {
                     let existing = if self.options.emulation.is_some() {
@@ -6807,6 +6923,7 @@ impl<'s> Context<'s> {
             name.to_string()
         };
         self.files.push(InputFile {
+            group_id: self.next_group_id,
             name: name.to_string(),
             archive_name: archive,
             elf,
@@ -20856,7 +20973,7 @@ impl<'s> Context<'s> {
             file_type::EXECUTABLE
         };
         encoding.put_u16(&mut header, kind);
-        encoding.put_u16(&mut header, self.target.architecture.machine());
+        encoding.put_u16(&mut header, self.target.machine);
         encoding.put_u32(&mut header, 1);
         encoding.put_word(&mut header, self.entry_address());
         encoding.put_word(
@@ -21742,6 +21859,9 @@ impl<'s> Context<'s> {
         self.remove_empty_loads();
         self.assign_file_offsets();
         self.write_map_and_cross_references();
+        if self.options.print_memory_usage {
+            self.print_memory_usage();
+        }
         if self.options.check_sections {
             self.check_sections();
         }
@@ -21773,6 +21893,37 @@ impl<'s> Context<'s> {
             return None;
         }
         Some(bytes)
+    }
+
+    fn print_memory_usage(&mut self) {
+        let size_text = |size: u64| {
+            if size & 0x3fff_ffff == 0 {
+                format!("{:>10} GB", size >> 30)
+            } else if size & 0xf_ffff == 0 {
+                format!("{:>10} MB", size >> 20)
+            } else if size & 0x3ff == 0 {
+                format!("{:>10} KB", size >> 10)
+            } else {
+                format!(" {size:>10} B")
+            }
+        };
+        let mut text = String::from("Memory region         Used Size  Region Size  %age Used\n");
+        for region in 0..self.script.regions.len() {
+            let origin = self.script.regions[region].origin.clone();
+            let length = self.script.regions[region].length.clone();
+            let origin = self.evaluate_value(&origin);
+            let length = self.evaluate_value(&length);
+            let used = self.script.regions[region].position.wrapping_sub(origin);
+            text.push_str(&format!("{:>16}: ", self.script.regions[region].name));
+            text.push_str(&size_text(used));
+            if length != 0 {
+                text.push_str(&size_text(length));
+                let percent = used as f64 * 100.0 / length as f64;
+                text.push_str(&format!("    {percent:6.2}%"));
+            }
+            text.push('\n');
+        }
+        self.messages.push(text.trim_end_matches('\n').to_string());
     }
 
     fn check_dynamic_addends(&mut self, bytes: &[u8]) {
