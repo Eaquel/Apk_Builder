@@ -150,6 +150,8 @@ pub struct Options {
     pub force_group_allocation: bool,
     pub gnu_stack: bool,
     pub mark_plt: bool,
+    pub optimize_bb_jumps: bool,
+    pub branch_to_branch: Option<bool>,
     pub ifunc_noplt: bool,
     pub check_dynamic_relocations: bool,
     pub print_memory_usage: bool,
@@ -331,6 +333,8 @@ impl Default for Options {
             force_group_allocation: false,
             gnu_stack: true,
             mark_plt: false,
+            optimize_bb_jumps: false,
+            branch_to_branch: None,
             ifunc_noplt: false,
             check_dynamic_relocations: false,
             print_memory_usage: false,
@@ -513,6 +517,7 @@ fn decode_package_metadata(text: &str) -> Result<Vec<u8>, usize> {
 }
 
 const EXECUTABLE_STACK_NOTE: &str = ", but -z execstack is not specified";
+const SPLIT_STACK_PROLOGUE: &str = ", but couldn't adjust its prologue";
 
 const NON_PREVAILING_NOTE: &str = "\n>>> or the symbol in the prevailing group had STB_WEAK binding and the symbol in a non-prevailing group had STB_GLOBAL binding. Mixing groups with STB_WEAK and STB_GLOBAL binding signature is not supported";
 
@@ -1490,6 +1495,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--warn-backrefs" | "-warn-backrefs" => options.warn_backrefs = true,
             "--no-warn-backrefs" | "-no-warn-backrefs" => options.warn_backrefs = false,
             "--check-dynamic-relocations" => options.check_dynamic_relocations = true,
+            "--optimize-bb-jumps" => options.optimize_bb_jumps = true,
+            "--branch-to-branch" => options.branch_to_branch = Some(true),
+            "--no-branch-to-branch" => options.branch_to_branch = Some(false),
+            "--no-optimize-bb-jumps" => options.optimize_bb_jumps = false,
             "--no-check-dynamic-relocations" => options.check_dynamic_relocations = false,
             "--apply-dynamic-relocs" => options.apply_dynamic_relocations = true,
             "--target1-rel" => options.arm_target1_relative = true,
@@ -3478,6 +3487,12 @@ pub struct Context<'s> {
     pub next_group_id: usize,
     pub why_live: BTreeMap<LiveItem, (Option<LiveItem>, &'static str)>,
     pub memtag_symbols: Vec<SymbolIndex>,
+    pub nop_filled: BTreeSet<SectionIndex>,
+    pub indirect_locals: Vec<SymbolIndex>,
+    pub split_stack_files: BTreeSet<FileIndex>,
+    pub no_split_stack_files: BTreeSet<FileIndex>,
+    pub branch_redirections: BTreeMap<(SectionIndex, u64), (SymbolIndex, i64)>,
+    pub jump_modifications: BTreeMap<SectionIndex, (u64, u8)>,
     pub backward_references: Vec<(SymbolIndex, FileIndex, FileIndex)>,
     pub pauth_core: Option<(u64, u64)>,
     pub elf_header_output: OutputIndex,
@@ -3630,6 +3645,12 @@ impl<'s> Context<'s> {
             next_group_id: 0,
             why_live: BTreeMap::new(),
             memtag_symbols: Vec::new(),
+            nop_filled: BTreeSet::new(),
+            indirect_locals: Vec::new(),
+            split_stack_files: BTreeSet::new(),
+            no_split_stack_files: BTreeSet::new(),
+            branch_redirections: BTreeMap::new(),
+            jump_modifications: BTreeMap::new(),
             backward_references: Vec::new(),
             pauth_core: None,
             elf_header_output: usize::MAX,
@@ -4059,6 +4080,11 @@ impl<'s> Context<'s> {
         alignment: u64,
         version: u16,
     ) {
+        let kind = if kind == symbol_type::GNU_INDIRECT_FUNCTION {
+            symbol_type::FUNCTION
+        } else {
+            kind
+        };
         self.overwrite(
             symbol,
             SymbolState::Shared,
@@ -8254,7 +8280,24 @@ impl<'s> Context<'s> {
                         self.files[index].discarded[position] = true;
                         continue;
                     }
-                    ".note.GNU-split-stack" | ".note.GNU-no-split-stack" | ".note.gnu.build-id" => {
+                    ".note.GNU-split-stack" => {
+                        if relocatable {
+                            self.error_always(not_supported("split stack").with_context(
+                                "Cause: cannot mix split-stack and non-split-stack in a relocatable link"
+                                    .to_string(),
+                            ));
+                        } else {
+                            self.split_stack_files.insert(index);
+                        }
+                        self.files[index].discarded[position] = true;
+                        continue;
+                    }
+                    ".note.GNU-no-split-stack" => {
+                        self.no_split_stack_files.insert(index);
+                        self.files[index].discarded[position] = true;
+                        continue;
+                    }
+                    ".note.gnu.build-id" => {
                         self.files[index].discarded[position] = true;
                         continue;
                     }
@@ -8981,7 +9024,9 @@ impl<'s> Context<'s> {
             {
                 continue;
             }
-            if self.options.allow_multiple_definition {
+            if self.options.allow_multiple_definition
+                || self.symbols[id].name == "__x86.get_pc_thunk.bx"
+            {
                 continue;
             }
             let name = self.symbols[id].name.clone();
@@ -11895,6 +11940,11 @@ impl<'s> Context<'s> {
     }
 
     fn enclosing_function(&self, section: SectionIndex, offset: u64) -> Option<String> {
+        self.enclosing_function_symbol(section, offset)
+            .map(|id| self.symbols[id].name.clone())
+    }
+
+    fn enclosing_function_symbol(&self, section: SectionIndex, offset: u64) -> Option<SymbolIndex> {
         let file = self.sections[section]
             .file
             .filter(|file| *file < self.files.len())?;
@@ -11909,7 +11959,7 @@ impl<'s> Context<'s> {
                 && symbol.value <= offset
                 && offset < symbol.value + symbol.size
             {
-                return Some(symbol.name.clone());
+                return Some(*id);
             }
         }
         None
@@ -13054,6 +13104,29 @@ impl<'s> Context<'s> {
         } else {
             format!("{source}{separator}{object}")
         }
+    }
+}
+
+fn fill_with_nops(buffer: &mut [u8]) {
+    const NOPS: [&[u8]; 9] = [
+        &[0x90],
+        &[0x66, 0x90],
+        &[0x0f, 0x1f, 0x00],
+        &[0x0f, 0x1f, 0x40, 0x00],
+        &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+        &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+        &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+        &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ];
+    let mut position = 0;
+    while buffer.len() - position >= 9 {
+        buffer[position..position + 9].copy_from_slice(NOPS[8]);
+        position += 9;
+    }
+    let remaining = buffer.len() - position;
+    if remaining > 0 {
+        buffer[position..].copy_from_slice(NOPS[remaining - 1]);
     }
 }
 
@@ -16221,6 +16294,7 @@ impl<'s> Context<'s> {
             copy.needs = 0;
             let local = self.symbols.len();
             self.symbols.push(copy);
+            self.indirect_locals.push(local);
             self.add_plt_entry(local, true);
             self.symbols[id].in_indirect_plt = true;
             self.symbols[id].plt_index = self.symbols[local].plt_index;
@@ -16458,6 +16532,9 @@ impl<'s> Context<'s> {
                 for id in kept {
                     self.add_to_symbol_table(id);
                 }
+            }
+            for id in self.indirect_locals.clone() {
+                self.add_to_symbol_table(id);
             }
             if self.copy_relocation_sections {
                 self.add_output_section_symbols();
@@ -17048,15 +17125,22 @@ impl<'s> Context<'s> {
         let Some((start, end)) = self.indirect_relocation_bounds else {
             return false;
         };
-        let name = if self.target.uses_addends {
-            ".rela.dyn"
-        } else {
-            ".rel.dyn"
+        let android = self.options.android_packing;
+        let name = match (self.target.uses_addends, android) {
+            (true, false) => ".rela.dyn",
+            (false, false) => ".rel.dyn",
+            (true, true) => ".rela.plt",
+            (false, true) => ".rel.plt",
         };
         let Some(section) = self.synthetic_section(name) else {
             return false;
         };
-        if self.dynamic_relocations.is_empty() {
+        let empty = if android {
+            self.plt_relocations.is_empty()
+        } else {
+            self.dynamic_relocations.is_empty()
+        };
+        if empty {
             return false;
         }
         let size = self.sections[section].size;
@@ -20064,6 +20148,13 @@ impl<'s> Context<'s> {
             self.aarch64_relocate_section(section, buffer);
             return;
         }
+        if self.sections[section].flags & section_flag::EXECUTE != 0
+            && self.sections[section]
+                .file
+                .is_some_and(|file| self.split_stack_files.contains(&file))
+        {
+            self.adjust_split_stack_prologues(section, buffer);
+        }
         let relocations = std::mem::take(&mut self.sections[section].relocations);
         let base = self.section_address(section, 0);
         for relocation in &relocations {
@@ -20088,6 +20179,118 @@ impl<'s> Context<'s> {
             self.relocating_section = None;
         }
         self.sections[section].relocations = relocations;
+        if let Some((offset, opcode)) = self.jump_modifications.get(&section).copied() {
+            let at = offset as usize;
+            if at >= 1 && at < buffer.len() {
+                buffer[at - 1] = 0x0f;
+                buffer[at] = opcode;
+            }
+        }
+    }
+
+    fn adjust_split_stack_prologues(&mut self, section: SectionIndex, buffer: &mut [u8]) {
+        let mut prologues: Vec<SymbolIndex> = Vec::new();
+        let mut morestack_calls: Vec<usize> = Vec::new();
+        let file = self.sections[section].file;
+        for index in 0..self.sections[section].relocations.len() {
+            let relocation = self.sections[section].relocations[index].clone();
+            let name = self.symbols[relocation.symbol].name.clone();
+            if name.starts_with("__morestack") {
+                if name == "__morestack" {
+                    morestack_calls.push(index);
+                }
+                continue;
+            }
+            let symbol = &self.symbols[relocation.symbol];
+            if !symbol.is_function() {
+                continue;
+            }
+            if symbol.is_defined() {
+                if let Some(held) = symbol.section {
+                    let split = match self.sections[held]
+                        .file
+                        .filter(|file| *file < self.files.len())
+                    {
+                        Some(owner) => self.split_stack_files.contains(&owner),
+                        None => true,
+                    };
+                    if split {
+                        continue;
+                    }
+                }
+            }
+            if prologues.iter().any(|function| {
+                let data = &self.symbols[*function];
+                data.value <= relocation.offset && relocation.offset < data.value + data.size
+            }) {
+                continue;
+            }
+            let Some(function) = self.enclosing_function_symbol(section, relocation.offset) else {
+                continue;
+            };
+            prologues.push(function);
+            if self.adjust_prologue_for_split_stack(buffer, self.symbols[function].value as usize) {
+                continue;
+            }
+            if !file.is_some_and(|file| self.no_split_stack_files.contains(&file)) {
+                let place = self.section_place(section);
+                let caller = self.symbols[function].name.clone();
+                self.error(
+                    problem("EI293", "A relocation does not match the instruction it patches.")
+                        .with_context(format!(
+                            "Reason: {place}: {caller} (with -fsplit-stack) calls {name} (without -fsplit-stack){SPLIT_STACK_PROLOGUE}"
+                        )),
+                );
+            }
+        }
+        let Some(non_split) = self.find("__morestack_non_split") else {
+            self.error_always(
+                problem("EI207", "A symbol is referenced but never defined.").with_context(
+                    "Cause: mixing split-stack objects requires a definition of __morestack_non_split"
+                        .to_string(),
+                ),
+            );
+            return;
+        };
+        for index in morestack_calls {
+            let offset = self.sections[section].relocations[index].offset;
+            if prologues.iter().any(|function| {
+                let data = &self.symbols[*function];
+                data.value <= offset && offset < data.value + data.size
+            }) {
+                self.sections[section].relocations[index].symbol = non_split;
+            }
+        }
+    }
+
+    fn adjust_prologue_for_split_stack(&mut self, buffer: &mut [u8], at: usize) -> bool {
+        if self.target.architecture != Architecture::X86_64 || self.word_size() != 8 {
+            self.error_always(
+                not_supported("split stack")
+                    .with_context("Cause: target doesn't support split stacks".to_string()),
+            );
+            return false;
+        }
+        if at + 8 >= buffer.len() {
+            return false;
+        }
+        if buffer[at..at + 5] == [0x64, 0x48, 0x3b, 0x24, 0x25] {
+            buffer[at..at + 8].copy_from_slice(&[0xf9, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00]);
+            return true;
+        }
+        if buffer[at..at + 4] == [0x4c, 0x8d, 0x94, 0x24]
+            || buffer[at..at + 4] == [0x4c, 0x8d, 0x9c, 0x24]
+        {
+            let value = u32::from_le_bytes([
+                buffer[at + 4],
+                buffer[at + 5],
+                buffer[at + 6],
+                buffer[at + 7],
+            ]);
+            buffer[at + 4..at + 8].copy_from_slice(&value.wrapping_sub(0x4000).to_le_bytes());
+            return true;
+        }
+        false
     }
 
     fn apply_non_allocated_relocations(&mut self, section: SectionIndex, buffer: &mut [u8]) {
@@ -21278,7 +21481,7 @@ impl<'s> Context<'s> {
         } else {
             BTreeMap::new()
         };
-        for member in members {
+        for (position, member) in members.iter().copied().enumerate() {
             let begin = self.sections[member].offset_in_output as usize;
             if fill {
                 for position in cursor..begin.min(size) {
@@ -21295,6 +21498,17 @@ impl<'s> Context<'s> {
                 out[start + begin..start + begin + length].copy_from_slice(&contents[..length]);
             }
             cursor = begin + self.sections[member].size as usize;
+            if fill && self.nop_filled.contains(&member) {
+                let end = members
+                    .get(position + 1)
+                    .map(|next| self.sections[*next].offset_in_output as usize)
+                    .unwrap_or(size)
+                    .min(size);
+                if cursor < end {
+                    fill_with_nops(&mut out[start + cursor..start + end]);
+                }
+                cursor = cursor.max(end);
+            }
         }
         if fill {
             for position in cursor..size {
@@ -22188,6 +22402,13 @@ impl<'s> Context<'s> {
             if self.failed() {
                 return None;
             }
+            if self
+                .options
+                .branch_to_branch
+                .unwrap_or(self.options.optimize >= 2)
+            {
+                self.apply_branch_to_branch();
+            }
             self.post_scan_relocations();
             self.report_shared_library_undefined();
         }
@@ -22244,6 +22465,12 @@ impl<'s> Context<'s> {
             self.fix_section_alignments();
         }
         self.layout_addresses();
+        if self.options.optimize_bb_jumps
+            && self.target.architecture == Architecture::X86_64
+            && !relocatable
+        {
+            self.optimize_basic_block_jumps();
+        }
         self.finalize_exception_index();
         self.resolve_link_order();
         if let Some(seed) = self.options.randomize_section_padding {
@@ -22545,6 +22772,240 @@ impl<'s> Context<'s> {
         let changed = size != self.sections[section].size;
         self.sections[section].size = size;
         changed
+    }
+
+    fn control_transfer_addend(&self, relocation: &Relocation) -> Option<u64> {
+        match self.target.architecture {
+            Architecture::X86_64 if relocation.kind == 4 => {
+                if self.symbols[relocation.symbol].is_section() {
+                    Some(relocation.addend.wrapping_add(4) as u64)
+                } else {
+                    Some(0)
+                }
+            }
+            Architecture::Aarch64 if relocation.kind == 314 => Some(0),
+            Architecture::Aarch64 if matches!(relocation.kind, 282 | 283) => {
+                Some(relocation.addend as u64)
+            }
+            _ => None,
+        }
+    }
+
+    fn branch_at_target(
+        &self,
+        symbol: SymbolIndex,
+        addend: u64,
+    ) -> Option<(SectionIndex, usize, u64)> {
+        let data = &self.symbols[symbol];
+        if !data.is_defined() || data.preemptible || data.is_indirect_function() {
+            return None;
+        }
+        let section = data.section?;
+        let held = &self.sections[section];
+        if held.flags & section_flag::EXECUTE == 0
+            || held.flags & section_flag::WRITE != 0
+            || held.synthetic.is_some()
+            || held.is_merge
+            || held.is_exception_frame
+            || held.file.is_none()
+        {
+            return None;
+        }
+        let offset = data.value.wrapping_add(addend);
+        if self.target.architecture == Architecture::X86_64 {
+            if held.data.get(offset as usize) != Some(&0xe9) {
+                return None;
+            }
+            let index = held
+                .relocations
+                .iter()
+                .position(|relocation| relocation.offset > offset)?;
+            let relocation = &held.relocations[index];
+            if relocation.offset == offset + 1 && matches!(relocation.kind, 2 | 4) {
+                return Some((section, index, relocation.addend.wrapping_add(4) as u64));
+            }
+            return None;
+        }
+        let index = held
+            .relocations
+            .iter()
+            .position(|relocation| relocation.offset >= offset)?;
+        let relocation = &held.relocations[index];
+        if relocation.offset == offset && relocation.kind == 282 {
+            return Some((section, index, relocation.addend as u64));
+        }
+        None
+    }
+
+    fn apply_branch_to_branch(&mut self) {
+        if !matches!(
+            self.target.architecture,
+            Architecture::X86_64 | Architecture::Aarch64
+        ) {
+            return;
+        }
+        for section in 0..self.sections.len() {
+            if self.sections[section].file.is_none() || self.sections[section].synthetic.is_some() {
+                continue;
+            }
+            for index in 0..self.sections[section].relocations.len() {
+                let relocation = self.sections[section].relocations[index].clone();
+                let Some(addend) = self.control_transfer_addend(&relocation) else {
+                    continue;
+                };
+                let Some(mut found) = self.branch_at_target(relocation.symbol, addend) else {
+                    continue;
+                };
+                for _ in 0..5 {
+                    let (held, at, next_addend) = found;
+                    let symbol = self.sections[held].relocations[at].symbol;
+                    match self.branch_at_target(symbol, next_addend) {
+                        Some(next) => found = next,
+                        None => break,
+                    }
+                }
+                let target = self.sections[found.0].relocations[found.1].clone();
+                let addend = match self.target.architecture {
+                    Architecture::X86_64 if self.symbols[relocation.symbol].is_section() => {
+                        target.addend
+                    }
+                    Architecture::X86_64 => relocation
+                        .addend
+                        .wrapping_add(target.addend)
+                        .wrapping_add(4),
+                    _ if relocation.kind == 314 => relocation.addend.wrapping_add(target.addend),
+                    _ => target.addend,
+                };
+                let changed = &mut self.sections[section].relocations[index];
+                changed.expression = target.expression;
+                changed.symbol = target.symbol;
+                changed.addend = addend;
+                self.branch_redirections
+                    .insert((section, relocation.offset), (target.symbol, addend));
+            }
+        }
+    }
+
+    fn optimize_basic_block_jumps(&mut self) {
+        let mut dropped: BTreeMap<SectionIndex, u64> = BTreeMap::new();
+        for output in self.order.clone() {
+            if self.outputs[output].flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            let members = self.outputs[output].members.clone();
+            let mut deleted = 0usize;
+            for (position, member) in members.iter().enumerate() {
+                let Some(next) = members.get(position + 1) else {
+                    continue;
+                };
+                if self.delete_fall_through_jump(*member, *next) {
+                    dropped.insert(*member, 5);
+                    deleted += 1;
+                }
+            }
+            if deleted > 0 {
+                self.layout_addresses();
+            }
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        for symbol in &mut self.symbols {
+            let Some(section) = symbol.section else {
+                continue;
+            };
+            let Some(bytes) = dropped.get(&section).copied() else {
+                continue;
+            };
+            let new_size = self.sections[section].size;
+            let old_size = new_size + bytes;
+            if symbol.value > new_size && symbol.value <= old_size {
+                symbol.value -= bytes;
+                continue;
+            }
+            if symbol.value + symbol.size > new_size
+                && symbol.value <= old_size
+                && symbol.value + symbol.size <= old_size
+            {
+                symbol.size -= bytes;
+            }
+        }
+    }
+
+    fn jump_relocation_at(&self, section: SectionIndex, offset: u64) -> Option<usize> {
+        self.sections[section]
+            .relocations
+            .iter()
+            .rposition(|relocation| {
+                relocation.offset == offset && relocation.expression != Expression::None
+            })
+    }
+
+    fn is_fall_through(&self, section: SectionIndex, next: SectionIndex, index: usize) -> bool {
+        let relocation = self.sections[section].relocations[index].clone();
+        if !matches!(relocation.kind, 2 | 4 | 15) {
+            return false;
+        }
+        let place = self.section_address(section, relocation.offset);
+        let target = self.evaluate(&relocation, place);
+        place.wrapping_add(4).wrapping_add(target) == self.section_address(next, 0)
+    }
+
+    fn delete_fall_through_jump(&mut self, section: SectionIndex, next: SectionIndex) -> bool {
+        let size = self.sections[section].size;
+        if size < 5 || (self.sections[section].data.len() as u64) < size {
+            return false;
+        }
+        let Some(jump) = self.jump_relocation_at(section, size - 4) else {
+            return false;
+        };
+        let jump_offset = self.sections[section].relocations[jump].offset as usize;
+        if self.sections[section].data[jump_offset - 1] != 0xe9 {
+            return false;
+        }
+        if !self.is_fall_through(section, next, jump) {
+            if size < 11 {
+                return false;
+            }
+            let Some(branch) = self.jump_relocation_at(section, size - 9) else {
+                return false;
+            };
+            let branch_offset = self.sections[section].relocations[branch].offset as usize;
+            if branch_offset < 2 || self.sections[section].data[branch_offset - 2] != 0x0f {
+                return false;
+            }
+            let inverted = match self.sections[section].data[branch_offset - 1] {
+                0x84 => 0x85,
+                0x85 => 0x84,
+                0x8f => 0x8e,
+                0x8d => 0x8c,
+                0x82 => 0x83,
+                0x86 => 0x87,
+                0x8c => 0x8d,
+                0x8e => 0x8f,
+                0x87 => 0x86,
+                0x83 => 0x82,
+                _ => return false,
+            };
+            if !self.is_fall_through(section, next, branch) {
+                return false;
+            }
+            self.jump_modifications
+                .insert(section, (branch_offset as u64 - 1, inverted));
+            let taken = self.sections[section].relocations[jump].clone();
+            let relocation = &mut self.sections[section].relocations[branch];
+            relocation.expression = taken.expression;
+            relocation.kind = taken.kind;
+            relocation.addend = taken.addend;
+            relocation.symbol = taken.symbol;
+        }
+        let relocation = &mut self.sections[section].relocations[jump];
+        relocation.expression = Expression::None;
+        relocation.offset = 0;
+        self.sections[section].size = size - 5;
+        self.sections[section].data.truncate((size - 5) as usize);
+        self.nop_filled.insert(section);
+        true
     }
 
     fn randomize_section_padding(&mut self, seed: u32) {
@@ -46027,15 +46488,25 @@ impl<'s> Context<'s> {
         let positions = self.symbol_table_positions();
         let raw = self.raw_relocations(target);
         let target_name = self.sections[target].name.clone();
-        for entry in raw {
+        for mut entry in raw {
             let offset = self.section_address(target, entry.offset);
+            let redirected = self
+                .branch_redirections
+                .get(&(target, entry.offset))
+                .copied();
+            if let Some((_, addend)) = redirected {
+                entry.addend = addend;
+            }
             let mut encoded = elf::Relocation {
                 offset,
                 kind: entry.kind,
                 symbol: 0,
                 addend: entry.addend,
             };
-            let Some(id) = self.symbol_of(target, entry.symbol) else {
+            let Some(id) = redirected
+                .map(|(symbol, _)| symbol)
+                .or_else(|| self.symbol_of(target, entry.symbol))
+            else {
                 elf::encode_relocation(encoding, &encoded, with_addend, &mut out);
                 continue;
             };
