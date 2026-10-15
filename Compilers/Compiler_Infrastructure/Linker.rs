@@ -155,6 +155,10 @@ pub struct Options {
     pub print_memory_usage: bool,
     pub warn_backrefs: bool,
     pub warn_backrefs_exclude: Vec<String>,
+    pub why_live: Vec<String>,
+    pub randomize_section_padding: Option<u32>,
+    pub execute_only: bool,
+    pub execute_only_report: u8,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -328,6 +332,10 @@ impl Default for Options {
             print_memory_usage: false,
             warn_backrefs: false,
             warn_backrefs_exclude: Vec::new(),
+            why_live: Vec::new(),
+            randomize_section_padding: None,
+            execute_only: false,
+            execute_only_report: 0,
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -670,6 +678,7 @@ fn apply_target_keyword(options: &mut Options, keyword: &str) -> Result<bool, Di
             "gcs-report" => options.gcs_report = Some(level),
             "gcs-report-dynamic" => options.gcs_report_dynamic = Some(level),
             "pauth-report" => options.pauth_report = level,
+            "execute-only-report" => options.execute_only_report = level,
             _ => {}
         }
         if value != "none" {
@@ -1447,6 +1456,19 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-relax" => options.relax = false,
             "--no-dynamic-linker" => options.no_dynamic_linker = true,
             "--print-memory-usage" | "-print-memory-usage" => options.print_memory_usage = true,
+            "--execute-only" | "-execute-only" => {
+                options.execute_only = true;
+                record_target_option(&mut options, "--execute-only");
+            }
+            "--no-execute-only" | "-no-execute-only" => {
+                options.execute_only = false;
+                if let Some(index) = TARGET_OPTIONS
+                    .iter()
+                    .position(|entry| entry.0 == "--execute-only")
+                {
+                    options.target_options.remove(&index);
+                }
+            }
             "--warn-backrefs" | "-warn-backrefs" => options.warn_backrefs = true,
             "--no-warn-backrefs" | "-no-warn-backrefs" => options.warn_backrefs = false,
             "--check-dynamic-relocations" => options.check_dynamic_relocations = true,
@@ -1636,6 +1658,25 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                                 "Cause: --package-metadata=: invalid % escape at byte {position}{PACKAGE_ESCAPE}"
                             )),
                         ),
+                    }
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--randomize-section-padding=") {
+                    let seed = parse_integer_any_radix(value).ok_or_else(|| {
+                        invalid_value("--randomize-section-padding", value).with_context(format!(
+                            "Cause: --randomize-section-padding: {NUMBER_EXPECTED} {value}"
+                        ))
+                    })?;
+                    options.randomize_section_padding = Some(seed as u32);
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--why-live=") {
+                    match glob_problem(value) {
+                        Some(problem) => options.pending_errors.push(
+                            invalid_value("--why-live", value)
+                                .with_context(format!("Cause: --why-live: {problem}: {value}")),
+                        ),
+                        None => options.why_live.push(value.to_string()),
                     }
                     continue;
                 }
@@ -2163,6 +2204,13 @@ pub type SectionIndex = usize;
 pub type SymbolIndex = usize;
 pub type OutputIndex = usize;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LiveItem {
+    Symbol(SymbolIndex),
+    Section(SectionIndex),
+    Place(SectionIndex, u64),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymbolState {
     Placeholder,
@@ -2402,6 +2450,7 @@ pub struct DynamicRelocation {
 pub enum Synthetic {
     Interpreter,
     PackageMetadata,
+    Padding,
     Bss,
     BssRelocationReadOnly,
     BuildIdentifier,
@@ -3389,6 +3438,7 @@ pub struct Context<'s> {
     pub and_features: u32,
     pub foreign_emulation: bool,
     pub next_group_id: usize,
+    pub why_live: BTreeMap<LiveItem, (Option<LiveItem>, &'static str)>,
     pub backward_references: Vec<(SymbolIndex, FileIndex, FileIndex)>,
     pub pauth_core: Option<(u64, u64)>,
     pub elf_header_output: OutputIndex,
@@ -3539,6 +3589,7 @@ impl<'s> Context<'s> {
             and_features: 0,
             foreign_emulation: false,
             next_group_id: 0,
+            why_live: BTreeMap::new(),
             backward_references: Vec::new(),
             pauth_core: None,
             elf_header_output: usize::MAX,
@@ -14309,30 +14360,42 @@ impl<'s> Context<'s> {
         let mut named: BTreeMap<String, Vec<SectionIndex>> = BTreeMap::new();
         for id in self.global_symbols() {
             if self.symbols[id].exported {
-                self.mark_symbol_live(id, &mut queue);
+                self.mark_symbol_live(id, "externally visible symbol", &mut queue);
             }
         }
-        let mut roots: Vec<String> = vec![self.entry_name.clone()];
-        roots.push(
+        let mut roots: Vec<(String, &'static str)> = vec![(self.entry_name.clone(), "entry point")];
+        roots.push((
             self.options
                 .initializer
                 .clone()
                 .unwrap_or_else(|| "_init".to_string()),
-        );
-        roots.push(
+            "initializer function",
+        ));
+        roots.push((
             self.options
                 .finalizer
                 .clone()
                 .unwrap_or_else(|| "_fini".to_string()),
-        );
-        roots.extend(self.options.undefined.iter().cloned());
-        roots.extend(self.script.referenced_symbols.iter().cloned());
-        for name in roots {
+            "finalizer function",
+        ));
+        for name in self.options.undefined.clone() {
+            roots.push((name, "undefined command line flag"));
+        }
+        for name in self.script.referenced_symbols.clone() {
+            roots.push((name, "referenced by linker script"));
+        }
+        for (name, reason) in roots {
             if let Some(id) = self.find(&name) {
-                self.mark_symbol_live(id, &mut queue);
+                self.mark_symbol_live(id, reason, &mut queue);
             }
         }
+        let tracking = !self.options.why_live.is_empty();
         for section in self.frame_pieces.keys().copied().collect::<Vec<_>>() {
+            if tracking {
+                self.why_live
+                    .entry(LiveItem::Section(section))
+                    .or_insert((None, "exception handling frame"));
+            }
             let pieces = self.frame_pieces[&section].clone();
             let relocations = self.frame_relocations[&section].clone();
             for piece in pieces {
@@ -14361,7 +14424,7 @@ impl<'s> Context<'s> {
         for section in candidates {
             let data = &self.sections[section];
             if data.flags & section_flag::GNU_RETAIN != 0 {
-                self.enqueue_live(section, 0, &mut queue);
+                self.enqueue_live(section, 0, None, (None, "retained"), &mut queue);
                 continue;
             }
             if data.flags & section_flag::LINK_ORDER != 0 {
@@ -14393,8 +14456,16 @@ impl<'s> Context<'s> {
                         || name.starts_with(".dtors")
                 }
             };
-            if reserved || self.script_should_keep(section) {
-                self.enqueue_live(section, 0, &mut queue);
+            if reserved {
+                self.enqueue_live(section, 0, None, (None, "reserved"), &mut queue);
+            } else if self.script_should_keep(section) {
+                self.enqueue_live(
+                    section,
+                    0,
+                    None,
+                    (None, "KEEP in linker script"),
+                    &mut queue,
+                );
             } else if (!self.options.start_stop_garbage_collection || name.starts_with("__libc_"))
                 && is_c_identifier(&name)
             {
@@ -14414,11 +14485,26 @@ impl<'s> Context<'s> {
                 self.resolve_live_reference(section, relocation, false, &named, &mut queue);
             }
             for dependent in self.sections[section].dependents.clone() {
-                self.enqueue_live(dependent, 0, &mut queue);
+                self.enqueue_live(
+                    dependent,
+                    0,
+                    None,
+                    (Some(LiveItem::Section(section)), "depended on by section"),
+                    &mut queue,
+                );
             }
             if let Some(next) = self.sections[section].next_in_group {
-                self.enqueue_live(next, 0, &mut queue);
+                self.enqueue_live(
+                    next,
+                    0,
+                    None,
+                    (Some(LiveItem::Section(section)), "in section group with"),
+                    &mut queue,
+                );
             }
+        }
+        if tracking {
+            self.print_why_live();
         }
         for id in self.global_symbols() {
             let symbol = &self.symbols[id];
@@ -14439,18 +14525,135 @@ impl<'s> Context<'s> {
         }
     }
 
-    fn mark_symbol_live(&mut self, id: SymbolIndex, queue: &mut Vec<SectionIndex>) {
+    fn mark_symbol_live(
+        &mut self,
+        id: SymbolIndex,
+        reason: &'static str,
+        queue: &mut Vec<SectionIndex>,
+    ) {
         let symbol = &self.symbols[id];
         if !symbol.is_defined() {
             return;
         }
         if let Some(section) = symbol.section {
             let value = symbol.value;
-            self.enqueue_live(section, value, queue);
+            self.enqueue_live(section, value, Some(id), (None, reason), queue);
         }
     }
 
-    fn enqueue_live(&mut self, section: SectionIndex, offset: u64, queue: &mut Vec<SectionIndex>) {
+    fn enclosing_symbol(&self, section: SectionIndex, offset: u64) -> Option<SymbolIndex> {
+        let file = self.sections[section]
+            .file
+            .filter(|file| *file < self.files.len() && *file != INTERNAL)?;
+        self.files[file].symbols.iter().copied().find(|id| {
+            *id != usize::MAX && {
+                let symbol = &self.symbols[*id];
+                symbol.is_defined()
+                    && symbol.section == Some(section)
+                    && symbol.value <= offset
+                    && offset < symbol.value.wrapping_add(symbol.size)
+            }
+        })
+    }
+
+    fn print_why_live(&mut self) {
+        let mut candidates = self.global_symbols();
+        for file in self.object_files.clone() {
+            let first_global = self.files[file].first_global;
+            for id in self.files[file].symbols.iter().take(first_global).copied() {
+                if id == usize::MAX {
+                    continue;
+                }
+                let symbol = &self.symbols[id];
+                if symbol.is_defined() && !symbol.is_section() {
+                    candidates.push(id);
+                }
+            }
+        }
+        for id in candidates {
+            let name = self.symbols[id].name.clone();
+            if self
+                .options
+                .why_live
+                .iter()
+                .any(|pattern| glob_match(pattern, &name))
+            {
+                self.print_why_live_symbol(id);
+            }
+        }
+    }
+
+    fn live_item_text(&self, item: LiveItem) -> String {
+        match item {
+            LiveItem::Symbol(id) => format!(
+                "{}:({})",
+                self.file_name(self.symbols[id].file),
+                self.symbol_text(id)
+            ),
+            LiveItem::Section(section) | LiveItem::Place(section, _) => self.section_place(section),
+        }
+    }
+
+    fn print_why_live_symbol(&mut self, id: SymbolIndex) {
+        let symbol = &self.symbols[id];
+        if symbol.is_defined() {
+            if let Some(section) = symbol.section {
+                if !self.sections[section].live {
+                    return;
+                }
+                if !symbol.is_section() && !self.sections[section].pieces.is_empty() {
+                    let pieces = &self.sections[section].pieces;
+                    let position =
+                        pieces.partition_point(|piece| piece.input_offset <= symbol.value);
+                    if position > 0 && !pieces[position - 1].live {
+                        return;
+                    }
+                }
+            }
+        }
+        let mut text = format!("live symbol: {}", self.live_item_text(LiveItem::Symbol(id)));
+        let mut current = LiveItem::Symbol(id);
+        for _ in 0..self.sections.len() + self.symbols.len() {
+            let reason = match self.why_live.get(&current) {
+                Some(reason) => *reason,
+                None => {
+                    let section = match current {
+                        LiveItem::Symbol(symbol) if self.symbols[symbol].is_defined() => {
+                            self.symbols[symbol].section
+                        }
+                        _ => None,
+                    };
+                    match section {
+                        Some(section) => (Some(LiveItem::Section(section)), "in live section"),
+                        None => (None, "no section"),
+                    }
+                }
+            };
+            let Some(item) = reason.0 else {
+                text.push_str(&format!(" ({})", reason.1));
+                break;
+            };
+            text.push_str(&format!("\n>>> {}: ", reason.1));
+            current = match item {
+                LiveItem::Place(section, offset) => match self.enclosing_symbol(section, offset) {
+                    Some(symbol) => LiveItem::Symbol(symbol),
+                    None => LiveItem::Section(section),
+                },
+                other => other,
+            };
+            text.push_str(&self.live_item_text(current));
+        }
+        self.messages.push(text);
+    }
+
+    fn enqueue_live(
+        &mut self,
+        section: SectionIndex,
+        offset: u64,
+        symbol: Option<SymbolIndex>,
+        reason: (Option<LiveItem>, &'static str),
+        queue: &mut Vec<SectionIndex>,
+    ) {
         if !self.sections[section].pieces.is_empty() {
             let pieces = &mut self.sections[section].pieces;
             let position = pieces.partition_point(|piece| piece.input_offset <= offset);
@@ -14462,6 +14665,23 @@ impl<'s> Context<'s> {
             return;
         }
         self.sections[section].live = true;
+        if !self.options.why_live.is_empty() {
+            match symbol {
+                Some(symbol) => {
+                    self.why_live
+                        .entry(LiveItem::Symbol(symbol))
+                        .or_insert(reason);
+                    self.why_live
+                        .entry(LiveItem::Section(section))
+                        .or_insert((Some(LiveItem::Symbol(symbol)), "contained live symbol"));
+                }
+                None => {
+                    self.why_live
+                        .entry(LiveItem::Section(section))
+                        .or_insert(reason);
+                }
+            }
+        }
         queue.push(section);
     }
 
@@ -14477,6 +14697,10 @@ impl<'s> Context<'s> {
             return;
         };
         self.symbols[id].used = true;
+        let reason = (
+            Some(LiveItem::Place(section, relocation.offset)),
+            "referenced by",
+        );
         let symbol = &self.symbols[id];
         if symbol.is_defined() {
             let Some(target) = symbol.section else {
@@ -14498,12 +14722,23 @@ impl<'s> Context<'s> {
             {
                 return;
             }
-            self.enqueue_live(target, offset, queue);
+            let canonical = if self.symbols[id].is_section() && !self.options.why_live.is_empty() {
+                self.enclosing_symbol(target, offset)
+            } else {
+                Some(id)
+            };
+            self.enqueue_live(target, offset, canonical, reason, queue);
             return;
+        }
+        if self.symbols[id].is_shared()
+            && !self.symbols[id].is_weak()
+            && !self.options.why_live.is_empty()
+        {
+            self.why_live.entry(LiveItem::Symbol(id)).or_insert(reason);
         }
         let name = self.symbols[id].name.clone();
         for target in named.get(&name).cloned().unwrap_or_default() {
-            self.enqueue_live(target, 0, queue);
+            self.enqueue_live(target, 0, None, reason, queue);
         }
     }
 
@@ -16400,8 +16635,62 @@ impl<'s> Context<'s> {
     fn magic_segment_flags(&self, flags: u32) -> u32 {
         if self.options.omagic {
             segment_flag::READ | segment_flag::WRITE | segment_flag::EXECUTE
+        } else if self.options.execute_only && flags & segment_flag::EXECUTE != 0 {
+            flags & !segment_flag::READ
         } else {
             flags
+        }
+    }
+
+    fn check_execute_only(&mut self) {
+        if self.options.execute_only {
+            for output in self.order.clone() {
+                if self.outputs[output].flags & section_flag::EXECUTE == 0 {
+                    continue;
+                }
+                let name = self.outputs[output].name.clone();
+                for member in self.outputs[output].members.clone() {
+                    if self.sections[member].flags & section_flag::EXECUTE != 0 {
+                        continue;
+                    }
+                    let place = self.section_place(member);
+                    self.error_always(
+                        problem(
+                            "EI263",
+                            "A linker script places sections in a way the linker cannot carry out.",
+                        )
+                        .with_context(format!("Section: {place}"))
+                        .with_context(format!(
+                            "Cause: cannot place {place} into {name}: --execute-only does not support intermingling data and code"
+                        )),
+                    );
+                }
+            }
+        }
+        let level = self.options.execute_only_report;
+        if level == 0 {
+            return;
+        }
+        let (flag, flag_name) = if self.target.architecture == Architecture::Aarch64 {
+            (section_flag::AARCH64_PURE_CODE, "SHF_AARCH64_PURECODE")
+        } else {
+            (section_flag::ARM_PURE_CODE, "SHF_ARM_PURECODE")
+        };
+        for output in self.order.clone() {
+            if self.segment_flags_of(output) != segment_flag::READ | segment_flag::EXECUTE {
+                continue;
+            }
+            for member in self.outputs[output].members.clone() {
+                let section = &self.sections[member];
+                if section.synthetic.is_some() || section.flags & flag != 0 {
+                    continue;
+                }
+                let place = self.section_place(member);
+                self.security_report(
+                    level,
+                    format!("-z execute-only-report: {place} does not have {flag_name} flag set"),
+                );
+            }
         }
     }
 
@@ -20603,6 +20892,19 @@ impl<'s> Context<'s> {
         };
         let mut buffer = vec![0u8; size];
         match which {
+            Synthetic::Padding => {
+                let output = self.sections[section].output.unwrap_or(0);
+                let filler = match self.outputs[output].script.filler {
+                    Some(filler) => filler,
+                    None if self.outputs[output].flags & section_flag::EXECUTE != 0 => {
+                        self.target.trap
+                    }
+                    None => [0; 4],
+                };
+                for (position, byte) in buffer.iter_mut().enumerate() {
+                    *byte = filler[position % 4];
+                }
+            }
             Synthetic::Interpreter | Synthetic::Merge | Synthetic::PackageMetadata => {
                 let data = &self.sections[section].data;
                 buffer[..data.len().min(size)].copy_from_slice(&data[..data.len().min(size)]);
@@ -21167,6 +21469,8 @@ impl<'s> Context<'s> {
             } else if !matches!(
                 key,
                 "--be8"
+                    | "--execute-only"
+                    | "-z execute-only-report"
                     | "--fix-cortex-a53-843419"
                     | "-z pac-plt"
                     | "-z force-bti"
@@ -21468,6 +21772,14 @@ impl<'s> Context<'s> {
         if let Some(rela) = self.options.explicit_addends {
             self.target.uses_addends = rela;
         }
+        if self.options.execute_only && !self.options.read_only_segment && !self.script.has_sections
+        {
+            self.error_always(
+                problem("EI204", "An option value is not valid.").with_context(
+                    "Cause: --execute-only and --no-rosegment cannot be used together".to_string(),
+                ),
+            );
+        }
         if self.options.mark_plt {
             let cause = if self.target.architecture != Architecture::X86_64 {
                 Some("-z mark-plt only supported on X86_64")
@@ -21760,6 +22072,10 @@ impl<'s> Context<'s> {
         self.layout_addresses();
         self.finalize_exception_index();
         self.resolve_link_order();
+        if let Some(seed) = self.options.randomize_section_padding {
+            self.randomize_section_padding(seed);
+            self.layout_addresses();
+        }
         let mut pass = 0u32;
         let mut assign_passes = 0u32;
         loop {
@@ -21842,6 +22158,7 @@ impl<'s> Context<'s> {
             }
         }
         self.check_output_addresses();
+        self.check_execute_only();
         if self.script_active() {
             self.check_final_script_conditions();
         }
@@ -21893,6 +22210,76 @@ impl<'s> Context<'s> {
             return None;
         }
         Some(bytes)
+    }
+
+    fn randomize_section_padding(&mut self, seed: u32) {
+        let mut generator = MersenneTwister::new(seed);
+        let mut current_load: Option<Option<usize>> = None;
+        for output in self.order.clone() {
+            let name = self.outputs[output].name.clone();
+            let paddable = matches!(
+                name.as_str(),
+                ".bss"
+                    | ".data"
+                    | ".data.rel.ro"
+                    | ".lbss"
+                    | ".ldata"
+                    | ".lrodata"
+                    | ".ltext"
+                    | ".rodata"
+            ) || name.starts_with(".text");
+            if !paddable {
+                continue;
+            }
+            let members = std::mem::take(&mut self.outputs[output].members);
+            let mut updated = Vec::with_capacity(members.len());
+            let mut start = 0usize;
+            while start < members.len() {
+                let description = self.sections[members[start]].description;
+                let mut end = start + 1;
+                while end < members.len() && self.sections[members[end]].description == description
+                {
+                    end += 1;
+                }
+                let load = self.outputs[output].load_segment;
+                if current_load != Some(load) {
+                    let amount = u64::from(generator.next()) % self.maximum_page_size;
+                    updated.push(self.add_padding_section(output, amount, description));
+                    current_load = Some(load);
+                }
+                for member in &members[start..end] {
+                    if generator.next().is_multiple_of(16) {
+                        let amount = self.sections[*member].alignment;
+                        updated.push(self.add_padding_section(output, amount, description));
+                    }
+                    updated.push(*member);
+                }
+                start = end;
+            }
+            self.outputs[output].members = updated;
+        }
+    }
+
+    fn add_padding_section(
+        &mut self,
+        output: OutputIndex,
+        amount: u64,
+        description: usize,
+    ) -> SectionIndex {
+        let mut section = InputSection::synthetic(
+            ".padding",
+            section_type::PROGRAM_BITS,
+            section_flag::ALLOCATE,
+            1,
+            Synthetic::Padding,
+        );
+        section.size = amount;
+        section.output = Some(output);
+        section.live = true;
+        section.description = description;
+        let index = self.sections.len();
+        self.sections.push(section);
+        index
     }
 
     fn print_memory_usage(&mut self) {
