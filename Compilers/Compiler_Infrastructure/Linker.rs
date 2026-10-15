@@ -142,6 +142,12 @@ pub struct Options {
     pub pic_veneer: bool,
     pub shuffle_sections: Vec<(String, u32)>,
     pub exclude_libraries: Vec<String>,
+    pub package_metadata: Vec<u8>,
+    pub keep_data_section_prefix: bool,
+    pub dead_relocation_values: Vec<(String, u64)>,
+    pub unique: bool,
+    pub gnu_unique: bool,
+    pub force_group_allocation: bool,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -302,6 +308,12 @@ impl Default for Options {
             pic_veneer: false,
             shuffle_sections: Vec::new(),
             exclude_libraries: Vec::new(),
+            package_metadata: Vec::new(),
+            keep_data_section_prefix: false,
+            dead_relocation_values: Vec::new(),
+            unique: false,
+            gnu_unique: true,
+            force_group_allocation: false,
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -445,6 +457,34 @@ pub fn parse_integer_any_radix(text: &str) -> Option<u64> {
 }
 
 const NUMBER_EXPECTED: &str = "number expected, but got";
+
+const PACKAGE_ESCAPE: &str = "; supports only %[0-9a-fA-F][0-9a-fA-F]";
+
+fn decode_package_metadata(text: &str) -> Result<Vec<u8>, usize> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut position = 0usize;
+    while position < bytes.len() {
+        if bytes[position] != b'%' {
+            decoded.push(bytes[position]);
+            position += 1;
+            continue;
+        }
+        let digit = |at: usize| bytes.get(at).and_then(|byte| (*byte as char).to_digit(16));
+        match (digit(position + 1), digit(position + 2)) {
+            (Some(high), Some(low)) if position + 2 < bytes.len() => {
+                decoded.push((high * 16 + low) as u8);
+                position += 3;
+            }
+            _ => return Err(position),
+        }
+    }
+    Ok(decoded)
+}
+
+const NON_PREVAILING_NOTE: &str = "\n>>> or the symbol in the prevailing group had STB_WEAK binding and the symbol in a non-prevailing group had STB_GLOBAL binding. Mixing groups with STB_WEAK and STB_GLOBAL binding signature is not supported";
+
+const DEAD_PREFIX: &str = "-z dead-reloc-in-nonalloc=: ";
 
 const SHUFFLE_PREFIX: &str = "--shuffle-sections=: ";
 
@@ -1349,6 +1389,12 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-xosegment" => options.execute_only_segment = false,
             "--noinhibit-exec" => options.no_inhibit_executable = true,
             "--pic-veneer" => options.pic_veneer = true,
+            "--unique" | "-unique" => options.unique = true,
+            "--force-group-allocation" | "-force-group-allocation" => {
+                options.force_group_allocation = true
+            }
+            "--gnu-unique" | "-gnu-unique" => options.gnu_unique = true,
+            "--no-gnu-unique" | "-no-gnu-unique" => options.gnu_unique = false,
             "--fatal-warnings" => options.fatal_warnings = true,
             "--no-warnings" => options.no_warnings = true,
             "--no-fatal-warnings" => options.fatal_warnings = false,
@@ -1544,6 +1590,17 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     options
                         .inputs
                         .push(InputItem::JustSymbols(value.to_string()));
+                    continue;
+                }
+                if let Some(value) = argument.strip_prefix("--package-metadata=") {
+                    match decode_package_metadata(value) {
+                        Ok(decoded) => options.package_metadata = decoded,
+                        Err(position) => options.pending_errors.push(
+                            invalid_value("--package-metadata", value).with_context(format!(
+                                "Cause: --package-metadata=: invalid % escape at byte {position}{PACKAGE_ESCAPE}"
+                            )),
+                        ),
+                    }
                     continue;
                 }
                 if let Some(value) = argument.strip_prefix("--exclude-libs=") {
@@ -1771,6 +1828,8 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "nognustack" | "noexecstack-ignored" => {}
         "muldefs" => options.allow_multiple_definition = true,
         "keep-text-section-prefix" => options.keep_text_section_prefix = true,
+        "keep-data-section-prefix" => options.keep_data_section_prefix = true,
+        "nokeep-data-section-prefix" => options.keep_data_section_prefix = false,
         "nokeep-text-section-prefix" => options.keep_text_section_prefix = false,
         "dynamic-undefined-weak" => options.dynamic_undefined_weak = Some(true),
         "nodynamic-undefined-weak" => options.dynamic_undefined_weak = Some(false),
@@ -1779,7 +1838,32 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "pack-relative-relocs" => options.pack_relative_flag = Some(true),
         "nopack-relative-relocs" => options.pack_relative_flag = Some(false),
         _ => {
-            if let Some(value) = keyword.strip_prefix("stack-size=") {
+            if let Some(value) = keyword.strip_prefix("dead-reloc-in-nonalloc=") {
+                let dead_error = |cause: String| {
+                    invalid_value("-z", keyword)
+                        .with_context(format!("Cause: {DEAD_PREFIX}{cause}"))
+                };
+                match value.split_once('=') {
+                    Some((pattern, number)) if !pattern.is_empty() && !number.is_empty() => {
+                        match parse_integer_any_radix(number) {
+                            None => options.pending_errors.push(dead_error(format!(
+                                "expected a non-negative integer, but got '{number}'"
+                            ))),
+                            Some(number) => match glob_problem(pattern) {
+                                Some(problem) => options
+                                    .pending_errors
+                                    .push(dead_error(format!("{problem}: {pattern}"))),
+                                None => options
+                                    .dead_relocation_values
+                                    .push((pattern.to_string(), number)),
+                            },
+                        }
+                    }
+                    _ => options
+                        .pending_errors
+                        .push(dead_error("expected <section_glob>=<value>".to_string())),
+                }
+            } else if let Some(value) = keyword.strip_prefix("stack-size=") {
                 options.stack_size =
                     Some(parse_number(value).ok_or_else(|| invalid_value("-z", keyword))?);
             } else if let Some(value) = keyword.strip_prefix("start-stop-visibility=") {
@@ -2050,6 +2134,7 @@ pub struct SymbolData {
     pub dynamic_symbol_index: usize,
     pub version: u16,
     pub discarded_section: u32,
+    pub non_prevailing: bool,
     pub shared_alignment: u64,
     pub shared_protected: bool,
     pub defined_in_shared: bool,
@@ -2091,6 +2176,7 @@ impl SymbolData {
             dynamic_symbol_index: 0,
             version: 1,
             discarded_section: 0,
+            non_prevailing: false,
             shared_alignment: 0,
             shared_protected: false,
             defined_in_shared: false,
@@ -2229,6 +2315,7 @@ pub struct DynamicRelocation {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Synthetic {
     Interpreter,
+    PackageMetadata,
     Bss,
     BssRelocationReadOnly,
     BuildIdentifier,
@@ -3506,6 +3593,7 @@ impl<'s> Context<'s> {
         entry.binding = binding;
         entry.kind = kind;
         entry.other = (entry.other & 3) | (other & !3);
+        entry.non_prevailing = false;
     }
 
     pub fn resolve_undefined(
@@ -7708,6 +7796,7 @@ impl<'s> Context<'s> {
         let count = self.files[index].elf.sections.len();
         let mut map: Vec<Option<SectionIndex>> = vec![None; count];
         let relocatable = self.is_relocatable();
+        let resolve_groups = !relocatable || self.options.force_group_allocation;
         let just_symbols = self.files[index].just_symbols;
         for position in 1..count {
             if just_symbols || self.files[index].discarded[position] {
@@ -7734,7 +7823,7 @@ impl<'s> Context<'s> {
             }
             match header.kind {
                 section_type::GROUP => {
-                    if !relocatable {
+                    if resolve_groups {
                         self.files[index].discarded[position] = true;
                         continue;
                     }
@@ -7761,7 +7850,7 @@ impl<'s> Context<'s> {
                     section.size = header.data.len() as u64;
                     section.info = header.info;
                     section.link = header.link;
-                    if relocatable {
+                    if !resolve_groups {
                         section.flags = header.flags;
                     }
                     map[position] = Some(self.sections.len());
@@ -7877,7 +7966,7 @@ impl<'s> Context<'s> {
                 elf_index: position,
                 name: header.name.clone(),
                 kind: header.kind,
-                flags: if relocatable {
+                flags: if !resolve_groups {
                     header.flags
                 } else {
                     header.flags & !section_flag::GROUP
@@ -8516,6 +8605,7 @@ impl<'s> Context<'s> {
                     entry.state = SymbolState::Undefined;
                     entry.discarded_section = section_number;
                     entry.section = None;
+                    entry.non_prevailing = true;
                 }
                 continue;
             }
@@ -9162,6 +9252,25 @@ impl<'s> Context<'s> {
                     Synthetic::ArmExceptionIndex,
                 );
             }
+            if !self.options.package_metadata.is_empty() {
+                let index = self.add_synthetic(
+                    ".note.package",
+                    section_type::NOTE,
+                    section_flag::ALLOCATE,
+                    4,
+                    Synthetic::PackageMetadata,
+                );
+                let metadata = self.options.package_metadata.clone();
+                let mut data = Vec::new();
+                encoding.put_u32(&mut data, 4);
+                encoding.put_u32(&mut data, metadata.len() as u32 + 1);
+                encoding.put_u32(&mut data, 0xcafe_1a7e);
+                data.extend_from_slice(b"FDO\0");
+                data.extend_from_slice(&metadata);
+                data.resize(16 + align_to(metadata.len() as u64 + 1, 4) as usize, 0);
+                self.sections[index].size = data.len() as u64;
+                self.sections[index].data = data;
+            }
         }
         let got_entry = self.target.got_entry_size;
         self.add_synthetic(
@@ -9364,8 +9473,13 @@ impl<'s> Context<'s> {
         }
         if self.options.strip != Strip::None {
             let sections = &self.sections;
-            self.input_order
-                .retain(|section| !is_debug_section(&sections[*section].name));
+            let stripped = |section: SectionIndex| {
+                sections[section].flags & section_flag::ALLOCATE == 0
+                    && is_debug_section(&sections[section].name)
+            };
+            self.input_order.retain(|section| {
+                !stripped(*section) && !sections[*section].relocated_section.is_some_and(&stripped)
+            });
         }
     }
 
@@ -10370,7 +10484,10 @@ impl<'s> Context<'s> {
             return true;
         }
         let name = section.name.as_str();
+        let kept_prefix = self.options.keep_data_section_prefix
+            && (name == ".data.rel.ro.hot" || name == ".data.rel.ro.unlikely");
         name == ".data.rel.ro"
+            || kept_prefix
             || name == ".bss.rel.ro"
             || name == ".ctors"
             || name == ".dtors"
@@ -10676,7 +10793,7 @@ impl<'s> Context<'s> {
         {
             return symbol_binding::LOCAL;
         }
-        if symbol.binding == symbol_binding::GNU_UNIQUE {
+        if symbol.binding == symbol_binding::GNU_UNIQUE && !self.options.gnu_unique {
             return symbol_binding::GLOBAL;
         }
         symbol.binding
@@ -11456,6 +11573,9 @@ impl<'s> Context<'s> {
                         "\n>>> section group signature: {signature}\n>>> prevailing definition is in {}",
                         self.file_name(Some(holder))
                     ));
+                    if symbol.non_prevailing {
+                        head.push_str(NON_PREVAILING_NOTE);
+                    }
                     diagnostic = diagnostic
                         .with_context(format!("Group: {signature}"))
                         .with_context(format!("Prevailing: {}", self.file_name(Some(holder))));
@@ -12520,7 +12640,17 @@ pub const X86_RELOCATION_NAMES: &[(u32, &str)] = &[
     (21, "R_386_PC16"),
     (22, "R_386_8"),
     (23, "R_386_PC8"),
+    (24, "R_386_TLS_GD_32"),
+    (25, "R_386_TLS_GD_PUSH"),
+    (26, "R_386_TLS_GD_CALL"),
+    (27, "R_386_TLS_GD_POP"),
+    (28, "R_386_TLS_LDM_32"),
+    (29, "R_386_TLS_LDM_PUSH"),
+    (30, "R_386_TLS_LDM_CALL"),
+    (31, "R_386_TLS_LDM_POP"),
     (32, "R_386_TLS_LDO_32"),
+    (33, "R_386_TLS_IE_32"),
+    (34, "R_386_TLS_LE_32"),
     (35, "R_386_TLS_DTPMOD32"),
     (36, "R_386_TLS_DTPOFF32"),
     (37, "R_386_TLS_TPOFF32"),
@@ -17105,12 +17235,18 @@ impl<'s> Context<'s> {
         let symbol = &self.symbols[relocation.symbol];
         let mut reason =
             format!("relocation {name} out of range: {value} is not in [{minimum}, {maximum}]");
-        if !symbol.is_section() {
+        let symbolless = self
+            .relocating_section
+            .is_some_and(|section| self.sections[section].flags & section_flag::ALLOCATE == 0);
+        if !symbolless && !symbol.is_section() {
             reason.push_str(&format!(
                 "; references '{}'",
                 self.symbol_text(relocation.symbol)
             ));
-        } else if let Some(section) = symbol.section.filter(|_| symbol.is_defined()) {
+        } else if let Some(section) = symbol
+            .section
+            .filter(|_| !symbolless && symbol.is_defined())
+        {
             reason.push_str(&format!(
                 "; references section '{}'",
                 self.sections[section].name
@@ -17123,7 +17259,7 @@ impl<'s> Context<'s> {
             }
         }
         let symbol = &self.symbols[relocation.symbol];
-        if !symbol.is_section() {
+        if !symbol.is_section() && !symbolless {
             reason.push_str(&format!("\n>>> defined in {}", self.file_name(symbol.file)));
         }
         let debug = self
@@ -19081,11 +19217,25 @@ impl<'s> Context<'s> {
         let raw = self.raw_relocations(section);
         let name = self.sections[section].name.clone();
         let debug = is_debug_section(&name);
-        let tombstone: u64 = if name == ".debug_loc" || name == ".debug_ranges" {
-            1
+        let mut tombstone: Option<u64> = if !debug {
+            None
+        } else if name == ".debug_loc" || name == ".debug_ranges" {
+            Some(1)
+        } else if name == ".debug_names" {
+            Some(u64::MAX)
         } else {
-            0
+            Some(0)
         };
+        if let Some((_, value)) = self
+            .options
+            .dead_relocation_values
+            .iter()
+            .rev()
+            .find(|(pattern, _)| glob_match(pattern, &name))
+        {
+            tombstone = Some(*value);
+        }
+        let bits = self.word_size() * 8;
         let base = self.section_address(section, 0);
         let relocatable = self.is_relocatable();
         let with_addend = self.sections[section]
@@ -19118,27 +19268,86 @@ impl<'s> Context<'s> {
                 || (self.symbols[symbol].is_undefined()
                     && self.symbols[symbol].discarded_section != 0)
                 || (self.symbols[symbol].folded && name != ".debug_line");
+            let expression = self.non_allocated_expression(entry.kind);
+            let absolute = matches!(
+                expression,
+                Some(Expression::Absolute | Expression::DynamicThreadRelative)
+            );
+            let buried = match tombstone {
+                Some(value) if absolute && defined_dead => {
+                    let mut value = if bits == 32 {
+                        sign_extend(value & 0xffff_ffff, 32) as u64
+                    } else {
+                        value
+                    };
+                    if self.target.architecture == Architecture::X86_64 && entry.kind == 10 {
+                        value &= 0xffff_ffff;
+                    }
+                    Some(value)
+                }
+                _ => None,
+            };
             if relocatable
-                && !(defined_dead && debug)
+                && buried.is_none()
                 && (with_addend || self.symbols[symbol].kind != symbol_type::SECTION)
             {
                 continue;
             }
-            let value = if defined_dead && debug {
-                tombstone
+            let value = if let Some(value) = buried {
+                value
             } else {
                 match self.non_allocated_expression(entry.kind) {
                     Some(Expression::Size) => {
                         self.symbols[symbol].size.wrapping_add(entry.addend as u64)
                     }
-                    Some(Expression::ProgramCounter) => self
-                        .symbol_address(symbol, entry.addend)
-                        .wrapping_sub(base.wrapping_add(entry.offset)),
+                    Some(
+                        kind @ (Expression::ProgramCounter | Expression::GotPltOnlyProgramCounter),
+                    ) => {
+                        let fatal = kind != Expression::ProgramCounter
+                            && !(self.target.architecture == Architecture::X86 && entry.kind == 10);
+                        let relocation_text = relocation_name(self.target.architecture, entry.kind);
+                        let target = self.symbol_text(symbol);
+                        let place = self.error_location(section, entry.offset);
+                        let diagnostic =
+                            problem("EI210", "The linker does not support this relocation.")
+                                .with_context(format!("Relocation: {relocation_text}"))
+                                .with_context(format!(
+                                    "Cause: {place}: has non-ABS relocation {relocation_text} against symbol '{target}'"
+                                ));
+                        if fatal {
+                            self.error(diagnostic);
+                            continue;
+                        }
+                        self.warn(diagnostic);
+                        self.symbol_address(symbol, entry.addend)
+                            .wrapping_sub(base.wrapping_add(entry.offset))
+                    }
                     Some(Expression::DynamicThreadRelative) => {
                         self.symbol_address(symbol, entry.addend)
                     }
                     Some(_) => self.symbol_address(symbol, entry.addend),
-                    None => continue,
+                    None => {
+                        let relocation_text = relocation_name(self.target.architecture, entry.kind);
+                        if relocation_text.starts_with("Unknown") {
+                            self.reject_unknown_relocation(
+                                section,
+                                entry.offset,
+                                entry.kind,
+                                symbol,
+                            );
+                        } else {
+                            let target = self.symbol_text(symbol);
+                            let place = self.error_location(section, entry.offset);
+                            self.error(
+                                problem("EI210", "The linker does not support this relocation.")
+                                    .with_context(format!("Relocation: {relocation_text}"))
+                                    .with_context(format!(
+                                        "Cause: {place}: has non-ABS relocation {relocation_text} against symbol '{target}'"
+                                    )),
+                            );
+                        }
+                        continue;
+                    }
                 }
             };
             let at = entry.offset as usize;
@@ -19146,13 +19355,15 @@ impl<'s> Context<'s> {
                 continue;
             }
             let location = self.error_location(section, entry.offset);
-            let bits = self.word_size() * 8;
-            let value = if bits == 32 {
+            let value = if bits == 32 && buried.is_none() {
                 value & 0xffff_ffff
             } else {
                 value
             };
+            self.relocating_section = Some(section);
+            self.relocating_offset = entry.offset;
             self.relocate(buffer, at, &relocation, value, &location);
+            self.relocating_section = None;
         }
     }
 
@@ -19164,6 +19375,15 @@ impl<'s> Context<'s> {
                 17 | 21 => Some(Expression::DynamicThreadRelative),
                 32 | 33 => Some(Expression::Size),
                 25 => Some(Expression::GotPltRelative),
+                26 | 29 => Some(Expression::GotPltOnlyProgramCounter),
+                _ => None,
+            },
+            Architecture::X86 => match kind {
+                1 | 20 | 22 => Some(Expression::Absolute),
+                32 => Some(Expression::DynamicThreadRelative),
+                2 | 21 | 23 => Some(Expression::ProgramCounter),
+                10 => Some(Expression::GotPltOnlyProgramCounter),
+                9 => Some(Expression::GotPltRelative),
                 _ => None,
             },
             _ => Some(Expression::Absolute),
@@ -19941,7 +20161,7 @@ impl<'s> Context<'s> {
         };
         let mut buffer = vec![0u8; size];
         match which {
-            Synthetic::Interpreter | Synthetic::Merge => {
+            Synthetic::Interpreter | Synthetic::Merge | Synthetic::PackageMetadata => {
                 let data = &self.sections[section].data;
                 buffer[..data.len().min(size)].copy_from_slice(&data[..data.len().min(size)]);
             }
@@ -40207,6 +40427,30 @@ impl<'s> Context<'s> {
                 }
             }
         }
+        if self.options.keep_data_section_prefix {
+            for (index, prefix) in [".data.rel.ro", ".data", ".rodata", ".bss.rel.ro", ".bss"]
+                .iter()
+                .enumerate()
+            {
+                let Some(rest) = name.strip_prefix(prefix) else {
+                    continue;
+                };
+                if rest.starts_with(".hot.") {
+                    return name[..prefix.len() + 4].to_string();
+                }
+                if rest.starts_with(".unlikely.") {
+                    return name[..prefix.len() + 9].to_string();
+                }
+                if index == 2 {
+                    if name.ends_with(".hot.") {
+                        return ".rodata.hot".to_string();
+                    }
+                    if name.ends_with(".unlikely.") {
+                        return ".rodata.unlikely".to_string();
+                    }
+                }
+            }
+        }
         output_section_name(name)
     }
 
@@ -40221,6 +40465,13 @@ impl<'s> Context<'s> {
         }
         self.script.orphan_sections.push(section);
         let name = self.orphan_output_name(section);
+        if self.options.unique {
+            let output = self.create_script_output(&name, "<internal>");
+            self.outputs[output].live = true;
+            self.record_script_section(output, section);
+            created.push(output);
+            return;
+        }
         if let Some(output) = self.script_output_by_name(&name) {
             self.record_script_section(output, section);
             return;
@@ -40241,7 +40492,9 @@ impl<'s> Context<'s> {
                 let output = self.create_script_output(&name, "<internal>");
                 self.outputs[output].live = true;
                 self.record_script_section(output, section);
-                by_name.entry(name).or_default().push(output);
+                if kind != section_type::GROUP && flags & section_flag::GROUP == 0 {
+                    by_name.entry(name).or_default().push(output);
+                }
                 created.push(output);
             }
         }
@@ -44538,7 +44791,7 @@ impl<'s> Context<'s> {
                             .and_then(|file| self.files[file].elf.sections.get(discarded))
                             .map(|header| header.name.clone())
                             .unwrap_or_default();
-                        let place = self.object_message(target, entry.offset);
+                        let place = self.object_message(section, offset);
                         self.warn(
                             problem("EI248", "A relocation points outside its section or at a discarded section.")
                                 .with_context(format!(
