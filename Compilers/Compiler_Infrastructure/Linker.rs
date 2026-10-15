@@ -4109,7 +4109,7 @@ impl<'s> Context<'s> {
             self.symbols[symbol].binding = symbol_binding::WEAK;
             return;
         }
-        let reference = self.file_name(self.symbols[symbol].file);
+        let reference = self.symbol_file_name(symbol);
         let extracted = self.extract(LazySource::LazyObject { file });
         self.record_extraction(reference, extracted, symbol);
     }
@@ -9232,7 +9232,7 @@ impl<'s> Context<'s> {
                     (first, second, cause)
                 }
                 _ => {
-                    let first = self.file_name(self.symbols[id].file);
+                    let first = self.symbol_file_name(id);
                     let second = self.file_name(Some(index));
                     let cause = format!(
                         "duplicate symbol: {shown}\n>>> defined in {first}\n>>> defined in {second}"
@@ -9247,6 +9247,13 @@ impl<'s> Context<'s> {
                     .with_context(format!("Definition: {second}"))
                     .with_context(format!("Cause: {cause}")),
             );
+        }
+    }
+
+    pub fn symbol_file_name(&self, id: SymbolIndex) -> String {
+        match self.script_symbol_locations.get(&id) {
+            Some(location) if self.symbols[id].file == Some(INTERNAL) => location.clone(),
+            _ => self.file_name(self.symbols[id].file),
         }
     }
 
@@ -11454,7 +11461,7 @@ impl<'s> Context<'s> {
                         .with_context(format!("File: {place}"))
                         .with_context(format!(
                             "Cause: {} cannot redefine linker defined symbol '_GLOBAL_OFFSET_TABLE_'",
-                            self.file_name(self.symbols[id].file)
+                            self.symbol_file_name(id)
                         )),
                 );
                 return;
@@ -11860,7 +11867,7 @@ impl<'s> Context<'s> {
             return;
         }
         if self.is_shared() && self.symbols[id].version != elf::version_index::LOCAL {
-            let file = self.file_name(self.symbols[id].file);
+            let file = self.symbol_file_name(id);
             self.error(
                 problem("EI243", "A symbol names a version that is not defined.")
                     .with_context(format!("File: {file}"))
@@ -12114,7 +12121,7 @@ impl<'s> Context<'s> {
     ) -> String {
         format!(
             "\n>>> defined in {}\n>>> referenced by {}",
-            self.file_name(self.symbols[id].file),
+            self.symbol_file_name(id),
             self.place_with_source(
                 section,
                 &self.symbols[id].name,
@@ -12390,7 +12397,7 @@ impl<'s> Context<'s> {
                     head.push_str(&format!(
                         "\n>>> did you mean{before}{}{after}\n>>> defined in: {}",
                         self.symbol_text(found),
-                        self.file_name(self.symbols[found].file)
+                        self.symbol_file_name(found)
                     ));
                 }
             }
@@ -14362,7 +14369,7 @@ impl<'s> Context<'s> {
         } else {
             diagnostic = diagnostic.with_context(format!("Symbol: {name}"));
         }
-        let defined_in = self.file_name(self.symbols[symbol].file);
+        let defined_in = self.symbol_file_name(symbol);
         let target = if name.is_empty() {
             "local symbol".to_string()
         } else {
@@ -15038,11 +15045,9 @@ impl<'s> Context<'s> {
 
     fn live_item_text(&self, item: LiveItem) -> String {
         match item {
-            LiveItem::Symbol(id) => format!(
-                "{}:({})",
-                self.file_name(self.symbols[id].file),
-                self.symbol_text(id)
-            ),
+            LiveItem::Symbol(id) => {
+                format!("{}:({})", self.symbol_file_name(id), self.symbol_text(id))
+            }
             LiveItem::Section(section) | LiveItem::Place(section, _) => self.section_place(section),
         }
     }
@@ -21482,6 +21487,7 @@ impl<'s> Context<'s> {
             None
         };
         match output {
+            Some(output) if Some(output) == self.script.aether => 1,
             Some(output) if self.outputs[output].live && self.outputs[output].index > 0 => {
                 let index = self.outputs[output].index as u32;
                 if index >= section_index::RESERVED_LOW {
@@ -22655,8 +22661,10 @@ impl<'s> Context<'s> {
                         symbol_type::NO_TYPE,
                         symbol_binding::WEAK,
                     );
-                    self.symbols[id].used_in_regular_object = true;
+                } else {
+                    self.merge_visibility(id, visibility::HIDDEN);
                 }
+                self.symbols[id].used_in_regular_object = true;
             }
         }
         if !relocatable && !self.is_pic() {
@@ -22856,7 +22864,9 @@ impl<'s> Context<'s> {
         self.finalize_symbol_table();
         self.finalize_synthetic_sizes();
         self.finalize_copied_sections();
-        self.layout_addresses();
+        if !self.failed() {
+            self.layout_addresses();
+        }
         if relocatable {
             for output in self.order.clone() {
                 self.outputs[output].address = 0;
@@ -38843,6 +38853,7 @@ pub struct LinkerScriptLexer {
     previous_line: usize,
     pending: Option<(String, LexerState, usize, usize)>,
     end_of_file: bool,
+    pub failure_reported: bool,
 }
 
 const SCRIPT_CHARACTERS: &str =
@@ -38870,6 +38881,7 @@ impl LinkerScriptLexer {
             previous_line: 1,
             pending: None,
             end_of_file: false,
+            failure_reported: false,
         }
     }
 
@@ -39696,7 +39708,9 @@ impl<'s> Context<'s> {
         let mut lexer = LinkerScriptLexer::new(text, name, under_sysroot);
         self.read_script_statements(&mut lexer, load, IncludeKind::Statements, &mut Vec::new());
         if let Some(failure) = lexer.failure.take() {
-            self.script_failure(failure);
+            if !lexer.failure_reported {
+                self.script_failure(failure);
+            }
         }
     }
 
@@ -40689,6 +40703,10 @@ impl<'s> Context<'s> {
 
     fn read_fill(&mut self, lexer: &mut LinkerScriptLexer) -> [u8; 4] {
         let expression = self.read_primary(lexer);
+        if let Some(failure) = lexer.failure.clone() {
+            self.script_failure(failure);
+            lexer.failure_reported = true;
+        }
         let value = self.evaluate_raw(&expression);
         if value > u64::from(u32::MAX) {
             lexer.set_error(&format!(
@@ -41665,7 +41683,11 @@ impl<'s> Context<'s> {
                 let defined = match self.find(name) {
                     Some(id) => {
                         self.symbols[id].is_defined()
-                            && self.script.symbol_order.get(&id).copied().unwrap_or(0) < *order
+                            && self
+                                .script
+                                .symbol_order
+                                .get(&id)
+                                .is_none_or(|defined_at| *defined_at < *order)
                     }
                     None => false,
                 };
@@ -43208,7 +43230,14 @@ impl<'s> Context<'s> {
         self.script_load_offsets
             .insert(output, self.script.state_load_offset);
         if let Some(segment) = self.outputs[output].load_segment {
-            if self.segments[segment].first == Some(output) {
+            let header = self.elf_header_output;
+            let programs = self.program_header_output;
+            let first = self.order.iter().copied().find(|candidate| {
+                *candidate != header
+                    && *candidate != programs
+                    && self.outputs[*candidate].load_segment == Some(segment)
+            });
+            if first == Some(output) {
                 self.segments[segment].load_offset = self.script.state_load_offset;
             }
         }
