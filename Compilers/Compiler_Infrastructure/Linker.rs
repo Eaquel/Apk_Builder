@@ -21356,10 +21356,15 @@ impl<'s> Context<'s> {
     ) -> Vec<elf::Relocation> {
         let relative_kind = self.target.relative_relocation;
         let indirect_kind = self.target.indirect_relative_relocation;
+        let dynamic_symbols_kept = self.synthetic_section(".dynsym").is_some_and(|section| {
+            self.sections[section].live && self.sections[section].output.is_some()
+        });
         let finalize = |entry: &DynamicRelocation| {
             let offset = self.section_address(entry.section, entry.offset);
             let symbol_index = match (entry.use_symbol_value, entry.symbol) {
-                (true, Some(id)) => self.symbols[id].dynamic_symbol_index as u32,
+                (true, Some(id)) if dynamic_symbols_kept => {
+                    self.symbols[id].dynamic_symbol_index as u32
+                }
                 _ => 0,
             };
             let mut addend = self.dynamic_addend(entry);
@@ -22883,9 +22888,6 @@ impl<'s> Context<'s> {
             self.allocate_script_headers();
         }
         self.compress_outputs();
-        if self.failed() && self.options.map_file.is_none() && !self.options.cross_reference {
-            return None;
-        }
         self.remove_empty_loads();
         self.assign_file_offsets();
         self.write_map_and_cross_references();
@@ -22895,6 +22897,7 @@ impl<'s> Context<'s> {
         if self.options.check_sections {
             self.check_sections();
         }
+        self.check_output_file_size();
         if self.failed() {
             return None;
         }
@@ -23225,6 +23228,34 @@ impl<'s> Context<'s> {
                 );
             }
         }
+    }
+
+    fn check_output_file_size(&mut self) {
+        let maximum = if self.word_size() == 8 {
+            i64::MAX as u64
+        } else {
+            u64::from(u32::MAX)
+        };
+        if self.file_size <= maximum {
+            return;
+        }
+        let mut text = format!(
+            "output file too large: {} bytes\nsection sizes:",
+            self.file_size
+        );
+        for output in self.order.clone() {
+            text.push_str(&format!(
+                "\n{} {}",
+                self.outputs[output].name, self.outputs[output].size
+            ));
+        }
+        self.error_always(
+            problem(
+                "EI264",
+                "Output sections overlap or run past the end of the address space.",
+            )
+            .with_context(format!("Cause: {text}")),
+        );
     }
 
     fn optimize_basic_block_jumps(&mut self) {
@@ -40681,7 +40712,11 @@ impl<'s> Context<'s> {
         with_flags: u64,
         without_flags: u64,
     ) -> usize {
-        let (pattern, file_match) = if let Some(stripped) = file_pattern.strip_suffix(':') {
+        let quoted =
+            file_pattern.len() >= 2 && file_pattern.starts_with('"') && file_pattern.ends_with('"');
+        let (pattern, file_match) = if quoted {
+            (unquote(file_pattern), FileMatch::Trivial)
+        } else if let Some(stripped) = file_pattern.strip_suffix(':') {
             (stripped.to_string(), FileMatch::WholeArchive)
         } else if let Some(stripped) = file_pattern.strip_prefix(':') {
             (stripped.to_string(), FileMatch::ArchivesExcluded)
@@ -42263,7 +42298,11 @@ impl<'s> Context<'s> {
             let size_before = result.len();
             for (position, section) in candidates.iter().enumerate() {
                 let data = &self.sections[*section];
-                if !data.live || data.output.is_some() || seen.contains(&position) {
+                if !data.live
+                    || data.output.is_some()
+                    || seen.contains(&position)
+                    || data.relocated_section.is_some()
+                {
                     continue;
                 }
                 let matched_name = if has_data_relocation_read_only
@@ -47071,11 +47110,13 @@ impl<'s> Context<'s> {
             .unwrap_or(0);
         let positions = self.symbol_table_positions();
         for output in self.order.clone() {
+            if self.outputs[output].kind == section_type::GROUP {
+                self.outputs[output].link = symbol_table;
+            }
             let Some(first) = self.outputs[output].members.first().copied() else {
                 continue;
             };
             if self.outputs[output].kind == section_type::GROUP {
-                self.outputs[output].link = symbol_table;
                 self.outputs[output].entry_size = 4;
                 let signature = self.sections[first].info;
                 if let Some(id) = self.symbol_of(first, signature) {
