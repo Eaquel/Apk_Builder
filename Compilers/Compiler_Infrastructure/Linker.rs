@@ -148,6 +148,7 @@ pub struct Options {
     pub unique: bool,
     pub gnu_unique: bool,
     pub force_group_allocation: bool,
+    pub gnu_stack: bool,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -314,6 +315,7 @@ impl Default for Options {
             unique: false,
             gnu_unique: true,
             force_group_allocation: false,
+            gnu_stack: true,
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -481,6 +483,8 @@ fn decode_package_metadata(text: &str) -> Result<Vec<u8>, usize> {
     }
     Ok(decoded)
 }
+
+const EXECUTABLE_STACK_NOTE: &str = ", but -z execstack is not specified";
 
 const NON_PREVAILING_NOTE: &str = "\n>>> or the symbol in the prevailing group had STB_WEAK binding and the symbol in a non-prevailing group had STB_GLOBAL binding. Mixing groups with STB_WEAK and STB_GLOBAL binding signature is not supported";
 
@@ -1238,6 +1242,21 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.section_start.insert(name.to_string(), address);
             continue;
         }
+        if option_value(
+            &mut cursor,
+            argument,
+            &["-Ttext-segment", "--Ttext-segment"],
+        )?
+        .is_some()
+        {
+            options.pending_errors.push(
+                invalid_value("-Ttext-segment", argument).with_context(
+                    "Cause: -Ttext-segment is not supported. Use --image-base if you intend to set the base address"
+                        .to_string(),
+                ),
+            );
+            continue;
+        }
         let mut segment_start = None;
         for (flag, section) in [("-Ttext", ".text"), ("-Tdata", ".data"), ("-Tbss", ".bss")] {
             if let Some(value) = option_value(&mut cursor, argument, &[flag, &format!("-{flag}")])?
@@ -1798,8 +1817,14 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "lazy" => options.bind_now = false,
         "text" => options.text_relocations_forbidden = true,
         "notext" | "textoff" => options.text_relocations_forbidden = false,
-        "execstack" => options.executable_stack = true,
-        "noexecstack" => options.executable_stack = false,
+        "execstack" => {
+            options.executable_stack = true;
+            options.gnu_stack = true;
+        }
+        "noexecstack" => {
+            options.executable_stack = false;
+            options.gnu_stack = true;
+        }
         "separate-code" => options.separate_code = SeparateCode::Code,
         "separate-loadable-segments" => options.separate_code = SeparateCode::Loadable,
         "noseparate-code" => options.separate_code = SeparateCode::None,
@@ -1825,7 +1850,11 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
             options.no_undefined = false;
             options.diagnose_regular = Some(false);
         }
-        "nognustack" | "noexecstack-ignored" => {}
+        "nognustack" => {
+            options.gnu_stack = false;
+            options.executable_stack = false;
+        }
+        "noexecstack-ignored" => {}
         "muldefs" => options.allow_multiple_definition = true,
         "keep-text-section-prefix" => options.keep_text_section_prefix = true,
         "keep-data-section-prefix" => options.keep_data_section_prefix = true,
@@ -6158,11 +6187,14 @@ impl<'s> Context<'s> {
                 InputItem::Defsym(text) => self.read_defsym(&text),
                 InputItem::Format(binary) => self.options.format_binary = binary,
                 InputItem::PushState => stack.push(state),
-                InputItem::PopState => {
-                    if let Some(previous) = stack.pop() {
-                        state = previous;
-                    }
-                }
+                InputItem::PopState => match stack.pop() {
+                    Some(previous) => state = previous,
+                    None => self.error_always(
+                        problem("EI297", "Library grouping options are not balanced.")
+                            .with_context("Option: --pop-state".to_string())
+                            .with_context("Cause: unbalanced --push-state/--pop-state".to_string()),
+                    ),
+                },
                 InputItem::File(path) => {
                     files_seen += 1;
                     let resolved = self.resolve_path(&path);
@@ -7881,8 +7913,22 @@ impl<'s> Context<'s> {
             if header.name.starts_with(".n") {
                 match header.name.as_str() {
                     ".note.GNU-stack" => {
-                        if header.flags & section_flag::EXECUTE != 0 && !relocatable {
+                        if header.flags & section_flag::EXECUTE != 0
+                            && !relocatable
+                            && !self.options.executable_stack
+                        {
                             self.files[index].executable_stack_requested = true;
+                            let display = self.file_name(Some(index));
+                            self.error(
+                                problem(
+                                    "EI211",
+                                    "An input lacks a security property that the link requires.",
+                                )
+                                .with_context(format!("File: {display}"))
+                                .with_context(format!(
+                                    "Cause: {display}: requires an executable stack{EXECUTABLE_STACK_NOTE}"
+                                )),
+                            );
                         }
                         self.files[index].discarded[position] = true;
                         continue;
@@ -8730,7 +8776,7 @@ impl<'s> Context<'s> {
         }
         for section in unterminated {
             let place = self.section_place(section);
-            self.error_always(
+            self.error(
                 problem("EI200", "The object file could not be read.")
                     .with_context(format!("File: {place}"))
                     .with_context(format!("Cause: {place}: string is not null terminated")),
@@ -10333,7 +10379,65 @@ impl<'s> Context<'s> {
         format!("{}:({})", self.file_name(data.file), data.name)
     }
 
+    fn finalize_merge_tail(&mut self, merge: SectionIndex) {
+        let alignment = self.sections[merge].alignment.max(1);
+        let members = self.sections[merge].merged_members.clone();
+        let mut strings: BTreeSet<Vec<u8>> = BTreeSet::new();
+        for member in &members {
+            for piece in &self.sections[*member].pieces {
+                if !piece.live {
+                    continue;
+                }
+                let start = piece.input_offset as usize;
+                strings.insert(
+                    self.sections[*member].data[start..start + piece.length as usize].to_vec(),
+                );
+            }
+        }
+        let mut sorted: Vec<Vec<u8>> = strings.into_iter().collect();
+        sorted.sort_by(|left, right| right.iter().rev().cmp(left.iter().rev()));
+        let mut offsets: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        let mut size = 0u64;
+        let mut previous: Vec<u8> = Vec::new();
+        for string in sorted {
+            if previous.ends_with(&string) {
+                let position = size - string.len() as u64;
+                if position.is_multiple_of(alignment) {
+                    offsets.insert(string, position);
+                    continue;
+                }
+            }
+            size = align_to(size, alignment);
+            offsets.insert(string.clone(), size);
+            size += string.len() as u64;
+            previous = string;
+        }
+        let mut data = vec![0u8; size as usize];
+        for (string, offset) in &offsets {
+            let start = *offset as usize;
+            data[start..start + string.len()].copy_from_slice(string);
+        }
+        for member in members {
+            for position in 0..self.sections[member].pieces.len() {
+                let piece = &self.sections[member].pieces[position];
+                if !piece.live {
+                    continue;
+                }
+                let start = piece.input_offset as usize;
+                let bytes = &self.sections[member].data[start..start + piece.length as usize];
+                let offset = offsets.get(bytes).copied().unwrap_or(0);
+                self.sections[member].pieces[position].output_offset = offset;
+            }
+        }
+        self.sections[merge].size = size;
+        self.sections[merge].data = data;
+    }
+
     fn finalize_merge(&mut self, merge: SectionIndex) {
+        if self.sections[merge].flags & section_flag::STRINGS != 0 && self.options.optimize >= 2 {
+            self.finalize_merge_tail(merge);
+            return;
+        }
         let alignment = self.sections[merge].alignment.max(1);
         let members = self.sections[merge].merged_members.clone();
         let shard_count = 32usize;
@@ -11258,7 +11362,39 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn demote_local_symbols(&mut self) {
+        for file in self.object_files.clone() {
+            let first_global = self.files[file].first_global;
+            let locals: Vec<SymbolIndex> = self.files[file]
+                .symbols
+                .iter()
+                .take(first_global)
+                .skip(1)
+                .copied()
+                .filter(|id| *id != usize::MAX)
+                .collect();
+            for id in locals {
+                if self.symbols[id].state != SymbolState::Defined {
+                    continue;
+                }
+                let Some(section) = self.symbols[id].section else {
+                    continue;
+                };
+                if self.sections[section].live {
+                    continue;
+                }
+                let index = self.sections[section].elf_index as u32;
+                let entry = &mut self.symbols[id];
+                entry.state = SymbolState::Undefined;
+                entry.discarded_section = index;
+                entry.section = None;
+                entry.used_in_regular_object = false;
+            }
+        }
+    }
+
     pub fn demote_symbols_and_compute_preemptible(&mut self) {
+        self.demote_local_symbols();
         for id in self.global_symbols() {
             let state = self.symbols[id].state.clone();
             if state == SymbolState::Defined {
@@ -16167,8 +16303,10 @@ impl<'s> Context<'s> {
         if self.options.executable_stack {
             stack_flags |= segment_flag::EXECUTE;
         }
-        let stack = self.add_segment(segment_type::GNU_STACK, stack_flags);
-        self.segments[stack].memory_size_override = Some(self.options.stack_size.unwrap_or(0));
+        if self.options.gnu_stack {
+            let stack = self.add_segment(segment_type::GNU_STACK, stack_flags);
+            self.segments[stack].memory_size_override = Some(self.options.stack_size.unwrap_or(0));
+        }
         if let Some(property) = self.find_output(".note.gnu.property") {
             let segment = self.add_segment(segment_type::GNU_PROPERTY, segment_flag::READ);
             self.segment_add(segment, property);
@@ -16659,6 +16797,44 @@ impl<'s> Context<'s> {
                     ),
                 ),
             );
+        }
+    }
+
+    fn check_output_addresses(&mut self) {
+        let base = if self.script.has_sections || self.is_relocatable() {
+            0
+        } else {
+            self.image_base
+        };
+        for output in self.order.clone() {
+            let section = &self.outputs[output];
+            let name = section.name.clone();
+            let address = section.address;
+            let alignment = section.alignment.max(1);
+            if address < base && section.flags & section_flag::ALLOCATE != 0 {
+                self.error(
+                    problem(
+                        "EI263",
+                        "A linker script places sections in a way the linker cannot carry out.",
+                    )
+                    .with_context(format!("Section: {name}"))
+                    .with_context(format!(
+                        "Cause: section '{name}' address (0x{address:x}) is smaller than image base (0x{base:x}); specify --image-base"
+                    )),
+                );
+            }
+            if !address.is_multiple_of(alignment) {
+                self.warn(
+                    caution(
+                        "EI263",
+                        "A linker script places sections in a way the linker cannot carry out.",
+                    )
+                    .with_context(format!("Section: {name}"))
+                    .with_context(format!(
+                        "Cause: address (0x{address:x}) of section {name} is not a multiple of alignment ({alignment})"
+                    )),
+                );
+            }
         }
     }
 
@@ -19181,6 +19357,33 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn check_merge_offset(&mut self, symbol: SymbolIndex, addend: i64) {
+        let data = &self.symbols[symbol];
+        if !data.is_section() || !data.is_defined() {
+            return;
+        }
+        let Some(section) = data.section else {
+            return;
+        };
+        if !self.sections[section].is_merge {
+            return;
+        }
+        let offset = data.value.wrapping_add(addend as u64);
+        if offset > self.sections[section].data.len() as u64 {
+            let place = self.section_place(section);
+            self.error(
+                problem(
+                    "EI248",
+                    "A relocation points outside its section or at a discarded section.",
+                )
+                .with_context(format!("Section: {place}"))
+                .with_context(format!(
+                    "Cause: {place}: offset 0x{offset:x} is outside the section"
+                )),
+            );
+        }
+    }
+
     fn apply_relocations(&mut self, section: SectionIndex, buffer: &mut [u8]) {
         if self.target.architecture == Architecture::Aarch64
             && !self.sections[section].is_exception_frame
@@ -19200,6 +19403,7 @@ impl<'s> Context<'s> {
             } else {
                 base.wrapping_add(relocation.offset)
             };
+            self.check_merge_offset(relocation.symbol, relocation.addend);
             let value = self.evaluate(relocation, place);
             if at >= buffer.len() {
                 continue;
@@ -20178,6 +20382,11 @@ impl<'s> Context<'s> {
                     buffer = self.android_relocations.clone();
                 } else {
                     let entries = self.dynamic_relocations.clone();
+                    for entry in &entries {
+                        if let (false, Some(symbol)) = (entry.use_symbol_value, entry.symbol) {
+                            self.check_merge_offset(symbol, entry.addend);
+                        }
+                    }
                     buffer = self.encode_dynamic_relocations(&entries, true);
                 }
             }
@@ -21377,6 +21586,7 @@ impl<'s> Context<'s> {
                 self.outputs[output].address = 0;
             }
         }
+        self.check_output_addresses();
         if self.script_active() {
             self.check_final_script_conditions();
         }
@@ -41019,11 +41229,10 @@ impl<'s> Context<'s> {
         let saved_dot = self.script.dot;
         self.script.state_memory_region = memory_region;
         self.script.state_load_region = load_region;
-        let address_expression = self.outputs[output].script.address.clone().or_else(|| {
-            self.outputs[output]
-                .address_fixed
-                .map(|address| Rc::new(ScriptExpression::Fixed(address)))
-        });
+        let address_expression = self.outputs[output]
+            .address_fixed
+            .map(|address| Rc::new(ScriptExpression::Fixed(address)))
+            .or_else(|| self.outputs[output].script.address.clone());
         let has_sections = self.script.has_sections;
         let location = self.outputs[output].script.location.clone();
         if flags & section_flag::ALLOCATE == 0 {
