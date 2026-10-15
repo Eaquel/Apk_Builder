@@ -69498,7 +69498,28 @@ mod linker_lit {
         }
         tools.insert("ld.lld".to_string(), tool_ld_lld);
         tools.insert("lld-link".to_string(), tool_lld_link);
+        tools.insert("[".to_string(), tool_bracket);
         tools
+    }
+
+    fn tool_bracket(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (negated, path) = match words.as_slice() {
+            ["[", "-x", path, "]"] => (false, *path),
+            ["[", "!", "-x", path, "]"] => (true, *path),
+            _ => return tool_host(arguments, input, world),
+        };
+        let executable = world.read(path).is_some_and(|bytes| {
+            bytes.starts_with(b"\x7fELF")
+                && bytes.len() > 17
+                && u16::from_le_bytes([bytes[16], bytes[17]]) != 1
+                && u16::from_be_bytes([bytes[16], bytes[17]]) != 1
+        });
+        ToolOutcome {
+            status: if executable != negated { 0 } else { 1 },
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
     }
 
     fn missing_input(tree: &Tree, path: &str) -> Option<String> {
@@ -69555,6 +69576,9 @@ mod linker_lit {
             ),
             Some("ELF/x86-64-plt.s") => Some(
                 "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
+            ),
+            Some("ELF/basic-aarch64.s") => Some(
+                "the installed LLVM 18 llvm-mc names the AArch64 mapping symbol $x.0 instead of $x",
             ),
             Some("ELF/invalid/mips-invalid-options-descriptor.test") => {
                 Some("the test links a MIPS object, and MIPS is not a target of this linker")

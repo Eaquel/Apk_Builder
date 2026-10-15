@@ -2208,7 +2208,7 @@ impl Target {
                 offset_relocation: 1029,
                 tls_got_relocation: 1030,
                 tls_descriptor_relocation: 1031,
-                got_base_in_got_plt: true,
+                got_base_in_got_plt: false,
                 thread_control_block_size: 16,
             },
             Architecture::Arm => Target {
@@ -2235,7 +2235,7 @@ impl Target {
                 offset_relocation: 18,
                 tls_got_relocation: 19,
                 tls_descriptor_relocation: 13,
-                got_base_in_got_plt: true,
+                got_base_in_got_plt: false,
                 thread_control_block_size: 8,
             },
         }
@@ -3267,6 +3267,13 @@ pub fn read_archive(
             at += 1;
         }
     }
+    if at < bytes.len() {
+        return Err(
+            archive_problem(name, "the archive ends inside a member header").with_context(format!(
+                "Cause: {name}: failed to parse archive: truncated or malformed archive (remaining size of archive too small for next archive member header at offset {at})"
+            )),
+        );
+    }
     Ok(members)
 }
 
@@ -3499,6 +3506,8 @@ pub struct Context<'s> {
     pub why_live: BTreeMap<LiveItem, (Option<LiveItem>, &'static str)>,
     pub memtag_symbols: Vec<SymbolIndex>,
     pub nop_filled: BTreeSet<SectionIndex>,
+    pub script_symbol_locations: BTreeMap<SymbolIndex, String>,
+    pub script_load_offsets: BTreeMap<OutputIndex, u64>,
     pub indirect_locals: Vec<SymbolIndex>,
     pub split_stack_files: BTreeSet<FileIndex>,
     pub no_split_stack_files: BTreeSet<FileIndex>,
@@ -3658,6 +3667,8 @@ impl<'s> Context<'s> {
             why_live: BTreeMap::new(),
             memtag_symbols: Vec::new(),
             nop_filled: BTreeSet::new(),
+            script_symbol_locations: BTreeMap::new(),
+            script_load_offsets: BTreeMap::new(),
             indirect_locals: Vec::new(),
             split_stack_files: BTreeSet::new(),
             no_split_stack_files: BTreeSet::new(),
@@ -9142,8 +9153,13 @@ impl<'s> Context<'s> {
                 continue;
             }
             let shown = self.shown_name(&name);
+            let earlier_binary = self.symbols[id]
+                .file
+                .filter(|file| *file < self.files.len())
+                .is_some_and(|file| self.files[file].binary);
+            let parsed_late = self.files[index].binary && !earlier_binary;
             let (first, second, cause) = match (held, section) {
-                (Some(held), Some(section)) => {
+                (Some(held), Some(section)) if !parsed_late => {
                     let separator = "\n>>>            ";
                     let first = self.object_message(held, self.symbols[id].value);
                     let second = self.object_message(section, symbol.value);
@@ -9692,10 +9708,15 @@ impl<'s> Context<'s> {
                     );
                     self.sections[index].entry_size = 4;
                 }
+                let dynamic_flags = if self.options.read_only_dynamic {
+                    section_flag::ALLOCATE
+                } else {
+                    section_flag::ALLOCATE | section_flag::WRITE
+                };
                 let index = self.add_synthetic(
                     ".dynamic",
                     section_type::DYNAMIC,
-                    section_flag::ALLOCATE | section_flag::WRITE,
+                    dynamic_flags,
                     word,
                     Synthetic::Dynamic,
                 );
@@ -14797,6 +14818,15 @@ impl<'s> Context<'s> {
                 for dependent in self.sections[section].dependents.clone() {
                     self.sections[dependent].live = true;
                 }
+                if self.copy_relocation_sections
+                    && (self.options.discard != Discard::None || self.retained_symbols.is_some())
+                {
+                    for entry in self.raw_relocations(section) {
+                        if let Some(id) = self.symbol_of(section, entry.symbol) {
+                            self.symbols[id].used = true;
+                        }
+                    }
+                }
             }
             let data = &self.sections[section];
             let name = data.name.clone();
@@ -17210,9 +17240,12 @@ impl<'s> Context<'s> {
                 let alignment = section.alignment;
                 let start_new = match note {
                     None => true,
-                    Some(segment) => self.segments[segment]
-                        .last
-                        .is_none_or(|last| self.outputs[last].alignment != alignment),
+                    Some(segment) => {
+                        section.script.load_address.is_some()
+                            || self.segments[segment]
+                                .last
+                                .is_none_or(|last| self.outputs[last].alignment != alignment)
+                    }
                 };
                 if start_new {
                     note = Some(self.add_segment(segment_type::NOTE, segment_flag::READ));
@@ -22411,11 +22444,25 @@ impl<'s> Context<'s> {
             .options
             .maximum_page_size
             .unwrap_or(self.target.default_maximum_page_size);
+        if !self.maximum_page_size.is_power_of_two() {
+            self.error_always(
+                invalid_value("-z max-page-size", &self.maximum_page_size.to_string())
+                    .with_context("Cause: max-page-size: value isn't a power of 2".to_string()),
+            );
+            self.maximum_page_size = self.target.default_maximum_page_size;
+        }
         self.common_page_size = self
             .options
             .common_page_size
-            .unwrap_or(self.target.default_common_page_size)
-            .min(self.maximum_page_size);
+            .unwrap_or(self.target.default_common_page_size);
+        if !self.common_page_size.is_power_of_two() {
+            self.error_always(
+                invalid_value("-z common-page-size", &self.common_page_size.to_string())
+                    .with_context("Cause: common-page-size: value isn't a power of 2".to_string()),
+            );
+            self.common_page_size = self.target.default_common_page_size;
+        }
+        self.common_page_size = self.common_page_size.min(self.maximum_page_size);
         if self.options.omagic || self.options.nmagic {
             let defaults = [
                 (
@@ -22552,9 +22599,6 @@ impl<'s> Context<'s> {
         if !relocatable {
             let undefined = self.scan_relocations();
             self.report_undefined(undefined);
-            if self.failed() {
-                return None;
-            }
             if self
                 .options
                 .branch_to_branch
@@ -22719,14 +22763,11 @@ impl<'s> Context<'s> {
             self.check_final_script_conditions();
         }
         self.finalize_output_headers();
-        if self.failed() {
-            return None;
-        }
         if self.script.has_sections {
             self.allocate_script_headers();
         }
         self.compress_outputs();
-        if self.failed() {
+        if self.failed() && self.options.map_file.is_none() && !self.options.cross_reference {
             return None;
         }
         self.remove_empty_loads();
@@ -41837,6 +41878,8 @@ impl<'s> Context<'s> {
             visibility::DEFAULT
         };
         self.define_script_symbol_plain(id, other);
+        let location = self.script.assignments[assignment].location.clone();
+        self.script_symbol_locations.insert(id, location);
         let base = if value.is_absolute() {
             None
         } else {
@@ -43005,6 +43048,8 @@ impl<'s> Context<'s> {
         } else if !same_region || !previous_load_default {
             self.script.state_load_offset = 0;
         }
+        self.script_load_offsets
+            .insert(output, self.script.state_load_offset);
         if let Some(segment) = self.outputs[output].load_segment {
             if self.segments[segment].first == Some(output) {
                 self.segments[segment].load_offset = self.script.state_load_offset;
@@ -43325,6 +43370,9 @@ impl<'s> Context<'s> {
             .copied()
             .find(|output| self.outputs[*output].load_segment == Some(first_load));
         self.segments[first_load].first = first;
+        if let Some(offset) = first.and_then(|first| self.script_load_offsets.get(&first)) {
+            self.segments[first_load].load_offset = *offset;
+        }
         if self.segments[first_load].last.is_none() {
             self.segments[first_load].last = first;
         }
@@ -47692,11 +47740,11 @@ impl<'s> Context<'s> {
         out.push_str(&format!("{:<49} {}\n", "Symbol", "File"));
         for id in order {
             let owner = self.symbols[id].file;
-            out.push_str(&format!(
-                "{:<49} {}\n",
-                self.symbol_text(id),
-                self.file_name(owner)
-            ));
+            let owner_name = match self.script_symbol_locations.get(&id) {
+                Some(location) if owner == Some(INTERNAL) => location.clone(),
+                _ => self.file_name(owner),
+            };
+            out.push_str(&format!("{:<49} {owner_name}\n", self.symbol_text(id)));
             for file in &files[&id] {
                 if Some(*file) != owner {
                     out.push_str(&format!("{:<49} {}\n", "", self.file_name(Some(*file))));
@@ -47709,6 +47757,14 @@ impl<'s> Context<'s> {
     pub fn write_map_and_cross_references(&mut self) {
         let map = self.options.map_file.clone();
         if map.is_none() && !self.options.cross_reference {
+            return;
+        }
+        if let Some(path) = map.as_deref().filter(|path| path.ends_with('/')) {
+            self.error_always(
+                problem("EI205", "An input file could not be found.")
+                    .with_context(format!("File: {path}"))
+                    .with_context(format!("Cause: cannot open {path}: Is a directory")),
+            );
             return;
         }
         let mut text = String::new();
