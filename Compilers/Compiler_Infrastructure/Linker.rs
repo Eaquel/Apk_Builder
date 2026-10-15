@@ -159,6 +159,10 @@ pub struct Options {
     pub randomize_section_padding: Option<u32>,
     pub execute_only: bool,
     pub execute_only_report: u8,
+    pub memtag_mode: u8,
+    pub memtag_heap: bool,
+    pub memtag_stack: bool,
+    pub memtag_android_note: bool,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -336,6 +340,10 @@ impl Default for Options {
             randomize_section_padding: None,
             execute_only: false,
             execute_only_report: 0,
+            memtag_mode: 0,
+            memtag_heap: false,
+            memtag_stack: false,
+            memtag_android_note: false,
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -509,6 +517,12 @@ const EXECUTABLE_STACK_NOTE: &str = ", but -z execstack is not specified";
 const NON_PREVAILING_NOTE: &str = "\n>>> or the symbol in the prevailing group had STB_WEAK binding and the symbol in a non-prevailing group had STB_GLOBAL binding. Mixing groups with STB_WEAK and STB_GLOBAL binding signature is not supported";
 
 const DEAD_PREFIX: &str = "-z dead-reloc-in-nonalloc=: ";
+
+const MEMTAG_GLOBALS_STATIC: u32 = 0x7000_0007;
+
+const MEMTAG_GLOBALS_DYNAMIC: u32 = 0x7000_0008;
+
+const MEMTAG_LEAVING: &str = ", leaving ";
 
 const SHUFFLE_PREFIX: &str = "--shuffle-sections=: ";
 
@@ -1456,6 +1470,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--no-relax" => options.relax = false,
             "--no-dynamic-linker" => options.no_dynamic_linker = true,
             "--print-memory-usage" | "-print-memory-usage" => options.print_memory_usage = true,
+            "--android-memtag-note" | "-android-memtag-note" => options.memtag_android_note = true,
+            "--no-android-memtag-note" | "-no-android-memtag-note" => {
+                options.memtag_android_note = false
+            }
             "--execute-only" | "-execute-only" => {
                 options.execute_only = true;
                 record_target_option(&mut options, "--execute-only");
@@ -1887,6 +1905,8 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "now" => options.bind_now = true,
         "retpolineplt" => options.retpoline_plt = true,
         "ifunc-noplt" => options.ifunc_noplt = true,
+        "memtag-heap" => options.memtag_heap = true,
+        "memtag-stack" => options.memtag_stack = true,
         "mark-plt" => options.mark_plt = true,
         "nomark-plt" => options.mark_plt = false,
         "rel" => options.explicit_addends = Some(false),
@@ -1944,7 +1964,20 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "pack-relative-relocs" => options.pack_relative_flag = Some(true),
         "nopack-relative-relocs" => options.pack_relative_flag = Some(false),
         _ => {
-            if let Some(value) = keyword.strip_prefix("dead-reloc-in-nonalloc=") {
+            if let Some(value) = keyword.strip_prefix("memtag-mode=") {
+                match value {
+                    "none" => options.memtag_mode = 0,
+                    "sync" => options.memtag_mode = 2,
+                    "async" => options.memtag_mode = 1,
+                    _ => {
+                        options
+                            .pending_errors
+                            .push(invalid_value("-z", keyword).with_context(format!(
+                                "Cause: unknown -z memtag-mode= value '{value}'"
+                            )))
+                    }
+                }
+            } else if let Some(value) = keyword.strip_prefix("dead-reloc-in-nonalloc=") {
                 let dead_error = |cause: String| {
                     invalid_value("-z", keyword)
                         .with_context(format!("Cause: {DEAD_PREFIX}{cause}"))
@@ -2277,6 +2310,7 @@ pub struct SymbolData {
     pub output_relative_end: bool,
     pub header_relative: bool,
     pub folded: bool,
+    pub tagged: bool,
 }
 
 impl SymbolData {
@@ -2319,6 +2353,7 @@ impl SymbolData {
             output_relative_end: false,
             header_relative: false,
             folded: false,
+            tagged: false,
         }
     }
 
@@ -2383,6 +2418,7 @@ impl SymbolData {
 pub enum Expression {
     None,
     Absolute,
+    Authenticated,
     Addend,
     AddendNegative,
     ProgramCounter,
@@ -2450,6 +2486,8 @@ pub struct DynamicRelocation {
 pub enum Synthetic {
     Interpreter,
     PackageMetadata,
+    MemtagNote,
+    MemtagGlobals,
     Padding,
     Bss,
     BssRelocationReadOnly,
@@ -3439,6 +3477,7 @@ pub struct Context<'s> {
     pub foreign_emulation: bool,
     pub next_group_id: usize,
     pub why_live: BTreeMap<LiveItem, (Option<LiveItem>, &'static str)>,
+    pub memtag_symbols: Vec<SymbolIndex>,
     pub backward_references: Vec<(SymbolIndex, FileIndex, FileIndex)>,
     pub pauth_core: Option<(u64, u64)>,
     pub elf_header_output: OutputIndex,
@@ -3590,6 +3629,7 @@ impl<'s> Context<'s> {
             foreign_emulation: false,
             next_group_id: 0,
             why_live: BTreeMap::new(),
+            memtag_symbols: Vec::new(),
             backward_references: Vec::new(),
             pauth_core: None,
             elf_header_output: usize::MAX,
@@ -8164,6 +8204,13 @@ impl<'s> Context<'s> {
                 | section_type::NULL => continue,
                 _ => {}
             }
+            if header.kind == MEMTAG_GLOBALS_STATIC
+                && self.target.architecture == Architecture::Aarch64
+                && !self.can_have_memtag_globals()
+            {
+                self.files[index].discarded[position] = true;
+                continue;
+            }
             if header.kind == section_type::AARCH64_ATTRIBUTES
                 && self.target.architecture == Architecture::Aarch64
             {
@@ -9567,6 +9614,42 @@ impl<'s> Context<'s> {
                     Synthetic::ArmExceptionIndex,
                 );
             }
+            if self.can_have_memtag_globals() {
+                self.add_synthetic(
+                    ".memtag.globals.dynamic",
+                    MEMTAG_GLOBALS_DYNAMIC,
+                    section_flag::ALLOCATE,
+                    4,
+                    Synthetic::MemtagGlobals,
+                );
+            }
+            if self.options.memtag_android_note
+                && self.options.memtag_mode != 0
+                && self.target.architecture == Architecture::Aarch64
+            {
+                let index = self.add_synthetic(
+                    ".note.android.memtag",
+                    section_type::NOTE,
+                    section_flag::ALLOCATE,
+                    4,
+                    Synthetic::MemtagNote,
+                );
+                let mut value = u32::from(self.options.memtag_mode);
+                if self.options.memtag_heap {
+                    value |= 4;
+                }
+                if self.options.memtag_stack {
+                    value |= 8;
+                }
+                let mut data = Vec::new();
+                encoding.put_u32(&mut data, 8);
+                encoding.put_u32(&mut data, 4);
+                encoding.put_u32(&mut data, 4);
+                data.extend_from_slice(b"Android\0");
+                encoding.put_u32(&mut data, value);
+                self.sections[index].size = data.len() as u64;
+                self.sections[index].data = data;
+            }
             if !self.options.package_metadata.is_empty() {
                 let index = self.add_synthetic(
                     ".note.package",
@@ -10237,6 +10320,22 @@ impl<'s> Context<'s> {
             }
             if self.options.pac_plt {
                 add(0x7000_0003, 0);
+            }
+            if self.options.memtag_mode != 0 {
+                add(0x7000_0009, u64::from(self.options.memtag_mode == 1));
+                add(0x7000_000b, u64::from(self.options.memtag_heap));
+                add(0x7000_000c, u64::from(self.options.memtag_stack));
+                if self.live_synthetic(".memtag.globals.dynamic") && !self.memtag_symbols.is_empty()
+                {
+                    let size = self
+                        .synthetic_section(".memtag.globals.dynamic")
+                        .map_or(0, |section| self.sections[section].size);
+                    add(
+                        0x7000_000d,
+                        self.dynamic_tables_section_address(".memtag.globals.dynamic"),
+                    );
+                    add(0x7000_000f, size);
+                }
             }
         }
         add(
@@ -13077,6 +13176,11 @@ pub const X86_RELOCATION_NAMES: &[(u32, &str)] = &[
 
 pub const AARCH64_RELOCATION_NAMES: &[(u32, &str)] = &[
     (0, "R_AARCH64_NONE"),
+    (580, "R_AARCH64_AUTH_ABS64"),
+    (1041, "R_AARCH64_AUTH_RELATIVE"),
+    (1042, "R_AARCH64_AUTH_GLOB_DAT"),
+    (1043, "R_AARCH64_AUTH_TLSDESC"),
+    (1044, "R_AARCH64_AUTH_IRELATIVE"),
     (257, "R_AARCH64_ABS64"),
     (258, "R_AARCH64_ABS32"),
     (259, "R_AARCH64_ABS16"),
@@ -13385,7 +13489,7 @@ impl<'s> Context<'s> {
                 }
             }
             Architecture::Aarch64 => {
-                if kind == 257 {
+                if kind == 257 || kind == 580 {
                     kind
                 } else {
                     0
@@ -13661,7 +13765,11 @@ impl<'s> Context<'s> {
         expression: Expression,
         kind: u32,
     ) {
+        let tagged = self.symbols[symbol].tagged;
+        let authenticated = self.target.architecture == Architecture::Aarch64 && kind == 580;
         if self.options.pack_relative_relocations
+            && !tagged
+            && !authenticated
             && self.sections[section].alignment >= 2
             && offset.is_multiple_of(2)
         {
@@ -13677,10 +13785,24 @@ impl<'s> Context<'s> {
             self.add_relocation(section, expression, kind, offset, addend, symbol);
             return;
         }
-        let relative = self.target.relative_relocation;
+        let relative = if authenticated {
+            1041
+        } else {
+            self.target.relative_relocation
+        };
         self.add_dynamic_relocation(
             false, relative, section, offset, symbol, addend, expression, kind,
         );
+        if tagged && (addend < 0 || addend as u64 >= self.symbols[symbol].size) {
+            self.add_relocation(
+                section,
+                Expression::AddendNegative,
+                kind,
+                offset,
+                addend,
+                symbol,
+            );
+        }
     }
 
     pub fn add_symbol_relocation(
@@ -13733,6 +13855,11 @@ impl<'s> Context<'s> {
         }
         if expression == Got || expression == Plt {
             return self.uses_only_low_page_bits(kind) || !self.is_pic();
+        }
+        if expression == Authenticated
+            && (!self.symbols[symbol].is_undefined() || self.symbols[symbol].preemptible)
+        {
+            return false;
         }
         if kind == self.indirect_symbolic_relocation() && kind != 0 {
             return false;
@@ -13850,8 +13977,10 @@ impl<'s> Context<'s> {
         let preemptible = self.symbols[symbol].preemptible;
         if can_write {
             let dynamic_kind = self.symbolic_dynamic_relocation(kind);
+            let authenticated = self.target.architecture == Architecture::Aarch64 && kind == 580;
             if expression == Expression::Got
-                || (dynamic_kind == self.target.symbolic_relocation && !preemptible)
+                || ((dynamic_kind == self.target.symbolic_relocation || authenticated)
+                    && !preemptible)
             {
                 self.add_relative_relocation(section, offset, symbol, addend, expression, kind);
                 return;
@@ -13861,7 +13990,10 @@ impl<'s> Context<'s> {
                 return;
             }
         }
-        if !self.is_shared() && self.symbols[symbol].is_shared() {
+        if !self.is_shared()
+            && self.symbols[symbol].is_shared()
+            && !(self.target.architecture == Architecture::Aarch64 && kind == 580)
+        {
             let ignored = (self.symbols[symbol].is_function()
                 && self.options.ignore_function_address_equality)
                 || (self.symbols[symbol].is_object() && self.options.ignore_data_address_equality);
@@ -15804,6 +15936,9 @@ impl<'s> Context<'s> {
             let flags = self.symbols[id].needs;
             if self.handle_non_preemptible_indirect(id, flags) {
                 continue;
+            }
+            if self.symbols[id].tagged && self.symbols[id].is_defined() {
+                self.memtag_symbols.push(id);
             }
             if flags == 0 {
                 continue;
@@ -17775,7 +17910,7 @@ impl<'s> Context<'s> {
         let got_plt = || self.synthetic_address(".got.plt");
         match relocation.expression {
             None => 0,
-            Absolute | DynamicThreadRelative | RelaxGotProgramCounterNoPic => {
+            Absolute | Authenticated | DynamicThreadRelative | RelaxGotProgramCounterNoPic => {
                 self.symbol_address(symbol, addend)
             }
             Addend => addend as u64,
@@ -18840,6 +18975,7 @@ impl<'s> Context<'s> {
                 0 => continue,
                 259 | 258 | 257 | 277 | 299 | 284 | 285 | 286 | 278 | 270 | 271 | 272 | 263
                 | 264 | 265 | 266 | 267 | 268 | 269 => Expression::Absolute,
+                580 => Expression::Authenticated,
                 262 | 261 | 260 | 274 | 273 | 287 | 288 | 289 | 290 | 291 | 292 | 293 => {
                     self.process_program_counter(section, kind, offset, addend, symbol);
                     continue;
@@ -18991,6 +19127,15 @@ impl<'s> Context<'s> {
                 encoding.write_u32(buffer, at, value as u32);
             }
             257 | 260 | 1029 => encoding.write_u64(buffer, at, value),
+            580 => {
+                let symbol = &self.symbols[relocation.symbol];
+                if symbol.is_undefined() && !symbol.preemptible {
+                    encoding.write_u64(buffer, at, value);
+                } else {
+                    self.check_signed(location, relocation, value, 32);
+                    encoding.write_u32(buffer, at, value as u32);
+                }
+            }
             277 => immediate12(buffer, value),
             311 | 275 | 541 | 562 => {
                 self.check_signed(location, relocation, value, 33);
@@ -19182,6 +19327,7 @@ impl<'s> Context<'s> {
                     if index < relocations.len()
                         && self.options.relax
                         && relocations[index].kind == 312
+                        && !self.symbols[relocation.symbol].tagged
                         && !unsafe_symbols.contains(&relocation.symbol)
                     {
                         let next = relocations[index].clone();
@@ -20892,6 +21038,11 @@ impl<'s> Context<'s> {
         };
         let mut buffer = vec![0u8; size];
         match which {
+            Synthetic::MemtagGlobals => {
+                let data = self.encode_memtag_globals(true);
+                let length = data.len().min(buffer.len());
+                buffer[..length].copy_from_slice(&data[..length]);
+            }
             Synthetic::Padding => {
                 let output = self.sections[section].output.unwrap_or(0);
                 let filler = match self.outputs[output].script.filler {
@@ -20905,7 +21056,10 @@ impl<'s> Context<'s> {
                     *byte = filler[position % 4];
                 }
             }
-            Synthetic::Interpreter | Synthetic::Merge | Synthetic::PackageMetadata => {
+            Synthetic::Interpreter
+            | Synthetic::Merge
+            | Synthetic::PackageMetadata
+            | Synthetic::MemtagNote => {
                 let data = &self.sections[section].data;
                 buffer[..data.len().min(size)].copy_from_slice(&data[..data.len().min(size)]);
             }
@@ -21772,6 +21926,23 @@ impl<'s> Context<'s> {
         if let Some(rela) = self.options.explicit_addends {
             self.target.uses_addends = rela;
         }
+        if self.options.memtag_mode == 0 {
+            for (enabled, option) in [
+                (self.options.memtag_stack, "-z memtag-stack"),
+                (self.options.memtag_heap, "-z memtag-heap"),
+                (self.options.memtag_android_note, "--android-memtag-note"),
+            ] {
+                if enabled {
+                    self.warn(
+                        caution("EI287", "An option has no effect in this link.")
+                            .with_context(format!("Option: {option}"))
+                            .with_context(format!(
+                                "Cause: -z memtag-mode is none{MEMTAG_LEAVING}{option} a no-op"
+                            )),
+                    );
+                }
+            }
+        }
         if self.options.execute_only && !self.options.read_only_segment && !self.script.has_sections
         {
             self.error_always(
@@ -21925,6 +22096,9 @@ impl<'s> Context<'s> {
         }
         self.split_merge_sections();
         self.mark_live();
+        if self.can_have_memtag_globals() {
+            self.create_tagged_symbols();
+        }
         self.create_synthetic_sections();
         self.combine_exception_indexes();
         if let Some(synthetic) = self.synthetic_section(".eh_frame") {
@@ -22107,6 +22281,7 @@ impl<'s> Context<'s> {
             changed |= self.update_indirect_relocation_bounds();
             changed |= self.update_android_relocations();
             changed |= self.update_relative_words();
+            changed |= self.update_memtag_globals();
             if self.has_dynamic_symbols && self.live_synthetic(".dynamic") {
                 let count = self.dynamic_entries().len();
                 if count != self.dynamic_entry_count {
@@ -22210,6 +22385,166 @@ impl<'s> Context<'s> {
             return None;
         }
         Some(bytes)
+    }
+
+    fn has_memtag(&self) -> bool {
+        self.target.architecture == Architecture::Aarch64 && self.options.memtag_mode != 0
+    }
+
+    fn can_have_memtag_globals(&self) -> bool {
+        let interpreter = !self.is_relocatable()
+            && !self.is_shared()
+            && !self.options.no_dynamic_linker
+            && self.options.dynamic_linker.is_some();
+        self.has_memtag() && (self.is_relocatable() || self.is_shared() || interpreter)
+    }
+
+    fn create_tagged_symbols(&mut self) {
+        let mut references: BTreeMap<SymbolIndex, usize> = BTreeMap::new();
+        for file in self.object_files.clone() {
+            let sections: Vec<SectionIndex> = self.files[file]
+                .sections
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|section| self.sections[*section].kind == MEMTAG_GLOBALS_STATIC)
+                .collect();
+            for section in sections {
+                let with_addend = self.sections[section]
+                    .relocation_section
+                    .is_none_or(|index| {
+                        self.files[file].elf.sections[index].kind
+                            == section_type::RELOCATIONS_WITH_ADDENDS
+                    });
+                if !with_addend {
+                    self.error_always(
+                        problem("EI210", "The linker does not support this relocation.")
+                            .with_context(
+                                "Cause: non-RELA relocations are not allowed with memtag globals"
+                                    .to_string(),
+                            ),
+                    );
+                }
+                for entry in self.raw_relocations(section) {
+                    let Some(id) = self.symbol_of(section, entry.symbol) else {
+                        continue;
+                    };
+                    let symbol = &self.symbols[id];
+                    if symbol.kind != symbol_type::OBJECT {
+                        continue;
+                    }
+                    if symbol.is_local || symbol.binding == symbol_binding::LOCAL {
+                        self.symbols[id].tagged = true;
+                        continue;
+                    }
+                    *references.entry(id).or_insert(0) += 1;
+                }
+                self.sections[section].live = false;
+            }
+        }
+        for file in self.object_files.clone() {
+            let first_global = self.files[file].first_global;
+            for id in self.files[file]
+                .symbols
+                .clone()
+                .into_iter()
+                .skip(first_global)
+            {
+                if id == usize::MAX {
+                    continue;
+                }
+                let symbol = &self.symbols[id];
+                if symbol.kind != symbol_type::OBJECT || symbol.binding == symbol_binding::LOCAL {
+                    continue;
+                }
+                let Some(remaining) = references.get_mut(&id) else {
+                    continue;
+                };
+                if *remaining == 0 {
+                    references.remove(&id);
+                    continue;
+                }
+                *remaining -= 1;
+            }
+        }
+        if !references.is_empty() && self.writes_addends() {
+            self.error_always(
+                problem("EI204", "An option value is not valid.").with_context(
+                    "Cause: --apply-dynamic-relocs cannot be used with MTE globals".to_string(),
+                ),
+            );
+        }
+        for id in references.into_keys() {
+            self.symbols[id].tagged = true;
+        }
+    }
+
+    fn encode_memtag_globals(&mut self, report: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut last_end = 0u64;
+        for id in self.memtag_symbols.clone() {
+            if !self.include_in_symbol_table(id) {
+                continue;
+            }
+            let address = self.symbol_address(id, 0);
+            let size = self.symbols[id].size;
+            if report {
+                let name = self.symbols[id].name.clone();
+                let mut causes = Vec::new();
+                if address <= 16 {
+                    causes.push(format!(
+                        "address of the tagged symbol \"{name}\" falls in the ELF header. This is indicative of a compiler/linker bug"
+                    ));
+                }
+                if !address.is_multiple_of(16) {
+                    causes.push(format!(
+                        "address of the tagged symbol \"{name}\" at 0x{address:x}\" is not granule (16-byte) aligned"
+                    ));
+                }
+                if size == 0 {
+                    causes.push(format!(
+                        "size of the tagged symbol \"{name}\" is not allowed to be zero"
+                    ));
+                }
+                if !size.is_multiple_of(16) {
+                    causes.push(format!(
+                        "size of the tagged symbol \"{name}\" (size 0x{size:x}) is not granule (16-byte) aligned"
+                    ));
+                }
+                for cause in causes {
+                    self.error_always(
+                        problem(
+                            "EI234",
+                            "A relocation value is not aligned the way its field needs.",
+                        )
+                        .with_context(format!("Cause: {cause}")),
+                    );
+                }
+            }
+            let granules = size / 16;
+            let step = (address.wrapping_sub(last_end) / 16) << 3;
+            if granules < 8 {
+                push_unsigned_leb(&mut out, step | granules);
+            } else {
+                push_unsigned_leb(&mut out, step);
+                push_unsigned_leb(&mut out, granules.wrapping_sub(1));
+            }
+            last_end = address.wrapping_add(size);
+        }
+        out
+    }
+
+    fn update_memtag_globals(&mut self) -> bool {
+        let Some(section) = self.synthetic_section(".memtag.globals.dynamic") else {
+            return false;
+        };
+        let mut symbols = std::mem::take(&mut self.memtag_symbols);
+        symbols.sort_by_key(|id| self.symbol_address(*id, 0));
+        self.memtag_symbols = symbols;
+        let size = self.encode_memtag_globals(false).len() as u64;
+        let changed = size != self.sections[section].size;
+        self.sections[section].size = size;
+        changed
     }
 
     fn randomize_section_padding(&mut self, seed: u32) {
