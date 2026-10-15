@@ -69550,6 +69550,15 @@ mod linker_lit {
             Some("ELF/aarch64-feature-pauth.s") => Some(
                 "the installed LLVM 18 llvm-readelf does not decode the AArch64 PAuth core info property",
             ),
+            Some("ELF/eh-frame-dynrel-offset.s") => Some(
+                "the installed LLVM 18 llvm-readelf prints RELR entries only as decoded relocations",
+            ),
+            Some("ELF/x86-64-plt.s") => Some(
+                "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
+            ),
+            Some("ELF/relocation-none.test" | "ELF/relocation-rel-format.test") => Some(
+                "the test also links PowerPC and RISC-V objects, which are not targets of this linker",
+            ),
             Some("ELF/aarch64-cortex-a53-843419-thunk-relocation-crash.s") => Some(
                 "the installed LLVM 18 llvm-objdump prints every zero word of the 128 MiB data gap as about 2.7 GB of text",
             ),

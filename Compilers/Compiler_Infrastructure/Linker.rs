@@ -149,6 +149,9 @@ pub struct Options {
     pub gnu_unique: bool,
     pub force_group_allocation: bool,
     pub gnu_stack: bool,
+    pub mark_plt: bool,
+    pub ifunc_noplt: bool,
+    pub check_dynamic_relocations: bool,
     pub dynamic_undefined_weak: Option<bool>,
     pub discard: Discard,
     pub undefined: Vec<String>,
@@ -316,6 +319,9 @@ impl Default for Options {
             gnu_unique: true,
             force_group_allocation: false,
             gnu_stack: true,
+            mark_plt: false,
+            ifunc_noplt: false,
+            check_dynamic_relocations: false,
             dynamic_undefined_weak: None,
             discard: Discard::Default,
             undefined: Vec::new(),
@@ -1434,6 +1440,8 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--relax" => options.relax = true,
             "--no-relax" => options.relax = false,
             "--no-dynamic-linker" => options.no_dynamic_linker = true,
+            "--check-dynamic-relocations" => options.check_dynamic_relocations = true,
+            "--no-check-dynamic-relocations" => options.check_dynamic_relocations = false,
             "--apply-dynamic-relocs" => options.apply_dynamic_relocations = true,
             "--target1-rel" => options.arm_target1_relative = true,
             "--target1-abs" => options.arm_target1_relative = false,
@@ -1737,6 +1745,11 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
     if options.no_warnings {
         options.fatal_warnings = false;
     }
+    if options.ifunc_noplt && options.text_relocations_forbidden {
+        return Err(invalid_value("-z", "ifunc-noplt").with_context(
+            "Cause: -z text and -z ifunc-noplt may not be used together".to_string(),
+        ));
+    }
     if options.force_ibt && options.retpoline_plt {
         return Err(invalid_value("-z", "force-ibt")
             .with_context("Cause: -z force-ibt may not be used with -z retpolineplt".to_string()));
@@ -1812,6 +1825,9 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "norelro" => options.relocation_read_only = false,
         "now" => options.bind_now = true,
         "retpolineplt" => options.retpoline_plt = true,
+        "ifunc-noplt" => options.ifunc_noplt = true,
+        "mark-plt" => options.mark_plt = true,
+        "nomark-plt" => options.mark_plt = false,
         "rel" => options.explicit_addends = Some(false),
         "rela" => options.explicit_addends = Some(true),
         "lazy" => options.bind_now = false,
@@ -3329,6 +3345,7 @@ pub struct Context<'s> {
     pub frame_header_large: bool,
     pub frame_header_size: u64,
     pub and_features: u32,
+    pub foreign_emulation: bool,
     pub pauth_core: Option<(u64, u64)>,
     pub elf_header_output: OutputIndex,
     pub program_header_output: OutputIndex,
@@ -3476,6 +3493,7 @@ impl<'s> Context<'s> {
             frame_header_large: false,
             frame_header_size: 0,
             and_features: 0,
+            foreign_emulation: false,
             pauth_core: None,
             elf_header_output: usize::MAX,
             program_header_output: usize::MAX,
@@ -6021,6 +6039,35 @@ fn bfd_emulation(name: &str) -> Option<&'static str> {
     })
 }
 
+fn is_foreign_emulation(emulation: &str) -> bool {
+    let trimmed = emulation.strip_suffix("_fbsd").unwrap_or(emulation);
+    matches!(
+        trimmed,
+        "elf32_x86_64"
+            | "elf32btsmip"
+            | "elf32btsmipn32"
+            | "elf32ltsmip"
+            | "elf32ltsmipn32"
+            | "elf32lriscv"
+            | "elf32ppc"
+            | "elf32ppclinux"
+            | "elf32lppc"
+            | "elf32lppclinux"
+            | "elf32loongarch"
+            | "elf64btsmip"
+            | "elf64ltsmip"
+            | "elf64lriscv"
+            | "elf64ppc"
+            | "elf64lppc"
+            | "elf64_sparc"
+            | "msp430elf"
+            | "elf64_amdgpu"
+            | "elf64loongarch"
+            | "elf64_s390"
+            | "hexagonelf"
+    )
+}
+
 pub fn emulation_target(emulation: &str) -> Option<(Architecture, Endian)> {
     let trimmed = emulation
         .strip_suffix("_fbsd")
@@ -6073,8 +6120,15 @@ impl<'s> Context<'s> {
                     self.target = Target::for_architecture(architecture, endian);
                     chosen_by_emulation = true;
                 }
+                None if is_foreign_emulation(&emulation) => {
+                    self.foreign_emulation = true;
+                    chosen_by_emulation = true;
+                }
                 None => {
-                    self.error(invalid_value("-m", &emulation));
+                    self.error(
+                        invalid_value("-m", &emulation)
+                            .with_context(format!("Cause: unknown emulation: {emulation}")),
+                    );
                     return;
                 }
             }
@@ -6308,8 +6362,42 @@ impl<'s> Context<'s> {
                 }
             }
         }
+        self.check_output_format_machines();
         if files_seen == 0 && self.files.len() == files_before && !self.failed() {
             self.error(problem("EI213", "No input files were given."));
+        }
+    }
+
+    fn check_output_format_machines(&mut self) {
+        let Some(emulation) = self
+            .options
+            .output_format_machine
+            .as_deref()
+            .and_then(bfd_emulation)
+        else {
+            return;
+        };
+        let expected = emulation_target(emulation);
+        let reference = self.options.output_format.clone().unwrap_or_default();
+        let mut loaded = self.object_files.clone();
+        loaded.extend(self.shared_files.clone());
+        loaded.sort_unstable();
+        for file in loaded {
+            if self.files[file].binary {
+                continue;
+            }
+            let machine = self.files[file].elf.header.machine;
+            let endian = self.files[file].elf.encoding().endian;
+            let mismatch = match expected {
+                Some((architecture, wanted)) => {
+                    machine != architecture.machine() || endian != wanted
+                }
+                None => true,
+            };
+            if mismatch {
+                let display = self.file_name(Some(file));
+                self.error(incompatible(&display, &reference));
+            }
         }
     }
 
@@ -6632,6 +6720,18 @@ impl<'s> Context<'s> {
                     .as_deref()
                     .and_then(bfd_emulation)
                     .and_then(emulation_target);
+                let foreign_format = format.is_none()
+                    && self
+                        .options
+                        .output_format_machine
+                        .as_deref()
+                        .and_then(bfd_emulation)
+                        .is_some();
+                if foreign_format {
+                    let reference = self.options.output_format.clone().unwrap_or_default();
+                    self.error(incompatible(&display, &reference));
+                    return;
+                }
                 if let Some((architecture, endian)) = format {
                     let expected = Target::for_architecture(architecture, endian);
                     if elf.header.machine != expected.architecture.machine()
@@ -6648,7 +6748,8 @@ impl<'s> Context<'s> {
                 *target_reference = Some(display.clone());
             }
             Some(reference) => {
-                if elf.header.machine != self.target.architecture.machine()
+                if self.foreign_emulation
+                    || elf.header.machine != self.target.architecture.machine()
                     || encoding != self.target.encoding
                 {
                     let existing = if self.options.emulation.is_some() {
@@ -9953,6 +10054,14 @@ impl<'s> Context<'s> {
                     tag::RELOCATIONS as u64
                 },
             );
+        }
+        if self.options.mark_plt && self.live_synthetic(".plt") {
+            if let Some(plt) = self.synthetic_section(".plt") {
+                let size = self.sections[plt].size;
+                add(0x7000_0000, self.dynamic_tables_section_address(".plt"));
+                add(0x7000_0001, size);
+                add(0x7000_0003, self.target.plt_entry_size);
+            }
         }
         if self.target.architecture == Architecture::Aarch64 {
             if self.and_features & 1 != 0 {
@@ -13539,6 +13648,11 @@ impl<'s> Context<'s> {
                 }
             }
         }
+        if indirect && self.options.ifunc_noplt {
+            self.symbols[symbol].exported = true;
+            self.add_symbol_relocation(kind, section, offset, symbol, addend, kind);
+            return;
+        }
         if needs_got(expression) {
             self.symbols[symbol].needs |= needs::GOT;
         } else if needs_plt(expression) {
@@ -15566,6 +15680,7 @@ impl<'s> Context<'s> {
         let section = self.synthetic_section(".got.plt").unwrap_or(0);
         let offset = (index + self.target.got_plt_header_entries) * self.target.got_entry_size;
         let preemptible = self.symbols[id].preemptible;
+        let marked = preemptible && self.options.mark_plt;
         self.plt_relocations.push(DynamicRelocation {
             kind: self.target.jump_slot_relocation,
             section,
@@ -15573,7 +15688,9 @@ impl<'s> Context<'s> {
             symbol: Some(id),
             use_symbol_value: preemptible,
             addend: 0,
-            expression: if preemptible {
+            expression: if marked {
+                Expression::Plt
+            } else if preemptible {
                 Expression::Addend
             } else {
                 Expression::Absolute
@@ -15600,7 +15717,11 @@ impl<'s> Context<'s> {
 
     fn handle_non_preemptible_indirect(&mut self, id: SymbolIndex, flags: u32) -> bool {
         let symbol = &self.symbols[id];
-        if !symbol.is_indirect_function() || symbol.preemptible || !symbol.is_defined() {
+        if !symbol.is_indirect_function()
+            || symbol.preemptible
+            || !symbol.is_defined()
+            || self.options.ifunc_noplt
+        {
             return false;
         }
         if flags & (needs::GOT | needs::PLT | needs::DIRECT_RELOCATION) == 0 {
@@ -20237,7 +20358,7 @@ impl<'s> Context<'s> {
     }
 
     fn dynamic_addend(&self, entry: &DynamicRelocation) -> u64 {
-        if entry.use_symbol_value {
+        if entry.use_symbol_value && entry.expression != Expression::Plt {
             return entry.addend as u64;
         }
         let Some(symbol) = entry.symbol else {
@@ -21230,6 +21351,23 @@ impl<'s> Context<'s> {
         if let Some(rela) = self.options.explicit_addends {
             self.target.uses_addends = rela;
         }
+        if self.options.mark_plt {
+            let cause = if self.target.architecture != Architecture::X86_64 {
+                Some("-z mark-plt only supported on X86_64")
+            } else if !self.target.uses_addends {
+                Some("-z mark-plt requires -z rela")
+            } else {
+                None
+            };
+            if let Some(cause) = cause {
+                self.error_always(
+                    problem("EI271", "An option is only supported on other targets.")
+                        .with_context("Option: -z mark-plt".to_string())
+                        .with_context(format!("Cause: {cause}")),
+                );
+                return None;
+            }
+        }
         self.has_dynamic_symbols = !self.shared_files.is_empty() || self.is_pic();
         self.options.export_dynamic |= self.is_shared();
         self.options.export_dynamic &= self.has_dynamic_symbols;
@@ -21628,10 +21766,60 @@ impl<'s> Context<'s> {
             );
         }
         let bytes = self.write_output();
+        if self.options.check_dynamic_relocations && self.writes_addends() && !relocatable {
+            self.check_dynamic_addends(&bytes);
+        }
         if self.failed() {
             return None;
         }
         Some(bytes)
+    }
+
+    fn check_dynamic_addends(&mut self, bytes: &[u8]) {
+        let mut entries = self.dynamic_relocations.clone();
+        entries.extend(self.plt_relocations.clone());
+        let word = self.word_size() as usize;
+        let encoding = self.encoding();
+        for entry in entries {
+            if self.options.mark_plt && entry.kind == self.target.jump_slot_relocation {
+                continue;
+            }
+            let Some(output) = self.sections[entry.section].output else {
+                continue;
+            };
+            let mut addend = self.dynamic_addend(&entry);
+            if word == 4 {
+                addend = sign_extend(addend, 32) as u64;
+            }
+            let without_addend = entry.kind == self.target.jump_slot_relocation
+                || entry.kind == self.target.global_data_relocation;
+            let address = self.section_address(entry.section, entry.offset);
+            let written = if without_addend || self.outputs[output].kind == section_type::NO_BITS {
+                0
+            } else {
+                let at =
+                    (self.outputs[output].offset + address - self.outputs[output].address) as usize;
+                if word == 8 {
+                    encoding.read_u64(bytes, at).unwrap_or(0)
+                } else {
+                    sign_extend(u64::from(encoding.read_u32(bytes, at).unwrap_or(0)), 32) as u64
+                }
+            };
+            if written != addend {
+                let name = relocation_name(self.target.architecture, entry.kind);
+                let against = entry
+                    .symbol
+                    .map(|symbol| format!(" against symbol {}", self.symbols[symbol].name))
+                    .unwrap_or_default();
+                self.error_always(
+                    problem("EI293", "A relocation does not match the instruction it patches.")
+                        .with_context(format!("Relocation: {name}"))
+                        .with_context(format!(
+                            "Cause: internal linker error: wrote incorrect addend value 0x{written:x} instead of 0x{addend:x} for dynamic relocation {name} at offset 0x{address:x}{against}"
+                        )),
+                );
+            }
+        }
     }
 }
 
