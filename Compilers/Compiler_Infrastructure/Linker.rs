@@ -150,6 +150,10 @@ pub struct Options {
     pub force_group_allocation: bool,
     pub gnu_stack: bool,
     pub mark_plt: bool,
+    pub orphan_handling: u8,
+    pub write_xor_execute_needed: bool,
+    pub no_branch_target_check: bool,
+    pub reject_mismatch: bool,
     pub optimize_bb_jumps: bool,
     pub branch_to_branch: Option<bool>,
     pub ifunc_noplt: bool,
@@ -264,7 +268,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
-            output: "a.out".to_string(),
+            output: String::new(),
             reproduce: None,
             dependency_file: None,
             print_archive_stats: None,
@@ -333,6 +337,10 @@ impl Default for Options {
             force_group_allocation: false,
             gnu_stack: true,
             mark_plt: false,
+            orphan_handling: 0,
+            write_xor_execute_needed: false,
+            no_branch_target_check: false,
+            reject_mismatch: true,
             optimize_bb_jumps: false,
             branch_to_branch: None,
             ifunc_noplt: false,
@@ -761,6 +769,20 @@ fn invalid_value(option: &str, value: &str) -> Diagnostic {
         .with_context(format!("Value: {value}"))
 }
 
+fn known_section_type(header: &elf::Section) -> bool {
+    let kind = header.kind;
+    if matches!(kind, 0..=4 | 7..=9 | 14..=18) {
+        return true;
+    }
+    if kind >= 0x8000_0000 && header.flags & section_flag::ALLOCATE == 0 {
+        return true;
+    }
+    if (0x6000_0000..=0x6fff_ffff).contains(&kind) && header.flags & 0x100 == 0 {
+        return true;
+    }
+    (0x7000_0000..=0x7fff_ffff).contains(&kind)
+}
+
 fn invalid_argument(option: &str, raw: &str, value: &str) -> Diagnostic {
     let shown = if raw.contains(value) {
         raw.to_string()
@@ -852,7 +874,6 @@ const IGNORED_FLAGS: &[&str] = &[
     "--no-keep-memory",
     "--no-mmap-output-file",
     "--no-pipeline-knowledge",
-    "--no-warn-mismatch",
     "--rpath-link",
     "--sort-common",
     "--stats",
@@ -1282,6 +1303,22 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             options.diagnose_shared = Some(shared);
             continue;
         }
+        if let Some(value) = option_value(&mut cursor, argument, &["--orphan-handling"])? {
+            options.orphan_handling = match value.as_str() {
+                "place" => 0,
+                "warn" => 1,
+                "error" => 2,
+                _ => {
+                    options.pending_errors.push(
+                        invalid_value("--orphan-handling", &value).with_context(format!(
+                            "Cause: unknown --orphan-handling mode: {value}"
+                        )),
+                    );
+                    0
+                }
+            };
+            continue;
+        }
         if let Some(value) = option_value(&mut cursor, argument, &["--section-start"])? {
             let (name, address) = value
                 .split_once('=')
@@ -1506,6 +1543,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--warn-backrefs" | "-warn-backrefs" => options.warn_backrefs = true,
             "--no-warn-backrefs" | "-no-warn-backrefs" => options.warn_backrefs = false,
             "--check-dynamic-relocations" => options.check_dynamic_relocations = true,
+            "--no-warn-mismatch" => options.reject_mismatch = false,
             "--optimize-bb-jumps" => options.optimize_bb_jumps = true,
             "--branch-to-branch" => options.branch_to_branch = Some(true),
             "--no-branch-to-branch" => options.branch_to_branch = Some(false),
@@ -1563,7 +1601,6 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             | "--no-ctors-in-init-array"
             | "--no-keep-memory"
             | "--no-mmap-output-file"
-            | "--no-warn-mismatch"
             | "--sort-common"
             | "--stats"
             | "--warn-execstack"
@@ -1934,6 +1971,8 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "lazy" => options.bind_now = false,
         "text" => options.text_relocations_forbidden = true,
         "notext" | "textoff" => options.text_relocations_forbidden = false,
+        "wxneeded" => options.write_xor_execute_needed = true,
+        "nobtcfi" => options.no_branch_target_check = true,
         "execstack" => {
             options.executable_stack = true;
             options.gnu_stack = true;
@@ -2038,11 +2077,15 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
                     }
                 };
             } else if let Some(value) = keyword.strip_prefix("max-page-size=") {
-                options.maximum_page_size =
-                    Some(parse_number(value).ok_or_else(|| invalid_value("-z", keyword))?);
+                options.maximum_page_size = Some(parse_number(value).ok_or_else(|| {
+                    invalid_value("-z", keyword)
+                        .with_context(format!("Cause: invalid max-page-size: {value}"))
+                })?);
             } else if let Some(value) = keyword.strip_prefix("common-page-size=") {
-                options.common_page_size =
-                    Some(parse_number(value).ok_or_else(|| invalid_value("-z", keyword))?);
+                options.common_page_size = Some(parse_number(value).ok_or_else(|| {
+                    invalid_value("-z", keyword)
+                        .with_context(format!("Cause: invalid common-page-size: {value}"))
+                })?);
             } else if !apply_target_keyword(options, keyword)? {
                 return Err(not_supported(&format!("-z {keyword}")));
             }
@@ -6335,10 +6378,17 @@ pub struct LoadState {
 impl<'s> Context<'s> {
     fn set_target_from(&mut self, encoding: Encoding, machine_number: u16, file: &str) -> bool {
         let Some(architecture) = Architecture::of_machine(machine_number) else {
-            self.error(
-                not_supported(&format!("machine {machine_number}"))
-                    .with_context(format!("File: {file}")),
-            );
+            let mut diagnostic = not_supported(&format!("machine {machine_number}"))
+                .with_context(format!("File: {file}"));
+            if !matches!(
+                machine_number,
+                3 | 6 | 8 | 20 | 21 | 22 | 40 | 43 | 62 | 83 | 105 | 164 | 183 | 224 | 243 | 258
+            ) {
+                diagnostic = diagnostic.with_context(format!(
+                    "Cause: unsupported e_machine value: {machine_number}"
+                ));
+            }
+            self.error(diagnostic);
             return false;
         };
         let target = if architecture == Architecture::X86_64 && encoding.class == elf::Class::Elf32
@@ -6854,6 +6904,7 @@ impl<'s> Context<'s> {
         from_library: bool,
         target_reference: &mut Option<String>,
     ) {
+        self.log(path.to_string());
         if self.options.format_binary {
             if target_reference.is_none() {
                 self.pending_binaries
@@ -8267,6 +8318,14 @@ impl<'s> Context<'s> {
                 continue;
             }
             let header = self.files[index].elf.sections[position].clone();
+            let excluded = header.flags & section_flag::EXCLUDE != 0 && !relocatable;
+            if !excluded && self.options.reject_mismatch && !known_section_type(&header) {
+                let display = self.file_name(Some(index));
+                self.error(not_supported("section type").with_context(format!(
+                    "Cause: {display}:({}): unknown section type 0x{:x}",
+                    header.name, header.kind
+                )));
+            }
             if header.flags & section_flag::EXCLUDE != 0 && !relocatable {
                 if header.kind == section_type::LLVM_ADDRESS_SIGNIFICANCE {
                     if header.link != 0 {
@@ -11145,6 +11204,7 @@ impl<'s> Context<'s> {
             || name == ".fini_array"
             || name == ".init_array"
             || name == ".preinit_array"
+            || (name == ".openbsd.randomdata" && self.operating_system_abi() == 12)
     }
 }
 
@@ -11409,6 +11469,11 @@ impl<'s> Context<'s> {
             );
             self.reserved
                 .insert("_GLOBAL_OFFSET_TABLE_".to_string(), id);
+            if self.target.got_base_in_got_plt {
+                self.has_got_plt_offset_relocation = true;
+            } else {
+                self.has_got_offset_relocation = true;
+            }
         }
         for name in ["__ehdr_start", "__executable_start", "__dso_handle"] {
             self.add_optional_regular(name, SymbolPlace::Header, 0, visibility::HIDDEN);
@@ -17221,6 +17286,19 @@ impl<'s> Context<'s> {
             let segment = self.add_segment(segment_type::GNU_EXCEPTION_FRAME, flags);
             self.segment_add(segment, header);
         }
+        if self.operating_system_abi() == 12 {
+            for (name, kind) in [
+                (".openbsd.mutable", segment_type::OPENBSD_MUTABLE),
+                (".openbsd.randomdata", segment_type::OPENBSD_RANDOMIZE),
+                (".openbsd.syscalls", segment_type::OPENBSD_SYSTEM_CALLS),
+            ] {
+                if let Some(output) = self.find_output(name) {
+                    let flags = self.segment_flags_of(output);
+                    let segment = self.add_segment(kind, flags);
+                    self.segment_add(segment, output);
+                }
+            }
+        }
         let mut stack_flags = segment_flag::READ | segment_flag::WRITE;
         if self.options.executable_stack {
             stack_flags |= segment_flag::EXECUTE;
@@ -17228,6 +17306,18 @@ impl<'s> Context<'s> {
         if self.options.gnu_stack {
             let stack = self.add_segment(segment_type::GNU_STACK, stack_flags);
             self.segments[stack].memory_size_override = Some(self.options.stack_size.unwrap_or(0));
+        }
+        if self.options.no_branch_target_check {
+            self.add_segment(
+                segment_type::OPENBSD_NO_BRANCH_TARGET,
+                segment_flag::EXECUTE,
+            );
+        }
+        if self.options.write_xor_execute_needed {
+            self.add_segment(
+                segment_type::OPENBSD_WRITE_XOR_EXECUTE_NEEDED,
+                segment_flag::EXECUTE,
+            );
         }
         if let Some(property) = self.find_output(".note.gnu.property") {
             let segment = self.add_segment(segment_type::GNU_PROPERTY, segment_flag::READ);
@@ -18359,6 +18449,18 @@ impl<'s> Context<'s> {
                 "; references section '{}'",
                 self.sections[section].name
             ));
+        }
+        let target_output = symbol
+            .section
+            .and_then(|section| self.sections[section].output)
+            .or(symbol.output_section_symbol);
+        if self.target.architecture == Architecture::X86_64
+            && relocation.kind == 2
+            && target_output
+                .is_some_and(|output| self.outputs[output].flags & section_flag::X86_64_LARGE != 0)
+        {
+            reason
+                .push_str("; R_X86_64_PC32 should not reference a section marked SHF_X86_64_LARGE");
         }
         if let Some(section) = self.relocating_section {
             let source = self.source_message(section, "", self.relocating_offset);
@@ -22318,6 +22420,9 @@ impl<'s> Context<'s> {
         }
         self.read_version_inputs();
         self.load_inputs();
+        if self.options.output.is_empty() {
+            self.options.output = "a.out".to_string();
+        }
         self.check_target_options();
         if self.failed() {
             return None;
@@ -22611,6 +22716,7 @@ impl<'s> Context<'s> {
         }
         self.build_symbol_tables();
         self.remove_unused_synthetic_sections();
+        self.diagnose_orphan_handling();
         if relocatable {
             self.adjust_script_output_sections();
             self.rebuild_order_from_script();
@@ -23723,11 +23829,15 @@ fn link_elf_rooted(
             messages,
         };
     }
-    let output = options.output.clone();
     let mut context = Context::new(options, source);
     context.messages = messages;
     context.identity = identity.to_string();
     let bytes = context.run();
+    let output = if context.options.output.is_empty() {
+        "a.out".to_string()
+    } else {
+        context.options.output.clone()
+    };
     let limit = context.options.error_limit.unwrap_or(20);
     let mut diagnostics = std::mem::take(&mut context.diagnostics);
     if context.options.no_warnings {
@@ -42122,6 +42232,11 @@ impl<'s> Context<'s> {
                 &context.sections,
             );
         };
+        let has_data_relocation_read_only = self.script.has_sections
+            && self
+                .outputs
+                .iter()
+                .any(|output| output.name == ".data.rel.ro");
         for rule in &rules {
             let size_before = result.len();
             for (position, section) in candidates.iter().enumerate() {
@@ -42129,7 +42244,14 @@ impl<'s> Context<'s> {
                 if !data.live || data.output.is_some() || seen.contains(&position) {
                     continue;
                 }
-                if !script_pattern_matches(&rule.sections, &data.name) {
+                let matched_name = if has_data_relocation_read_only
+                    && data.synthetic == Some(Synthetic::BssRelocationReadOnly)
+                {
+                    ".data.rel.ro.bss"
+                } else {
+                    data.name.as_str()
+                };
+                if !script_pattern_matches(&rule.sections, matched_name) {
                     continue;
                 }
                 if !self.description_matches_file(description, data.file) {
@@ -42455,6 +42577,41 @@ impl<'s> Context<'s> {
                     by_name.entry(name).or_default().push(output);
                 }
                 created.push(output);
+            }
+        }
+    }
+
+    fn diagnose_orphan_handling(&mut self) {
+        if self.options.orphan_handling == 0 || !self.script.has_sections {
+            return;
+        }
+        for section in self.script.orphan_sections.clone() {
+            let data = &self.sections[section];
+            if !data.live
+                || data.relocated_section.is_some()
+                || data.synthetic == Some(Synthetic::RelocationReadOnlyPadding)
+            {
+                continue;
+            }
+            let name = self.orphan_output_name(section);
+            let place = self.section_place(section);
+            let cause = format!("Cause: {place} is being placed in '{name}'");
+            if self.options.orphan_handling == 2 {
+                self.error_always(
+                    problem(
+                        "EI263",
+                        "A linker script places sections in a way the linker cannot carry out.",
+                    )
+                    .with_context(cause),
+                );
+            } else {
+                self.warn(
+                    caution(
+                        "EI263",
+                        "A linker script places sections in a way the linker cannot carry out.",
+                    )
+                    .with_context(cause),
+                );
             }
         }
     }

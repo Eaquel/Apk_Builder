@@ -69577,6 +69577,9 @@ mod linker_lit {
             Some("ELF/x86-64-plt.s") => Some(
                 "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
             ),
+            Some("ELF/openbsd-phdr.s" | "ELF/relro-openbsd.s") => Some(
+                "the installed LLVM 18 llvm-mc leaves EI_OSABI at System V for OpenBSD objects",
+            ),
             Some("ELF/basic-aarch64.s") => Some(
                 "the installed LLVM 18 llvm-mc names the AArch64 mapping symbol $x.0 instead of $x",
             ),

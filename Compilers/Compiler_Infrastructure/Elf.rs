@@ -92,6 +92,7 @@ pub mod segment_type {
     pub const GNU_STACK: u32 = 0x6474_e551;
     pub const GNU_RELRO: u32 = 0x6474_e552;
     pub const GNU_PROPERTY: u32 = 0x6474_e553;
+    pub const OPENBSD_MUTABLE: u32 = 0x65a3_dbe5;
     pub const OPENBSD_RANDOMIZE: u32 = 0x65a3_dbe6;
     pub const OPENBSD_WRITE_XOR_EXECUTE_NEEDED: u32 = 0x65a3_dbe7;
     pub const OPENBSD_NO_BRANCH_TARGET: u32 = 0x65a3_dbe8;
