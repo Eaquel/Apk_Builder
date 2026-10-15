@@ -150,6 +150,7 @@ pub struct Options {
     pub force_group_allocation: bool,
     pub gnu_stack: bool,
     pub mark_plt: bool,
+    pub large_read_only_after_bss: bool,
     pub orphan_handling: u8,
     pub write_xor_execute_needed: bool,
     pub no_branch_target_check: bool,
@@ -337,6 +338,7 @@ impl Default for Options {
             force_group_allocation: false,
             gnu_stack: true,
             mark_plt: false,
+            large_read_only_after_bss: false,
             orphan_handling: 0,
             write_xor_execute_needed: false,
             no_branch_target_check: false,
@@ -1972,6 +1974,8 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
         "text" => options.text_relocations_forbidden = true,
         "notext" | "textoff" => options.text_relocations_forbidden = false,
         "wxneeded" => options.write_xor_execute_needed = true,
+        "lrodata-after-bss" => options.large_read_only_after_bss = true,
+        "nolrodata-after-bss" => options.large_read_only_after_bss = false,
         "nobtcfi" => options.no_branch_target_check = true,
         "execstack" => {
             options.executable_stack = true;
@@ -2547,6 +2551,7 @@ pub struct DynamicRelocation {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Synthetic {
+    SymbolTableIndices,
     Interpreter,
     PackageMetadata,
     MemtagNote,
@@ -8706,7 +8711,7 @@ impl<'s> Context<'s> {
         let first_global = self.files[index].first_global;
         for (position, symbol) in symbols.iter().enumerate().take(first_global) {
             let mut section_number = symbol.section;
-            if section_number >= section_index::RESERVED_LOW {
+            if symbol.is_reserved() {
                 section_number = 0;
             }
             if section_number as usize >= count {
@@ -9158,7 +9163,7 @@ impl<'s> Context<'s> {
                 continue;
             }
             let mut section_number = symbol.section;
-            if section_number >= section_index::RESERVED_LOW {
+            if symbol.is_reserved() {
                 if section_number == section_index::COMMON {
                     continue;
                 }
@@ -10046,6 +10051,14 @@ impl<'s> Context<'s> {
                 Synthetic::SymbolTable,
             );
             self.sections[index].entry_size = encoding.symbol_size() as u64;
+            let indices = self.add_synthetic(
+                ".symtab_shndx",
+                section_type::SYMBOL_TABLE_INDICES,
+                0,
+                4,
+                Synthetic::SymbolTableIndices,
+            );
+            self.sections[indices].entry_size = 4;
         }
         if self.options.section_header {
             self.add_synthetic(
@@ -10122,6 +10135,9 @@ impl<'s> Context<'s> {
             return true;
         };
         match which {
+            Synthetic::SymbolTableIndices => {
+                self.outputs.len() >= section_index::RESERVED_LOW as usize
+            }
             Synthetic::Bss | Synthetic::BssRelocationReadOnly => data.size != 0,
             Synthetic::Got => {
                 self.has_got_offset_relocation
@@ -10695,6 +10711,7 @@ impl<'s> Context<'s> {
                     kind: symbol.kind,
                     other: symbol.other,
                     section: section_number,
+                    extended: false,
                 },
                 &mut out,
             );
@@ -11113,8 +11130,13 @@ impl<'s> Context<'s> {
         let writable = section.flags & section_flag::WRITE != 0;
         let large = section.flags & section_flag::X86_64_LARGE != 0
             && self.target.architecture == Architecture::X86_64;
+        let after_bss = self.options.large_read_only_after_bss;
         if !writable && !executable {
-            if !large {
+            if large {
+                if after_bss {
+                    value |= rank::LARGE_ALTERNATE;
+                }
+            } else if !after_bss {
                 value |= rank::LARGE;
             }
             if section.name == ".interp" {
@@ -11149,7 +11171,13 @@ impl<'s> Context<'s> {
                 value |= rank::NOT_RELOCATION_READ_ONLY;
             }
             if large {
-                value |= rank::LARGE;
+                value |= if !after_bss {
+                    rank::LARGE
+                } else if section.kind == section_type::NO_BITS {
+                    1
+                } else {
+                    rank::LARGE_ALTERNATE
+                };
             }
         }
         if section.kind == section_type::NO_BITS {
@@ -13242,7 +13270,7 @@ impl<'s> Context<'s> {
                     } else {
                         encoding.write_u32(&mut section.data, at, value as u32);
                     }
-                    if symbol.section != 0 && symbol.section < section_index::RESERVED_LOW {
+                    if symbol.section != 0 && !symbol.is_reserved() {
                         section.targets.insert(at, symbol.section);
                     }
                 }
@@ -16639,7 +16667,7 @@ impl<'s> Context<'s> {
                 .skip(first_global)
                 .filter(|symbol| {
                     symbol.section != section_index::UNDEFINED
-                        && symbol.section != section_index::ABSOLUTE
+                        && !symbol.is_absolute()
                         && symbol.kind != symbol_type::THREAD_LOCAL
                         && symbol.value == value
                 })
@@ -17454,6 +17482,10 @@ impl<'s> Context<'s> {
         }
         let mut last: Option<usize> = None;
         let mut last_read_only: Option<OutputIndex> = None;
+        let x86_64 = self.target.architecture == Architecture::X86_64;
+        let is_large = |context: &Context, output: OutputIndex| {
+            x86_64 && context.outputs[output].flags & section_flag::X86_64_LARGE != 0
+        };
         for (index, segment) in self.segments.iter().enumerate() {
             if segment.kind != segment_type::LOAD {
                 continue;
@@ -17461,7 +17493,10 @@ impl<'s> Context<'s> {
             last = Some(index);
             if segment.flags & segment_flag::WRITE == 0 {
                 if let Some(output) = segment.last {
-                    if output != self.elf_header_output && output != self.program_header_output {
+                    if output != self.elf_header_output
+                        && output != self.program_header_output
+                        && !is_large(self, output)
+                    {
                         last_read_only = Some(output);
                     }
                 }
@@ -17484,7 +17519,7 @@ impl<'s> Context<'s> {
             let final_section = self.segments[segment].last;
             let mut data_end = None;
             for output in self.order.clone() {
-                if self.outputs[output].kind != section_type::NO_BITS {
+                if self.outputs[output].kind != section_type::NO_BITS && !is_large(self, output) {
                     data_end = Some(output);
                 }
                 if Some(output) == final_section {
@@ -18072,6 +18107,7 @@ impl<'s> Context<'s> {
                 (self.symbol_table.len() as u64 + 1) * encoding.symbol_size() as u64,
             ),
             (".strtab", self.string_table.len() as u64),
+            (".symtab_shndx", (self.symbol_table.len() as u64 + 1) * 4),
             (
                 ".dynsym",
                 (self.dynamic_symbols.len() as u64 + 1) * encoding.symbol_size() as u64,
@@ -21469,11 +21505,22 @@ impl<'s> Context<'s> {
                     kind: symbol.kind,
                     other: symbol.other,
                     section: section_number,
+                    extended: false,
                 },
                 &mut out,
             );
         }
         out
+    }
+
+    fn symbol_output_section(&self, id: SymbolIndex) -> Option<OutputIndex> {
+        let symbol = &self.symbols[id];
+        if let Some(output) = symbol.output_section_symbol {
+            return Some(output);
+        }
+        let section = symbol.section?;
+        let target = self.sections[section].merged_into.unwrap_or(section);
+        self.sections[target].output
     }
 
     pub fn output_index_of_symbol(&self, id: SymbolIndex) -> u32 {
@@ -21591,6 +21638,20 @@ impl<'s> Context<'s> {
                 buffer = self.encode_dynamic_relocations(&entries, false);
             }
             Synthetic::SymbolTable => buffer = self.encode_symbol_table(),
+            Synthetic::SymbolTableIndices => {
+                let encoding = self.encoding();
+                buffer = vec![0; 4];
+                for id in &self.symbol_table {
+                    let index = self.output_index_of_symbol(*id);
+                    let extended = if index == section_index::EXTENDED {
+                        self.symbol_output_section(*id)
+                            .map_or(0, |output| self.outputs[output].index as u32)
+                    } else {
+                        0
+                    };
+                    encoding.put_u32(&mut buffer, extended);
+                }
+            }
             Synthetic::DynamicSymbolTable => buffer = self.encode_dynamic_symbol_table(),
             Synthetic::DynamicStringTable => buffer = self.dynamic_strings.clone(),
             Synthetic::GnuHash => buffer = self.encode_gnu_hash(),
@@ -22020,7 +22081,20 @@ impl<'s> Context<'s> {
             }
         }
         let mut section_headers = Vec::new();
-        elf::encode_section_header(encoding, &Section::default(), &mut section_headers);
+        let null_header = Section {
+            size: if count >= section_index::RESERVED_LOW as usize {
+                count as u64
+            } else {
+                0
+            },
+            link: if names >= section_index::RESERVED_LOW as usize {
+                names as u32
+            } else {
+                0
+            },
+            ..Section::default()
+        };
+        elf::encode_section_header(encoding, &null_header, &mut section_headers);
         for output in self.order.clone() {
             let data = &self.outputs[output];
             let section = Section {
@@ -22320,6 +22394,9 @@ impl<'s> Context<'s> {
                 }
             }
             match which {
+                Some(Synthetic::SymbolTableIndices) => {
+                    self.outputs[output].link = index_of(".symtab", self);
+                }
                 Some(Synthetic::SymbolTable) => {
                     self.outputs[output].link = index_of(".strtab", self);
                     self.outputs[output].info = self.symbol_table_first_global as u32 + 1;

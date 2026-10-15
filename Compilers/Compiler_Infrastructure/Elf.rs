@@ -530,9 +530,14 @@ pub struct Symbol {
     pub kind: u8,
     pub other: u8,
     pub section: u32,
+    pub extended: bool,
 }
 
 impl Symbol {
+    pub fn is_reserved(&self) -> bool {
+        !self.extended && self.section >= section_index::RESERVED_LOW
+    }
+
     pub fn info(&self) -> u8 {
         (self.binding << 4) | (self.kind & 0xf)
     }
@@ -546,11 +551,11 @@ impl Symbol {
     }
 
     pub fn is_common(&self) -> bool {
-        self.section == section_index::COMMON
+        !self.extended && self.section == section_index::COMMON
     }
 
     pub fn is_absolute(&self) -> bool {
-        self.section == section_index::ABSOLUTE
+        !self.extended && self.section == section_index::ABSOLUTE
     }
 }
 
@@ -1359,7 +1364,8 @@ pub fn decode_symbols(
             )
         };
         let mut section = u32::from(section);
-        if section == section_index::EXTENDED {
+        let is_extended = section == section_index::EXTENDED;
+        if is_extended {
             section = extended
                 .and_then(|table| encoding.read_u32(table, index * 4))
                 .ok_or((at, "an extended section index is missing"))?;
@@ -1374,6 +1380,7 @@ pub fn decode_symbols(
             kind: info & 0xf,
             other,
             section,
+            extended: is_extended,
         });
     }
     Ok(symbols)
