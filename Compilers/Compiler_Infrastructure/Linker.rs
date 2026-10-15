@@ -761,6 +761,15 @@ fn invalid_value(option: &str, value: &str) -> Diagnostic {
         .with_context(format!("Value: {value}"))
 }
 
+fn invalid_argument(option: &str, raw: &str, value: &str) -> Diagnostic {
+    let shown = if raw.contains(value) {
+        raw.to_string()
+    } else {
+        format!("{raw} {value}")
+    };
+    invalid_value(option, value).with_context(format!("Cause: invalid argument: {shown}"))
+}
+
 pub fn not_supported(feature: &str) -> Diagnostic {
     problem(
         "EI212",
@@ -1276,9 +1285,9 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
         if let Some(value) = option_value(&mut cursor, argument, &["--section-start"])? {
             let (name, address) = value
                 .split_once('=')
-                .ok_or_else(|| invalid_value("--section-start", &value))?;
+                .ok_or_else(|| invalid_argument("--section-start", "--section-start", &value))?;
             let address = parse_section_address(address)
-                .ok_or_else(|| invalid_value("--section-start", &value))?;
+                .ok_or_else(|| invalid_argument("--section-start", "--section-start", &value))?;
             options.section_start.insert(name.to_string(), address);
             continue;
         }
@@ -1309,8 +1318,10 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             }
         }
         if let Some((section, value)) = segment_start {
-            let address =
-                parse_section_address(&value).ok_or_else(|| invalid_value(&raw, &value))?;
+            let address = parse_section_address(&value).ok_or_else(|| {
+                let spelled = format!("-{}", raw.trim_start_matches('-'));
+                invalid_argument(&raw, &spelled, &value)
+            })?;
             options.section_start.insert(section.to_string(), address);
             continue;
         }
@@ -3513,6 +3524,7 @@ pub struct Context<'s> {
     pub relocating_section: Option<SectionIndex>,
     pub relocating_offset: u64,
     pub source_lines: std::cell::RefCell<BTreeMap<FileIndex, Rc<SourceLines>>>,
+    pub pending_debug_warnings: std::cell::RefCell<Vec<String>>,
     pub identity: String,
     pub extra_outputs: Vec<(String, Vec<u8>)>,
     pub retained_symbols: Option<BTreeSet<String>>,
@@ -3671,6 +3683,7 @@ impl<'s> Context<'s> {
             relocating_section: None,
             relocating_offset: 0,
             source_lines: std::cell::RefCell::new(BTreeMap::new()),
+            pending_debug_warnings: std::cell::RefCell::new(Vec::new()),
             identity: LINKER_IDENTITY.to_string(),
             extra_outputs: Vec::new(),
             retained_symbols: None,
@@ -3679,7 +3692,25 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn flush_debug_warnings(&mut self) {
+        let pending = std::mem::take(&mut *self.pending_debug_warnings.borrow_mut());
+        for text in pending {
+            let mut diagnostic = caution(
+                "EI282",
+                "The linker cannot use the debug information of an input file.",
+            )
+            .with_context(format!("Cause: {text}"));
+            diagnostic.severity = if self.options.fatal_warnings {
+                Severity::Error
+            } else {
+                Severity::Warning
+            };
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
     pub fn error(&mut self, mut diagnostic: Diagnostic) {
+        self.flush_debug_warnings();
         if self.options.no_inhibit_executable {
             diagnostic.severity = Severity::Warning;
         }
@@ -3687,10 +3718,12 @@ impl<'s> Context<'s> {
     }
 
     pub fn error_always(&mut self, diagnostic: Diagnostic) {
+        self.flush_debug_warnings();
         self.diagnostics.push(diagnostic);
     }
 
     pub fn warn(&mut self, mut diagnostic: Diagnostic) {
+        self.flush_debug_warnings();
         if self.options.fatal_warnings {
             diagnostic.severity = Severity::Error;
         } else {
@@ -7338,10 +7371,40 @@ impl<'s> Context<'s> {
             self.messages.push(shown);
         }
         let elf = self.files[index].elf.clone();
-        if let Ok(Some(name)) = elf.shared_object_name() {
+        let symbol_count = elf
+            .dynamic_symbol_table()
+            .and_then(|table| elf.symbols(table).ok())
+            .map_or(0, |symbols| symbols.len());
+        if symbol_count == 0
+            && !elf
+                .sections_of_kind(section_type::GNU_VERSION_SYMBOLS)
+                .is_empty()
+        {
+            let display = self.file_name(Some(index));
+            self.error_always(
+                problem("EI200", "The object file could not be read.")
+                    .with_context(format!("File: {display}"))
+                    .with_context(
+                        "Cause: SHT_GNU_versym should be associated with symbol table".to_string(),
+                    ),
+            );
+            return;
+        }
+        let names = elf
+            .shared_object_name()
+            .and_then(|name| elf.needed_libraries().map(|needed| (name, needed)));
+        let (name, needed) = match names {
+            Ok(names) => names,
+            Err(diagnostic) => {
+                let display = self.file_name(Some(index));
+                self.error_always(diagnostic.with_context(format!("File: {display}")));
+                return;
+            }
+        };
+        if let Some(name) = name {
             self.files[index].shared_object_name = name;
         }
-        self.files[index].needed_libraries = elf.needed_libraries().unwrap_or_default();
+        self.files[index].needed_libraries = needed;
         let shared_name = self.files[index].shared_object_name.clone();
         if !self.shared_names_seen.insert(shared_name.clone()) {
             if self.files[index].needed {
@@ -7383,6 +7446,14 @@ impl<'s> Context<'s> {
                 table[slot] = Some((name.clone(), definition.hash));
             }
         }
+        if let Some(defect) = elf.version_need_problem() {
+            let display = self.file_name(Some(index));
+            self.error(
+                problem("EI243", "A symbol names a version that is not defined.")
+                    .with_context(format!("File: {display}"))
+                    .with_context(format!("Cause: {display} {defect}")),
+            );
+        }
         let mut need_names: BTreeMap<u16, String> = BTreeMap::new();
         for need in elf.version_needs().unwrap_or_default() {
             for entry in need.entries {
@@ -7397,6 +7468,18 @@ impl<'s> Context<'s> {
                 .copied()
                 .unwrap_or(elf::version_index::GLOBAL);
             let bare = version & 0x7fff;
+            if symbol.binding == symbol_binding::LOCAL {
+                let display = self.file_name(Some(index));
+                self.error(
+                    problem("EI218", "A symbol has a binding the linker does not know.")
+                        .with_context(format!("File: {display}"))
+                        .with_context(format!(
+                            "Cause: {display}: invalid local symbol '{}' in global part of symbol table",
+                            symbol.name
+                        )),
+                );
+                continue;
+            }
             if symbol.is_undefined() {
                 let mut name = symbol.name.clone();
                 if version != elf::version_index::LOCAL && version != elf::version_index::GLOBAL {
@@ -8165,6 +8248,9 @@ impl<'s> Context<'s> {
         let relocatable = self.is_relocatable();
         let resolve_groups = !relocatable || self.options.force_group_allocation;
         let just_symbols = self.files[index].just_symbols;
+        if self.files[index].discarded.len() < count {
+            self.files[index].discarded.resize(count, false);
+        }
         for position in 1..count {
             if just_symbols || self.files[index].discarded[position] {
                 continue;
@@ -8246,7 +8332,7 @@ impl<'s> Context<'s> {
             if header.kind == section_type::ARM_ATTRIBUTES
                 && self.target.architecture == Architecture::Arm
             {
-                self.read_arm_attributes(index, &header.data);
+                self.read_arm_attributes(index, &header.name, &header.data);
                 if self.synthetic.contains_key(".ARM.attributes") {
                     self.files[index].discarded[position] = true;
                     continue;
@@ -8553,6 +8639,18 @@ impl<'s> Context<'s> {
             if section_number >= section_index::RESERVED_LOW {
                 section_number = 0;
             }
+            if section_number as usize >= count {
+                let display = self.file_name(Some(index));
+                self.error(
+                    problem("EI219", "A symbol points at a section that does not exist.")
+                        .with_context(format!("File: {display}"))
+                        .with_context(format!("Index: {section_number}"))
+                        .with_context(format!(
+                            "Cause: {display}: invalid section index: {section_number}"
+                        )),
+                );
+                section_number = 0;
+            }
             let section = self.files[index]
                 .sections
                 .get(section_number as usize)
@@ -8586,13 +8684,18 @@ impl<'s> Context<'s> {
         }
     }
 
-    fn read_arm_attributes(&mut self, index: FileIndex, data: &[u8]) {
+    fn read_arm_attributes(&mut self, index: FileIndex, name: &str, data: &[u8]) {
         let Some(attributes) = parse_arm_attributes(data, self.encoding()) else {
             let display = self.file_name(Some(index));
-            self.warn(
+            let mut diagnostic =
                 caution("EI254", "The ARM attributes of an input could not be read.")
-                    .with_context(format!("File: {display}")),
-            );
+                    .with_context(format!("File: {display}"));
+            if let Some(version) = data.first().filter(|version| **version != b'A') {
+                diagnostic = diagnostic.with_context(format!(
+                    "Cause: {display}:({name}): unrecognized format-version: 0x{version:x}"
+                ));
+            }
+            self.warn(diagnostic);
             return;
         };
         if let Some(architecture) = attributes.get(&6).copied() {
@@ -11712,16 +11815,21 @@ impl<'s> Context<'s> {
             if other_suffix.starts_with("@@") && other_suffix[2..] == suffix[1..] {
                 map.insert(id, other);
                 let symbol = self.symbols[id].clone();
+                if symbol.state != SymbolState::Shared {
+                    self.merge_visibility(other, symbol.other);
+                }
                 if symbol.is_defined() {
                     if !symbol.is_weak()
                         && !self.symbols[other].is_weak()
                         && !self.options.allow_multiple_definition
                     {
                         let place = self.definition_place(other);
+                        let second = self.definition_place(id);
                         self.error(
                             problem("EI206", "A symbol is defined more than once.")
                                 .with_context(format!("Symbol: {other_name}"))
-                                .with_context(format!("Definition: {place}")),
+                                .with_context(format!("Definition: {place}"))
+                                .with_context(format!("Definition: {second}")),
                         );
                     }
                 } else if symbol.binding != symbol_binding::WEAK
@@ -11906,7 +12014,7 @@ impl<'s> Context<'s> {
             Some(at) => (&name[..at], &name[at..]),
             None => (name, ""),
         };
-        match demangle_itanium(base) {
+        match demangle_symbol(base) {
             Some(text) => format!("{text}{suffix}"),
             None => name.to_string(),
         }
@@ -12039,6 +12147,15 @@ impl<'s> Context<'s> {
         undefined: &mut Vec<UndefinedReference>,
     ) -> bool {
         let symbol = &self.symbols[id];
+        if symbol.version_suffix_at.is_some() {
+            undefined.push(UndefinedReference {
+                symbol: id,
+                section,
+                offset,
+                warning: false,
+            });
+            return true;
+        }
         if symbol.is_weak() {
             return false;
         }
@@ -12250,6 +12367,7 @@ pub struct LineTable {
 
 #[derive(Clone, Debug, Default)]
 pub struct SourceLines {
+    pub warnings: Vec<String>,
     pub tables: Vec<LineTable>,
     pub variables: BTreeMap<String, (usize, u64, u64)>,
     pub source_file: String,
@@ -12525,6 +12643,7 @@ impl LineTable {
         strings: &[u8],
         line_strings: &[u8],
         encoding: Encoding,
+        warnings: &mut Vec<String>,
     ) -> Option<LineTable> {
         let data = &section.data;
         let mut reader = DwarfReader {
@@ -12543,6 +12662,9 @@ impl LineTable {
             .min(data.len() as u64) as usize;
         let version = reader.sized(2)? as u16;
         if !(2..=5).contains(&version) {
+            warnings.push(format!(
+                "parsing line table prologue at offset 0x{offset:08x}: unsupported version {version}"
+            ));
             return None;
         }
         if version >= 5 {
@@ -12617,6 +12739,12 @@ impl LineTable {
                 reader.unsigned()?;
                 table.files.push((name, directory));
             }
+        }
+        if reader.at < program {
+            warnings.push(format!(
+                "unknown data in line table prologue at offset 0x{offset:08x}: parsing ended (at offset 0x{:08x}) before reaching the prologue end at offset 0x{program:08x}",
+                reader.at
+            ));
         }
         reader.at = program;
         let mut rows: Vec<(u64, u64, u64)> = Vec::new();
@@ -12699,6 +12827,11 @@ impl LineTable {
                     }
                 }
             }
+        }
+        if !rows.is_empty() {
+            warnings.push(format!(
+                "last sequence in debug line table at offset 0x{offset:08x} is not terminated"
+            ));
         }
         Some(table)
     }
@@ -12882,6 +13015,7 @@ fn read_unit_variables(
                 strings,
                 line_strings,
                 encoding,
+                &mut lines.warnings,
             )?;
             lines.tables.push(parsed);
             line_table = Some(lines.tables.len() - 1);
@@ -13043,6 +13177,9 @@ impl<'s> Context<'s> {
             return found.clone();
         }
         let lines = Rc::new(self.read_source_lines(file));
+        self.pending_debug_warnings
+            .borrow_mut()
+            .extend(lines.warnings.iter().cloned());
         self.source_lines.borrow_mut().insert(file, lines.clone());
         lines
     }
@@ -14045,8 +14182,9 @@ impl<'s> Context<'s> {
             return;
         }
         let flags = self.sections[section].flags;
-        let can_write =
-            flags & section_flag::WRITE != 0 || !self.options.text_relocations_forbidden;
+        let can_write = flags & section_flag::WRITE != 0
+            || (!self.options.text_relocations_forbidden
+                && !self.sections[section].is_exception_frame);
         let preemptible = self.symbols[symbol].preemptible;
         if can_write {
             let dynamic_kind = self.symbolic_dynamic_relocation(kind);
@@ -14460,6 +14598,21 @@ impl<'s> Context<'s> {
         }
         let frames: Vec<SectionIndex> = self.frame_pieces.keys().copied().collect();
         for section in frames {
+            let outside = self
+                .frame_relocations
+                .get(&section)
+                .is_some_and(|relocations| {
+                    relocations.iter().any(|relocation| {
+                        self.frame_piece_index(section, relocation.offset).is_none()
+                    })
+                });
+            if outside {
+                self.error(
+                    problem("EI240", "The exception frame section is malformed.").with_context(
+                        "Cause: .eh_frame: relocation is not in any piece".to_string(),
+                    ),
+                );
+            }
             let relocations: Vec<RawRelocation> = self
                 .frame_relocations
                 .get(&section)
@@ -22561,6 +22714,7 @@ impl<'s> Context<'s> {
         }
         self.check_output_addresses();
         self.check_execute_only();
+        self.check_thread_local_symbols();
         if self.script_active() {
             self.check_final_script_conditions();
         }
@@ -22882,6 +23036,36 @@ impl<'s> Context<'s> {
                 changed.addend = addend;
                 self.branch_redirections
                     .insert((section, relocation.offset), (target.symbol, addend));
+            }
+        }
+    }
+
+    fn check_thread_local_symbols(&mut self) {
+        if self.is_relocatable()
+            || self
+                .tls_segment
+                .and_then(|segment| self.segments[segment].first)
+                .is_some()
+        {
+            return;
+        }
+        let mut reported = BTreeSet::new();
+        for id in self.symbol_table.clone() {
+            let symbol = &self.symbols[id];
+            if !symbol.is_defined() || !symbol.is_thread_local() || symbol.section.is_none() {
+                continue;
+            }
+            if reported.insert(id) {
+                let display = self.file_name(symbol.file);
+                self.error(
+                    problem(
+                        "EI221",
+                        "Thread-local and ordinary sections are placed in one output section.",
+                    )
+                    .with_context(format!(
+                        "Cause: {display} has an STT_TLS symbol but doesn't have a PT_TLS segment"
+                    )),
+                );
             }
         }
     }
@@ -48698,6 +48882,141 @@ impl<'a> Demangler<'a> {
     }
 }
 
+pub fn demangle_symbol(name: &str) -> Option<String> {
+    let direct = |text: &str| {
+        if text.starts_with("_Z") {
+            demangle_itanium(text)
+        } else if text.starts_with("_R") {
+            demangle_rust(text)
+        } else if text == "_Dmain" {
+            Some("D main".to_string())
+        } else {
+            None
+        }
+    };
+    direct(name).or_else(|| name.strip_prefix('_').and_then(direct))
+}
+
+struct RustDemangler<'a> {
+    text: &'a [u8],
+    at: usize,
+}
+
+impl RustDemangler<'_> {
+    fn peek(&self) -> u8 {
+        self.text.get(self.at).copied().unwrap_or(0)
+    }
+
+    fn take(&mut self, byte: u8) -> bool {
+        if self.peek() == byte {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn base_62(&mut self) -> Option<u64> {
+        if self.take(b'_') {
+            return Some(0);
+        }
+        let mut value = 0u64;
+        loop {
+            let byte = self.peek();
+            self.at += 1;
+            let digit = match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'z' => byte - b'a' + 10,
+                b'A'..=b'Z' => byte - b'A' + 36,
+                b'_' => return value.checked_add(1),
+                _ => return None,
+            };
+            value = value.checked_mul(62)?.checked_add(u64::from(digit))?;
+        }
+    }
+
+    fn identifier(&mut self) -> Option<(String, u64)> {
+        let disambiguator = if self.take(b's') {
+            self.base_62()?.checked_add(1)?
+        } else {
+            0
+        };
+        if self.peek() == b'u' {
+            return None;
+        }
+        let start = self.at;
+        while self.peek().is_ascii_digit() {
+            self.at += 1;
+        }
+        let length: usize = std::str::from_utf8(&self.text[start..self.at])
+            .ok()?
+            .parse()
+            .ok()?;
+        self.take(b'_');
+        let end = self.at.checked_add(length)?;
+        let name = std::str::from_utf8(self.text.get(self.at..end)?)
+            .ok()?
+            .to_string();
+        self.at = end;
+        Some((name, disambiguator))
+    }
+
+    fn path(&mut self, depth: u32) -> Option<String> {
+        if depth > 64 {
+            return None;
+        }
+        let tag = self.peek();
+        self.at += 1;
+        match tag {
+            b'C' => Some(self.identifier()?.0),
+            b'N' => {
+                let namespace = self.peek();
+                self.at += 1;
+                if !namespace.is_ascii_alphabetic() {
+                    return None;
+                }
+                let mut text = self.path(depth + 1)?;
+                let (name, disambiguator) = self.identifier()?;
+                if namespace.is_ascii_uppercase() {
+                    let kind = match namespace {
+                        b'C' => "closure".to_string(),
+                        b'S' => "shim".to_string(),
+                        other => char::from(other).to_string(),
+                    };
+                    text.push_str("::{");
+                    text.push_str(&kind);
+                    if !name.is_empty() {
+                        text.push(':');
+                        text.push_str(&name);
+                    }
+                    text.push_str(&format!("#{disambiguator}}}"));
+                } else {
+                    text.push_str("::");
+                    text.push_str(&name);
+                }
+                Some(text)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn demangle_rust(name: &str) -> Option<String> {
+    let body = name.strip_prefix("_R")?;
+    let mut demangler = RustDemangler {
+        text: body.as_bytes(),
+        at: 0,
+    };
+    if demangler.peek().is_ascii_digit() {
+        return None;
+    }
+    let text = demangler.path(0)?;
+    if demangler.at != demangler.text.len() {
+        return None;
+    }
+    Some(text)
+}
+
 pub fn demangle_itanium(name: &str) -> Option<String> {
     let body = name.strip_prefix("_Z")?;
     let mut demangler = Demangler {
@@ -49592,7 +49911,11 @@ impl<'s> Context<'s> {
                 }
             }
         }
-        let name = self.symbols[id].name.clone();
+        let full = self.symbols[id].name.clone();
+        let name = match self.symbols[id].version_suffix_at {
+            Some(at) if at <= full.len() => full[..at].to_string(),
+            _ => full,
+        };
         let bytes = name.as_bytes();
         let plain = |found: SymbolIndex| Some((found, ": ".to_string(), String::new()));
         for at in 0..=bytes.len() {
@@ -49636,9 +49959,9 @@ impl<'s> Context<'s> {
         }
         let globals = self.global_symbols();
         for found in &globals {
-            if !self.symbols[*found].is_undefined()
-                && self.symbols[*found].name.eq_ignore_ascii_case(&name)
-            {
+            let other = &self.symbols[*found].name;
+            let stem = other.split('@').next().unwrap_or(other);
+            if !self.symbols[*found].is_undefined() && stem.eq_ignore_ascii_case(&name) {
                 return plain(*found);
             }
         }

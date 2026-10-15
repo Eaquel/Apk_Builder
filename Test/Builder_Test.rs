@@ -69556,6 +69556,9 @@ mod linker_lit {
             Some("ELF/x86-64-plt.s") => Some(
                 "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
             ),
+            Some("ELF/invalid/mips-invalid-options-descriptor.test") => {
+                Some("the test links a MIPS object, and MIPS is not a target of this linker")
+            }
             Some("ELF/relocation-none.test" | "ELF/relocation-rel-format.test") => Some(
                 "the test also links PowerPC and RISC-V objects, which are not targets of this linker",
             ),

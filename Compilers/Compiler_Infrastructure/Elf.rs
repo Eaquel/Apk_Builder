@@ -610,6 +610,8 @@ pub struct ElfFile {
     pub program_headers: Vec<ProgramHeader>,
 }
 
+const BUT_GOT: &str = ", but got ";
+
 fn unreadable(offset: u64, reason: &str) -> Diagnostic {
     fail("EI200", "The object file could not be read.")
         .with_context(format!("Offset: {offset}"))
@@ -743,7 +745,15 @@ impl ElfFile {
                         .checked_add(section.size)
                         .filter(|stop| *stop <= bytes.len() as u64)
                         .ok_or_else(|| {
-                            unreadable(section.offset, "a section runs past the end of the file")
+                            unreadable(
+                                section.offset,
+                                &format!(
+                                    "section [index {index}] has a sh_offset (0x{:x}) + sh_size (0x{:x}) that is greater than the file size (0x{:x})",
+                                    section.offset,
+                                    section.size,
+                                    bytes.len()
+                                ),
+                            )
                         })?;
                     section.data = bytes[start..stop as usize].to_vec();
                 }
@@ -873,7 +883,27 @@ impl ElfFile {
         else {
             return Ok(Vec::new());
         };
-        Ok(decode_dynamic(self.encoding(), &self.sections[index].data))
+        let section = &self.sections[index];
+        let entry_size = (self.encoding().word_size() * 2) as u64;
+        if section.entry_size != entry_size {
+            return Err(unreadable(
+                section.offset,
+                &format!(
+                    "section [index {index}] has invalid sh_entsize: expected {entry_size}{BUT_GOT}{}",
+                    section.entry_size
+                ),
+            ));
+        }
+        if !section.size.is_multiple_of(entry_size) {
+            return Err(unreadable(
+                section.offset,
+                &format!(
+                    "section [index {index}] has an invalid sh_size ({}) which is not a multiple of its sh_entsize ({entry_size})",
+                    section.size
+                ),
+            ));
+        }
+        Ok(decode_dynamic(self.encoding(), &section.data))
     }
 
     pub fn needed_libraries(&self) -> Result<Vec<String>, Diagnostic> {
@@ -885,12 +915,19 @@ impl ElfFile {
             return Ok(Vec::new());
         };
         let strings = &self.sections[self.sections[index].link as usize].data;
-        Ok(self
-            .dynamic_entries()?
-            .iter()
-            .filter(|entry| entry.tag == dynamic_tag::NEEDED)
-            .filter_map(|entry| string_at(strings, entry.value as u32))
-            .collect())
+        let mut names = Vec::new();
+        for entry in self.dynamic_entries()? {
+            if entry.tag != dynamic_tag::NEEDED {
+                continue;
+            }
+            let name = string_at(strings, entry.value as u32)
+                .filter(|_| entry.value < strings.len() as u64)
+                .ok_or_else(|| {
+                    unreadable(self.sections[index].offset, "invalid DT_NEEDED entry")
+                })?;
+            names.push(name);
+        }
+        Ok(names)
     }
 
     pub fn shared_object_name(&self) -> Result<Option<String>, Diagnostic> {
@@ -902,11 +939,17 @@ impl ElfFile {
             return Ok(None);
         };
         let strings = &self.sections[self.sections[index].link as usize].data;
-        Ok(self
+        let Some(entry) = self
             .dynamic_entries()?
-            .iter()
+            .into_iter()
             .find(|entry| entry.tag == dynamic_tag::SHARED_OBJECT_NAME)
-            .and_then(|entry| string_at(strings, entry.value as u32)))
+        else {
+            return Ok(None);
+        };
+        string_at(strings, entry.value as u32)
+            .filter(|_| entry.value < strings.len() as u64)
+            .map(Some)
+            .ok_or_else(|| unreadable(self.sections[index].offset, "invalid DT_SONAME entry"))
     }
 
     pub fn notes(&self, index: usize) -> Result<Vec<Note>, Diagnostic> {
@@ -954,6 +997,43 @@ impl ElfFile {
         let strings = &self.sections[section.link as usize].data;
         decode_version_needs(self.encoding(), &section.data, strings)
             .map_err(|reason| unreadable(section.offset, reason))
+    }
+
+    pub fn version_need_problem(&self) -> Option<&'static str> {
+        let index = self
+            .sections_of_kind(section_type::GNU_VERSION_NEEDS)
+            .first()
+            .copied()?;
+        let section = &self.sections[index];
+        let encoding = self.encoding();
+        let data = &section.data;
+        let strings = self
+            .dynamic_symbol_table()
+            .and_then(|table| self.sections.get(self.sections[table].link as usize))
+            .map_or(0, |strings| strings.data.len() as u64);
+        let mut at = 0usize;
+        for _ in 0..section.info {
+            if at.checked_add(16).is_none_or(|end| end > data.len()) {
+                return Some("has an invalid Verneed");
+            }
+            let count = encoding.read_u16(data, at + 2).unwrap_or(0);
+            let auxiliary = encoding.read_u32(data, at + 8).unwrap_or(0) as usize;
+            let next = encoding.read_u32(data, at + 12).unwrap_or(0) as usize;
+            let mut cursor = at.saturating_add(auxiliary);
+            for _ in 0..count {
+                if cursor.checked_add(16).is_none_or(|end| end > data.len()) {
+                    return Some("has an invalid Vernaux");
+                }
+                let name = encoding.read_u32(data, cursor + 8).unwrap_or(0);
+                if u64::from(name) >= strings {
+                    return Some("has a Vernaux with an invalid vna_name");
+                }
+                cursor = cursor
+                    .saturating_add(encoding.read_u32(data, cursor + 12).unwrap_or(0) as usize);
+            }
+            at = at.saturating_add(next);
+        }
+        None
     }
 
     pub fn assign_object_layout(&mut self) {
@@ -1283,8 +1363,7 @@ pub fn decode_symbols(
                 .and_then(|table| encoding.read_u32(table, index * 4))
                 .ok_or((at, "an extended section index is missing"))?;
         }
-        let name = string_at(strings, name_offset)
-            .ok_or((at, "a symbol name lies outside the string table"))?;
+        let name = string_at(strings, name_offset).ok_or((at, "invalid symbol name offset"))?;
         symbols.push(Symbol {
             name,
             name_offset,
