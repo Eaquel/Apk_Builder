@@ -99,6 +99,13 @@ jobs:
       - name: Run every check that needs no Android build
         run: ./Test/Builder_Test.py --strict layout comments templates speech independence format lint dependencies strings core
 
+      - name: Install the LLVM tools the oracle comparisons run
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm
+          llvm-tblgen --version
+
       - name: Hold every reference suite, oracle comparison and determinism check
         run: ./Test/Builder_Test.py --strict suites differential determinism
 
