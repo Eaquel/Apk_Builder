@@ -149,6 +149,10 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 
 ## 9. Güncel durum
 
+- Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
 - Claude-A: x86 assembler. Sıradaki adım Intel girdi sözdizimi (`ParseIntelOperand`, `IntelExprStateMachine`),
   ardından `X86InstComments`, disassembler ve nesne dosyası çıktısı.
-- Claude-B: (Claude-B dolduracak)
+- Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
+  anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
+  `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
+  Yeni tanı kodları `EI400–EI499`, testler `mod c_front_end`.
